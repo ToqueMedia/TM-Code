@@ -22,6 +22,7 @@ import {
   where,
   Timestamp,
 } from 'firebase/firestore'
+import { getDatabase, connectDatabaseEmulator } from 'firebase/database'
 import {
   initializeAppCheck,
   CustomProvider,
@@ -53,6 +54,10 @@ const firebaseConfig = {
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
   measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
+  // Optional — only set when the Realtime Database is enabled (used by the
+  // team-collab offline relay). When absent, `rtdb()` returns null and the
+  // relay gracefully no-ops.
+  databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL,
 }
 
 let _app: ReturnType<typeof initializeApp> | null = null
@@ -161,6 +166,27 @@ function getFirebaseDb() { ensureFirebase(); return _db! }
 // property reads but the brand check still rejected it at runtime.
 // `getFirebaseDb()` is the real, initialized instance; use it directly.
 export const db = (): ReturnType<typeof getFirestore> => getFirebaseDb()
+
+// Lazy Realtime Database accessor for the team-collab offline relay. Returns
+// null when no `databaseURL` is configured (RTDB not enabled) so the relay
+// degrades cleanly. Connects to the emulator (port 9000) in dev on first use.
+let _rtdb: ReturnType<typeof getDatabase> | null = null
+let _rtdbEmulatorConnected = false
+export function rtdb(): ReturnType<typeof getDatabase> | null {
+  ensureFirebase()
+  if (_rtdb) return _rtdb
+  if (!firebaseConfig.databaseURL) return null
+  _rtdb = getDatabase(_app!)
+  if (!_rtdbEmulatorConnected && shouldUseEmulators()) {
+    _rtdbEmulatorConnected = true
+    try {
+      connectDatabaseEmulator(_rtdb, EMULATOR_CONFIG.DATABASE.HOST, EMULATOR_CONFIG.DATABASE.PORT)
+    } catch {
+      /* non-fatal — falls back to the configured databaseURL */
+    }
+  }
+  return _rtdb
+}
 
 // Collections (aligned with web project)
 export const COLLECTIONS = {
@@ -788,6 +814,35 @@ class FirebaseAuthService {
         }
       }
     }
+  }
+
+  /**
+   * Plano de Equipas: liga/desliga o consumo de equipa do próprio user (move
+   * `activeTeamId` no control-plane). `active=true` → o consumo passa a faturar
+   * a fatia da equipa; `false` → consumo do plano pessoal. Refaz o /v1/me para
+   * o billingStore refletir o novo modo. Atira em falha (a UI mostra erro).
+   */
+  async setTeamBillingMode(active: boolean): Promise<void> {
+    const token = await this.getIdToken()
+    if (!token) throw new Error('Sessão sem token.')
+    const workerUrl = resolveWorkerUrl()
+    const appCheck = await getAppCheckHeader()
+    const res = await tauriFetch(`${workerUrl}/v1/me/billing-mode`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        ...appCheck,
+      },
+      body: JSON.stringify({ active }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({})) as { error?: string }
+      throw new Error(err.error || `Falha ao mudar o modo de consumo (${res.status}).`)
+    }
+    // Re-lê o estado autoritativo (bypassa o throttle de 5 min).
+    this.lastBillingFetchMs = Date.now()
+    await this.fetchBillingInfo()
   }
 
   private getLiveCurrentUser(): User | null {

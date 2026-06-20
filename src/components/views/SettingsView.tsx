@@ -229,6 +229,22 @@ function ProfileSection() {
   const cycleEnd = useBillingStore(s => s.cycleEnd)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
   const noCredits = useBillingStore(s => s.noCredits)
+  const team = useBillingStore(s => s.team)
+  const teamMemberOf = useBillingStore(s => s.teamMemberOf)
+  const [modeBusy, setModeBusy] = useState(false)
+  const [modeErr, setModeErr] = useState<string | null>(null)
+  const teamActive = !!team // consumo a faturar a equipa agora
+  async function setConsumeMode(active: boolean) {
+    if (modeBusy || active === teamActive) return
+    setModeBusy(true); setModeErr(null)
+    try {
+      await FirebaseAuthService.getInstance().setTeamBillingMode(active)
+    } catch (e) {
+      setModeErr(e instanceof Error ? e.message : 'Falhou.')
+    } finally {
+      setModeBusy(false)
+    }
+  }
   const appLanguage = useSettingsStore(s => s.appLanguage)
   const agentLanguage = useSettingsStore(s => s.agentLanguage)
   const setAppLanguage = useSettingsStore(s => s.setAppLanguage)
@@ -436,6 +452,71 @@ function ProfileSection() {
 
         <Box h="1px" bg={tokens.colors.border.subtle} />
       </VStack>
+
+      {/* ── Team (Plano de Equipas) ─────────────────────── */}
+      {teamMemberOf && (
+        <VStack align="stretch" gap={3}>
+          <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.muted} textTransform="uppercase" letterSpacing="0.06em">
+            {t('settings.teamTitle' as any)}
+          </Text>
+
+          {/* Detalhes (só quando o consumo está em modo equipa) */}
+          {team ? (
+            <VStack align="stretch" gap={1.5}>
+              <Flex justify="space-between" align="center">
+                <HStack gap={2.5}>
+                  <Box w="8px" h="8px" borderRadius="full" bg={tokens.colors.accent.purple} />
+                  <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary}>
+                    {team.tier === 'team-max' ? 'Team Max' : 'Team Pro'}
+                  </Text>
+                  <Text fontSize="11px" color={tokens.colors.text.disabled}>
+                    {team.role === 'owner' ? t('settings.teamAdmin' as any) : t('settings.teamMember' as any)}
+                  </Text>
+                </HStack>
+                <Text fontSize="12px" color={tokens.colors.text.secondary}>
+                  {t('settings.teamYourSlice' as any)} {Math.round(team.mySlicePct * 100)}%
+                </Text>
+              </Flex>
+            </VStack>
+          ) : (
+            <Text fontSize="12px" color={tokens.colors.text.secondary}>
+              {t('settings.teamPersonalActive' as any)}
+            </Text>
+          )}
+
+          {/* Toggle de consumo Pessoal/Equipa — como escolher BYOK vs plano */}
+          <Box>
+            <Text fontSize="12px" color={tokens.colors.text.secondary} mb={1.5}>{t('settings.consumeMode' as any)}</Text>
+            <HStack gap={0} p="3px" borderRadius={tokens.radius.full} bg={tokens.colors.bg.card} border="1px solid" borderColor={tokens.colors.bg.cardBorder} w="fit-content">
+              {([['personal', false], ['team', true]] as const).map(([key, val]) => {
+                const active = teamActive === val
+                return (
+                  <Box
+                    key={key}
+                    as="button"
+                    px={3} py="4px" borderRadius={tokens.radius.full}
+                    fontSize="12px" fontWeight={active ? '600' : '500'}
+                    bg={active ? tokens.colors.accent.purple : 'transparent'}
+                    color={active ? 'white' : tokens.colors.text.muted}
+                    cursor={modeBusy || active ? 'default' : 'pointer'}
+                    opacity={modeBusy ? 0.6 : 1}
+                    transition={tokens.transition.fast}
+                    onClick={() => setConsumeMode(val)}
+                  >
+                    {val ? t('settings.consumeTeam' as any) : t('settings.consumePersonal' as any)}
+                  </Box>
+                )
+              })}
+            </HStack>
+            <Text fontSize="10px" color={tokens.colors.text.disabled} mt={1.5}>
+              {t('settings.consumeHint' as any)}
+            </Text>
+            {modeErr && <Text fontSize="11px" color={tokens.colors.accent.red} mt={1}>{modeErr}</Text>}
+          </Box>
+
+          <Box h="1px" bg={tokens.colors.border.subtle} />
+        </VStack>
+      )}
 
       {/* ── App Update ──────────────────────────────────── */}
       <UpdateSection />

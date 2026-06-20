@@ -153,15 +153,15 @@ function CheckpointPanel() {
     <Box
       borderTop={`1px solid ${tokens.colors.border.glass}`}
       bg={tokens.colors.bg.card}
-      borderRadius={tokens.radius.lg}
+      borderRadius={tokens.radius.md}
       overflow="hidden"
     >
-      {/* Header */}
+      {/* Header — compact strip so it stays out of the way of the workspace. */}
       <Flex
         align="center"
         justify="space-between"
-        px={3}
-        py="8px"
+        px={2.5}
+        py="3px"
         cursor="pointer"
         transition={`background ${tokens.transition.fast}`}
         _hover={{ bg: tokens.colors.bg.hoverSubtle }}
@@ -170,16 +170,16 @@ function CheckpointPanel() {
         aria-expanded={isExpanded}
         aria-label={t("checkpoint.toggle")}
       >
-        <Flex align="center" gap={2}>
+        <Flex align="center" gap={1.5}>
           <Box
             color={tokens.colors.text.disabled}
             transition={`transform ${tokens.transition.fast}`}
             style={{ transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)' }}
           >
-            <FiChevronDown size={12} />
+            <FiChevronDown size={11} />
           </Box>
-          <FiClock size={11} color={tokens.colors.text.muted} />
-          <Text fontSize="11px" color={tokens.colors.text.muted} fontWeight="500" letterSpacing="0.02em">
+          <FiClock size={10} color={tokens.colors.text.muted} />
+          <Text fontSize="10px" color={tokens.colors.text.muted} fontWeight="500" letterSpacing="0.02em">
             {t('checkpoint.count').replace('{count}', String(checkpoints.length))}
           </Text>
         </Flex>
@@ -191,8 +191,8 @@ function CheckpointPanel() {
             display="flex"
             alignItems="center"
             gap="4px"
-            px={isSidebarMode ? "6px" : "8px"}
-            py="4px"
+            px={isSidebarMode ? "5px" : "7px"}
+            py="2px"
             borderRadius={tokens.radius.md}
             fontSize="10px"
             fontWeight="500"
@@ -217,8 +217,8 @@ function CheckpointPanel() {
             display="flex"
             alignItems="center"
             gap="4px"
-            px={isSidebarMode ? "6px" : "8px"}
-            py="4px"
+            px={isSidebarMode ? "5px" : "7px"}
+            py="2px"
             borderRadius={tokens.radius.md}
             fontSize="10px"
             fontWeight="500"
@@ -247,8 +247,8 @@ function CheckpointPanel() {
             display="flex"
             alignItems="center"
             gap="4px"
-            px={isSidebarMode ? "6px" : "8px"}
-            py="4px"
+            px={isSidebarMode ? "5px" : "7px"}
+            py="2px"
             borderRadius={tokens.radius.md}
             fontSize="10px"
             fontWeight="600"
@@ -414,7 +414,7 @@ function CheckpointPanel() {
             </Flex>
           ) : (
             <Box
-              maxH="180px"
+              maxH="150px"
               overflowY="auto"
               borderRadius={tokens.radius.lg}
               bg={tokens.colors.bg.overlay}
@@ -492,10 +492,10 @@ function CheckpointPanel() {
       {/* Checkpoint list */}
       {isExpanded && (
         <Box
-          maxH="220px"
+          maxH="170px"
           overflowY="auto"
           px={2}
-          pb={2}
+          pb={1.5}
           css={{
             '&::-webkit-scrollbar': { width: '4px' },
             '&::-webkit-scrollbar-track': { background: 'transparent' },
@@ -518,8 +518,8 @@ function CheckpointPanel() {
                 key={cp.id}
                 align="center"
                 justify="space-between"
-                px={2.5}
-                py="6px"
+                px={2}
+                py="4px"
                 borderRadius={tokens.radius.md}
                 transition={`background ${tokens.transition.fast}`}
                 _hover={{ bg: tokens.colors.bg.hoverSubtle }}

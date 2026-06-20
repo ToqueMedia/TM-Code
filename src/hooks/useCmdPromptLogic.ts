@@ -39,13 +39,14 @@ const MENTION_MENU_LIMIT = 50
 /**
  * CMD-mode prompt logic — slash commands, message queue, @mention support.
  */
-const NO_ARG_COMMANDS = new Set(['/exit', '/new', '/clear', '/init', '/terminal', '/settings', '/resume'])
+const NO_ARG_COMMANDS = new Set(['/exit', '/new', '/clear', '/init', '/terminal', '/settings', '/resume', '/team-chat', '/live-preview'])
 
 // Control commands that must run immediately even while the agent is streaming.
-// They each stop the agent internally (stopAgent()) before doing their work, so
-// queueing them would defeat their purpose — /exit would wait for the very task
-// it's supposed to cancel.
-const CONTROL_COMMANDS_BYPASS_QUEUE = new Set(['/exit', '/new', '/clear', '/terminal', '/settings', '/resume'])
+// Two kinds: ones that stop the agent internally (stopAgent()) so queueing
+// would defeat their purpose (/exit would wait for the task it cancels), and
+// agent-independent UI toggles (/team-chat, /live-preview) that have nothing to
+// do with the running turn and shouldn't sit behind it in the queue.
+const CONTROL_COMMANDS_BYPASS_QUEUE = new Set(['/exit', '/new', '/clear', '/terminal', '/settings', '/resume', '/team-chat', '/live-preview'])
 
 function isTerminalToggleCommand(input: string): boolean {
   return input.trim() === '/terminal'
@@ -200,6 +201,14 @@ export function useCmdPromptLogic() {
       if (cmd.name.startsWith(lowerPrefix)) return true
       if (cmd.name === '/exit' && lowerPrefix.startsWith('/q') && '/quit'.startsWith(lowerPrefix)) {
         return true
+      }
+      // Acronym match for hyphenated commands — the initials of each word also
+      // surface the command: `/tc` → `/team-chat`, `/lp` → `/live-preview`,
+      // `/ss` → `/start-server` / `/stop-server`. Needs >1 char so a bare `/`
+      // doesn't over-match (the name-prefix branch already covers `/`).
+      if (lowerPrefix.length > 1 && cmd.name.includes('-')) {
+        const acronym = '/' + cmd.name.slice(1).split('-').map(w => w[0] ?? '').join('')
+        if (acronym.startsWith(lowerPrefix)) return true
       }
       return false
     })

@@ -668,7 +668,10 @@ pub(crate) fn kill_pty_process_tree(root_pid: u32) {
         let mut all = vec![root_pid];
         let mut frontier = vec![root_pid];
         while let Some(pid) = frontier.pop() {
-            if let Ok(out) = Command::new("pgrep").args(["-P", &pid.to_string()]).output() {
+            if let Ok(out) = Command::new("pgrep")
+                .args(["-P", &pid.to_string()])
+                .output()
+            {
                 for cpid in String::from_utf8_lossy(&out.stdout)
                     .lines()
                     .filter_map(|l| l.trim().parse::<u32>().ok())
@@ -683,11 +686,15 @@ pub(crate) fn kill_pty_process_tree(root_pid: u32) {
         // SIGTERM leaves-first (reverse) for graceful shutdown, then SIGKILL any
         // straggler after a short grace period.
         for &pid in all.iter().rev() {
-            let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).output();
+            let _ = Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .output();
         }
         std::thread::sleep(Duration::from_millis(200));
         for &pid in all.iter().rev() {
-            let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).output();
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .output();
         }
     }
     #[cfg(windows)]
@@ -1665,6 +1672,7 @@ fn windows_pids_on_port(port: u16) -> Vec<u32> {
 ///      port — those listeners live in THIS process.
 ///   2. The preview WKWebView keeps a client connection to the running dev
 ///      server's port.
+///
 /// The old `lsof -ti:PORT | xargs kill -9` SIGKILLed the IDE in case 1 — and,
 /// without `-sTCP:LISTEN`, in case 2 — which is the "app closes the instant I
 /// press Stop" crash. SIGKILL leaves no crash report, which is why no .ips ever

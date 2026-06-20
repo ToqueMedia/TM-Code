@@ -229,6 +229,42 @@ Body here.`
       expect(parsed.description.length).toBeLessThanOrEqual(220)
       expect(parsed.description.endsWith('…')).toBe(true)
     })
+
+    it('parses a YAML folded block scalar (description: >) instead of capturing just ">"', async () => {
+      // Regression: the old single-regex parser captured only ">" for folded
+      // scalars (its `\n*$` lookahead matched end-of-line right after the
+      // indicator), so the model saw a 1-char description. See chakra-ui-*.
+      const { parseSkillFrontmatter } = await import('../skillService')
+      const raw = `---
+name: chakra
+description: >
+  Build responsive, accessible UI components and layouts
+  using Chakra UI v3 with tokens and recipes.
+license: MIT
+---
+
+# Chakra`
+      const parsed = parseSkillFrontmatter(raw, 'chakra')
+      expect(parsed.name).toBe('chakra')
+      expect(parsed.description).toBe(
+        'Build responsive, accessible UI components and layouts using Chakra UI v3 with tokens and recipes.',
+      )
+    })
+
+    it('parses a literal block scalar (description: |) and stops at the next key', async () => {
+      const { parseSkillFrontmatter } = await import('../skillService')
+      const raw = `---\nname: y\ndescription: |\n  Line one\n  Line two\ncacheable: true\n---\nbody`
+      const parsed = parseSkillFrontmatter(raw, 'y')
+      expect(parsed.description).toBe('Line one Line two')
+      expect(parsed.cacheable).toBe(true)
+    })
+
+    it('strips surrounding quotes from an inline scalar', async () => {
+      const { parseSkillFrontmatter } = await import('../skillService')
+      const raw = `---\nname: z\ndescription: "Quoted description here."\n---\nbody`
+      const parsed = parseSkillFrontmatter(raw, 'z')
+      expect(parsed.description).toBe('Quoted description here.')
+    })
   })
 
   describe('createProjectSkill', () => {

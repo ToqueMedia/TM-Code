@@ -2,6 +2,7 @@ mod commands;
 use commands::ai_completion::*;
 use commands::byok::*;
 use commands::checkpoint::*;
+use commands::collab::*;
 use commands::container::*;
 use commands::data_viewer::*;
 use commands::debugger::*;
@@ -11,6 +12,7 @@ use commands::e2e::*;
 use commands::file_tree::*;
 use commands::filesystem::*;
 use commands::git::*;
+use commands::github::*;
 use commands::http_client::*;
 use commands::installer::*;
 use commands::issue_reporter::*;
@@ -21,6 +23,7 @@ use commands::sandbox::*;
 use commands::screenshot::*;
 use commands::search::*;
 use commands::terminal::*;
+use commands::tunnel::*;
 use commands::version::*;
 
 use tauri::image::Image;
@@ -1017,6 +1020,17 @@ pub fn run() {
                 builder = builder.background_color(Color(10, 10, 10, 255));
             }
 
+            // Multi-account testing on one machine: `TM_PROFILE_DIR` isolates the
+            // WebView data store (cookies / localStorage / IndexedDB → the Firebase
+            // session), so a second instance launched with a DIFFERENT value signs
+            // into a DIFFERENT account. Unset in normal use → the default shared
+            // store (single account). Used to test team collaboration locally.
+            if let Ok(profile_dir) = std::env::var("TM_PROFILE_DIR") {
+                if !profile_dir.trim().is_empty() {
+                    builder = builder.data_directory(std::path::PathBuf::from(profile_dir));
+                }
+            }
+
             builder
                 // Allow ALL navigations including iframes to localhost dev servers
                 .on_navigation(|url| {
@@ -1180,18 +1194,35 @@ pub fn run() {
                     if let Some(pm) = window.try_state::<commands::terminal::ProcessMap>() {
                         if let Ok(mut map) = pm.lock() {
                             for (pid, child) in map.iter_mut() {
-                                // Best-effort kill — process may have already exited
+                                // Skip already-exited children. The exit poller never
+                                // prunes this map, so a long session accumulates dead
+                                // entries whose PIDs Windows may have recycled —
+                                // tree-killing a recycled PID could hit an unrelated
+                                // process. try_wait() reaps without blocking.
+                                if matches!(child.try_wait(), Ok(Some(_))) {
+                                    continue;
+                                }
+                                // These are start_dev_server children (the Chat-mode
+                                // preview dev servers). child.kill() terminates ONLY
+                                // the immediate parent (cmd.exe / wsl.exe / sh); the
+                                // real server (node) is a grandchild and would survive
+                                // ORPHANED, still holding its port — the "dev server
+                                // fights with the port after I close the app" bug on
+                                // Windows. Tree-kill the whole descendant chain
+                                // (taskkill /T on Windows), same as the PTY path below.
+                                commands::terminal::kill_pty_process_tree(*pid);
                                 let _ = child.kill();
-                                eprintln!("[shutdown] Killed child process PID {}", pid);
+                                eprintln!("[shutdown] Killed dev-server tree PID {}", pid);
                             }
                             map.clear();
                         }
                     }
-                    // PTY shells + their dev-server trees. ProcessMap above only
-                    // holds execute_command children; without this, every terminal's
-                    // shell AND its dev server (node on :3000/:3001/…) leaked on quit
-                    // and kept the port bound. Synchronous on purpose — the process
-                    // is about to exit, so spawned tasks would never run.
+                    // PTY shells live in a SEPARATE map (PtyPidMap) and need their own
+                    // teardown: an interactive shell puts each job (`yarn dev`, …) in
+                    // its own process group, so killing just the shell PID leaves the
+                    // dev server (node on :3000/:3001/…) orphaned and the port bound.
+                    // Synchronous on purpose — the process is about to exit, so spawned
+                    // tasks would never run.
                     if let Some(pm) = window.try_state::<commands::terminal::PtyPidMap>() {
                         if let Ok(mut map) = pm.lock() {
                             for (sid, pid) in map.iter() {
@@ -1295,6 +1326,12 @@ pub fn run() {
             data_viewer_dev_query,
             collect_deploy_bundle,
             collect_backend_tarball,
+            collect_next_db_meta,
+            collect_next_static_bundle,
+            collect_next_prebuilt_tarball,
+            stage_next_prebuilt_tarball,
+            upload_file_put,
+            probe_url_ready,
             validate_backend_for_cloud_run,
             list_skills_bundled,
             read_skill_content,
@@ -1331,6 +1368,20 @@ pub fn run() {
             git_clone_repository,
             git_push,
             git_pull,
+            github_device_start,
+            github_device_poll,
+            github_token_status,
+            github_disconnect,
+            github_account,
+            collab_chat_append,
+            collab_chat_load,
+            tunnel_fetch,
+            tunnel_proxy_start,
+            tunnel_proxy_stop,
+            tunnel_deliver,
+            tunnel_open_preview_window,
+            live_preview_serve_static,
+            live_preview_stop_static,
             http_client_request,
             send_issue_report,
             capture_screen_region,

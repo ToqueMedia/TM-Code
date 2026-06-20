@@ -18,6 +18,7 @@ import { invoke } from '@/utils/invokeMetrics'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import { IS_MAC, IS_WINDOWS } from '@/utils/platform'
+import { WINDOWS_DOWNLOAD_LINKS, INSTALL_PHASE_LABELS as PHASE_LABELS, type DevToolId } from '@/services/devToolsInstall'
 import OnboardingNav from '../OnboardingNav'
 
 interface ToolsStepProps {
@@ -25,7 +26,7 @@ interface ToolsStepProps {
   onBack: () => void
 }
 
-type ToolId = 'python' | 'node' | 'git'
+type ToolId = DevToolId
 type ToolStatus =
   | 'checking'
   | 'available'
@@ -46,20 +47,8 @@ interface ToolState {
   error?: string
 }
 
-// Maps the install phase emitted by the Rust backend to a short PT label.
-const PHASE_LABELS: Record<string, string> = {
-  winget: 'A instalar via winget…',
-  downloading: 'A descarregar…',
-  installing: 'A instalar…',
-  refreshing: 'A verificar…',
-}
-
-// Links de download diretos e personalizados para Windows (substituir pelos links finais)
-const WINDOWS_DOWNLOAD_LINKS: Record<ToolId, string> = {
-  python: 'https://assets-tm.toquemedia.net/python-3.14.5-amd64.exe',
-  node: 'https://assets-tm.toquemedia.net/node-v22.22.3-x64.msi',
-  git: 'https://assets-tm.toquemedia.net/Git-2.54.0-64-bit.exe',
-}
+// PHASE_LABELS and WINDOWS_DOWNLOAD_LINKS now live in services/devToolsInstall
+// so the startup RequirementsErrorScreen shares the exact same install source.
 
 function ToolsStep({ onNext, onBack }: ToolsStepProps) {
   const t = useTranslation()

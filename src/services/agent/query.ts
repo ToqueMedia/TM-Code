@@ -1283,16 +1283,22 @@ export async function* query(
       // billing store para o agentRunner/usePromptBar bloquearem o próximo
       // turno localmente e o CreditIndicator mostrar o estado.
       if (errorStatus(error) === 402) {
+        // Membro de equipa esgotou a fatia → mensagem dedicada (não pode comprar;
+        // só o admin realoca). Owner/pessoal → mensagem de compra/upgrade.
+        let teamMemberBlocked = false;
         try {
           const { useBillingStore } = await import("../../stores/billingStore");
-          useBillingStore.getState().setNoCredits();
+          const store = useBillingStore.getState();
+          store.setNoCredits();
+          teamMemberBlocked = !!store.team && store.team.role !== "owner";
         } catch {
           /* non-critical */
         }
         yield {
           type: "error",
-          message:
-            "Token budget exhausted for this cycle. Buy extra usage or wait for the cycle reset.",
+          message: teamMemberBlocked
+            ? "Your team slice is exhausted for this cycle. Ask your team admin to increase your allocation."
+            : "Token budget exhausted for this cycle. Buy extra usage or wait for the cycle reset.",
         };
         return {
           reason: "error",

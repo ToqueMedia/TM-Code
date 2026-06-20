@@ -6,3 +6,5 @@ sessions/
 queue-operations.jsonl
 # Unsaved editor buffers — recovery state, never source of truth.
 editor-state.json
+# Team-collab restore points + ephemeral P2P chat — throwaway state.
+collab/

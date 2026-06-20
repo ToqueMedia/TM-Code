@@ -2,11 +2,11 @@
  * ensureSupported regression tests — pins the error messages users see
  * when their detected DeployPlan isn't yet wired through the deploy flow.
  *
- * Phase 1 supports `static-spa` and `composite`. cf-ssr is detected but
- * Phase 2 isn't implemented; pure workers-container is rare and pushed
- * to a follow-up. Each rejection produces a precise message naming the
- * framework so the user knows it's known-unsupported, not a detector
- * bug.
+ * Phase 1 supports `static-spa`, `composite`, and `next-standalone`. cf-ssr
+ * (Nuxt/SvelteKit/Astro-SSR) is detected but Phase 2 isn't implemented; pure
+ * workers-container is rare and pushed to a follow-up. Each rejection produces
+ * a precise message naming the framework so the user knows it's
+ * known-unsupported, not a detector bug.
  */
 import type { DeployPlan } from '../deploy/deployPlan'
 import { ensureSupported } from '../deploy/planNarrow'
@@ -27,17 +27,12 @@ describe('ensureSupported', () => {
     expect(ensureSupported(plan)).toBe(plan)
   })
 
-  describe('cf-ssr — server-rendered frameworks not yet supported', () => {
-    it('Next.js → friendly name in error', () => {
-      const plan: DeployPlan = {
-        kind: 'cf-ssr',
-        adapter: 'next-on-pages',
-        assetsDir: '.vercel/output/static',
-        workerEntry: '.vercel/output/functions/_worker.js',
-      }
-      expect(() => ensureSupported(plan)).toThrow(/Next\.js projects can't be published yet/i)
-    })
+  it('accepts next-standalone unchanged', () => {
+    const plan: DeployPlan = { kind: 'next-standalone', port: 8080 }
+    expect(ensureSupported(plan)).toBe(plan)
+  })
 
+  describe('cf-ssr — server-rendered frameworks not yet supported', () => {
     it('Nuxt → friendly name in error', () => {
       const plan: DeployPlan = {
         kind: 'cf-ssr',

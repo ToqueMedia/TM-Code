@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "vite",
     "dev:ai-worker": "yarn --cwd workers/ai-pass-through dev",
+    "dev:collab-worker": "yarn --cwd workers/collab-signaling dev",
     "build": "tsc && vite build",
     "tauri": "tauri",
     "tauri:build:win-x64": "node scripts/build.mjs x86_64-pc-windows-msvc --require-updater-artifacts",
@@ -19,6 +20,7 @@
     "release:finalize": "node scripts/finalize-release.mjs",
     "test": "jest",
     "test:ai-worker": "yarn --cwd workers/ai-pass-through test",
+    "test:collab-worker": "yarn --cwd workers/collab-signaling test",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage"
   },

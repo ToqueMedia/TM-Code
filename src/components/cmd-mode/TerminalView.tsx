@@ -17,6 +17,10 @@ import { TerminalWorkingTips } from './TerminalWorkingTips'
 import { TerminalMessageRenderer } from './TerminalMessageRenderer'
 import { TerminalGreeting } from './TerminalGreeting'
 import { TerminalPanel } from './TerminalPanel'
+import { TerminalTeamChatPanel } from './TerminalTeamChatPanel'
+import { TerminalChatNotification } from './TerminalChatNotification'
+import { TerminalLivePreviewBanner } from './TerminalLivePreviewBanner'
+import { TerminalIncomingPreviewBanner } from './TerminalIncomingPreviewBanner'
 import { BillingOverageBanner } from './BillingOverageBanner'
 import { ErrorBoundary } from './terminalHelpers'
 import { TerminalPermissionPrompt } from './TerminalPermissionPrompt'
@@ -26,6 +30,9 @@ import { TerminalGoalCelebration } from './TerminalGoalCelebration'
 import AgentTasksPanel from '../chat/AgentTasksPanel'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { useAttachments } from '../../hooks/useAttachments'
+import { useCollabSession } from '../../hooks/useCollabSession'
+import { useCollabStore } from '../../stores/collabStore'
+import { useToastStore } from '../../stores/toastStore'
 import { useTranslation } from '@/i18n/useTranslation'
 import { tokens } from '@/theme/tokens'
 import { FiChevronDown } from 'react-icons/fi'
@@ -38,6 +45,11 @@ interface TerminalViewProps {
 
 const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   const t = useTranslation()
+  // Drive the team collaboration mesh in Terminal mode too — without this the
+  // session only ran in Chat mode (MainLayout), so terminal-mode chat showed
+  // "0 online", messages never sent, and /live-preview had no mesh to share
+  // over. MainLayout and TerminalView are mutually exclusive, so no double-run.
+  useCollabSession()
   const activeSessionId = useChatStore(s => s.activeSessionId)
   const sessions = useChatStore(s => s.sessions)
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
@@ -51,6 +63,17 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const messages = session?.messages || []
+
+  // Guarded exit: while sharing a Live Preview, leaving Terminal mode would tear
+  // down the session and kill the shared dev server out from under the team.
+  // Block every exit path (Escape, title-bar button) and explain why.
+  const handleBack = useCallback(() => {
+    if (useCollabStore.getState().sharingPreview) {
+      useToastStore.getState().addToast('warning', t('team.exitBlockedBySharing'))
+      return
+    }
+    onBack()
+  }, [onBack, t])
 
   // Track if we've ever had messages — prevents flicker when first message
   // is added and then immediately removed (e.g. session switch, clear).
@@ -478,11 +501,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       if (isTyping && hasInputText) return
       e.preventDefault()
       e.stopPropagation()
-      onBack()
+      handleBack()
     }
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
-  }, [onBack])
+  }, [handleBack])
 
   // Close the session picker automatically if the user leaves CMD Mode.
   useEffect(() => {
@@ -754,7 +777,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       onDragLeave={onViewDragLeave}
       onDrop={onViewDrop}
     >
-      <TerminalTitleBar projectPath={projectPath} onBack={onBack} />
+      <TerminalTitleBar projectPath={projectPath} onBack={handleBack} />
       <BillingOverageBanner />
 
       {/* Output area — overflow="hidden" on the wrapper prevents large content
@@ -911,6 +934,18 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
           every 2 min. Sits directly above the status bar (chrome, not scrollback). */}
       <TerminalWorkingTips />
 
+      {/* Incoming live previews — a teammate is sharing; click to open + test
+          their running app (persistent access even with the chat panel closed). */}
+      <TerminalIncomingPreviewBanner />
+
+      {/* Live Preview share banner — while sharing, shows it's live + the stop
+          shortcut (click or /live-preview); pairs with the exit-block. */}
+      <TerminalLivePreviewBanner />
+
+      {/* Unread team-chat banner — visible signal when a message arrives while
+          the chat panel is closed (terminal style, click to open). */}
+      <TerminalChatNotification />
+
       <Box flexShrink={0} data-tauri-drag-region>
         <TerminalStatusLine />
       </Box>
@@ -941,6 +976,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
           <TerminalPanel projectPath={projectPath} widthPx={clampedPanelWidth} onReady={handleTerminalReady} />
         </Flex>
       )}
+
+      {/* Team chat — terminal-style side panel (mIRC/Discord). Self-gates on
+          chatOpen + team membership; renders nothing otherwise. Opened via
+          the 💬 controls or the /team-chat command. */}
+      <TerminalTeamChatPanel />
     </Flex>
   )
 }

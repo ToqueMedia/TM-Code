@@ -11,18 +11,19 @@ import { activatePreview } from '../../services/previewActivation'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useBillingStore, extraConsumptionPct } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
+import { useCollabStore } from '../../stores/collabStore'
 import { useByokState } from '../../hooks/useByokState'
-import { useThinkingToggle } from '../../hooks/useThinkingToggle'
 import MessageBubble from '../chat/MessageBubble'
 import { useMessageWindow } from '../../hooks/useMessageWindow'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
-import ContextWindowIndicator from '../chat/ContextWindowIndicator'
 import PostCompactSurvey from '../chat/PostCompactSurvey'
 import ChatSkeleton from '../chat/ChatSkeleton'
+import ChatWorkingTips from '../chat/ChatWorkingTips'
 import ModelIndicator from '../chat/ModelIndicator'
 import TmSpeedIndicator from '../chat/TmSpeedIndicator'
 import SessionDropdown from './SessionDropdown'
 import ChatSuggestions from './ChatSuggestions'
+import { CollabShareControls } from '../collab/CollabShareControls'
 import { GoalCelebration } from '../celebration/GoalCelebration'
 const CheckpointPanel = lazy(() => import('../chat/CheckpointPanel'))
 import { tokens } from '@/theme/tokens'
@@ -47,6 +48,10 @@ function ChatView() {
   const scaffoldPhase = useLayoutStore(s => s.scaffoldPhase)
   const scaffoldMessage = useLayoutStore(s => s.scaffoldMessage)
   const billingPlan = useBillingStore(s => s.plan)
+  // While sharing a team Live Preview, opening the normal preview would start a
+  // second dev server (port collision) — disable the Preview button until the
+  // share stops.
+  const isSharingLivePreview = useCollabStore(s => s.sharingPreview)
   const noCredits = useBillingStore(s => s.noCredits)
   const consumedPct = useBillingStore(s => s.consumedPct)
   const tokensConsumed = useBillingStore(s => s.tokensConsumed)
@@ -54,12 +59,6 @@ function ChatView() {
   const cycleEnd = useBillingStore(s => s.cycleEnd)
   const billingStatus = useBillingStore(s => s.status)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
-  // Thinking is no longer user-toggleable (claude-vaz parity). The
-  // mandatory badge below renders when the backend reports the active
-  // model is mandatory-thinking; otherwise nothing surfaces here and
-  // reasoning is decided by the request type (forced ON by slash
-  // commands /plan, /debug, /review, /te2e; OFF otherwise).
-  const { mandatory: thinkingMandatory } = useThinkingToggle()
   const { byokInPlay: showModelIndicator } = useByokState()
   // Last terminal error from the agent loop. The ServiceError thrown for 402
   // (NO_CREDITS), 429 (BUDGET_EXHAUSTED / RATE_LIMIT), 5xx, AUTH_EXPIRED, etc.
@@ -340,6 +339,12 @@ function ChatView() {
               isStreaming={isStreaming}
             />
           </Box>
+          {/* In preview/sidebar mode the right-hand indicator cluster (which
+              normally hosts the team controls) is hidden, so the user loses
+              the Live Preview + Chat affordances. Surface them here, next to
+              the session dropdown, so sharing stays reachable while the
+              preview is open. */}
+          {isSidebarMode && <CollabShareControls compact />}
           {!isSidebarMode && (
             <Box
               as="button"
@@ -366,24 +371,6 @@ function ChatView() {
             because 380px can't fit them all. */}
         {!isSidebarMode && (
           <HStack gap={1.5}>
-            <ContextWindowIndicator />
-            {thinkingMandatory && (
-              <Flex
-                align="center"
-                gap="4px"
-                px="6px"
-                py="3px"
-                borderRadius="5px"
-                bg="rgba(163, 113, 247, 0.1)"
-                border="1px solid rgba(163, 113, 247, 0.25)"
-                color={tokens.colors.accent.purple}
-                title={t('chat.thinkingAlwaysOn')}
-              >
-                <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
-                  ⚡ Thinking
-                </Text>
-              </Flex>
-            )}
             <TmSpeedIndicator />
             <ModelIndicator />
             {!showModelIndicator && (
@@ -411,6 +398,9 @@ function ChatView() {
               servers={mcpServers}
               isInitializing={mcpIsInitializing}
             />
+            {/* Team collaboration — presence + share live preview + chat.
+                Renders nothing for non-team-members. */}
+            <CollabShareControls />
             <Box
               as="button"
               display="flex"
@@ -420,11 +410,14 @@ function ChatView() {
               h="28px"
               borderRadius="6px"
               color={tokens.colors.text.secondary}
-              cursor="pointer"
+              cursor={isSharingLivePreview ? 'not-allowed' : 'pointer'}
+              opacity={isSharingLivePreview ? 0.4 : 1}
+              aria-disabled={isSharingLivePreview}
               transition={`all ${tokens.transition.fast}`}
-              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-              onClick={() => void activatePreview(projectPath)}
+              _hover={isSharingLivePreview ? {} : { bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+              onClick={() => { if (!isSharingLivePreview) void activatePreview(projectPath) }}
               aria-label={t('view.preview')}
+              title={isSharingLivePreview ? t('team.previewBlockedBySharing') : t('view.preview')}
             >
               <FiEye size={13} />
               <Text fontSize="11px" fontWeight="500">{t('view.preview')}</Text>
@@ -738,6 +731,11 @@ function ChatView() {
           </Box>
         )}
         </Box>
+
+      {/* Rotating command tips — parity with Terminal mode's TerminalWorkingTips.
+          Subtle line above the PromptBar, only while the agent is working;
+          surfaces the slash-command catalogue progressively. */}
+      <ChatWorkingTips />
 
     </Flex>
   )

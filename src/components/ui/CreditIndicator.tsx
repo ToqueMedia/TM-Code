@@ -3,7 +3,7 @@ import { Box, Flex, Text, HStack, VStack } from '@chakra-ui/react'
 import { FiChevronDown } from 'react-icons/fi'
 import { tokens } from '../../theme/tokens'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { isInOverageState, extraConsumptionPct, type UserPlanName, type CostBudgetStatus } from '../../stores/billingStore'
+import { isInOverageState, extraConsumptionPct, useBillingStore, type UserPlanName, type CostBudgetStatus } from '../../stores/billingStore'
 import { t } from '../../i18n'
 
 export const PLAN_DISPLAY: Record<UserPlanName, { label: string; color: string }> = {
@@ -36,7 +36,14 @@ function CreditIndicatorInner(props: CreditIndicatorProps) {
   const lastRefreshAt = useRef(0)
   const REFRESH_DEBOUNCE_MS = 1000
 
+  // Plano de Equipas: quando o user é membro, o billing principal já reflete a
+  // FATIA do membro (control-plane projeta mySliceTokens/myConsumedPct). Aqui só
+  // mudamos o ENQUADRAMENTO (badge "Equipa", "a tua fatia") e o CTA de bloqueio.
+  const team = useBillingStore(s => s.team)
   const planInfo = PLAN_DISPLAY[props.plan] || PLAN_DISPLAY.explorer
+  const badgeLabel = team ? t('chat.teamBadge') : planInfo.label
+  const badgeColor = team ? tokens.colors.accent.purple : planInfo.color
+  const isTeamOwner = team?.role === 'owner'
   const pct = Math.round(props.consumedPct * 100)
   // Cycle bar width is capped at 100 — overflow goes to the overage segment
   const cycleBarPct = Math.min(100, pct)
@@ -123,9 +130,9 @@ function CreditIndicatorInner(props: CreditIndicatorProps) {
         _hover={{ bg: 'rgba(255, 255, 255, 0.08)', borderColor: 'rgba(255, 255, 255, 0.12)' }}
         onClick={() => setShowDetail(!showDetail)}
       >
-        {/* Plan badge */}
-        <Text fontSize="9px" fontWeight="700" color={planInfo.color} textTransform="uppercase" letterSpacing="0.04em">
-          {planInfo.label}
+        {/* Plan badge (ou "Equipa" quando em equipa) */}
+        <Text fontSize="9px" fontWeight="700" color={badgeColor} textTransform="uppercase" letterSpacing="0.04em">
+          {badgeLabel}
         </Text>
 
         {/* Single % indicator */}
@@ -184,8 +191,8 @@ function CreditIndicatorInner(props: CreditIndicatorProps) {
           {/* Plan header */}
           <Flex justify="space-between" align="center" w="100%">
             <HStack gap={1.5}>
-              <Box w="6px" h="6px" borderRadius="full" bg={planInfo.color} />
-              <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.primary}>{planInfo.label}</Text>
+              <Box w="6px" h="6px" borderRadius="full" bg={badgeColor} />
+              <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.primary}>{badgeLabel}</Text>
             </HStack>
             {isInOverage && (
               <Text fontSize="9px" fontWeight="700" color={tokens.colors.accent.orange} textTransform="uppercase">
@@ -198,7 +205,7 @@ function CreditIndicatorInner(props: CreditIndicatorProps) {
           {props.tokenBudget > 0 && (
             <VStack gap={0.5} align="stretch" w="100%">
               <Flex justify="space-between" w="100%">
-                <Text fontSize="10px" color={tokens.colors.text.muted}>{t('chat.sessionMonthly')}</Text>
+                <Text fontSize="10px" color={tokens.colors.text.muted}>{team ? t('chat.teamSlice') : t('chat.sessionMonthly')}</Text>
                 <Text fontSize="10px" fontFamily={tokens.fontFamily.mono}
                   color={props.consumedPct >= 1 ? tokens.colors.accent.red : props.consumedPct >= 0.95 ? tokens.colors.accent.orange : props.consumedPct >= 0.80 ? '#f0b429' : tokens.colors.text.secondary}>
                   {pct}%
@@ -248,8 +255,18 @@ function CreditIndicatorInner(props: CreditIndicatorProps) {
             </>
           )}
 
-          {/* Blocked warning — clickable, opens studio for upgrade/purchase */}
-          {isBlocked && (
+          {/* Blocked warning. Em equipa o MEMBRO não compra (CTA estático "fala
+              com o teu admin"); o OWNER pode gerir a equipa (abre a web). Fora
+              de equipa, abre o studio para upgrade/compra. */}
+          {isBlocked && team && !isTeamOwner && (
+            <>
+              <Box w="100%" h="1px" bg="rgba(248, 81, 73, 0.15)" />
+              <Text w="100%" py="4px" fontSize="10px" color={tokens.colors.accent.red} textAlign="left">
+                {t('chat.teamAskAdmin')}
+              </Text>
+            </>
+          )}
+          {isBlocked && (!team || isTeamOwner) && (
             <>
               <Box w="100%" h="1px" bg="rgba(248, 81, 73, 0.15)" />
               <Box
@@ -260,12 +277,13 @@ function CreditIndicatorInner(props: CreditIndicatorProps) {
                 transition={`opacity ${tokens.transition.fast}`}
                 _hover={{ opacity: 0.8 }}
                 onClick={() => {
+                  const url = team ? 'https://code.toquemedia.net/account/team' : 'https://code.toquemedia.net'
                   import('@tauri-apps/plugin-opener').then(opener => {
-                    opener.openUrl('https://code.toquemedia.net').catch(() => {})
+                    opener.openUrl(url).catch(() => {})
                   })
                 }}
               >
-                {props.plan === 'explorer' ? t('settings.upgradeForMore') : t('chat.buyTms')} →
+                {team ? t('chat.teamManage') : props.plan === 'explorer' ? t('settings.upgradeForMore') : t('chat.buyTms')} →
               </Box>
             </>
           )}

@@ -35,6 +35,12 @@ export const PRODUCTION_DEPLOY_URL = 'https://api-agents.toquemedia.net'
 
 export const PRODUCTION_AI_WORKER_URL = 'https://ai-pass-through-worker.geral-871.workers.dev'
 
+/** Default collab signaling Worker (WebSocket) endpoint when no override is set. */
+export const DEFAULT_COLLAB_SIGNALING_URL = 'ws://localhost:8789'
+
+/** Production collab signaling Worker (WebSocket) endpoint. */
+export const PRODUCTION_COLLAB_SIGNALING_URL = 'wss://collab-signaling-worker.geral-871.workers.dev'
+
 /** Optional override for deploys (staging the pipeline). Undefined → use PRODUCTION_DEPLOY_URL. */
 export const VITE_DEPLOY_URL: string | undefined = import.meta.env.VITE_DEPLOY_URL as string | undefined
 
@@ -47,5 +53,17 @@ export const VITE_WORKER_URL: string | undefined = import.meta.env.VITE_WORKER_U
 /** User-provided AI data-plane Worker URL override (Vite env); undefined in Jest. */
 export const VITE_AI_WORKER_URL: string | undefined = import.meta.env.VITE_AI_WORKER_URL as string | undefined
 
+/** User-provided collab signaling Worker URL override (Vite env); undefined in Jest. */
+export const VITE_COLLAB_SIGNALING_URL: string | undefined = import.meta.env.VITE_COLLAB_SIGNALING_URL as string | undefined
+
 /** Whether the app is running under a Vite dev server (false in tests, prod build, SSR). */
 export const IS_VITE_DEV: boolean = import.meta.env.DEV === true
+
+/**
+ * GitHub OAuth App client_id for the device-flow "Sign in with GitHub" used to
+ * clone private repos. This is a PUBLIC value (device flow needs no client
+ * secret), so it is safe to ship in the bundle. Undefined in Jest and until an
+ * OAuth App is registered — when unset, the clone dialog still works for public
+ * repos and surfaces a "GitHub sign-in not configured" hint for private ones.
+ */
+export const VITE_GITHUB_CLIENT_ID: string | undefined = import.meta.env.VITE_GITHUB_CLIENT_ID as string | undefined

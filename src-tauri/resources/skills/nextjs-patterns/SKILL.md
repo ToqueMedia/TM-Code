@@ -2,6 +2,22 @@
 
 You are working in a Next.js project. App Router (`app/`) is the default for new code. The `pages/` router still works but is legacy. The rules below cover non-obvious decisions and footguns.
 
+## CRITICAL — the build script MUST be `next build --webpack`, never the bare `next build`
+
+This is not a preference — it is a hard requirement for any Next.js project that will be published. Do it WITHOUT being asked.
+
+**Mechanical rule — run this check the moment you touch a Next.js project (on scaffold, on any publish/"prepare to publish" request, and before generating a Dockerfile or calling any deploy tool):**
+
+1. Read `package.json`.
+2. If `scripts.build` does NOT contain `--webpack` (e.g. it's the bare `next build`), rewrite it to `next build --webpack` **now**, with `edit_file`. Do not ask first; do not defer.
+3. Only then continue with whatever else you were doing.
+
+When scaffolding a NEW project, write `"build": "next build --webpack"` from the first `package.json` you create.
+
+**Why this is non-negotiable:** Next 16 defaults `next build` to Turbopack, and the current Turbopack release emits some CSS chunks with an EMPTY content-hash segment — producing filenames like `0z4b9tj1rp8k..css` (note the `..`). That double-dot is a valid filename but **silently breaks Publish**: static assets are stored as object keys, and a key containing `..` is rejected as a path-traversal attempt at the storage edge, so the upload phase 403s and the whole deploy fails. The failure surfaces deep in the deploy, not at build time, so it reads as a platform bug when it's actually the build tool. The webpack builder emits clean `[hash].css` names and has none of this. (`next dev` is unaffected — this is build-only.)
+
+Revisit only when Turbopack fixes the empty-hash naming (webpack builds are slower, and Next steers toward Turbopack long-term) — until then, `--webpack` is mandatory.
+
 ## CRITICAL — App Router is the default; the model has a strong Pages Router prior
 
 Next.js's old Pages Router (`pages/`, `getServerSideProps`, `getStaticProps`, `_app.tsx`, `_document.tsx`, `next/router`) was the dominant API from 2016 to early 2023 and **is heavily over-represented in your training data**. The App Router (`app/`, `'use client'` opt-in, Server Components, `<Link>` from `next/link`, `useRouter` from `next/navigation`, Server Actions) is the canonical default since Next.js 13.4 — but the model still reaches for Pages Router patterns under generation pressure.

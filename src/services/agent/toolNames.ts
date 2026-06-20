@@ -56,6 +56,8 @@ export const UPDATE_TASKS = 'update_tasks'
 
 // Platform integrations
 export const PROVISION_AUTH = 'provision_auth'
+export const PROVISION_DATABASE = 'provision_database'
+export const PROVISION_FILES = 'provision_files'
 export const PROVISION_DEPLOY = 'provision_deploy'
 export const REQUEST_CREDENTIALS = 'request_credentials'
 export const ASK_USER_QUESTION = 'ask_user_question'
@@ -88,7 +90,7 @@ export const TOOL_NAMES = [
   WEB_SEARCH, WEB_FETCH,
   DELEGATE, COLLECT_RESULTS,
   UPDATE_TASKS,
-  PROVISION_AUTH, PROVISION_DEPLOY, REQUEST_CREDENTIALS, ASK_USER_QUESTION,
+  PROVISION_AUTH, PROVISION_DATABASE, PROVISION_FILES, PROVISION_DEPLOY, REQUEST_CREDENTIALS, ASK_USER_QUESTION,
   SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,
 ] as const
 

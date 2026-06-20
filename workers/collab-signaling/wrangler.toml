@@ -1,0 +1,27 @@
+name = "collab-signaling-worker"
+main = "src/index.ts"
+compatibility_date = "2026-06-02"
+
+# Ephemeral team code-sharing signaling. Hosts ONE Durable Object instance per
+# team (idFromName = teamId) that brokers WebRTC SDP/ICE + presence between the
+# team's online members. It NEVER stores changesets or chat — those travel P2P
+# over the DataChannels this DO only helps establish. See ARCHITECTURE.md and
+# docs/PLAN-TEAM-COLLAB-P2P.md (§6.3).
+
+[observability]
+enabled = true
+
+# One signaling room per team. SQLite-backed class so it runs on both the free
+# and paid Workers tiers; the room keeps presence in memory only (no storage).
+[[durable_objects.bindings]]
+name = "SIGNALING_ROOM"
+class_name = "SignalingRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SignalingRoom"]
+
+[vars]
+# Production Firebase project (same as the data-plane). For local/emulator runs
+# set FIRESTORE_REST_BASE + AUTH_MODE in .dev.vars (gitignored).
+FIREBASE_PROJECT_ID = "maiplayer-ac56d"

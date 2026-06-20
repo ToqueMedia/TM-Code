@@ -111,7 +111,7 @@ The `db.ts` template below references `process.env.TMDB_URL` and `process.env.TM
 
 **Run this mechanical check before any `write_file`/`create_file` on `db.ts`** — do not rely on inferring user intent from the prompt:
 
-```
+```text
 1. Read `.env` (via read_env_vars or grep). Search for `TMDB_URL=` and `TMDB_TOKEN=`.
 2. If BOTH are present and non-empty → skip. Already provisioned.
 3. If EITHER is missing/empty → call `provision_database` NOW.

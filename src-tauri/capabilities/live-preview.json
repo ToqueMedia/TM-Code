@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "live-preview",
+  "description": "Minimal capability for the live-preview window. It loads a TEAMMATE's running app served over the P2P tunnel (remote, semi-trusted content on a random localhost port), so it is deliberately scoped to the bare minimum a previewed web app needs — currently just the notification plugin, so the app's permission check resolves instead of throwing an unhandled rejection. It intentionally does NOT grant custom commands, fs, process, or window/webview control: previewed code must not be able to reach the viewer's Tauri backend.",
+  "windows": ["live-preview"],
+  "remote": {
+    "urls": ["http://localhost:*", "http://127.0.0.1:*"]
+  },
+  "permissions": ["notification:default"]
+}

@@ -211,6 +211,20 @@ function PublishModal({ isOpen, onClose }: PublishModalProps) {
             />
 
             <Box px={6} py={5}>
+              {summary?.scope === 'team' && phase !== 'upgrade' && (
+                <Box
+                  mb={3}
+                  px={2.5}
+                  py={1.5}
+                  borderRadius="6px"
+                  bg="rgba(163, 113, 247, 0.12)"
+                  border="1px solid rgba(163, 113, 247, 0.3)"
+                >
+                  <Text fontSize="11px" color="#a78bfa">
+                    {t('publish.teamHosting')}
+                  </Text>
+                </Box>
+              )}
               {phase === 'upgrade' && <UpgradeStep onClose={handleClose} />}
               {phase === 'over-quota' && summary && (
                 <OverQuotaStep summary={summary} onClose={handleClose} />

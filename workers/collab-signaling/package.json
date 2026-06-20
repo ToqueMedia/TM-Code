@@ -1,0 +1,16 @@
+{
+  "name": "collab-signaling-worker",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev --config wrangler.toml --ip 0.0.0.0 --port 8789 --inspector-port 0 --persist-to ../../.wrangler/shared-state",
+    "deploy": "wrangler deploy --config wrangler.toml",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "~5.9.3",
+    "wrangler": "^4.78.0"
+  }
+}

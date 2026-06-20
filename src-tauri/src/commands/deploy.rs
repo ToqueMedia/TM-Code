@@ -401,6 +401,418 @@ fn walk_for_tar(
     Ok(())
 }
 
+// === Next.js DB / file-storage metadata ===
+
+#[derive(Debug, Serialize)]
+pub struct NextDbMeta {
+    pub has_database: bool,
+    /// True when a TM Code File Storage helper is present (drives
+    /// TM_FILES_* provisioning + Cloud Run env injection).
+    pub has_file_storage: bool,
+    /// Concatenated migration SQL (preferred) or raw schema content (fallback).
+    pub migration_sql: Option<String>,
+    /// Raw Drizzle schema content — the worker's init phase uses it to extract
+    /// table DDL when no generated migrations exist.
+    pub schema_file_content: Option<String>,
+}
+
+/// Detect the data layer for a Next.js project the way `collect_deploy_bundle`
+/// does for the composite (`backend/`) layout — except Next apps keep DB code
+/// under app-conventional paths, not `backend/src/db/`. Probes an ordered set
+/// of candidate schema/migration/files locations and stops at the first hit.
+///
+/// Returns empty meta (no DB, no files) when nothing matches — a Next app with
+/// no persistence deploys fine; init just skips Turso provisioning.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn collect_next_db_meta(project_path: String) -> Result<NextDbMeta, String> {
+    let project = Path::new(&project_path);
+    if !project.exists() || !project.is_dir() {
+        return Err(format!("Project path does not exist: {}", project_path));
+    }
+
+    // Drizzle schema candidates, ordered most- to least-specific. The
+    // `backend/`/`server/` entries keep parity with collect_deploy_bundle so a
+    // Next app that happens to follow that layout still resolves.
+    const SCHEMA_CANDIDATES: &[&str] = &[
+        "backend/src/db/schema.ts",
+        "server/src/db/schema.ts",
+        "src/db/schema.ts",
+        "src/lib/db/schema.ts",
+        "src/server/db/schema.ts",
+        "lib/db/schema.ts",
+        "db/schema.ts",
+        "app/db/schema.ts",
+        "drizzle/schema.ts",
+    ];
+    let schema_path = SCHEMA_CANDIDATES
+        .iter()
+        .map(|rel| project.join(rel))
+        .find(|p| p.is_file());
+
+    let has_database = schema_path.is_some();
+
+    // Generated migrations live alongside the schema or in a top-level
+    // `drizzle/`/`migrations/` dir. First dir with *.sql wins.
+    const MIGRATION_DIR_CANDIDATES: &[&str] = &[
+        "backend/migrations",
+        "drizzle",
+        "drizzle/migrations",
+        "migrations",
+        "src/db/migrations",
+        "db/migrations",
+    ];
+    let migration_sql = if has_database {
+        let sql_concat = MIGRATION_DIR_CANDIDATES
+            .iter()
+            .map(|rel| project.join(rel))
+            .filter(|d| d.is_dir())
+            .find_map(|dir| concat_sql_dir(&dir));
+        match sql_concat {
+            Some(sql) => Some(sql),
+            // Fall back to raw schema content (worker extracts DDL from it).
+            None => schema_path
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok()),
+        }
+    } else {
+        None
+    };
+
+    let schema_file_content = schema_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok());
+
+    // TM Code File Storage helper — same convention set as the backend bundle,
+    // extended to Next app-dir layouts.
+    const FILES_HELPER_CANDIDATES: &[&str] = &[
+        "backend/src/files.ts",
+        "server/src/files.ts",
+        "src/lib/files.ts",
+        "src/server/files.ts",
+        "lib/files.ts",
+        "src/files.ts",
+        "app/lib/files.ts",
+    ];
+    let has_file_storage = FILES_HELPER_CANDIDATES
+        .iter()
+        .any(|rel| project.join(rel).is_file());
+
+    Ok(NextDbMeta {
+        has_database,
+        has_file_storage,
+        migration_sql,
+        schema_file_content,
+    })
+}
+
+/// Read every `*.sql` in a directory (sorted by name) and concatenate them,
+/// newline-terminating each. Returns None when the dir has no SQL files.
+fn concat_sql_dir(dir: &Path) -> Option<String> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "sql"))
+        .collect();
+    if files.is_empty() {
+        return None;
+    }
+    files.sort();
+    let mut combined = String::new();
+    for f in files {
+        if let Ok(content) = std::fs::read_to_string(&f) {
+            combined.push_str(&content);
+            if !content.ends_with('\n') {
+                combined.push('\n');
+            }
+        }
+    }
+    Some(combined)
+}
+
+// === Next.js static bundle (R2 offload) + prebuilt container tarball ===
+
+/// Collect the client-side static assets a Next.js standalone build emits, so
+/// the deploy can offload them to R2/CDN instead of serving them from the
+/// container. Two sources, mapped to the URL paths the app serves them at:
+///   - `.next/static/**` → R2 key `_next/static/**` (served at /_next/static/*)
+///   - `public/**`        → R2 key `**`             (served at /*)
+///
+/// Caller must run `next build` first. Returns an empty vec if neither dir
+/// exists (still a valid deploy — the container is the fallback for any asset
+/// not in R2).
+#[tauri::command(rename_all = "camelCase")]
+pub async fn collect_next_static_bundle(
+    project_path: String,
+) -> Result<Vec<DeployBundleFile>, String> {
+    let project = Path::new(&project_path);
+    if !project.exists() || !project.is_dir() {
+        return Err(format!("Project path does not exist: {}", project_path));
+    }
+
+    let mut out: Vec<DeployBundleFile> = Vec::new();
+
+    // .next/static → _next/static/<rel>
+    let static_dir = project.join(".next").join("static");
+    if static_dir.is_dir() {
+        let mut staged = Vec::new();
+        walk_collect(&static_dir, &static_dir, &mut staged)
+            .map_err(|e| format!("Failed to read .next/static: {}", e))?;
+        for mut f in staged {
+            f.path = format!("_next/static/{}", f.path);
+            out.push(f);
+        }
+    }
+
+    // public → served at the site root.
+    let public_dir = project.join("public");
+    if public_dir.is_dir() {
+        walk_collect(&public_dir, &public_dir, &mut out)
+            .map_err(|e| format!("Failed to read public/: {}", e))?;
+    }
+
+    Ok(out)
+}
+
+/// Tar up a PREBUILT Next.js standalone app for the container image. The
+/// container only runs `node server.js` — no build step — so the tarball
+/// ships the build output, not the source:
+///   - `Dockerfile`            (trivial copy+run image; written by the IDE)
+///   - `.next/standalone/**`   (server.js + traced node_modules + app)
+///   - `public/**`             (small; may be read server-side at runtime)
+///
+/// `.next/static/**` is deliberately EXCLUDED: it's the big client-asset dir
+/// (hashed JS/CSS), it's never read server-side, and it's already uploaded to
+/// R2 (served at /_next/static/*). Shipping it again would just bloat the
+/// image past the deploy phase's size limit for no benefit.
+///
+/// Paths are preserved relative to the project root so the Dockerfile's
+/// `COPY .next/standalone ./` etc. resolve. Returns base64 gzip tar.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn collect_next_prebuilt_tarball(project_path: String) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let project = Path::new(&project_path);
+    let bytes = build_next_prebuilt_tar(project)?;
+    Ok(B64.encode(&bytes))
+}
+
+/// Build the prebuilt-Next gzip tarball into memory. Shared by the inline
+/// (`collect_next_prebuilt_tarball`) and staged (`stage_next_prebuilt_tarball`)
+/// commands so the tar is built exactly once per path.
+fn build_next_prebuilt_tar(project: &Path) -> Result<Vec<u8>, String> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Cursor;
+
+    if !project.exists() || !project.is_dir() {
+        return Err(format!(
+            "Project path does not exist: {}",
+            project.display()
+        ));
+    }
+
+    // The standalone server is the load-bearing artifact. Its absence means
+    // the build didn't run or next.config lacks `output: 'standalone'`.
+    let server_entry = project.join(".next").join("standalone").join("server.js");
+    if !server_entry.is_file() {
+        return Err(
+            "No .next/standalone/server.js — run the build with `output: 'standalone'` in next.config first."
+                .to_string(),
+        );
+    }
+    if !project.join("Dockerfile").is_file() {
+        return Err("Dockerfile missing at project root (the deploy generates one).".to_string());
+    }
+
+    let cursor = Cursor::new(Vec::<u8>::new());
+    let encoder = GzEncoder::new(cursor, Compression::default());
+    let mut tar = tar::Builder::new(encoder);
+
+    let map_err = |e: std::io::Error| format!("Failed to build prebuilt tarball: {}", e);
+
+    append_path_to_tar(&project.join("Dockerfile"), project, &mut tar).map_err(map_err)?;
+    append_path_to_tar(&project.join(".next").join("standalone"), project, &mut tar)
+        .map_err(map_err)?;
+
+    // public/ — include it, or inject an empty placeholder so the Dockerfile's
+    // `COPY public ./public` can't fail on apps that ship no public dir.
+    let public_dir = project.join("public");
+    if public_dir.is_dir() {
+        append_path_to_tar(&public_dir, project, &mut tar).map_err(map_err)?;
+    } else {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "public/.gitkeep", &b""[..])
+            .map_err(map_err)?;
+    }
+
+    let encoder = tar
+        .into_inner()
+        .map_err(|e| format!("tar finish failed: {}", e))?;
+    let cursor = encoder
+        .finish()
+        .map_err(|e| format!("gzip finish failed: {}", e))?;
+    Ok(cursor.into_inner())
+}
+
+#[derive(Debug, Serialize)]
+pub struct StagedTarball {
+    pub size_bytes: usize,
+    /// Base64 of the tarball — present only when it fits inline (≤ inlineMaxBytes).
+    pub base64: Option<String>,
+    /// Temp file path holding the tarball — present only when too big to inline.
+    pub temp_path: Option<String>,
+}
+
+/// Build the prebuilt-Next tarball and decide how it should travel to the
+/// build backend:
+///   - `size_bytes ≤ inline_max_bytes` → return it base64-encoded (the IDE
+///     sends it through the Worker's container/build phase, as before).
+///   - bigger → write it to a temp file and return the path; the IDE PUTs it
+///     straight to GCS via a resumable session (bypassing the Worker body
+///     limit). `upload_file_put` removes the temp file afterwards.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn stage_next_prebuilt_tarball(
+    project_path: String,
+    inline_max_bytes: usize,
+) -> Result<StagedTarball, String> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let project = Path::new(&project_path);
+    let bytes = build_next_prebuilt_tar(project)?;
+    let size_bytes = bytes.len();
+
+    if size_bytes <= inline_max_bytes {
+        return Ok(StagedTarball {
+            size_bytes,
+            base64: Some(B64.encode(&bytes)),
+            temp_path: None,
+        });
+    }
+
+    // Too big to inline — stage to a temp file the IDE will stream to GCS.
+    let mut sanitized: String = project_path
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    if sanitized.len() > 80 {
+        sanitized = sanitized[sanitized.len() - 80..].to_string();
+    }
+    let mut temp = std::env::temp_dir();
+    temp.push(format!("tm-next-src-{}-{}.tar.gz", sanitized, size_bytes));
+    std::fs::write(&temp, &bytes).map_err(|e| format!("Failed to stage tarball: {}", e))?;
+
+    Ok(StagedTarball {
+        size_bytes,
+        base64: None,
+        temp_path: Some(temp.to_string_lossy().to_string()),
+    })
+}
+
+/// PUT a local file's bytes to `url` (e.g. a GCS resumable session URI) with
+/// the given Content-Type. No auth header — the session URI is the credential.
+/// Runs through reqwest (Rust side), so it's not subject to browser CORS. The
+/// temp file is removed afterwards regardless of outcome.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn upload_file_put(
+    path: String,
+    url: String,
+    content_type: String,
+) -> Result<u16, String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read staged file: {}", e))?;
+    let client = reqwest::Client::new();
+    let result = client
+        .put(&url)
+        .header("Content-Type", content_type)
+        .body(bytes)
+        .send()
+        .await;
+
+    // Best-effort cleanup — a retry re-stages from scratch anyway.
+    let _ = std::fs::remove_file(&path);
+
+    match result {
+        Ok(res) => {
+            let status = res.status().as_u16();
+            if res.status().is_success() {
+                Ok(status)
+            } else {
+                let detail = res.text().await.unwrap_or_default();
+                Err(format!(
+                    "Upload failed: HTTP {} {}",
+                    status,
+                    detail.chars().take(300).collect::<String>()
+                ))
+            }
+        }
+        Err(e) => Err(format!("Upload request failed: {}", e)),
+    }
+}
+
+/// Append a file (or recursively a directory's files) to the tar builder,
+/// preserving each path relative to `base`. Skips symlinks. Missing paths are
+/// a no-op (the caller decides what's required).
+fn append_path_to_tar(
+    path: &Path,
+    base: &Path,
+    tar: &mut tar::Builder<flate2::write::GzEncoder<std::io::Cursor<Vec<u8>>>>,
+) -> std::io::Result<()> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return Ok(()), // absent — nothing to add
+    };
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+    if meta.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            append_path_to_tar(&entry.path(), base, tar)?;
+        }
+        return Ok(());
+    }
+    let rel = path
+        .strip_prefix(base)
+        .map_err(|_| std::io::Error::other("strip_prefix failed"))?;
+    let mut file = std::fs::File::open(path)?;
+    tar.append_file(rel, &mut file)?;
+    Ok(())
+}
+
+// === Service readiness probe ===
+
+#[derive(Debug, Serialize)]
+pub struct ProbeResult {
+    /// True when the server answered at all (any HTTP status).
+    pub reachable: bool,
+    /// HTTP status, or 0 when unreachable.
+    pub status: u16,
+}
+
+/// GET `url` from the Rust side (reqwest) and report reachability + status.
+/// Done in Rust, not the webview, so the readiness probe isn't defeated by
+/// browser CORS/CSP — a freshly deployed app that doesn't send CORS headers
+/// (a vanilla Next.js server) would otherwise read as "unreachable" from a
+/// browser fetch even while it's serving fine.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn probe_url_ready(url: String) -> Result<ProbeResult, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("probe client build failed: {}", e))?;
+    match client.get(&url).send().await {
+        Ok(res) => Ok(ProbeResult {
+            reachable: true,
+            status: res.status().as_u16(),
+        }),
+        Err(_) => Ok(ProbeResult {
+            reachable: false,
+            status: 0,
+        }),
+    }
+}
+
 // === Pre-deploy lint ===
 
 /// Pre-deploy lint for Cloud Run / Express backends.

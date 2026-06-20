@@ -3,19 +3,26 @@
  * today. Extracted into its own module so tests can import it without
  * dragging in deployService's Tauri / Firebase imports.
  *
- * Phase 1 supports `static-spa` and `composite`. cf-ssr (Next/Nuxt/SvelteKit
- * /Astro-SSR) is detected but Phase 2 isn't wired — surface a precise
- * error pointing at the framework so the user knows it's known-unsupported
- * rather than a generic detector failure. Pure workers-container is rare
- * and pushed to a follow-up.
+ * Phase 1 supports `static-spa`, `composite`, and `next-standalone`. cf-ssr
+ * (Nuxt/SvelteKit/Astro-SSR) is detected but Phase 2 isn't wired — surface a
+ * precise error pointing at the framework so the user knows it's
+ * known-unsupported rather than a generic detector failure. Pure
+ * workers-container is rare and pushed to a follow-up.
  */
-import type { DeployPlan, StaticSpaPlan, CompositePlan } from './deployPlan'
+import type { DeployPlan, StaticSpaPlan, CompositePlan, NextStandalonePlan } from './deployPlan'
 
-export function ensureSupported(plan: DeployPlan): StaticSpaPlan | CompositePlan {
-  if (plan.kind === 'static-spa' || plan.kind === 'composite') return plan
+export function ensureSupported(
+  plan: DeployPlan,
+): StaticSpaPlan | CompositePlan | NextStandalonePlan {
+  if (
+    plan.kind === 'static-spa' ||
+    plan.kind === 'composite' ||
+    plan.kind === 'next-standalone'
+  ) {
+    return plan
+  }
   if (plan.kind === 'cf-ssr') {
     const friendly: Record<typeof plan.adapter, string> = {
-      'next-on-pages': 'Next.js',
       nuxt: 'Nuxt',
       sveltekit: 'SvelteKit',
       astro: 'Astro (SSR mode)',

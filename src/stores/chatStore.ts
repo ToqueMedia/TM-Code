@@ -2164,7 +2164,12 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const toolCalls = [...(msg.toolCalls || [])]
         for (let i = toolCalls.length - 1; i >= 0; i--) {
           if (toolCalls[i].id === toolId) {
-            toolCalls[i] = { ...toolCalls[i], input: args }
+            // `started: true` — onToolCallStart fires right before the tool's
+            // execute() in the serial loop, so this flips the call from
+            // "queued" to "actively running". Calls still waiting their turn
+            // behind a pending diff approval keep started undefined and render
+            // as a calm queued row (see ToolCallDisplay.isQueued).
+            toolCalls[i] = { ...toolCalls[i], input: args, started: true }
             break
           }
         }

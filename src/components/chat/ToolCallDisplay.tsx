@@ -3,7 +3,7 @@ import { Box, Flex, Text, Image } from '@chakra-ui/react'
 import {
   FiFolder, FiSearch, FiTerminal,
   FiGlobe, FiTool, FiChevronRight, FiChevronDown,
-  FiCheck, FiX, FiLoader, FiCpu,
+  FiCheck, FiX, FiLoader, FiCpu, FiClock,
 } from 'react-icons/fi'
 import { ToolCallDisplay as ToolCallDisplayType } from '../../types/chat'
 import InlineDiff from './InlineDiff'
@@ -184,7 +184,15 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
   const useFileIcon = FILE_TOOLS.has(toolCall.toolName) && !!filePath
   const IconComponent = TOOL_ICONS[toolCall.toolName] || FiTool
   const inputSummary = getInputSummary(toolCall.toolName, toolCall.input)
-  const isRunning = toolCall.status === 'running'
+  // A tool call streams in with status:'running' but the serial tool loop runs
+  // calls one at a time, blocking on each diff approval. So a turn that emits
+  // several edits shows the first one's approval card while the rest sit QUEUED
+  // behind it. `started` (set on onToolCallStart, i.e. the moment a call's
+  // execute() begins) separates the one actually running from those still
+  // waiting — without it every queued edit shows an active spinner and reads
+  // as parallel edits firing at once.
+  const isQueued = toolCall.status === 'running' && toolCall.started !== true
+  const isRunning = toolCall.status === 'running' && toolCall.started === true
   const isFailed = toolCall.status === 'failed'
   const isCompleted = toolCall.status === 'completed'
   const isNested = !!toolCall.spawnedBy
@@ -331,7 +339,13 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
         onClick={() => { if (canExpand) setExpanded(!expanded) }}
       >
         {/* Status indicator */}
-        {isRunning ? (
+        {isQueued ? (
+          // Queued behind a pending approval — static clock, no spinner, so it
+          // reads as "waiting its turn" rather than "actively editing now".
+          <Box color={tokens.colors.text.disabled} flexShrink={0}>
+            <FiClock size={12} />
+          </Box>
+        ) : isRunning ? (
           <Box
             color={tokens.colors.toolCall.runningText}
             flexShrink={0}
@@ -364,15 +378,17 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
           </Box>
         )}
 
-        {/* Tool name */}
+        {/* Tool name — queued calls read "Queued · <action>" in a muted tone
+            so a stack of edits awaiting approval doesn't look like parallel
+            work in flight. */}
         <Text
-          color={tokens.colors.text.secondary}
+          color={isQueued ? tokens.colors.text.disabled : tokens.colors.text.secondary}
           fontFamily={tokens.fontFamily.mono}
           fontSize="12px"
           flexShrink={0}
           fontWeight="500"
         >
-          {getToolLabel(toolCall.toolName)}
+          {isQueued ? `${t('toolLabel.queued')} · ${getToolLabel(toolCall.toolName)}` : getToolLabel(toolCall.toolName)}
         </Text>
 
         {/* Summary */}

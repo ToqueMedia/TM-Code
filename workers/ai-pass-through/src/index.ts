@@ -15,6 +15,7 @@ import { HttpError, jsonError, methodNotAllowed } from './errors'
 import { buildResponseHeaders, buildUpstreamHeaders, corsPreflight, withCors } from './headers'
 import { createRequestId, logRequest } from './logging'
 import { injectStreamOptions, observeUsage } from './usage'
+import { withStreamIdleTimeout } from './streamWatchdog'
 import { ensureGeminiThoughtSummaries } from './geminiThinking'
 import type { Env, Fetcher, WaitUntilContext } from './types'
 
@@ -53,6 +54,23 @@ export function resolveUpstreamHeaderTimeout(env: Env, streamRequested: boolean)
     : DEFAULT_UPSTREAM_NONSTREAM_HEADER_TIMEOUT_MS
   const raw = typeof env[envKey] === 'string' ? Number(env[envKey]) : NaN
   return Number.isFinite(raw) && raw > 0 ? raw : fallback
+}
+
+// Timeout de INATIVIDADE do stream DEPOIS dos headers — o segundo watchdog que
+// o header-timeout (até ao 1º byte) não dá: re-arma a cada chunk e aborta o
+// upstream se não fluírem bytes durante o intervalo (provider que estola a meio
+// da geração → "code had hung" do runtime). 90s é folgado para modelos de
+// reasoning (gaps entre tokens) mas finito; mata o hang em ~90s em vez dos
+// ~minutos até o runtime cancelar. 0/negativo desliga (ver streamWatchdog.ts).
+const DEFAULT_UPSTREAM_STREAM_IDLE_TIMEOUT_MS = 90_000
+
+export function resolveUpstreamStreamIdleTimeout(env: Env): number {
+  const raw = typeof env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS === 'string'
+    ? Number(env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS)
+    : NaN
+  // Finito mas <= 0 desliga deliberadamente; NaN cai no default.
+  if (Number.isFinite(raw)) return raw
+  return DEFAULT_UPSTREAM_STREAM_IDLE_TIMEOUT_MS
 }
 
 interface PreparedBody {
@@ -176,20 +194,37 @@ async function handleChatCompletions(
     )
   }
 
+  // Hoisted: o budget base do plano/tier — reusado para o pieTotal do contexto
+  // de equipa nos headers (§3.5).
+  let planBudget = 0
   if (enforcement !== 'off') {
     if (budgetState) {
       // Budget do plano vem do subscription_plans do admin (cache 5 min em
       // billing.ts); hardcoded/PLAN_BUDGETS_JSON só como fallback — senão o
       // gate 402 e o consumedPct dos headers divergem da web/control-plane.
-      const planBudget = await resolvePlanBudgetFor(env, budgetState.plan, idToken, fetcher)
+      planBudget = await resolvePlanBudgetFor(env, budgetState.plan, idToken, fetcher)
       budgetCheck = checkCostBudget(budgetState, { [budgetState.plan]: planBudget })
     }
-    if (enforcement === 'enforce' && budgetCheck && !budgetCheck.allowed) {
-      return jsonError(
-        402,
-        'tm_budget_exhausted',
-        'Token budget exhausted for this cycle. Buy extra usage or wait for the cycle reset.',
-      )
+    if (budgetCheck && !budgetCheck.allowed) {
+      // EQUIPA: o hard cap da fatia é o CONTRATO da feature e não há
+      // utilizadores legados — bloqueia já em 'shadow' (código dedicado → a IDE
+      // mostra "fala com o teu admin"; o membro não compra, só o admin realoca).
+      if (budgetState?.team) {
+        return jsonError(
+          402,
+          'tm_team_slice_exhausted',
+          'Your team slice is exhausted for this cycle. Ask your team admin to increase your allocation.',
+        )
+      }
+      // PESSOAL: só bloqueia em 'enforce' — em 'shadow' apenas mede/reporta,
+      // para não 402-ar planos pessoais existentes durante o rollout.
+      if (enforcement === 'enforce') {
+        return jsonError(
+          402,
+          'tm_budget_exhausted',
+          'Token budget exhausted for this cycle. Buy extra usage or wait for the cycle reset.',
+        )
+      }
     }
   }
 
@@ -299,6 +334,8 @@ async function handleChatCompletions(
         rawTokens,
         asOverage,
         fetcher,
+        // Membro de equipa: dual-write na equipa (total + fatia), não no user.
+        team: budgetState?.team ? { teamId: budgetState.team.teamId } : undefined,
       })
     }))
   }
@@ -314,6 +351,21 @@ async function handleChatCompletions(
     configSource: active.source,
     configKey: active.key,
   })
+
+  // ── Watchdog de inatividade do stream ────────────────────────────────
+  // O header-timeout acima já foi limpo (finally do fetch) — a partir daqui
+  // NADA supervisionava o corpo. Envolve qualquer corpo que ainda seja um
+  // stream (sai como string só no ramo 400) num watchdog que re-arma a cada
+  // chunk e aborta o MESMO upstreamAbort se o provider estolar a meio. Sem
+  // isto, um stall pós-headers ficava pendurado até o runtime o matar com
+  // "code had hung and would never generate a response".
+  if (responseBody instanceof ReadableStream) {
+    responseBody = withStreamIdleTimeout(
+      responseBody,
+      () => upstreamAbort.abort(),
+      resolveUpstreamStreamIdleTimeout(env),
+    )
+  }
 
   return new Response(responseBody, {
     status: upstream.status,
@@ -334,12 +386,25 @@ async function handleChatCompletions(
       // turno; a IDE cobre o intervalo com a estimativa otimista local.
       budget: budgetState && budgetCheck
         ? {
-            plan: budgetState.plan,
+            // H4: membro de equipa → reporta o plano-BASE (team-pro→pro,
+            // team-max→max), não o tier cru, para o billingStore da IDE
+            // (tipado UserPlanName) não receber um valor desconhecido.
+            plan: budgetState.team ? (budgetState.plan === 'team-max' ? 'max' : 'pro') : budgetState.plan,
             status: budgetCheck.status,
             consumedPct: budgetCheck.consumedPct,
             tokensConsumed: budgetState.tokensConsumed,
             extraUsageBalance: budgetState.extraUsageBalance,
             cycleEnd: budgetState.cycleEnd,
+            // §3.5: contexto de equipa (tier cru + fatia/bolo em tokens) para a
+            // IDE enquadrar "a tua fatia / o bolo". sliceTokens = teto do membro.
+            team: budgetState.team
+              ? {
+                  teamId: budgetState.team.teamId,
+                  tier: budgetState.plan,
+                  sliceTokens: budgetCheck.tokenBudget,
+                  pieTotal: planBudget + budgetState.team.purchasedExtra,
+                }
+              : undefined,
           }
         : undefined,
     }),

@@ -49,11 +49,11 @@ export function parseSkillFrontmatter(raw: string, fallbackName: string): Parsed
   if (fmMatch) {
     const [, fmBlock, body] = fmMatch
     const nameLine = fmBlock.match(/^name:\s*(.+)$/m)
-    const descLine = fmBlock.match(/^description:\s*([\s\S]+?)(?=\n\w+:|\n*$)/m)
     const cacheableLine = fmBlock.match(/^cacheable:\s*(true|false)\s*$/m)
     const noCacheReasonLine = fmBlock.match(/^noCacheReason:\s*(.+)$/m)
     const name = nameLine ? nameLine[1].trim() : fallbackName
-    let description = descLine ? descLine[1].trim().replace(/\s+/g, ' ') : deriveDescription(body, fallbackName)
+    const rawDescription = extractFrontmatterScalar(fmBlock, 'description')
+    let description = rawDescription ? rawDescription.replace(/\s+/g, ' ').trim() : deriveDescription(body, fallbackName)
     if (description.length > MAX_DESCRIPTION_CHARS) {
       description = description.slice(0, MAX_DESCRIPTION_CHARS - 1).trimEnd() + '…'
     }
@@ -75,6 +75,62 @@ export function parseSkillFrontmatter(raw: string, fallbackName: string): Parsed
     description = description.slice(0, MAX_DESCRIPTION_CHARS - 1).trimEnd() + '…'
   }
   return { name: fallbackName, description, body: raw, cacheable: true }
+}
+
+/**
+ * Extract a single YAML scalar field from a frontmatter block, supporting:
+ *  - inline plain scalars:           `description: Foo bar`
+ *  - inline w/ indented continuation: `description: Foo`\n`  bar`
+ *  - quoted scalars:                 `description: "Foo"` / `'Foo'`
+ *  - block scalars (folded/literal): `description: >` or `description: |`,
+ *    with optional chomping (`>-`, `|+`) and the value on the following
+ *    more-indented lines.
+ * Returns the raw (still multi-line) value — callers collapse whitespace —
+ * or null when the field is absent.
+ *
+ * Why a line walk instead of one regex: the previous
+ * `/^description:\s*([\s\S]+?)(?=\n\w+:|\n*$)/m` captured only `>` for block
+ * scalars — its `\n*$` lookahead matched end-of-line immediately after the
+ * `>` indicator, so EVERY folded-scalar description silently became literally
+ * ">" (both in CI and in the in-prompt skill index the model reads). This is
+ * shared prod + verifier logic, so the fix lands in one place.
+ */
+function extractFrontmatterScalar(fmBlock: string, key: string): string | null {
+  const lines = fmBlock.split(/\r?\n/)
+  const head = new RegExp(`^${key}:[ \\t]*(.*)$`)
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(head)
+    if (!m) continue
+    const inline = m[1].trim()
+    const isBlockScalar = /^[|>][+-]?$/.test(inline)
+    if (inline && !isBlockScalar) {
+      // Plain/quoted inline scalar; fold in any indented continuation lines.
+      const parts = [stripQuotes(inline)]
+      for (let j = i + 1; j < lines.length; j++) {
+        if (/^[ \t]+\S/.test(lines[j])) parts.push(lines[j].trim())
+        else break
+      }
+      return parts.join(' ')
+    }
+    // Block scalar (or a bare key): the value is the following indented lines.
+    const collected: string[] = []
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j]
+      if (line.trim() === '') { collected.push(''); continue }
+      if (/^[ \t]+\S/.test(line)) collected.push(line.replace(/^[ \t]+/, ''))
+      else break // dedented → next top-level key, scalar ends
+    }
+    return collected.join('\n').trim()
+  }
+  return null
+}
+
+/** Strip a single matching pair of surrounding single/double quotes. */
+function stripQuotes(s: string): string {
+  if (s.length >= 2 && ((s[0] === '"' && s.endsWith('"')) || (s[0] === "'" && s.endsWith("'")))) {
+    return s.slice(1, -1)
+  }
+  return s
 }
 
 /** First non-empty paragraph after the H1 — single line, collapsed whitespace. */

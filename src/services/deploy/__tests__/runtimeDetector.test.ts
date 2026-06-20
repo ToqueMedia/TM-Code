@@ -95,13 +95,50 @@ describe('runtimeDetector — static-spa templates (Phase 1 supported)', () => {
   })
 })
 
-describe('runtimeDetector — cf-ssr templates (Phase 2)', () => {
-  it('next.js → cf-ssr next-on-pages', () => {
-    const r = detectDeployPlan(mockFs({ 'package.json': pkg({ next: '^15', react: '^19' }) }))
-    expect(r.plan).toMatchObject({ kind: 'cf-ssr', adapter: 'next-on-pages' })
-    expect(r.phase1Supported).toBe(false)
+describe('runtimeDetector — next-standalone (Phase 1, Cloud Run container)', () => {
+  it('next.js + output:standalone → next-standalone, supported', () => {
+    const r = detectDeployPlan(
+      mockFs({
+        'package.json': pkg({ next: '^15', react: '^19' }),
+        'next.config.mjs': `export default { output: 'standalone' }`,
+      }),
+    )
+    expect(r.plan).toEqual({ kind: 'next-standalone', port: 8080 })
+    expect(r.phase1Supported).toBe(true)
   })
 
+  it('next.js + output:"standalone" (double quotes, .ts) → supported', () => {
+    const r = detectDeployPlan(
+      mockFs({
+        'package.json': pkg({ next: '^15', react: '^19' }),
+        'next.config.ts': `const config = { output: "standalone" }\nexport default config`,
+      }),
+    )
+    expect(r.plan?.kind).toBe('next-standalone')
+    expect(r.phase1Supported).toBe(true)
+  })
+
+  it('next.js WITHOUT standalone output → still deployable, warns it will be added', () => {
+    const r = detectDeployPlan(
+      mockFs({
+        'package.json': pkg({ next: '^15', react: '^19' }),
+        'next.config.js': `module.exports = {}`,
+      }),
+    )
+    expect(r.plan?.kind).toBe('next-standalone')
+    expect(r.phase1Supported).toBe(true)
+    expect(r.warnings.join(' ')).toMatch(/output.*standalone/i)
+  })
+
+  it('next.js with no next.config at all → deployable (deploy injects standalone)', () => {
+    const r = detectDeployPlan(mockFs({ 'package.json': pkg({ next: '^15', react: '^19' }) }))
+    expect(r.plan?.kind).toBe('next-standalone')
+    expect(r.phase1Supported).toBe(true)
+    expect(r.warnings.length).toBe(1)
+  })
+})
+
+describe('runtimeDetector — cf-ssr templates (Phase 2)', () => {
   it('nuxt → cf-ssr nuxt', () => {
     const r = detectDeployPlan(mockFs({ 'package.json': pkg({ nuxt: '^3', vue: '^3' }) }))
     expect(r.plan).toMatchObject({ kind: 'cf-ssr', adapter: 'nuxt' })
@@ -287,8 +324,13 @@ describe('runtimeDetector — hidden backend warnings', () => {
 
 describe('runtimeDetector — precedence', () => {
   it('Next.js wins over plain vite when both are declared', () => {
-    const r = detectDeployPlan(mockFs({ 'package.json': pkg({ next: '^15', react: '^19', vite: '^8' }) }))
-    expect(r.plan).toMatchObject({ kind: 'cf-ssr', adapter: 'next-on-pages' })
+    const r = detectDeployPlan(
+      mockFs({
+        'package.json': pkg({ next: '^15', react: '^19', vite: '^8' }),
+        'next.config.mjs': `export default { output: 'standalone' }`,
+      }),
+    )
+    expect(r.plan?.kind).toBe('next-standalone')
   })
 
   it('Composite wins over the SPA-only signals of its inner client/', () => {

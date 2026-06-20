@@ -14,6 +14,7 @@ import { acquireGitStatusPolling, refreshGitStatus } from '@/services/gitStatusP
 import { useGitStatusStore } from '@/stores/gitStatusStore'
 import { useCurrentProject } from '@/hooks/useProjectState'
 import { getFileIconByExtension } from '@/utils/iconMapper'
+import { CollabShareControls } from '@/components/collab/CollabShareControls'
 
 const statusMeta: Record<string, { color: string; label: string }> = {
   added:     { color: tokens.colors.accent.greenBright, label: 'A' },
@@ -568,9 +569,12 @@ ${diffDetail}`,
             </Text>
           )}
         </HStack>
-        <button type="button" className="sc-btn" title={t("view.refresh")} aria-label={t("view.refresh")} onClick={() => refreshGitStatus({ spinner: true })} disabled={loading}>
-          {loading ? <span className="sc-spin"><VscRefresh size={13} /></span> : <VscRefresh size={13} />}
-        </button>
+        <HStack gap={1}>
+          <CollabShareControls compact />
+          <button type="button" className="sc-btn" title={t("view.refresh")} aria-label={t("view.refresh")} onClick={() => refreshGitStatus({ spinner: true })} disabled={loading}>
+            {loading ? <span className="sc-spin"><VscRefresh size={13} /></span> : <VscRefresh size={13} />}
+          </button>
+        </HStack>
       </Flex>
 
       {/* Branch row — name + ahead/behind counters vs upstream */}

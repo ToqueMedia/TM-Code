@@ -9,12 +9,14 @@ import {
   PORT_REGEX,
   PORT_FAILURE_REGEX,
   resolveIsWrapper,
+  extractScriptName,
   classifyProbedUrl,
   detectLineRole,
   type LineRoleHint,
   type ProbeKind,
 } from './devServerDetection'
 import { coalesceLogLines } from './devServerLogCoalesce'
+import { appendDevFlags } from './devCommandFlags'
 
 /**
  * Preferred host in preview URLs.
@@ -55,7 +57,13 @@ interface InternalSlot {
    *  best-guess). A later distinct JSON URL can still replace it. False means
    *  backendUrl came from a real JSON probe and should not be overwritten. */
   backendUrlMirrored: boolean
-  eaddrinuseRetries: number
+  /** Framework-default ports for this command, resolved THROUGH npm/yarn/pnpm
+   *  script indirection at start() time (so `npm run dev` → `vite` → 5173).
+   *  Used for preemptive port cleanup, the stop()-time backup kill when no URL
+   *  was ever detected, and early port-guarding. The EADDRINUSE restart budget
+   *  is NOT here — it lives on the manager so it survives the slot rebuild a
+   *  restart performs (see `eaddrinuseRestarts`). */
+  frameworkPorts: number[]
   /** One-shot flag: set after the first cross-origin "Script error. (:0)" hint
    *  is emitted to the console. Prevents the helper text from repeating on
    *  every popup retry attempt during the same dev-server slot. */
@@ -77,6 +85,10 @@ export interface StartOptions {
    *  set, a probed URL on this port is treated as frontend regardless of
    *  what the server returned. Most projects do not need it. */
   frontendPortHint?: number
+  /** @internal Set ONLY by the EADDRINUSE auto-recovery restart so the
+   *  per-operation restart budget (`eaddrinuseRestarts`) is preserved instead
+   *  of reset to zero. External callers must never pass this. */
+  autoRestart?: boolean
 }
 
 interface DevServerOutputPayload {
@@ -143,6 +155,12 @@ async function isFullstackWrapper(command: string, projectPath: string): Promise
 class DevServerManager {
   private static instance: DevServerManager
   private server: InternalSlot | null = null
+  /** EADDRINUSE auto-restart budget for the CURRENT bring-up operation. Lives
+   *  on the manager (not the slot) because each restart builds a fresh slot —
+   *  a per-slot counter reset to 0 every restart, making the "max 2" cap an
+   *  unbounded thrash loop. Reset to 0 only on a user-initiated start(); the
+   *  auto-recovery restart passes `autoRestart: true` to preserve it. */
+  private eaddrinuseRestarts = 0
   private unlistenOutput: UnlistenFn | null = null
   private unlistenExit: UnlistenFn | null = null
   private unsubPreviewDefer: (() => void) | null = null
@@ -169,14 +187,7 @@ class DevServerManager {
   private injectHost(command: string, projectKind: ProjectKind, isWrapper: boolean): string {
     if (projectKind === 'backend') return command
     if (isWrapper) return command
-
-    if (/^(npm|yarn|pnpm|bun)\s+(run\s+\w+|start|dev)\b/.test(command)) {
-      return `${command} -- --host 0.0.0.0`
-    }
-    if (/^(npx\s+)?(ng\s+serve|next\s+dev|vite|nuxt\s+dev|astro\s+dev|svelte-kit\s+dev)\b/.test(command)) {
-      return `${command} --host 0.0.0.0`
-    }
-    return command
+    return appendDevFlags(command, '--host 0.0.0.0') ?? command
   }
 
   private normalizeUrl(url: string): string {
@@ -199,6 +210,11 @@ class DevServerManager {
     const projectKind: ProjectKind = opts.projectKind ?? 'frontend'
     const frontendPortHint = opts.frontendPortHint
 
+    // Reset the EADDRINUSE restart budget on a user-initiated start. The auto-
+    // recovery restart passes `autoRestart: true` so the budget keeps counting
+    // down across the stop→start cycle instead of resetting every time.
+    if (!opts.autoRestart) this.eaddrinuseRestarts = 0
+
     // One server per project. Stop any existing before launching.
     await this.stop()
 
@@ -206,7 +222,12 @@ class DevServerManager {
     // If a zombie process from a previous TM Code crash (or another app)
     // holds a well-known port, kill it before the dev server tries to bind.
     // This avoids the EADDRINUSE → retry → restart cycle for the common case.
-    const knownPorts = this.guessFrameworkPorts(devCommand)
+    // resolveFrameworkPorts FOLLOWS npm/yarn/pnpm script indirection, so the
+    // most common command (`npm run dev`, whose `dev` script is really `vite`)
+    // now yields [5173] and gets cleaned — previously guessFrameworkPorts only
+    // string-matched the literal "npm run dev", returned [], and an orphaned
+    // server on the port could be recovered ONLY by the fragile EADDRINUSE loop.
+    const knownPorts = await this.resolveFrameworkPorts(devCommand, projectPath)
     if (knownPorts.length > 0) {
       await Promise.allSettled(knownPorts.map(p => invoke('kill_port', { port: p })))
     }
@@ -228,7 +249,7 @@ class DevServerManager {
       frontendUrl: null,
       backendUrl: null,
       backendUrlMirrored: false,
-      eaddrinuseRetries: 0,
+      frameworkPorts: knownPorts,
       scriptErrorHintShown: false,
       gsiPopupHintShown: false,
     }
@@ -341,31 +362,49 @@ class DevServerManager {
         })
       }
 
-      // EADDRINUSE auto-recovery — up to 2 retries per slot.
+      // EADDRINUSE auto-recovery — capped restart budget on the MANAGER so it
+      // survives the slot rebuild each restart performs (see eaddrinuseRestarts).
       const eaddrinuse = line.match(/EADDRINUSE.*(?:port|address)[:\s]*(\d+)/i)
         || line.match(/EADDRINUSE.*:::(\d+)/i)
         || line.match(/EADDRINUSE.*:(\d+)/i)
         || line.match(/address already in use\s+(?:::)?(\d+)/i)
         || line.match(/listen\s+EADDRINUSE\s+\S+:(\d+)/i)
       const MAX_EADDRINUSE_RETRIES = 2
-      if (eaddrinuse && slot.eaddrinuseRetries < MAX_EADDRINUSE_RETRIES) {
+      if (eaddrinuse) {
         const blockedPort = parseInt(eaddrinuse[1], 10)
         if (blockedPort > 0) {
-          slot.eaddrinuseRetries++
-          const { projectPath, command, projectKind } = slot
-          // Flush whatever we have collected so far before the restart so
-          // the user sees the EADDRINUSE line and the recovery message.
-          const coalescedSoFar = coalesceLogLines(lines).map((e) => ({ text: e.text, level: e.level }))
-          coalescedSoFar.push({
-            text: `Port ${blockedPort} in use — killing and restarting (attempt ${slot.eaddrinuseRetries}/${MAX_EADDRINUSE_RETRIES})...`,
-            level: 'warn',
+          const { projectPath, command, projectKind, frontendPortHint: hint } = slot
+          if (this.eaddrinuseRestarts < MAX_EADDRINUSE_RETRIES) {
+            this.eaddrinuseRestarts++
+            // Flush whatever we have collected so far before the restart so
+            // the user sees the EADDRINUSE line and the recovery message.
+            const coalescedSoFar = coalesceLogLines(lines).map((e) => ({ text: e.text, level: e.level }))
+            coalescedSoFar.push({
+              text: `Port ${blockedPort} in use — killing and restarting (attempt ${this.eaddrinuseRestarts}/${MAX_EADDRINUSE_RETRIES})...`,
+              level: 'warn',
+            })
+            if (coalescedSoFar.length > 0) layoutStore.addDevServerLogs(coalescedSoFar)
+            // Preserve frontendPortHint across the auto-restart (matches
+            // restart()); `autoRestart` keeps the budget from resetting.
+            this.stop().then(async () => {
+              try { await invoke('kill_port', { port: blockedPort }) } catch {}
+              await new Promise(r => setTimeout(r, 800))
+              await this.start(projectPath, command, { projectKind, frontendPortHint: hint, autoRestart: true }).catch(() => {})
+            })
+            return
+          }
+          // Budget exhausted. Stop cleanly so `this.server` is cleared —
+          // otherwise the dead/looping slot stays non-null and
+          // activatePreview()'s isActive() guard silently refuses to start on
+          // the next preview-open ("dev server doesn't run again"). A clean
+          // stop lets the next open retry from scratch with a fresh budget.
+          const giveUp = coalesceLogLines(lines).map((e) => ({ text: e.text, level: e.level }))
+          giveUp.push({
+            text: `Port ${blockedPort} still in use after ${MAX_EADDRINUSE_RETRIES} attempts. Close whatever is using it, then reopen the preview to retry.`,
+            level: 'error',
           })
-          if (coalescedSoFar.length > 0) layoutStore.addDevServerLogs(coalescedSoFar)
-          this.stop().then(async () => {
-            try { await invoke('kill_port', { port: blockedPort }) } catch {}
-            await new Promise(r => setTimeout(r, 800))
-            await this.start(projectPath, command, projectKind).catch(() => {})
-          })
+          if (giveUp.length > 0) layoutStore.addDevServerLogs(giveUp)
+          void this.stop()
           return
         }
       }
@@ -577,9 +616,11 @@ class DevServerManager {
       }
     }
     // Also clean known framework ports if no URL was detected yet (server
-    // crashed before becoming ready).
+    // crashed before becoming ready). Uses the resolved frameworkPorts (which
+    // followed `npm run dev` → vite → 5173) rather than re-string-matching the
+    // raw command, which would miss wrappers.
     if (portsToClean.length === 0) {
-      portsToClean.push(...this.guessFrameworkPorts(slot.command))
+      portsToClean.push(...slot.frameworkPorts)
     }
     for (const port of portsToClean) {
       invoke('kill_port', { port }).catch(() => {})
@@ -605,8 +646,7 @@ class DevServerManager {
     const pid = slot.pid
     // Use the actually-detected URLs to derive ports for the post-stop
     // safety kill (handles Windows cmd.exe → concurrently → npm → node
-    // chains where tree-kill sometimes loses descendants). If no URL was
-    // ever detected, there's nothing to clean up at the port level.
+    // chains where tree-kill sometimes loses descendants).
     const portsToClean: number[] = []
     for (const url of [slot.frontendUrl, slot.backendUrl]) {
       if (!url) continue
@@ -615,6 +655,14 @@ class DevServerManager {
         const p = parseInt(m[1], 10)
         if (p && !portsToClean.includes(p)) portsToClean.push(p)
       }
+    }
+    // Fallback when the server died before printing any URL (early stop, or a
+    // crash during boot): derive ports from the resolved framework defaults so
+    // an orphaned tree doesn't keep the port (mirrors handleExit). ONLY when no
+    // URL was detected — once a real URL is known we trust it exclusively and
+    // never kill a default port that a DIFFERENT external server might hold.
+    if (portsToClean.length === 0) {
+      portsToClean.push(...slot.frameworkPorts)
     }
     this.server = null
 
@@ -647,7 +695,7 @@ class DevServerManager {
     const slot = this.server
     const ports = new Set<number>()
     if (slot) {
-      for (const p of this.guessFrameworkPorts(slot.command)) ports.add(p)
+      for (const p of slot.frameworkPorts) ports.add(p)
       for (const url of [slot.frontendUrl, slot.backendUrl]) {
         const m = url?.match(/:(\d+)/)
         if (m) {
@@ -669,6 +717,50 @@ class DevServerManager {
     this.unlistenExit = null
     this.unsubPreviewDefer?.()
     this.unsubPreviewDefer = null
+  }
+
+  /**
+   * Resolve framework-default ports for a command, FOLLOWING npm/yarn/pnpm/bun
+   * `run <script>` indirection. guessFrameworkPorts() only string-matches the
+   * literal command, so the most common command — `npm run dev`, whose
+   * package.json `dev` script is really `vite` / `next dev` — produced [] and
+   * the preemptive port cleanup never ran. An orphaned server on :5173 could
+   * then be recovered only by the fragile EADDRINUSE retry loop.
+   *
+   * Safety: we only ever return ports guessFrameworkPorts() itself returns
+   * (Vite 5173, Next/Nuxt 3000, Angular 4200, Astro 4321). It deliberately
+   * omits Express/Fastify :3000, so resolving a `node server.js` script adds
+   * nothing — we never preemptively kill a port too commonly shared with
+   * unrelated apps.
+   */
+  private async resolveFrameworkPorts(devCommand: string, projectPath: string): Promise<number[]> {
+    // Fast path: the literal command already names a framework (no I/O).
+    const direct = this.guessFrameworkPorts(devCommand)
+    if (direct.length > 0) return direct
+
+    let lookup: (name: string) => string | null
+    try {
+      lookup = await buildScriptLookup(projectPath)
+    } catch {
+      return []
+    }
+
+    const ports = new Set<number>()
+    const visited = new Set<string>()
+    const visit = (cmd: string, depth: number): void => {
+      if (depth > 3) return // guard circular scripts (dev → start → dev)
+      // A script body may chain several commands (`concurrently "vite" "node
+      // api"`, `a && b`). guessFrameworkPorts scans the whole string, so a
+      // framework token anywhere in the body is still caught.
+      for (const p of this.guessFrameworkPorts(cmd)) ports.add(p)
+      const scriptName = extractScriptName(cmd)
+      if (!scriptName || visited.has(scriptName)) return
+      visited.add(scriptName)
+      const body = lookup(scriptName)
+      if (body) visit(body, depth + 1)
+    }
+    visit(devCommand, 0)
+    return [...ports]
   }
 
   /** Guess the default ports a framework will bind to based on the dev

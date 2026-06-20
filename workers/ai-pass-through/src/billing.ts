@@ -49,6 +49,11 @@ const DEFAULT_PLAN_BUDGETS: Record<string, number> = {
   max: 129_810_000,
   welcome: 32_500_000,
   'byok-only': 0,
+  // Tiers de equipa (Plano de Equipas): o budget base da "pie" partilhada. Só
+  // fallback — o valor real vem do subscription_plans do admin (planKey
+  // 'team-pro'/'team-max'), igual aos planos pessoais.
+  'team-pro': 20_910_000,
+  'team-max': 129_810_000,
 }
 
 export function resolvePlanBudgets(env: Env): Record<string, number> {
@@ -124,6 +129,21 @@ export function resolveSpeedMultiplier(env: Env): number {
 
 // ── User budget state (cached read) ──────────────────────────────────────
 
+/** Membro de uma equipa (Plano de Equipas). Presente em `UserBudgetState.team`
+ *  quando `users/{uid}.activeTeamId` aponta para uma equipa — nesse caso o
+ *  gate e o commit usam a FATIA do membro (hard cap ESTRITO), não o budget
+ *  pessoal. A pie = budget base do tier + `purchasedExtra`; o teto do membro =
+ *  `percentAllocation × pieTotal`. Σ fatias ≤ 100% garante que a equipa não
+ *  estoura a pie, por isso nunca há overage no modelo de equipa. */
+export interface TeamMemberBudget {
+  teamId: string
+  /** Tokens comprados avulsos (`teams/{id}.tokenBudget.purchasedExtra`) que
+   *  CRESCEM a pie — não é um pool de overflow consumível. */
+  purchasedExtra: number
+  /** Fatia do membro (0..1). */
+  percentAllocation: number
+}
+
 export interface UserBudgetState {
   plan: string
   tokensConsumed: number
@@ -140,6 +160,11 @@ export interface UserBudgetState {
   /** Soft-delete por um admin (`users/{uid}.deleted`, campo de topo). Mesmo
    *  efeito do `blocked` no gate. */
   deleted?: boolean
+  /** Quando presente, o consumo vem de uma equipa: `plan` é o tier, os campos
+   *  de topo já estão projetados na fatia do membro (`tokensConsumed` =
+   *  consumo do membro, `extraUsageBalance` = 0), e o gate/commit usam este
+   *  bloco. Ver [[PLAN-TEAM-PLAN-BILLING]]. */
+  team?: TeamMemberBudget
 }
 
 const STATE_CACHE_MS = 60_000
@@ -172,6 +197,22 @@ function intField(value: unknown): number {
   return 0
 }
 
+/** Como `intField` mas SEM arredondar — para frações (ex. percentAllocation
+ *  0..1, normalmente um doubleValue). Arredondar uma fatia destruía-a. */
+function numField(value: unknown): number {
+  const v = value as { integerValue?: string; doubleValue?: number } | undefined
+  if (!v) return 0
+  if (typeof v.doubleValue === 'number') return v.doubleValue
+  if (typeof v.integerValue === 'string') return parseFloat(v.integerValue) || 0
+  return 0
+}
+
+/** uid como segmento de FieldPath do Firestore: backtick-quote (um uid pode
+ *  começar por dígito, o que exige aspas no path de máscaras e transforms). */
+function fieldPathSegment(key: string): string {
+  return '`' + key.replace(/([\\`])/g, '\\$1') + '`'
+}
+
 /**
  * Lê `users/{uid}` (userPlan + tokenBudget) com cache de 60s por isolate.
  * Falha → `null` (degrada: sem gate, sem headers, sem commit em overage —
@@ -193,6 +234,7 @@ export async function getUserBudgetState(
 
   const mask = [
     'userPlan',
+    'activeTeamId',
     'blocked',
     'deleted',
     'tokenBudget.tokensConsumed',
@@ -214,14 +256,41 @@ export async function getUserBudgetState(
       const doc = await response.json() as {
         fields?: {
           userPlan?: { stringValue?: string }
+          activeTeamId?: { stringValue?: string }
           blocked?: { booleanValue?: boolean }
           deleted?: { booleanValue?: boolean }
           tokenBudget?: { mapValue?: { fields?: Record<string, unknown> } }
         }
       }
+      const userBlocked = doc.fields?.blocked?.booleanValue === true
+      const userDeleted = doc.fields?.deleted?.booleanValue === true
+      const activeTeamId = doc.fields?.activeTeamId?.stringValue
       const plan = doc.fields?.userPlan?.stringValue
       const budget = doc.fields?.tokenBudget?.mapValue?.fields ?? {}
-      if (typeof plan === 'string' && plan) {
+
+      if (typeof activeTeamId === 'string' && activeTeamId) {
+        // Membro de uma equipa: a fatia hard-cap SUBSTITUI o budget pessoal.
+        // Segunda leitura (teams/{id}) que entra no mesmo estado cacheado 60s.
+        const team = await getTeamMemberBudget(env, activeTeamId, userId, idToken, fetcher)
+        if (team) {
+          state = {
+            plan: team.planTier,
+            tokensConsumed: team.memberConsumed,
+            extraUsageBalance: 0,
+            cycleEnd: team.cycleEnd,
+            blocked: userBlocked || team.memberBlocked,
+            deleted: userDeleted,
+            team: {
+              teamId: activeTeamId,
+              purchasedExtra: team.purchasedExtra,
+              percentAllocation: team.percentAllocation,
+            },
+          }
+        }
+        // team null (equipa apagada / não-membro / leitura falhada) → cai no
+        // plano PESSOAL abaixo (M1), nunca bloqueia o user com fatia 0.
+      }
+      if (!state && typeof plan === 'string' && plan) {
         const overrideRaw = intField(budget['tokenBudgetOverride'])
         state = {
           plan,
@@ -229,8 +298,8 @@ export async function getUserBudgetState(
           extraUsageBalance: Math.max(0, intField(budget['extraUsageBalance'])),
           cycleEnd: (budget['cycleEnd'] as { stringValue?: string } | undefined)?.stringValue ?? '',
           tokenBudgetOverride: overrideRaw > 0 ? overrideRaw : undefined,
-          blocked: doc.fields?.blocked?.booleanValue === true,
-          deleted: doc.fields?.deleted?.booleanValue === true,
+          blocked: userBlocked,
+          deleted: userDeleted,
         }
       }
     } else {
@@ -247,6 +316,99 @@ export async function getUserBudgetState(
 
   stateCache.set(userId, { state, expiresAt: now + STATE_CACHE_MS })
   return state
+}
+
+// ── Team member budget (Plano de Equipas) ────────────────────────────────
+//
+// Quando `users/{uid}.activeTeamId` aponta para uma equipa, o consumo vem da
+// FATIA do membro nessa equipa, não do plano pessoal. Lê `teams/{teamId}` com
+// uma máscara mínima: o tier (→ budget base via resolvePlanBudgetFor), o
+// `purchasedExtra` (top-ups avulsos que crescem a pie), e o submapa
+// `members.{uid}` (fatia + consumo + bloqueio). Hard cap ESTRITO: a fatia é o
+// teto, nunca há overage. Falha/ausência → null (degrada como qualquer leitura
+// de billing). Corre dentro do getUserBudgetState, por isso partilha a cache.
+
+interface TeamMemberRead {
+  planTier: string
+  purchasedExtra: number
+  percentAllocation: number
+  memberConsumed: number
+  memberBlocked: boolean
+  cycleEnd: string
+}
+
+async function getTeamMemberBudget(
+  env: Env,
+  teamId: string,
+  userId: string,
+  idToken: string,
+  fetcher: Fetcher,
+): Promise<TeamMemberRead | null> {
+  const projectId = typeof env.FIREBASE_PROJECT_ID === 'string' ? env.FIREBASE_PROJECT_ID : ''
+  if (!projectId || !teamId || !idToken) return null
+
+  const mask = [
+    'planTier',
+    'subscription',
+    'tokenBudget.purchasedExtra',
+    'cycle.cycleEnd',
+    `members.${fieldPathSegment(userId)}`,
+  ].map(p => `mask.fieldPaths=${encodeURIComponent(p)}`).join('&')
+  const url = `${firestoreBase(env)}/v1/projects/${projectId}/databases/(default)/documents/teams/${encodeURIComponent(teamId)}?${mask}`
+
+  try {
+    const headers = await resolveFirestoreAuthHeaders(env, idToken, fetcher)
+    const response = await fetcher.fetch(url, {
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(FIRESTORE_READ_TIMEOUT_MS),
+    })
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      console.warn(`[billing] team read failed (${response.status}) team=${teamId} user=${userId}: ${text.slice(0, 200)}`)
+      return null
+    }
+    const doc = await response.json() as {
+      fields?: {
+        planTier?: { stringValue?: string }
+        subscription?: { mapValue?: { fields?: Record<string, unknown> } }
+        tokenBudget?: { mapValue?: { fields?: Record<string, unknown> } }
+        cycle?: { mapValue?: { fields?: Record<string, unknown> } }
+        members?: { mapValue?: { fields?: Record<string, unknown> } }
+      }
+    }
+    const planTier = doc.fields?.planTier?.stringValue
+    if (typeof planTier !== 'string' || !planTier) return null
+
+    // Subscrição da equipa: sem plano pago ATIVO (ou expirado) a equipa não dá
+    // pie — null → o membro cai no plano PESSOAL (M1). Fecha o furo de criar
+    // equipa grátis e ganhar o budget do tier sem pagar.
+    const sub = doc.fields?.subscription?.mapValue?.fields ?? {}
+    const subActive = (sub['active'] as { booleanValue?: boolean } | undefined)?.booleanValue === true
+    const subExpiresAt = (sub['expiresAt'] as { stringValue?: string } | undefined)?.stringValue ?? ''
+    if (!subActive || (subExpiresAt !== '' && Date.parse(subExpiresAt) < Date.now())) return null
+
+    const tb = doc.fields?.tokenBudget?.mapValue?.fields ?? {}
+    const cycle = doc.fields?.cycle?.mapValue?.fields ?? {}
+    const members = doc.fields?.members?.mapValue?.fields ?? {}
+    const memberRaw = members[userId] as { mapValue?: { fields?: Record<string, unknown> } } | undefined
+    // M1: activeTeamId aponta para uma equipa onde o user NÃO é membro (removido
+    // mas activeTeamId por limpar) → null, e o getUserBudgetState cai no plano
+    // pessoal em vez de o bloquear com fatia 0.
+    if (!memberRaw) return null
+    const member = memberRaw.mapValue?.fields ?? {}
+    return {
+      planTier,
+      purchasedExtra: Math.max(0, intField(tb['purchasedExtra'])),
+      percentAllocation: Math.min(1, Math.max(0, numField(member['percentAllocation']))),
+      memberConsumed: Math.max(0, intField(member['tokensConsumed'])),
+      memberBlocked: (member['blocked'] as { booleanValue?: boolean } | undefined)?.booleanValue === true,
+      cycleEnd: (cycle['cycleEnd'] as { stringValue?: string } | undefined)?.stringValue ?? '',
+    }
+  } catch (error) {
+    console.warn('[billing] team read threw:', error)
+    return null
+  }
 }
 
 // ── Plan budget (admin-set em subscription_plans) ────────────────────────
@@ -354,6 +516,9 @@ const BUDGET_WARNING_THRESHOLD = 0.8
 const BUDGET_CRITICAL_THRESHOLD = 0.95
 
 export function checkCostBudget(state: UserBudgetState, budgets: Record<string, number>): CostBudgetCheck {
+  // Membro de equipa: fatia hard-cap ESTRITA, sem overage. Ramo dedicado.
+  if (state.team) return checkTeamSliceBudget(state, budgets)
+
   // Override por utilizador (gifts) substitui o budget do plano — mesma
   // semântica do tokenBudgetOverride na web/control-plane.
   const tokenBudget = state.tokenBudgetOverride ?? budgets[state.plan] ?? 0
@@ -382,6 +547,39 @@ export function checkCostBudget(state: UserBudgetState, budgets: Record<string, 
   return { allowed: true, status: 'allowed', consumedPct, tokenBudget, asOverage: false }
 }
 
+/**
+ * Gate da fatia de um membro de equipa (hard cap ESTRITO).
+ *
+ * pieTotal = budget base do tier (`budgets[state.plan]`) + purchasedExtra.
+ * teto do membro = percentAllocation × pieTotal. O consumo do membro já vem
+ * projetado em `state.tokensConsumed`. Decisão travada (ver
+ * PLAN-TEAM-PLAN-BILLING): ao atingir 100% da fatia → `rejected`, SEM overage,
+ * mesmo que a equipa tenha folga — só o admin a aumentar a % desbloqueia.
+ */
+function checkTeamSliceBudget(state: UserBudgetState, budgets: Record<string, number>): CostBudgetCheck {
+  const baseBudget = budgets[state.plan] ?? 0
+  const pieTotal = Math.max(0, baseBudget + (state.team?.purchasedExtra ?? 0))
+  const sliceTokens = Math.floor(pieTotal * (state.team?.percentAllocation ?? 0))
+  const consumed = Math.max(0, state.tokensConsumed)
+
+  // Fatia nula (membro sem alocação) ou tier sem budget → rejeita.
+  if (sliceTokens <= 0) {
+    return { allowed: false, status: 'rejected', consumedPct: 0, tokenBudget: sliceTokens, asOverage: false }
+  }
+
+  const consumedPct = consumed / sliceTokens
+  if (consumedPct >= 1) {
+    return { allowed: false, status: 'rejected', consumedPct, tokenBudget: sliceTokens, asOverage: false }
+  }
+  if (consumedPct >= BUDGET_CRITICAL_THRESHOLD) {
+    return { allowed: true, status: 'allowed_critical', consumedPct, tokenBudget: sliceTokens, asOverage: false }
+  }
+  if (consumedPct >= BUDGET_WARNING_THRESHOLD) {
+    return { allowed: true, status: 'allowed_warning', consumedPct, tokenBudget: sliceTokens, asOverage: false }
+  }
+  return { allowed: true, status: 'allowed', consumedPct, tokenBudget: sliceTokens, asOverage: false }
+}
+
 // ── Commit (porte do control-plane commitTokenConsumption) ───────────────
 
 export interface CommitArgs {
@@ -391,9 +589,15 @@ export interface CommitArgs {
   rawTokens: number
   asOverage: boolean
   fetcher: Fetcher
+  /** Quando presente, o commit é dual-write na EQUIPA (total + fatia do
+   *  membro), não em `users/{uid}`. Hard cap estrito → nunca há overage. */
+  team?: { teamId: string }
 }
 
 export async function commitTokenConsumption(args: CommitArgs): Promise<boolean> {
+  // Membro de equipa: dual-write na equipa em vez de users/{uid}.
+  if (args.team) return commitTeamConsumption(args)
+
   const { env, userId, idToken, rawTokens, asOverage, fetcher } = args
   if (rawTokens <= 0) return true
 
@@ -471,6 +675,57 @@ export async function commitTokenConsumption(args: CommitArgs): Promise<boolean>
     return true
   } catch (error) {
     console.error('[billing] commit threw:', error)
+    return false
+  }
+}
+
+/**
+ * Commit de consumo de uma equipa (Plano de Equipas) — dual-write ATÓMICO no
+ * doc `teams/{teamId}`: total da equipa + contador vitalício + fatia do membro
+ * (`members.{uid}.tokensConsumed`), num único `:commit`. Hard cap estrito →
+ * NUNCA há overage, por isso é só incrementos (sem extraUsageBalance, sem
+ * floor). A cache por-utilizador é avançada com a fatia do membro para os
+ * turnos seguintes verem o consumo a crescer sem reler.
+ */
+async function commitTeamConsumption(args: CommitArgs): Promise<boolean> {
+  const { env, userId, idToken, rawTokens, fetcher, team } = args
+  if (rawTokens <= 0 || !team) return true
+
+  const projectId = typeof env.FIREBASE_PROJECT_ID === 'string' ? env.FIREBASE_PROJECT_ID : ''
+  if (!projectId) return false
+
+  const docName = `projects/${projectId}/databases/(default)/documents/teams/${team.teamId}`
+  const commitUrl = `${firestoreBase(env)}/v1/projects/${projectId}/databases/(default)/documents:commit`
+
+  const writes = [{
+    transform: {
+      document: docName,
+      fieldTransforms: [
+        { fieldPath: 'tokenBudget.tokensConsumed', increment: { integerValue: String(rawTokens) } },
+        { fieldPath: 'lifetimeTokensConsumed', increment: { integerValue: String(rawTokens) } },
+        { fieldPath: `members.${fieldPathSegment(userId)}.tokensConsumed`, increment: { integerValue: String(rawTokens) } },
+      ],
+    },
+  }]
+
+  try {
+    const headers = await resolveFirestoreAuthHeaders(env, idToken, fetcher)
+    const response = await fetcher.fetch(commitUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ writes }),
+      signal: AbortSignal.timeout(FIRESTORE_COMMIT_TIMEOUT_MS),
+    })
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      console.error(`[billing] team commit failed (${response.status}) team=${team.teamId} user=${userId} tokens=${rawTokens}: ${text.slice(0, 200)}`)
+      return false
+    }
+    console.info(`[billing] committed ${rawTokens} tokens team=${team.teamId} member=${userId}`)
+    bumpCachedConsumption(userId, rawTokens, false)
+    return true
+  } catch (error) {
+    console.error('[billing] team commit threw:', error)
     return false
   }
 }

@@ -35,3 +35,11 @@ dist-ssr
 .dev.vars*
 !.dev.vars.example
 !.env.example
+
+# Compiled config artifacts. `tsc -b` (tsconfig.node.json is composite) emits
+# these into the repo root next to the source. Vite resolves vite.config.js
+# BEFORE vite.config.ts, so a committed vite.config.js silently shadows every
+# edit to vite.config.ts. Keep them out of git so the .ts source always wins.
+/vite.config.js
+/vite.config.d.ts
+*.tsbuildinfo

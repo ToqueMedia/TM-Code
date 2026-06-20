@@ -6,13 +6,16 @@
  */
 import { invoke } from '@/utils/invokeMetrics'
 import { useLayoutStore, selectIsPreviewServerRunning } from '../stores/layoutStore'
+import { useCollabStore } from '../stores/collabStore'
+import { useToastStore } from '../stores/toastStore'
 import { devServerManager } from './devServerManager'
 import { logger } from '../utils/logger'
+import { t } from '../i18n'
 
 /**
  * Detect the dev command for a project by checking manifest and package.json.
  */
-async function detectDevCommand(projectPath: string): Promise<string | null> {
+export async function detectDevCommand(projectPath: string): Promise<string | null> {
   // 1. Check .toquemedia-template manifest
   try {
     const raw = await invoke<string>('read_file', { path: `${projectPath}/.toquemedia-template` })
@@ -46,6 +49,15 @@ export async function activatePreview(projectPath: string | null): Promise<void>
 
   // Already in preview — nothing to do (caller handles toggle-off).
   if (layout.viewMode === 'preview') return
+
+  // Blocked while sharing a team Live Preview: opening the normal preview would
+  // start a SECOND dev server for the same project (port collision) and clash
+  // with the dedicated Live Preview server (7773). Guard at the source so every
+  // entry point (header button, menu, agent tool) is covered.
+  if (useCollabStore.getState().sharingPreview) {
+    useToastStore.getState().addToast('warning', t('team.previewBlockedBySharing'))
+    return
+  }
 
   // Server already running or static preview ready → just switch.
   if (selectIsPreviewServerRunning(layout) || layout.previewHtmlContent) {
