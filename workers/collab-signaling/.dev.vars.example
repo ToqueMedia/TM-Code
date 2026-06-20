@@ -14,8 +14,7 @@ FIRESTORE_REST_BASE = "http://127.0.0.1:8080"
 # for production; override here only if your emulator uses a different id.
 # FIREBASE_PROJECT_ID = "maiplayer-ac56d"
 
-# Offline relay against the local RTDB emulator (your suite runs it on 9000).
-# With this set, the worker writes inboxes via the emulator REST and skips the
-# service account entirely. In production, instead set FIREBASE_CLIENT_EMAIL +
-# FIREBASE_PRIVATE_KEY (wrangler secret) and FIREBASE_DATABASE_URL.
-FIREBASE_DATABASE_EMULATOR_HOST = "127.0.0.1:9000"
+# NOTE: this worker needs NO secrets in production. The relay fallback travels
+# over the WebSocket through the DO (see RelayMessage in types.ts) — there is no
+# RTDB/service-account path, so FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY /
+# FIREBASE_DATABASE_URL are not used.

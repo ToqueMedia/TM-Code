@@ -17,6 +17,14 @@ export interface Env {
 
   /** Firestore REST base override (set to the emulator host for local runs). */
   FIRESTORE_REST_BASE?: string
+
+  /**
+   * Control-plane base URL (e.g. https://api-agents.toquemedia.net). In
+   * production the membership gate POSTs `/v1/collab/membership` here because
+   * the Worker can't read Firestore directly (App Check enforcement). Unused on
+   * the emulator path (FIRESTORE_REST_BASE set).
+   */
+  CONTROL_PLANE_URL?: string
 }
 
 export interface AuthenticatedUser {

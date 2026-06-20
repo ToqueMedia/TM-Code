@@ -1,16 +1,30 @@
 // Authoritative team-membership gate for signaling admission.
 //
 // We do NOT trust any client-supplied team id or the `teamMemberOf` field on
-// the user's own doc (a user can write their own user doc). Instead we read the
-// TEAM doc `teams/{room}` — whose `members` map is written ONLY server-side
-// (Cloud Functions) and which Firestore rules let only members read — and check
-// the authenticated uid appears in it. A non-member's read is denied by rules,
-// so the gate fails closed.
+// the user's own doc (a user can write their own user doc). Admission is gated
+// on the authoritative TEAM doc `teams/{room}` — whose `members` map is written
+// ONLY server-side (Cloud Functions, Admin SDK) — checking the authenticated
+// uid appears in it. The gate fails CLOSED.
+//
+// TWO read paths, by environment:
+//
+//  • PRODUCTION — the Firestore REST API has **App Check ENFORCED**, so this
+//    Worker (which only carries the user's ID token, no App Check token) is
+//    rejected with 403 if it reads `teams/{teamId}` directly. Instead we POST
+//    to the control-plane (`/v1/collab/membership`), which re-verifies the
+//    token and reads the team with a SERVICE ACCOUNT (bypasses App Check +
+//    rules) and returns whether the uid is a member.
+//
+//  • EMULATOR / LOCAL (`FIRESTORE_REST_BASE` set) — App Check is off on the
+//    emulator, so we read the team doc directly (bearer `owner` bypasses the
+//    emulator rules) and keep local dev self-contained without a running
+//    control-plane.
 
 import type { Env } from './types'
 
 const DEFAULT_FIRESTORE_BASE = 'https://firestore.googleapis.com'
 const FIRESTORE_READ_TIMEOUT_MS = 10_000
+const MEMBERSHIP_PROXY_TIMEOUT_MS = 10_000
 
 function firestoreBase(env: Env): string {
   return typeof env.FIRESTORE_REST_BASE === 'string' && env.FIRESTORE_REST_BASE
@@ -33,24 +47,17 @@ export function isMemberInDoc(doc: TeamDoc | null | undefined, uid: string): boo
 }
 
 /**
- * Confirm `uid` is a member of team `room`. Reads the team doc with the user's
- * own ID token (self-authorized; emulator bypasses with `owner`). Fails CLOSED:
- * any read error / denied / missing doc → not a member.
+ * Emulator/local path: read the team doc directly (bypassing rules with the
+ * `owner` bearer). Only used when `FIRESTORE_REST_BASE` points at an emulator.
  */
-export async function checkMembership(
+async function checkMembershipDirect(
   room: string,
   uid: string,
-  idToken: string,
   env: Env,
-  fetcher: typeof fetch = fetch,
+  fetcher: typeof fetch,
 ): Promise<boolean> {
   const projectId = typeof env.FIREBASE_PROJECT_ID === 'string' ? env.FIREBASE_PROJECT_ID : ''
   if (!projectId) return false
-
-  // Emulator accepts `owner` to bypass rules; production uses the user's token
-  // (Firestore rules permit a member to read their team doc).
-  const emulator = typeof env.FIRESTORE_REST_BASE === 'string' && env.FIRESTORE_REST_BASE !== ''
-  const bearer = emulator ? 'owner' : idToken
 
   const url =
     `${firestoreBase(env)}/v1/projects/${projectId}/databases/(default)/documents/` +
@@ -58,7 +65,7 @@ export async function checkMembership(
 
   try {
     const response = await fetcher(url, {
-      headers: { authorization: `Bearer ${bearer}` },
+      headers: { authorization: `Bearer owner` },
       signal: AbortSignal.timeout(FIRESTORE_READ_TIMEOUT_MS),
     })
     if (!response.ok) return false
@@ -67,4 +74,54 @@ export async function checkMembership(
   } catch {
     return false
   }
+}
+
+/**
+ * Production path: delegate the membership check to the control-plane, which
+ * reads the team with a service account (the Worker's own user-token read is
+ * blocked by Firestore App Check enforcement). Fails CLOSED on any error.
+ */
+async function checkMembershipViaControlPlane(
+  room: string,
+  idToken: string,
+  env: Env,
+  fetcher: typeof fetch,
+): Promise<boolean> {
+  const base = typeof env.CONTROL_PLANE_URL === 'string' ? env.CONTROL_PLANE_URL.replace(/\/+$/, '') : ''
+  if (!base) return false
+
+  try {
+    const response = await fetcher(`${base}/v1/collab/membership`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${idToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ teamId: room }),
+      signal: AbortSignal.timeout(MEMBERSHIP_PROXY_TIMEOUT_MS),
+    })
+    if (!response.ok) return false
+    const data = (await response.json()) as { member?: boolean }
+    return data.member === true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Confirm `uid` is a member of team `room`. Fails CLOSED: any read error /
+ * denied / missing doc → not a member. Routes to the emulator-direct path when
+ * `FIRESTORE_REST_BASE` is set, otherwise to the control-plane proxy.
+ */
+export async function checkMembership(
+  room: string,
+  uid: string,
+  idToken: string,
+  env: Env,
+  fetcher: typeof fetch = fetch,
+): Promise<boolean> {
+  if (typeof env.FIRESTORE_REST_BASE === 'string' && env.FIRESTORE_REST_BASE !== '') {
+    return checkMembershipDirect(room, uid, env, fetcher)
+  }
+  return checkMembershipViaControlPlane(room, idToken, env, fetcher)
 }

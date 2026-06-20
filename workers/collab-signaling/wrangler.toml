@@ -25,3 +25,10 @@ new_sqlite_classes = ["SignalingRoom"]
 # Production Firebase project (same as the data-plane). For local/emulator runs
 # set FIRESTORE_REST_BASE + AUTH_MODE in .dev.vars (gitignored).
 FIREBASE_PROJECT_ID = "maiplayer-ac56d"
+
+# Control-plane base URL. The membership gate delegates here in production
+# (POST /v1/collab/membership) because Firestore has App Check ENFORCED and this
+# Worker only carries the user's ID token — a direct teams/{teamId} read 403s.
+# The control-plane reads the team with a service account. Not used on the
+# emulator path (FIRESTORE_REST_BASE set in .dev.vars).
+CONTROL_PLANE_URL = "https://api-agents.toquemedia.net"
