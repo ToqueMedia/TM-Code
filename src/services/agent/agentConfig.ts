@@ -12,18 +12,6 @@ export const DEFAULT_MODEL = 'mimo-v2.5-pro-1m'
 export const MIMO_CONTEXT_WINDOW = 1_000_000
 export const DEFAULT_CONTEXT_WINDOW = 131_072 // Conservative fallback (128K)
 
-// ── TM Speed ──
-
-/**
- * Multiplicador de consumo do TM Speed (`/speed`). Aplicado APENAS ao caminho
- * de billing (billingStore/Firestore) e APENAS quando o worker confirma na
- * resposta `X-TM-Speed-Applied: true` — nunca quando o toggle está ligado mas
- * o worker degradou (speedModel não publicado, plano não elegível). As
- * contagens de tokens para janela de contexto/compaction ficam sempre raw.
- * Espelha o spec do produto: UltraSpeed consome 3x.
- */
-export const TM_SPEED_BILLING_MULTIPLIER = 3
-
 // ── Loop control ──
 
 /** Max auto-continuations when model hits token limit mid-response. */

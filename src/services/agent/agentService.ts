@@ -53,7 +53,7 @@ import {
   mechanicalFallback,
   buildInternalMessagesFromSession,
 } from "./contextManager";
-import { DEFAULT_CONTEXT_WINDOW, TM_SPEED_BILLING_MULTIPLIER } from "./agentConfig";
+import { DEFAULT_CONTEXT_WINDOW } from "./agentConfig";
 
 // ── Re-exports for backward compatibility ──
 
@@ -586,9 +586,7 @@ class AgentService {
             callbacks.onUsageUpdate(
               event.usage.prompt_tokens ?? 0,
               event.usage.completion_tokens ?? 0,
-              !this.lightweightOptions && this.lastResponseSpeedApplied
-                ? TM_SPEED_BILLING_MULTIPLIER
-                : 1,
+              !this.lightweightOptions && this.lastResponseSpeedApplied,
             );
           }
           callbacks.onTurnComplete(turnNumber, event.providerState);
