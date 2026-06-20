@@ -1,7 +1,7 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { logger } from '../utils/logger'
 
-export type PackageManager = 'bun' | 'pnpm' | 'npm'
+export type PackageManager = 'bun' | 'yarn' | 'pnpm' | 'npm'
 
 interface PMCommands {
   install: string
@@ -11,6 +11,7 @@ interface PMCommands {
 
 const PM_COMMANDS: Record<PackageManager, PMCommands> = {
   bun:  { install: 'bun install',  run: 'bun run',  add: 'bun add' },
+  yarn: { install: 'yarn install', run: 'yarn',     add: 'yarn add' },
   pnpm: { install: 'pnpm install', run: 'pnpm run', add: 'pnpm add' },
   npm:  { install: 'npm install',  run: 'npm run',  add: 'npm add' },
 }
@@ -81,15 +82,44 @@ export function getPMCommands(pm: PackageManager): PMCommands {
 }
 
 /**
- * Replaces npm/pnpm/bun commands with the target package manager equivalent.
+ * Replaces npm/pnpm/bun/yarn commands with the target package manager equivalent.
  * e.g., adaptCommand("npm install", "pnpm") → "pnpm install"
  */
 export function adaptCommand(command: string, targetPM: PackageManager): string {
   if (!command) return command
   return command
-    .replace(/^(npm|pnpm|bun)\s+install\b/, `${targetPM} install`)
-    .replace(/^(npm|pnpm|bun)\s+run\b/, `${targetPM} run`)
-    .replace(/^(npm|pnpm|bun)\s+start\b/, `${targetPM} start`)
-    .replace(/^(npm|pnpm|bun)\s+add\b/, `${targetPM} add`)
-    .replace(/^(npm|pnpm|bun)\s+ci\b/, `${targetPM} ci`)
+    .replace(/^(npm|pnpm|bun|yarn)\s+install\b/, `${targetPM} install`)
+    .replace(/^(npm|pnpm|bun|yarn)\s+run\b/, `${targetPM} run`)
+    .replace(/^(npm|pnpm|bun|yarn)\s+start\b/, `${targetPM} start`)
+    .replace(/^(npm|pnpm|bun|yarn)\s+add\b/, `${targetPM} add`)
+    .replace(/^(npm|pnpm|bun|yarn)\s+ci\b/, `${targetPM} ci`)
+}
+
+/**
+ * Detect the package manager a PROJECT uses, from its committed lockfile.
+ *
+ * Distinct from {@link detectSystemPackageManager}, which probes what's
+ * installed to pick the fastest. This respects the project's own lockfile so a
+ * preview/run path never fires `npm install` inside a yarn/pnpm project (which
+ * would create a competing lockfile and a second, divergent node_modules).
+ * Precedence matches the Live Preview and `/start-server` paths so every
+ * install/run surface agrees on the PM for a given project. Falls back to
+ * `npm` when no lockfile is present.
+ */
+export async function detectProjectPackageManager(projectPath: string): Promise<PackageManager> {
+  const sep = projectPath.includes('\\') ? '\\' : '/'
+  const checks: Array<[string, PackageManager]> = [
+    ['pnpm-lock.yaml', 'pnpm'],
+    ['bun.lockb', 'bun'],
+    ['yarn.lock', 'yarn'],
+    ['package-lock.json', 'npm'],
+  ]
+  for (const [file, pm] of checks) {
+    try {
+      if (await invoke<boolean>('path_exists', { path: `${projectPath}${sep}${file}` })) return pm
+    } catch {
+      // path_exists rejected (unlikely) — fall through to the next candidate.
+    }
+  }
+  return 'npm'
 }

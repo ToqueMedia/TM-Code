@@ -13,6 +13,7 @@ const LOG_COLORS: Record<string, string> = {
 
 function DevServerStatus() {
   const isLoading = useLayoutStore(s => s.isPreviewServerLoading)
+  const isInstallingDeps = useLayoutStore(s => s.isInstallingDeps)
   const isRunning = useLayoutStore(selectIsPreviewServerRunning)
   const logs = useLayoutStore(s => s.devServerLogs)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -24,9 +25,9 @@ function DevServerStatus() {
     }
   }, [logs.length])
 
-  // Only show when loading or when there are recent errors
+  // Only show when loading/installing or when there are recent errors
   const hasErrors = logs.some(l => l.level === 'error')
-  const visible = isLoading || (hasErrors && !isRunning)
+  const visible = isLoading || isInstallingDeps || (hasErrors && !isRunning)
 
   if (!visible || logs.length === 0) return null
 
@@ -60,7 +61,7 @@ function DevServerStatus() {
         py="8px"
         borderBottom="1px solid rgba(255, 255, 255, 0.06)"
       >
-        {isLoading ? (
+        {(isLoading || isInstallingDeps) ? (
           <Box
             w="12px"
             h="12px"
@@ -78,7 +79,7 @@ function DevServerStatus() {
           <FiMonitor size={12} color={hasErrors ? tokens.colors.accent.red : tokens.colors.accent.green} />
         )}
         <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.primary} flex={1}>
-          {isLoading ? t('devserver.starting') : t('devserver.title')}
+          {isInstallingDeps ? t('preview.installingDeps') : isLoading ? t('devserver.starting') : t('devserver.title')}
         </Text>
         <Box
           as="button"

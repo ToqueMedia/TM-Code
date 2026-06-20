@@ -17,6 +17,7 @@ import { startAndShareLivePreview, LIVE_PREVIEW_PORT } from '../collab/livePrevi
 import AgentService from './agentService'
 import MCPService from '../mcp/mcpService'
 import { devServerManager } from '../devServerManager'
+import { detectProjectPackageManager } from '../packageManagerDetector'
 import { MCP_REGISTRY, findRegistryEntry, buildConfigEntry, type McpRegistryEntry } from '../../utils/mcpRegistry'
 import { clearPromptHistory } from '../cmdPromptHistory'
 import { t } from '../../i18n/useTranslation'
@@ -460,24 +461,6 @@ async function readPackageJsonScripts(projectPath: string): Promise<Record<strin
   } catch {
     return null
   }
-}
-
-async function detectProjectPackageManager(projectPath: string): Promise<'yarn' | 'pnpm' | 'bun' | 'npm'> {
-  const checks: Array<[string, 'yarn' | 'pnpm' | 'bun' | 'npm']> = [
-    ['pnpm-lock.yaml', 'pnpm'],
-    ['bun.lockb', 'bun'],
-    ['yarn.lock', 'yarn'],
-    ['package-lock.json', 'npm'],
-  ]
-  for (const [file, pm] of checks) {
-    try {
-      await invoke<string>('read_file', { path: `${projectPath}/${file}` })
-      return pm
-    } catch {
-      // file not present, try next
-    }
-  }
-  return 'npm'
 }
 
 function buildDevCommand(pm: 'yarn' | 'pnpm' | 'bun' | 'npm', scriptName: string): string {
