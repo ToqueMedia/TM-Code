@@ -36,6 +36,12 @@ class AICompletionService {
     const { autocomplete } = useSettingsStore.getState();
     if (!autocomplete.enabled) return null;
 
+    // FIM is a TM sidecar. On free + BYOK everything is self-funded and the
+    // user's key may not offer FIM, so it's disabled (Phase 2 policy). Paid +
+    // BYOK and non-BYOK keep the worker sidecar.
+    const { resolveAuxByokRoute } = await import('./agent/byokRouting');
+    if (resolveAuxByokRoute()) return null;
+
     // Skip if Ollama recently failed — avoid hammering + misleading loading state
     if (Date.now() - this.lastErrorTime < this.errorCooldownMs) return null;
 

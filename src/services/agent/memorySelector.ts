@@ -29,6 +29,7 @@
 import { invoke as tauriInvoke } from '@tauri-apps/api/core'
 import { logger } from '../../utils/logger'
 import { resolveAIWorkerUrl } from '../../utils/devUrls'
+import { resolveAuxByokRoute, byokAuxCompletion } from './byokRouting'
 import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
 
 /**
@@ -188,44 +189,61 @@ ${userMessage.slice(0, 4000)}
 Memory catalog (${entries.length} entries):
 ${catalogText}`
 
-    let res: Response
-    try {
-      const appCheck = await getAppCheckHeader()
-      res = await fetch(`${workerUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${idToken}`,
-          'X-Request-Type': 'memory-selector',
-          ...appCheck,
-        },
-        body: JSON.stringify({
-          messages: [
-            { role: 'system', content: selectorSystem },
-            { role: 'user', content: selectorUser },
-          ],
-          temperature: 0,
-          max_tokens: 800,
-          stream: false,
-          // response_format hint — DashScope honours it; OpenRouter passes
-          // through to compatible upstreams. Backend ignores when unsupported.
-          response_format: { type: 'json_object' },
-        }),
-        signal: ac.signal,
-      })
-    } finally {
+    const messages = [
+      { role: 'system', content: selectorSystem },
+      { role: 'user', content: selectorUser },
+    ]
+
+    // Free + BYOK: select on the user's own key. Paid+BYOK / non-BYOK use the
+    // TM worker (sidecar) path below.
+    const auxRoute = resolveAuxByokRoute()
+    let content: string
+    if (auxRoute) {
       clearTimeout(timeoutId)
-    }
+      content = (await byokAuxCompletion(auxRoute.snapshot, {
+        messages,
+        maxTokens: 800,
+        temperature: 0,
+        jsonObject: true,
+        signal: ac.signal,
+      })) ?? ''
+    } else {
+      let res: Response
+      try {
+        const appCheck = await getAppCheckHeader()
+        res = await fetch(`${workerUrl}/v1/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${idToken}`,
+            'X-Request-Type': 'memory-selector',
+            ...appCheck,
+          },
+          body: JSON.stringify({
+            messages,
+            temperature: 0,
+            max_tokens: 800,
+            stream: false,
+            // response_format hint — DashScope honours it; OpenRouter passes
+            // through to compatible upstreams. Backend ignores when unsupported.
+            response_format: { type: 'json_object' },
+          }),
+          signal: ac.signal,
+        })
+      } finally {
+        clearTimeout(timeoutId)
+      }
 
-    if (!res.ok) {
-      logger.warn('memdir', `[selector] HTTP ${res.status} — falling back to inject-all`)
-      return null
-    }
+      if (!res.ok) {
+        logger.warn('memdir', `[selector] HTTP ${res.status} — falling back to inject-all`)
+        return null
+      }
 
-    const data = await res.json() as {
-      choices?: Array<{ message?: { content?: string } }>
+      const data = await res.json() as {
+        choices?: Array<{ message?: { content?: string } }>
+      }
+      content = data.choices?.[0]?.message?.content ?? ''
     }
-    const content = data.choices?.[0]?.message?.content ?? ''
     if (!content) {
       logger.warn('memdir', '[selector] empty content — falling back to inject-all')
       return null

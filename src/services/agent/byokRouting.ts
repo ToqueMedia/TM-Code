@@ -12,11 +12,16 @@ import type OpenAI from 'openai'
 import { invoke } from '@/utils/invokeMetrics'
 import { useByokStore } from '../../stores/byokStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useBillingStore } from '../../stores/billingStore'
 import { createByokAgentClient } from './sdkClient'
 import { resolveThinkingHint } from './thinkingShapeDetection'
 import { BYOK_THINKING_BUDGET_TOKENS } from './agentConfig'
 import type { ByokSessionSnapshot } from '../../types/chat'
 import { logger } from '../../utils/logger'
+import { isFreePlan } from './byokPlans'
+
+// Re-export so existing importers (and tests) can keep getting it from here.
+export { isFreePlan }
 
 /** The active session's frozen BYOK snapshot + whether BYOK routing is live. */
 export function resolveActiveByokSnapshot(): {
@@ -26,6 +31,61 @@ export function resolveActiveByokSnapshot(): {
   const snapshot = useChatStore.getState().getActiveSession()?.byokSnapshot ?? null
   const byokActive = !!snapshot && useByokStore.getState().enabled
   return { snapshot, byokActive }
+}
+
+/**
+ * Should an AUXILIARY model call (memory, commit message, etc.) route through
+ * the user's BYOK key? True only on free plans with BYOK active. Returns the
+ * snapshot to use, or null to keep the managed (worker) path.
+ *
+ * Paid + BYOK → null (auxiliaries use TM infra). Non-BYOK → null.
+ */
+export function resolveAuxByokRoute(): { snapshot: ByokSessionSnapshot } | null {
+  const { snapshot, byokActive } = resolveActiveByokSnapshot()
+  if (!byokActive || !snapshot) return null
+  if (!isFreePlan(useBillingStore.getState().plan)) return null
+  return { snapshot }
+}
+
+/**
+ * Run a one-shot (non-streaming) auxiliary completion through the user's BYOK
+ * provider. Returns the assistant message text, or null on any failure (callers
+ * fall back to their managed/empty path). Anthropic has no `response_format`, so
+ * jsonObject is dropped there — the caller's tolerant JSON parser handles it.
+ */
+export async function byokAuxCompletion(
+  snapshot: ByokSessionSnapshot,
+  params: {
+    messages: Array<{ role: string; content: string }>
+    maxTokens: number
+    temperature?: number
+    jsonObject?: boolean
+    signal?: AbortSignal
+  },
+): Promise<string | null> {
+  const client = await buildByokClientFromSnapshot(snapshot, { lightweight: true })
+  if (!client) return null
+  const provider = useByokStore.getState().providers.find((p) => p.id === snapshot.providerId)
+  const isAnthropic =
+    (provider?.apiShape ?? (snapshot.providerId === 'anthropic' ? 'anthropic' : 'openai_compat')) ===
+    'anthropic'
+  const body: Record<string, unknown> = {
+    model: snapshot.modelId,
+    max_tokens: params.maxTokens,
+    messages: params.messages,
+    stream: false,
+  }
+  if (params.temperature != null) body.temperature = params.temperature
+  if (params.jsonObject && !isAnthropic) body.response_format = { type: 'json_object' }
+  try {
+    const resp = await client.chat.completions.create(
+      body as unknown as OpenAI.ChatCompletionCreateParamsNonStreaming,
+      params.signal ? { signal: params.signal } : undefined,
+    )
+    return resp.choices?.[0]?.message?.content ?? null
+  } catch {
+    return null
+  }
 }
 
 /**

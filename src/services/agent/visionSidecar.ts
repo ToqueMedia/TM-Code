@@ -29,6 +29,13 @@ export async function describeImagesViaSidecar(
   const imageParts = parts.filter(p => p.type === 'image_url')
   if (imageParts.length === 0) return null
 
+  // The vision sidecar is a TM-infra fallback for non-vision models. On free +
+  // BYOK it's disabled (self-funded; if the user's model is natively
+  // vision-capable, images already flow through the main loop). Paid + BYOK and
+  // non-BYOK keep the worker sidecar.
+  const { resolveAuxByokRoute } = await import('./byokRouting')
+  if (resolveAuxByokRoute()) return null
+
   const token = await FirebaseAuthService.getInstance().getIdToken()
   if (!token) return null
 
