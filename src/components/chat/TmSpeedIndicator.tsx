@@ -29,13 +29,17 @@ export default function TmSpeedIndicator() {
       px="6px"
       py="3px"
       borderRadius="5px"
-      bg="rgba(210, 153, 34, 0.12)"
-      border="1px solid rgba(210, 153, 34, 0.3)"
+      // Degradado (toggle ON mas o worker não serviu speed → SEM 3x): esmaecido
+      // e com sufixo "pendente". Só sólido quando `applied` = a cobrar 3x, para
+      // o badge não dar a entender uma cobrança que não está a acontecer.
+      bg={applied ? 'rgba(210, 153, 34, 0.12)' : 'rgba(210, 153, 34, 0.05)'}
+      border={`1px solid ${applied ? 'rgba(210, 153, 34, 0.3)' : 'rgba(210, 153, 34, 0.15)'}`}
       color={tokens.colors.accent.orange}
+      opacity={applied ? 1 : 0.6}
       title={applied ? t('speed.indicatorTooltip') : t('speed.indicatorTooltipPending')}
     >
       <Text fontSize="10px" fontWeight="600" letterSpacing="0.02em">
-        ⚡ {t('speed.indicator')}
+        ⚡ {t('speed.indicator')}{applied ? '' : ` ${t('speed.indicatorPendingSuffix')}`}
       </Text>
     </Flex>
   )

@@ -343,11 +343,14 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
               fontWeight="600"
               whiteSpace="nowrap"
               flexShrink={0}
+              // Degradado (toggle ON mas worker não serviu speed → sem 3x):
+              // esmaecido + sufixo "pendente". Sólido só quando applied = 3x.
+              opacity={tmSpeedApplied ? 1 : 0.55}
               title={tmSpeedApplied ? t("speed.indicatorTooltip") : t("speed.indicatorTooltipPending")}
             >
               {/* Refined-terminal: emoji '⚡' replaced by a single-color text
                   marker '✦' in the same accent.orange. */}
-              ✦ {t("speed.indicator")}
+              ✦ {t("speed.indicator")}{tmSpeedApplied ? "" : ` ${t("speed.indicatorPendingSuffix")}`}
             </Text>
           )}
 

@@ -240,11 +240,10 @@ async function handleChatCompletions(
   const speedRequested = request.headers.get('x-tm-speed') === 'true'
   let speedEligible = false
   if (speedRequested && config.speedModel) {
-    if (enforcement === 'off' && !budgetState) {
-      // Com billing desligado o estado ainda não foi lido — lê só para o gate
-      // de plano (mesma cache).
-      budgetState = await getUserBudgetState(env, user.userId, idToken, fetcher)
-    }
+    // budgetState já foi lido (incondicionalmente) no gate de suspensão acima,
+    // em QUALQUER modo de billing, e a leitura é cacheada 60s (inclui resultados
+    // null). A elegibilidade do speed reusa esse mesmo estado — zero leituras
+    // extra, zero round-trips.
     speedEligible = isSpeedAllowedForPlanState(budgetState)
   }
   const speedApplied = speedRequested && !!config.speedModel && speedEligible

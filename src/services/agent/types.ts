@@ -68,10 +68,11 @@ export interface AgentCallbacks {
   /** Error. */
   onError: (error: Error) => void
 
-  /** Usage update. `billingMultiplier` (default 1) é o fator de cobrança do
-   * turno — 3 quando o worker confirmou TM Speed via `X-TM-Speed-Applied`.
-   * Aplica-se só a billing; os tokens reportados ficam sempre raw. */
-  onUsageUpdate: (inputTokens: number, outputTokens: number, billingMultiplier?: number) => void
+  /** Usage update. `speedApplied` (default false) sinaliza que o worker serviu
+   * TM Speed neste turno (`X-TM-Speed-Applied: true`) — usado SÓ para feedback
+   * (log/UI). A cobrança (3x por defeito) é aplicada server-side no worker; o
+   * cliente nunca faz matemática de consumo e os tokens reportados ficam raw. */
+  onUsageUpdate: (inputTokens: number, outputTokens: number, speedApplied?: boolean) => void
 
   /** Context was compressed to fit within model limits. */
   onContextCompression?: (event: import('@/types/agent').CompactProgressEvent) => void

@@ -570,12 +570,16 @@ async function runAgentInternal(
           useChatStore.getState().finalizeAssistantMessage()
         }
       },
-      onUsageUpdate: (inputTokens, outputTokens, billingMultiplier = 1) => {
+      onUsageUpdate: (inputTokens, outputTokens, speedApplied = false) => {
         // Defensive ?? 0: partial-usage providers can pass undefined for either
         // counter; .toLocaleString() on undefined crashes the whole run.
         const inTok = inputTokens ?? 0
         const outTok = outputTokens ?? 0
-        logger.info('agent', `→ Tokens: ${inTok.toLocaleString()} in / ${outTok.toLocaleString()} out${billingMultiplier > 1 ? ` (billed ${billingMultiplier}x — TM Speed, server-side)` : ''}`)
+        // O multiplicador real (3x por defeito) é do worker (env
+        // TM_SPEED_BILLING_MULTIPLIER); o cliente não o conhece, por isso o log
+        // afirma apenas que o speed foi servido — sem cravar um número que pode
+        // divergir da config do worker.
+        logger.info('agent', `→ Tokens: ${inTok.toLocaleString()} in / ${outTok.toLocaleString()} out${speedApplied ? ' (TM Speed — billed at the server-side speed rate)' : ''}`)
         // isForeground = !isBackgroundRun: invisible auto-wake / background runs
         // still count toward billing + the activity indicator, but must NOT move
         // the ctx pill (it tracks the FOREGROUND conversation's context size).
