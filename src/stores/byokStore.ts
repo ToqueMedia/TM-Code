@@ -102,6 +102,12 @@ export interface ByokProvider {
   models: ByokModel[]
   local?: boolean
   custom?: boolean
+  /** Catalog rendering bucket (ApiKeysSection groups Cloud / Local / Custom).
+   *  Anthropic is a curated cloud provider but lives under Custom by product
+   *  decision, so it sets `group:'custom'` while keeping `custom:false` (it
+   *  still shows its curated model list, not the free-text Custom input).
+   *  When absent, the UI derives the bucket from `local`/`custom` flags. */
+  group?: 'cloud' | 'local' | 'custom'
 }
 
 export interface ByokProviderConfig {
@@ -122,6 +128,13 @@ export interface ByokProviderConfig {
   /** User-supplied baseURL override (org gateway). Empty/undefined = use
    *  provider.defaultBaseURL. */
   baseURL?: string
+  /** User-declared context window for the BYOK model, in tokens. Under BYOK the
+   *  request bypasses the worker, so the IDE can't learn the real window from
+   *  the X-Model-Context-Window response header — the USER declares the value
+   *  their model supports (Settings dropdown: 128K/192K/200K/256K/1M/2M) and
+   *  the agent's auto-compact uses it. Empty = fall back to the catalog model's
+   *  contextWindow, then FALLBACK_CONTEXT_WINDOW. Persisted. */
+  contextWindow?: number
   /** Last-used timestamp (ms). Updated on every chat send so the Settings
    *  UI can rank providers. */
   lastUsed?: number
@@ -159,20 +172,98 @@ export interface TestKeyResult {
 // and authHeader is empty (we don't inject Authorization for local-no-auth).
 // `models: []` is intentional — local models are dynamic; the IDE refreshes
 // them via `refreshLocalModels()` which calls the discovery endpoint.
-/**
- * Provider IDs pinned to the top of the picker, in priority order. The catalog
- * itself is Firestore-managed, so its natural document order is whatever the
- * admin seeded; this list is the frontend-side priority overlay so featured
- * providers always surface first regardless of upstream ordering. Any provider
- * id not in this list keeps its catalog position.
- */
-const TOP_PINNED_PROVIDER_IDS = ['xiaomi', 'moonshot']
+// ── Cloud providers (hardcoded) ──
+//
+// BYOK is IDE → SDK → provider DIRECT (never the TM worker), so the catalog is
+// owned by the IDE — there is no server `/v1/byok/providers` fetch anymore.
+// Curated set: Google Gemini + DashScope/Alibaba (both OpenAI-compat),
+// Custom (free-text OpenAI-compat), and Anthropic (native Messages API).
+//
+// `contextWindow` here is only a DEFAULT — under BYOK the user declares the
+// real window via the Settings dropdown (perProviderConfig.contextWindow),
+// because the worker (which used to emit X-Model-Context-Window) is bypassed.
+// Model ids are sensible defaults; users pin exact ids via "Other model".
+const CLOUD_PROVIDERS: ByokProvider[] = [
+  {
+    id: 'gemini',
+    name: 'Google Gemini',
+    enabled: true,
+    group: 'cloud',
+    // OpenAI-compat endpoint. The SDK appends /chat/completions → .../openai/chat/completions.
+    defaultBaseURL: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    apiShape: 'openai_compat',
+    // June 2026: Gemini 3 / 3.5 generation. The OpenAI-compat endpoint maps
+    // reasoning_effort → thinkingConfig; reasoning can't be disabled on Pro/3
+    // models, so the default `medium` (buildThinkingConfig) is always valid.
+    models: [
+      { id: 'gemini-3-pro', label: 'Gemini 3 Pro', capabilities: { images: true, audio: false, video: false, tools: true }, contextWindow: 1_048_576, supportsThinking: true, thinkingShape: 'gemini_thinking_budget' },
+      { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', capabilities: { images: true, audio: false, video: false, tools: true }, contextWindow: 1_048_576, supportsThinking: true, thinkingShape: 'gemini_thinking_budget' },
+      { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', capabilities: { images: true, audio: false, video: false, tools: true }, contextWindow: 1_048_576, supportsThinking: true, thinkingShape: 'gemini_thinking_budget' },
+    ],
+  },
+  {
+    id: 'dashscope',
+    name: 'DashScope (Alibaba Cloud)',
+    enabled: true,
+    group: 'cloud',
+    // International endpoint. CN users override the baseURL with
+    // https://dashscope.aliyuncs.com/compatible-mode/v1 in the Base URL field.
+    defaultBaseURL: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    apiShape: 'openai_compat',
+    // supportsThinking:false by default — DashScope's `enable_thinking` only
+    // applies to some Qwen3 SKUs and errors on non-streaming; users opt in per
+    // model via "Other model" if they run a thinking SKU. The thinkingShape is
+    // still detected from the host (qwen_enable_thinking) when they do.
+    models: [
+      { id: 'qwen3-max', label: 'Qwen3 Max', capabilities: { images: false, audio: false, video: false, tools: true }, contextWindow: 262_144, supportsThinking: false },
+      { id: 'qwen3-coder-plus', label: 'Qwen3 Coder Plus', capabilities: { images: false, audio: false, video: false, tools: true }, contextWindow: 1_048_576, supportsThinking: false },
+      { id: 'qwen-plus', label: 'Qwen Plus', capabilities: { images: false, audio: false, video: false, tools: true }, contextWindow: 131_072, supportsThinking: false },
+      { id: 'qwen-max', label: 'Qwen Max', capabilities: { images: false, audio: false, video: false, tools: true }, contextWindow: 32_768, supportsThinking: false },
+    ],
+  },
+  {
+    id: 'anthropic',
+    name: 'Anthropic (Claude)',
+    enabled: true,
+    // Curated cloud provider, but grouped under Custom per product decision.
+    group: 'custom',
+    defaultBaseURL: 'https://api.anthropic.com',
+    // Anthropic authenticates with x-api-key, not Authorization: Bearer.
+    authHeader: 'x-api-key',
+    authPrefix: '',
+    apiShape: 'anthropic',
+    extraHeaders: { 'anthropic-version': '2023-06-01' },
+    models: [
+      { id: 'claude-fable-5', label: 'Claude Fable 5', capabilities: { images: true, audio: false, video: false, tools: true }, contextWindow: 200_000, supportsThinking: true, thinkingShape: 'anthropic' },
+      { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', capabilities: { images: true, audio: false, video: false, tools: true }, contextWindow: 200_000, supportsThinking: true, thinkingShape: 'anthropic' },
+      { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', capabilities: { images: true, audio: false, video: false, tools: true }, contextWindow: 200_000, supportsThinking: true, thinkingShape: 'anthropic' },
+      { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', capabilities: { images: true, audio: false, video: false, tools: true }, contextWindow: 200_000, supportsThinking: false, thinkingShape: 'anthropic' },
+    ],
+  },
+  {
+    id: 'custom',
+    name: 'Custom (OpenAI-Compatible)',
+    enabled: true,
+    group: 'custom',
+    custom: true,
+    defaultBaseURL: '',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    apiShape: 'openai_compat',
+    models: [],
+  },
+]
 
 const LOCAL_PROVIDERS: ByokProvider[] = [
   {
     id: 'ollama',
     name: 'Ollama',
     enabled: true,
+    group: 'local',
     defaultBaseURL: 'http://localhost:11434',
     authHeader: '',
     authPrefix: '',
@@ -184,6 +275,7 @@ const LOCAL_PROVIDERS: ByokProvider[] = [
     id: 'lm-studio',
     name: 'LM Studio',
     enabled: true,
+    group: 'local',
     defaultBaseURL: 'http://localhost:1234',
     authHeader: '',
     authPrefix: '',
@@ -261,6 +353,10 @@ interface ByokState {
   setKey: (providerId: string, key: string) => Promise<void>
   deleteKey: (providerId: string) => Promise<void>
   setBaseURL: (providerId: string, baseURL: string | undefined) => void
+  /** Set the user-declared context window (tokens) for a provider's BYOK model.
+   *  Drives auto-compact under BYOK (the worker is bypassed, so no
+   *  X-Model-Context-Window header). Persisted. */
+  setContextWindow: (providerId: string, contextWindow: number | undefined) => void
   testKey: (
     providerId: string,
     modelId: string,
@@ -312,49 +408,22 @@ export const useByokStore = create<ByokState>()(
       catalogLoaded: false,
 
       loadProviders: async () => {
-        // Local providers are always present, regardless of auth — the whole
-        // point of Ollama/LM Studio is offline use. Cloud catalog comes from
-        // the worker only when authenticated.
-        let cloudProviders: ByokProvider[] = []
-        try {
-          const token = await FirebaseAuthService.getInstance().getIdToken()
-          if (token) {
-            const res = await tauriFetch(`${resolveWorkerUrl()}/v1/byok/providers`, {
-              headers: { Authorization: `Bearer ${token}` },
-            })
-            if (res.ok) {
-              const data = await res.json() as { providers: ByokProvider[] }
-              cloudProviders = Array.isArray(data.providers) ? data.providers : []
-            } else {
-              console.warn(`[byok] /v1/byok/providers returned ${res.status}`)
-            }
-          }
-        } catch (err) {
-          console.warn('[byok] loadProviders failed:', err)
-        }
-
-        // Merge cloud + local. Cloud wins on id collision so admins can
-        // override the hardcoded defaults later via Firestore.
-        const merged = [...cloudProviders]
-        for (const local of LOCAL_PROVIDERS) {
-          if (!merged.find(p => p.id === local.id)) merged.push(local)
-        }
-
-        // Pin featured providers to the top in fixed priority order. The
-        // backend catalog order is admin-managed (Firestore document order)
-        // and can drift; this overlay guarantees Xiaomi MiMo is always the
-        // first entry regardless of catalog state. Missing ids are no-ops.
-        const pinnedSet = new Set(TOP_PINNED_PROVIDER_IDS)
-        const pinned = TOP_PINNED_PROVIDER_IDS
-          .map(id => merged.find(p => p.id === id))
-          .filter((p): p is ByokProvider => Boolean(p))
-        const rest = merged.filter(p => !pinnedSet.has(p.id))
-        const ordered = [...pinned, ...rest]
+        // Catalog is hardcoded in the IDE — BYOK is IDE → provider DIRECT, so
+        // there is NO server `/v1/byok/providers` fetch (and no Firestore
+        // override). Cloud first, then local; Custom/Anthropic carry
+        // group:'custom'. Local providers are always present for offline use.
+        const providers: ByokProvider[] = [...CLOUD_PROVIDERS, ...LOCAL_PROVIDERS]
 
         const config = { ...get().perProviderConfig }
-        // Cloud providers: refresh hasKey from keychain (source of truth —
-        // persisted hasKey could be stale after a manual delete).
-        for (const provider of cloudProviders) {
+        for (const provider of providers) {
+          if (provider.local) {
+            // Local: ensure a config entry exists so the UI renders the baseURL
+            // field. hasKey stays false; `configured` persists from localStorage.
+            if (!config[provider.id]) config[provider.id] = { hasKey: false }
+            continue
+          }
+          // Cloud: refresh hasKey from the keychain (source of truth — a
+          // persisted hasKey can go stale after a manual key delete).
           const existing = config[provider.id] || { hasKey: false }
           try {
             const present = await invoke<boolean>('byok_has_key', { provider: provider.id })
@@ -363,14 +432,8 @@ export const useByokStore = create<ByokState>()(
             console.warn(`[byok] byok_has_key(${provider.id}) failed:`, err)
           }
         }
-        // Local providers: ensure a config entry exists so the UI can render
-        // the baseURL field. hasKey stays false; configured persists from
-        // localStorage if the user previously confirmed.
-        for (const local of ordered.filter(p => p.local)) {
-          if (!config[local.id]) config[local.id] = { hasKey: false }
-        }
 
-        set({ providers: ordered, perProviderConfig: config, catalogLoaded: true })
+        set({ providers, perProviderConfig: config, catalogLoaded: true })
       },
 
       setKey: async (providerId, key) => {
@@ -429,6 +492,16 @@ export const useByokStore = create<ByokState>()(
         const existing = config[providerId] || { hasKey: false }
         config[providerId] = { ...existing, baseURL: cleanBaseURL(baseURL) }
         set({ perProviderConfig: config })
+        syncActiveSessionSnapshot()
+      },
+
+      setContextWindow: (providerId, contextWindow) => {
+        const config = { ...get().perProviderConfig }
+        const existing = config[providerId] || { hasKey: false }
+        config[providerId] = { ...existing, contextWindow }
+        set({ perProviderConfig: config })
+        // Re-capture the active session snapshot so the new window takes effect
+        // for the current conversation's auto-compact immediately.
         syncActiveSessionSnapshot()
       },
 

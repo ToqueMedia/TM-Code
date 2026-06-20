@@ -30,10 +30,20 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, State};
+use tokio::sync::oneshot;
 
 const KEYRING_SERVICE: &str = "tm-code-byok";
+
+/// Abort registry for BYOK direct streaming (`byok_chat_stream`). Maps a
+/// `request_id` → a oneshot sender; `byok_chat_abort` fires it so the agent's
+/// Stop button truly cancels the in-flight reqwest stream. Without it the JS
+/// transport unsubscribes from the events but the Rust task keeps draining the
+/// user's provider for up to the 5-min timeout — real money on a BYOK key.
+#[derive(Default)]
+pub struct ByokStreamRegistry(pub Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>);
 
 fn entry_for(provider: &str) -> Result<Entry, String> {
     Entry::new(KEYRING_SERVICE, provider).map_err(|e| format!("keyring init failed: {e}"))
@@ -344,6 +354,178 @@ pub async fn byok_local_chat_stream(
         );
     });
 
+    Ok(())
+}
+
+// ── BYOK direct streaming (cloud + local) ──
+//
+// The agentic BYOK path is IDE → SDK → provider DIRECT (never the TM worker).
+// Cloud providers (Anthropic / Google / DashScope) block browser `fetch` from
+// the WebView origin (CORS), so the streaming POST is opened here in Rust
+// (no CORS) and chunks are relayed as Tauri events, exactly like
+// `byok_local_chat_stream`. Same event protocol:
+//
+//   { "type": "chunk", "data": "..." }   — raw UTF-8 bytes from upstream
+//   { "type": "done" }                    — stream completed normally
+//   { "type": "error", "error": "..." }   — request or stream failed
+//   { "type": "http_error", "status": N, "body": "..." }  — HTTP non-2xx
+//
+// Egress guard: this is NOT a generic HTTP egress. It only allows (a) localhost
+// (local providers) or (b) https to EXACTLY the `expected_host` the IDE derived
+// from the active provider's baseURL. The JS transport (byokTransport.ts) sets
+// all auth headers per provider+shape; we forward them verbatim.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatStreamInput {
+    pub request_id: String,
+    pub url: String,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    pub body: String,
+    /// Host the IDE expects to talk to (from the provider's baseURL). The
+    /// request URL's host must equal this for any non-localhost target.
+    pub expected_host: String,
+}
+
+#[tauri::command]
+pub async fn byok_chat_stream(
+    app: AppHandle,
+    registry: State<'_, ByokStreamRegistry>,
+    input: ChatStreamInput,
+) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(&input.url).map_err(|e| format!("invalid url: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "missing host".to_string())?
+        .to_string();
+    let scheme = parsed.scheme().to_string();
+    let is_local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "0.0.0.0" | "::1");
+
+    // Egress guard. Localhost OR https to exactly the configured provider host.
+    let allowed = is_local || (scheme == "https" && host == input.expected_host);
+    if !allowed {
+        return Err(format!(
+            "byok_chat_stream: refused egress to '{host}' (scheme={scheme}, expected_host={})",
+            input.expected_host
+        ));
+    }
+
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(300));
+    if is_local {
+        // Self-signed local gateways (rare) — accept invalid certs only for
+        // localhost, NEVER for cloud.
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    let client = builder
+        .build()
+        .map_err(|e| format!("client init failed: {e}"))?;
+
+    let event_name = format!("byok-stream-{}", input.request_id);
+    let mut req = client.post(parsed).body(input.body);
+
+    // Forward caller headers verbatim — Authorization / x-api-key /
+    // anthropic-version / Content-Type / Accept are all decided JS-side per
+    // provider + apiShape. Only default the two transport headers when absent.
+    let mut has_content_type = false;
+    let mut has_accept = false;
+    for (k, v) in input.headers.iter() {
+        if k.eq_ignore_ascii_case("content-type") {
+            has_content_type = true;
+        }
+        if k.eq_ignore_ascii_case("accept") {
+            has_accept = true;
+        }
+        req = req.header(k, v);
+    }
+    if !has_content_type {
+        req = req.header("Content-Type", "application/json");
+    }
+    if !has_accept {
+        req = req.header("Accept", "text/event-stream");
+    }
+
+    // Register the abort channel BEFORE spawning so a near-instant abort can't
+    // race the insert.
+    let (abort_tx, mut abort_rx) = oneshot::channel::<()>();
+    registry
+        .0
+        .lock()
+        .unwrap()
+        .insert(input.request_id.clone(), abort_tx);
+    let registry_arc = registry.0.clone();
+    let request_id = input.request_id.clone();
+
+    tokio::spawn(async move {
+        let cleanup = |reg: &Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>| {
+            reg.lock().unwrap().remove(&request_id);
+        };
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = app.emit(
+                    &event_name,
+                    serde_json::json!({ "type": "error", "error": format!("request failed: {e}") }),
+                );
+                cleanup(&registry_arc);
+                return;
+            }
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let _ = app.emit(
+                &event_name,
+                serde_json::json!({ "type": "http_error", "status": status.as_u16(), "body": body }),
+            );
+            cleanup(&registry_arc);
+            return;
+        }
+
+        let mut stream = resp.bytes_stream();
+        loop {
+            tokio::select! {
+                // Stop button (JS aborted) — drop the stream, emit nothing more.
+                _ = &mut abort_rx => break,
+                maybe = stream.next() => match maybe {
+                    Some(Ok(bytes)) => {
+                        let text = String::from_utf8_lossy(&bytes).to_string();
+                        let _ = app.emit(
+                            &event_name,
+                            serde_json::json!({ "type": "chunk", "data": text }),
+                        );
+                    }
+                    Some(Err(e)) => {
+                        let _ = app.emit(
+                            &event_name,
+                            serde_json::json!({ "type": "error", "error": format!("stream error: {e}") }),
+                        );
+                        break;
+                    }
+                    None => {
+                        let _ = app.emit(&event_name, serde_json::json!({ "type": "done" }));
+                        break;
+                    }
+                },
+            }
+        }
+        cleanup(&registry_arc);
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn byok_chat_abort(
+    registry: State<'_, ByokStreamRegistry>,
+    request_id: String,
+) -> Result<(), String> {
+    if let Some(tx) = registry.0.lock().unwrap().remove(&request_id) {
+        // Receiver in the spawned task's select! wakes and breaks the loop.
+        let _ = tx.send(());
+    }
     Ok(())
 }
 

@@ -15,6 +15,11 @@
 import type OpenAI from 'openai'
 import FirebaseAuthService from '../../auth/firebaseAuth'
 import { createSubAgentClient } from '../sdkClient'
+import {
+  resolveActiveByokSnapshot,
+  buildByokClientFromSnapshot,
+  buildByokThinkingConfig,
+} from '../byokRouting'
 import { QueryEngine } from '../queryEngine'
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from '../query'
 import ToolExecutor from '../toolExecutor'
@@ -59,12 +64,32 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
     useSubAgentStore.getState().errorRun(runId, 'Authentication expired')
     return runId
   }
-  const client = createSubAgentClient(authToken)
-  const refreshClient = async (): Promise<OpenAI | null> => {
-    const auth = FirebaseAuthService.getInstance()
-    const refreshed = await auth.getIdToken(true)
-      ?? (await auth.refreshLogin() ? await auth.getIdToken(true) : null)
-    return refreshed ? createSubAgentClient(refreshed) : null
+  // BYOK: sub-agents are coding too — route them through the user's provider
+  // direct (the conversation's frozen snapshot), never the TM worker. Falls
+  // back to the managed sub-agent client when BYOK is off.
+  const { snapshot: byokSnapshot, byokActive } = resolveActiveByokSnapshot()
+  let client: OpenAI
+  let refreshClient: () => Promise<OpenAI | null>
+  let model = 'tm-active-model'
+  let thinkingConfig: Record<string, unknown> | undefined
+  if (byokActive && byokSnapshot) {
+    const byokClient = await buildByokClientFromSnapshot(byokSnapshot, { lightweight: true })
+    if (!byokClient) {
+      useSubAgentStore.getState().errorRun(runId, `BYOK key missing for "${byokSnapshot.providerId}"`)
+      return runId
+    }
+    client = byokClient
+    refreshClient = async () => buildByokClientFromSnapshot(byokSnapshot, { lightweight: true })
+    model = byokSnapshot.modelId
+    thinkingConfig = buildByokThinkingConfig(byokSnapshot)
+  } else {
+    client = createSubAgentClient(authToken)
+    refreshClient = async (): Promise<OpenAI | null> => {
+      const auth = FirebaseAuthService.getInstance()
+      const refreshed = await auth.getIdToken(true)
+        ?? (await auth.refreshLogin() ? await auth.getIdToken(true) : null)
+      return refreshed ? createSubAgentClient(refreshed) : null
+    }
   }
 
   // ── Build tool definitions in OpenAI format ──
@@ -103,10 +128,11 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   const engine = new QueryEngine({
     client,
     refreshClient,
-    model: 'tm-active-model',
+    model,
     systemPrompt,
     tools: openaiTools,
     executeTool,
+    thinkingConfig,
     maxTurns: definition.maxTurns,
     onResponseHeaders: (headers) => {
       useBillingStore.getState().updateFromHeaders(headers)

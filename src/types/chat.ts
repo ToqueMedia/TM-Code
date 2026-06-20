@@ -468,6 +468,11 @@ export interface ByokSessionSnapshot {
    *  silently ignored by Anthropic/OpenAI/Gemini upstreams, which is why
    *  the toggle was a no-op for BYOK before this field existed. */
   thinkingShape?: 'anthropic' | 'openai_reasoning_effort' | 'qwen_enable_thinking' | 'gemini_thinking_budget' | 'openrouter_reasoning' | 'mimo_chat_template_kwargs'
+  /** Model context window frozen at snapshot time (from the hardcoded catalog).
+   *  Under BYOK the request bypasses the worker, so the IDE can't learn the
+   *  window from X-Model-Context-Window — it seeds the auto-compact limit from
+   *  here instead. `0`/absent → agentService falls back to FALLBACK_CONTEXT_WINDOW. */
+  contextWindow?: number
 }
 
 export interface SessionContext {

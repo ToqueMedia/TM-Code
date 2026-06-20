@@ -154,6 +154,8 @@ commands.allow = [
   "byok_delete_key",
   "byok_has_key",
   "byok_local_chat_stream",
+  "byok_chat_stream",
+  "byok_chat_abort",
   "open_preview_webview",
   "navigate_preview_webview",
   "close_preview_webview",

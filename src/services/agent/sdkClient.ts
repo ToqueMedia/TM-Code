@@ -12,8 +12,9 @@
  *   3. Worker validates the token and injects the real upstream API key
  */
 
-import OpenAI from 'openai'
+import OpenAI, { type ClientOptions } from 'openai'
 import { resolveAIWorkerUrl } from '../../utils/devUrls'
+import { createByokFetch, type ByokApiShape } from './byokTransport'
 
 // ── Constants ──
 
@@ -91,5 +92,54 @@ export function createSubAgentClient(
     maxRetries: 0,
     timeout: options?.timeout ?? 120_000, // 2 min default for sub-agents
     ...options,
+  })
+}
+
+/**
+ * Create an OpenAI SDK client for the BYOK DIRECT path — IDE → SDK → provider,
+ * bypassing the TM worker entirely.
+ *
+ * Differences from `createAgentClient`:
+ *   - `baseURL` is the provider's own URL, used RAW (only trailing slash
+ *     trimmed). We must NOT force-append `/v1` like `normalizeBaseURL` does —
+ *     that breaks Gemini (`/v1beta/openai`) and double-`/v1`s DashScope. The SDK
+ *     appends `/chat/completions` itself.
+ *   - `apiKey` is the user's own key (read just-in-time from the OS keychain).
+ *     The SDK sends it as `Authorization: Bearer`; the Anthropic transport
+ *     rewrites that to `x-api-key`.
+ *   - `fetch` is the Rust-backed CORS-free streaming transport. Anthropic
+ *     request/response translation happens inside it (apiShape).
+ */
+export function createByokAgentClient(params: {
+  baseURL: string
+  apiKey: string
+  apiShape: ByokApiShape
+  extraHeaders?: Record<string, string>
+  maxRetries?: number
+  timeout?: number
+}): OpenAI {
+  const baseURL = params.baseURL.replace(/\/+$/, '')
+  let expectedHost = ''
+  try {
+    expectedHost = new URL(baseURL).host
+  } catch {
+    expectedHost = ''
+  }
+  return new OpenAI({
+    baseURL,
+    // SDK requires a non-empty apiKey; local providers (no auth) get a
+    // placeholder the upstream ignores.
+    apiKey: params.apiKey || 'tm-byok-local',
+    dangerouslyAllowBrowser: true,
+    maxRetries: params.maxRetries ?? DEFAULT_MAX_RETRIES,
+    timeout: params.timeout ?? DEFAULT_TIMEOUT_MS,
+    // The OpenAI SDK's `Fetch` type uses its own URLLike; our transport returns
+    // a real Response from (url, init). Cast through the SDK option type — the
+    // runtime contract (a streaming Response) is exactly what the SDK consumes.
+    fetch: createByokFetch({ expectedHost, apiShape: params.apiShape }) as unknown as ClientOptions['fetch'],
+    defaultHeaders: {
+      'x-app': 'tm-code',
+      ...(params.extraHeaders ?? {}),
+    },
   })
 }

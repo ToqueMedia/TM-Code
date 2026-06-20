@@ -625,6 +625,7 @@ pub fn run() {
         .manage(pty_map)
         .manage(child_map)
         .manage(pty_pid_map)
+        .manage(ByokStreamRegistry::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -1395,6 +1396,8 @@ pub fn run() {
             byok_delete_key,
             byok_has_key,
             byok_local_chat_stream,
+            byok_chat_stream,
+            byok_chat_abort,
             open_preview_webview,
             navigate_preview_webview,
             close_preview_webview,
