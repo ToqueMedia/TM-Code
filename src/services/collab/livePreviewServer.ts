@@ -17,6 +17,7 @@ import { invoke } from '@/utils/invokeMetrics'
 import { listen } from '@tauri-apps/api/event'
 import { detectDevCommand } from '@/services/previewActivation'
 import { detectFromProjectPath } from '@/services/deploy/runtimeDetector'
+import { detectProjectPackageManager } from '@/services/packageManagerDetector'
 
 /** Dedicated, fixed port for the team Live Preview server. */
 export const LIVE_PREVIEW_PORT = 7773
@@ -197,19 +198,6 @@ function buildCommandFor(pm: PackageManager): string {
   return pm === 'yarn' || pm === 'pnpm' ? `${pm} build` : `${pm} run build`
 }
 
-async function detectPackageManager(projectPath: string): Promise<PackageManager> {
-  const checks: Array<[string, PackageManager]> = [
-    ['pnpm-lock.yaml', 'pnpm'],
-    ['bun.lockb', 'bun'],
-    ['yarn.lock', 'yarn'],
-    ['package-lock.json', 'npm'],
-  ]
-  for (const [file, pm] of checks) {
-    if (await pathExists(`${projectPath}/${file}`)) return pm
-  }
-  return 'npm'
-}
-
 /** Resolve the static build output directory (absolute), or null if none. */
 async function resolveOutputDir(projectPath: string): Promise<string | null> {
   try {
@@ -231,7 +219,7 @@ async function startStaticStrategy(projectPath: string): Promise<number> {
   const pkg = await readPackageJson(projectPath)
   if (!pkg?.scripts?.build?.trim()) throw new Error('no-build-command')
 
-  const pm = await detectPackageManager(projectPath)
+  const pm = await detectProjectPackageManager(projectPath)
   const result = await invoke<CommandResult>('execute_command', {
     command: buildCommandFor(pm),
     cwd: projectPath,

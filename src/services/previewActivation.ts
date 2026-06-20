@@ -9,6 +9,7 @@ import { useLayoutStore, selectIsPreviewServerRunning } from '../stores/layoutSt
 import { useCollabStore } from '../stores/collabStore'
 import { useToastStore } from '../stores/toastStore'
 import { devServerManager } from './devServerManager'
+import { ensureDependenciesInstalled } from './dependencyInstaller'
 import { logger } from '../utils/logger'
 import { t } from '../i18n'
 
@@ -87,6 +88,22 @@ export async function activatePreview(projectPath: string | null): Promise<void>
   if (!cmd) {
     // No dev command found — preview opens with "Waiting..." state.
     // User can ask the agent to set up and start the server.
+    return
+  }
+
+  // One-click contract: a project that was never installed (no node_modules)
+  // must still preview from a single click. Install missing dependencies first,
+  // streaming progress into the same console the dev server uses, THEN start.
+  // No-op (instant) when node_modules already exists.
+  useLayoutStore.getState().setPreviewServerLoading(true)
+  const ensured = await ensureDependenciesInstalled(projectPath, {
+    onInstallStart: () => useLayoutStore.getState().setInstallingDeps(true),
+    onLog: (text, level) => useLayoutStore.getState().addDevServerLog(text, level),
+  })
+  useLayoutStore.getState().setInstallingDeps(false)
+  if (ensured.status === 'failed') {
+    // Error already logged → the PreviewView surfaces the failure state.
+    useLayoutStore.getState().setPreviewServerLoading(false)
     return
   }
 

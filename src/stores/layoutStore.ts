@@ -52,6 +52,10 @@ interface LayoutState {
   projectsSidebarBeforePreview: boolean | null
   showTemplateSelector: boolean
   isPreviewServerLoading: boolean
+  /** True while a one-click preview is installing missing `node_modules` before
+   *  the dev server starts. Drives the "Installing dependencies…" label so the
+   *  loading UI doesn't mislabel the install as "Starting preview server". */
+  isInstallingDeps: boolean
   /** The single dev server for this project. Null when no server is active. */
   devServer: DevServerInfo | null
   /**
@@ -113,6 +117,8 @@ interface LayoutActions {
   toggleProjectsSidebar: () => void
   setShowTemplateSelector: (show: boolean) => void
   setPreviewServerLoading: (loading: boolean) => void
+  /** Toggle the "installing dependencies" phase of a one-click preview. */
+  setInstallingDeps: (installing: boolean) => void
   /** Initialize the dev server record when a process starts. */
   initDevServer: (info: { pid: number; projectKind: ProjectKind }) => void
   /** Update the frontend URL (iframe target). Marks devServer status=running. */
@@ -163,6 +169,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   projectsSidebarBeforePreview: null,
   showTemplateSelector: false,
   isPreviewServerLoading: false,
+  isInstallingDeps: false,
   devServer: null,
   previewMode: 'server',
   isHttpDrawerOpen: false,
@@ -234,6 +241,10 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
     set({ isPreviewServerLoading: loading })
   },
 
+  setInstallingDeps: (installing: boolean) => {
+    set({ isInstallingDeps: installing })
+  },
+
   initDevServer: ({ pid, projectKind }) => {
     set({
       devServer: {
@@ -245,6 +256,8 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
       },
       previewMode: previewModeFor(projectKind),
       isPreviewServerLoading: true,
+      // The dev server is starting → any install phase is over.
+      isInstallingDeps: false,
       previewServerTimedOut: false,
       // Backend-only projects have no iframe — don't show a stale static preview.
       // Frontend/fullstack: clear so the iframe starts clean for the new server.
@@ -294,6 +307,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
     set({
       devServer: null,
       isPreviewServerLoading: false,
+      isInstallingDeps: false,
       previewServerTimedOut: false,
       // Keep logs and static preview; clearing the live server shouldn't
       // wipe other preview state.

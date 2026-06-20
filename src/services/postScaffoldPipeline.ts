@@ -1,11 +1,10 @@
-import { invoke } from '@/utils/invokeMetrics'
 import { t } from '../i18n'
-import { listen } from '@tauri-apps/api/event'
 import { useProjectStore } from '../stores/projectStore'
 import { useLayoutStore } from '../stores/layoutStore'
 import { devServerManager } from './devServerManager'
 import { templateService, Template, resolveFrontendPortHint } from './templateService'
 import { detectSystemPackageManager, adaptCommand } from './packageManagerDetector'
+import { runStreamingInstall } from './dependencyInstaller'
 import { logger } from '../utils/logger'
 
 /**
@@ -81,124 +80,50 @@ async function postScaffoldPipeline(
 }
 
 /**
- * Run the install command. Returns true on success.
- * Uses a simple PID-tracking approach — events are buffered if they arrive
- * before invoke returns, avoiding the async pidReady pattern that can lose events.
+ * Run the install command, streaming output into the dev-server console.
+ * Returns true on success. The streaming/timeout/PID-buffering mechanics live
+ * in {@link runStreamingInstall}; here we just map the typed result onto the
+ * post-scaffold messages. Unlike the preview's `ensureDependenciesInstalled`,
+ * this always installs (a fresh scaffold has no node_modules) and uses the
+ * caller-chosen command (adapted to the fastest SYSTEM package manager).
  */
-const INSTALL_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
-
 async function runInstall(
   projectPath: string,
   installCommand: string,
 ): Promise<boolean> {
   const layoutStore = useLayoutStore.getState()
 
-  // Register listeners BEFORE spawning
-  let targetPid = 0
-  let finished = false
-  let resolveExit: (code: number) => void
-  const exitPromise = new Promise<number>((res) => {
-    resolveExit = res
+  const result = await runStreamingInstall(projectPath, installCommand, {
+    onOutput: (text) => layoutStore.addDevServerLog(text, 'info'),
   })
 
-  // Buffer events that arrive before we know the PID
-  const bufferedOutput: { pid: number; data: string }[] = []
-  const bufferedExit: { pid: number; code: number }[] = []
-
-  const unOutput = await listen<{ pid: number; stream: string; data: string }>(
-    'cmd-output',
-    (event) => {
-      if (targetPid === 0) {
-        bufferedOutput.push({ pid: event.payload.pid, data: event.payload.data })
-      } else if (event.payload.pid === targetPid) {
-        layoutStore.addDevServerLog(event.payload.data, 'info')
-      }
-    }
-  )
-
-  const unExit = await listen<{ pid: number; code: number }>(
-    'cmd-exit',
-    (event) => {
-      if (targetPid === 0) {
-        bufferedExit.push({ pid: event.payload.pid, code: event.payload.code })
-      } else if (event.payload.pid === targetPid && !finished) {
-        finished = true
-        cleanup()
-        resolveExit(event.payload.code)
-      }
-    }
-  )
-
-  const cleanup = () => {
-    unOutput()
-    unExit()
-  }
-
-  try {
-    const pid = await invoke<number>('run_streaming_command', {
-      command: installCommand,
-      cwd: projectPath,
-    })
-    targetPid = pid
-
-    // Flush buffered events that arrived before invoke returned
-    for (const ev of bufferedOutput) {
-      if (ev.pid === pid) {
-        layoutStore.addDevServerLog(ev.data, 'info')
-      }
-    }
-    for (const ev of bufferedExit) {
-      if (ev.pid === pid && !finished) {
-        finished = true
-        cleanup()
-        resolveExit!(ev.code)
-      }
-    }
-
-    // Race between exit and timeout
-    let timeoutTimer: ReturnType<typeof setTimeout>
-    const timeoutPromise = new Promise<number>((_, reject) => {
-      timeoutTimer = setTimeout(() => reject(new Error('timeout')), INSTALL_TIMEOUT_MS)
-    })
-
-    let exitCode: number
-    try {
-      exitCode = await Promise.race([exitPromise, timeoutPromise]) as number
-      clearTimeout(timeoutTimer!)
-    } catch (err) {
-      clearTimeout(timeoutTimer!)
-      // Timeout — kill the process and suggest manual install
-      cleanup()
-      if (targetPid > 0) {
-        try { await invoke('kill_process', { pid: targetPid }) } catch {}
-      }
-      layoutStore.addDevServerLog(
-        t('postScaffold.installTimeout').replace('{path}', projectPath).replace('{command}', installCommand),
-        'error',
-      )
-      logger.error('postScaffold', 'Install timed out after 5 minutes')
-      return false
-    }
-
-    if (exitCode !== 0) {
-      layoutStore.addDevServerLog(
-        t('postScaffold.installExitCode').replace('{code}', String(exitCode)).replace('{path}', projectPath).replace('{command}', installCommand),
-        'error',
-      )
-      logger.error('postScaffold', `Install failed with exit code ${exitCode}`)
-      return false
-    }
-
+  if (result.ok) {
     layoutStore.addDevServerLog(t('postScaffold.installSuccess'), 'info')
     return true
-  } catch (error) {
-    cleanup()
-    const msg = error instanceof Error ? error.message : String(error)
+  }
+
+  if (result.reason === 'timeout') {
     layoutStore.addDevServerLog(
-      t('postScaffold.installError').replace('{message}', msg).replace('{path}', projectPath).replace('{command}', installCommand),
+      t('postScaffold.installTimeout').replace('{path}', projectPath).replace('{command}', installCommand),
       'error',
     )
-    logger.error('postScaffold', 'Install failed:', error)
+    logger.error('postScaffold', 'Install timed out after 5 minutes')
     return false
   }
+
+  if (result.reason === 'exit') {
+    layoutStore.addDevServerLog(
+      t('postScaffold.installExitCode').replace('{code}', String(result.exitCode)).replace('{path}', projectPath).replace('{command}', installCommand),
+      'error',
+    )
+    logger.error('postScaffold', `Install failed with exit code ${result.exitCode}`)
+    return false
+  }
+
+  layoutStore.addDevServerLog(
+    t('postScaffold.installError').replace('{message}', result.message).replace('{path}', projectPath).replace('{command}', installCommand),
+    'error',
+  )
+  logger.error('postScaffold', 'Install failed:', result.message)
+  return false
 }

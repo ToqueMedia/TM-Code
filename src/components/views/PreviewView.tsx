@@ -65,6 +65,7 @@ function PreviewView() {
   const isPreviewFullscreen = useLayoutStore(s => s.isPreviewFullscreen)
   const previewServerTimedOut = useLayoutStore(s => s.previewServerTimedOut)
   const isPreviewServerLoading = useLayoutStore(s => s.isPreviewServerLoading)
+  const isInstallingDeps = useLayoutStore(s => s.isInstallingDeps)
   // PreviewView is sticky-mounted by MainLayout, so it keeps rendering even
   // when the user switches to Chat/Editor/Settings. While not the active view
   // we park the native macOS webview off-screen (via `frozen` below) —
@@ -889,6 +890,19 @@ function PreviewView() {
                     >
                       Retry
                     </Box>
+                  </>
+                ) : isInstallingDeps ? (
+                  <>
+                    <Box
+                      w="20px" h="20px" borderRadius="full"
+                      border="2px solid" borderColor={tokens.colors.border.panel}
+                      borderTopColor={tokens.colors.accent.primary}
+                      animation="spin 0.8s linear infinite"
+                      css={{ '@keyframes spin': { '0%': { transform: 'rotate(0deg)' }, '100%': { transform: 'rotate(360deg)' } } }}
+                    />
+                    <Text fontSize={tokens.fontSize.sm} color={tokens.colors.text.disabled}>
+                      {t('preview.installingDeps')}
+                    </Text>
                   </>
                 ) : hasErrors ? (
                   <>

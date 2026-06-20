@@ -90,6 +90,7 @@ const en = {
   'preview.screenshotAttached': 'Screenshot attached to chat draft.',
   'preview.screenshotFailed': 'Screenshot capture failed',
   'preview.screenshotPaidOnly': 'Screenshot → chat is available on paid plans only.',
+  'preview.installingDeps': 'Installing dependencies…',
   'preview.screenshotPermissionDenied': 'TM Code needs Screen Recording permission to capture the preview. Open System Settings → Privacy & Security → Screen Recording, enable TM Code, then quit and reopen the app.',
   'tip.designHashtag': 'Frontend project detected. Add #design to your prompt for a polished UI with deliberate aesthetic.',
 
@@ -1858,6 +1859,7 @@ const pt: Record<keyof typeof en, string> = {
   'preview.screenshotAttached': 'Screenshot anexado ao rascunho.',
   'preview.screenshotFailed': 'Falhou ao capturar screenshot',
   'preview.screenshotPaidOnly': 'Screenshot → chat só está disponível em planos pagos.',
+  'preview.installingDeps': 'A instalar dependências…',
   'preview.screenshotPermissionDenied': 'A TM Code precisa de permissão de Gravação de Ecrã para capturar o preview. Abre as Definições do Sistema → Privacidade e Segurança → Gravação de Ecrã, activa a TM Code, fecha a app e reabre.',
   'tip.designHashtag': 'Projecto frontend detectado. Adiciona #design ao prompt para UI polida com estética deliberada.',
 
