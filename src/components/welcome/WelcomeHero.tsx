@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useRef } from 'react'
 import {
   Box,
   Flex,
@@ -25,6 +25,7 @@ import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { GoalCelebration } from '../celebration/GoalCelebration'
 import { WorldCupBadge } from '../celebration/WorldCupBadge'
+import { WelcomeRunner } from '../celebration/WelcomeRunner'
 import { FOOTBALL_MODE_ENABLED } from '@/utils/worldCup'
 import { triggerGoalCelebration } from '@/stores/celebrationStore'
 
@@ -69,6 +70,11 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({
   const isMac = navigator.platform.toLowerCase().includes('mac')
   const mod = isMac ? '⌘' : 'Ctrl'
 
+  // The seasonal runner jogs across the title and steps up onto the taller
+  // "TM Code" wordmark — it measures both to do that (see WelcomeRunner).
+  const titleRef = useRef<HTMLDivElement>(null)
+  const wordmarkRef = useRef<HTMLSpanElement>(null)
+
   // Kick-off burst — a one-shot goal celebration when the hero first appears
   // (the welcome screen has no agent run to "score" against). Guarded to once
   // per launch and to a short delay so the hero has painted first.
@@ -105,24 +111,31 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({
           <Box mb={3}>
             <WorldCupBadge />
           </Box>
-          <Heading
-            fontSize="28px"
-            fontWeight="700"
-            color={tokens.colors.text.primary}
-            mb={2}
-          >
-            {t('welcome.title')}{' '}
-            <Text
-              as="span"
-              style={{
-                background: tokens.gradient.accentPrimary,
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-              }}
+          {/* position:relative + reserved top padding give the runner a "track"
+              above the title to run, kick and trap the ball in. The padding is
+              only added when the seasonal feature is on so nothing shifts when
+              it's off. */}
+          <Box ref={titleRef} position="relative" pt={FOOTBALL_MODE_ENABLED ? '32px' : 0}>
+            <Heading
+              fontSize="28px"
+              fontWeight="700"
+              color={tokens.colors.text.primary}
+              mb={2}
             >
-              TM Code
-            </Text>
-          </Heading>
+              {t('welcome.title')}{' '}
+              <span
+                ref={wordmarkRef}
+                style={{
+                  background: tokens.gradient.accentPrimary,
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                }}
+              >
+                TM Code
+              </span>
+            </Heading>
+            <WelcomeRunner containerRef={titleRef} stepRef={wordmarkRef} />
+          </Box>
           <Text
             fontSize="15px"
             color={tokens.colors.text.secondary}
