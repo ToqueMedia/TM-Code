@@ -65,3 +65,38 @@ test('checkMembership fails closed without a project id', async () => {
   )
   assert.equal(ok, false)
 })
+
+// ── Production path: control-plane proxy (no FIRESTORE_REST_BASE) ──
+// In production the Worker can't read Firestore directly (App Check ENFORCED),
+// so checkMembership POSTs to the control-plane, which returns { member }.
+const prodEnv: Env = {
+  SIGNALING_ROOM: {} as Env['SIGNALING_ROOM'],
+  FIREBASE_PROJECT_ID: 'demo-proj',
+  CONTROL_PLANE_URL: 'https://api.example.test',
+}
+
+test('checkMembership (proxy) returns true when the control-plane says member', async () => {
+  const ok = await checkMembership('team1', 'alice', 'idtok', prodEnv, fakeFetcher(200, { member: true }))
+  assert.equal(ok, true)
+})
+
+test('checkMembership (proxy) fails closed when the control-plane says not a member', async () => {
+  const ok = await checkMembership('team1', 'alice', 'idtok', prodEnv, fakeFetcher(200, { member: false }))
+  assert.equal(ok, false)
+})
+
+test('checkMembership (proxy) fails closed on a non-2xx from the control-plane', async () => {
+  assert.equal(await checkMembership('team1', 'alice', 'idtok', prodEnv, fakeFetcher(500, {})), false)
+  assert.equal(await checkMembership('team1', 'alice', 'idtok', prodEnv, fakeFetcher(403, {})), false)
+})
+
+test('checkMembership (proxy) fails closed without a control-plane url', async () => {
+  const ok = await checkMembership(
+    'team1',
+    'alice',
+    'idtok',
+    { ...prodEnv, CONTROL_PLANE_URL: undefined },
+    fakeFetcher(200, { member: true }),
+  )
+  assert.equal(ok, false)
+})
