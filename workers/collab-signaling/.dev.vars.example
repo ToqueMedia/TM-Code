@@ -1,0 +1,21 @@
+# Local/emulator overrides for `wrangler dev` (copy to .dev.vars — gitignored).
+#
+# Production uses real Firebase JWT verification + Firestore over HTTPS and does
+# NOT need any of these. For local runs against your Firebase emulator:
+
+# Accept unsigned emulator ID tokens (no JWKS round-trip).
+AUTH_MODE = "firebase_emulator"
+
+# Point Firestore reads at your local emulator (membership gate reads
+# teams/{teamId}). Adjust host/port to your setup.
+FIRESTORE_REST_BASE = "http://127.0.0.1:8080"
+
+# Project id (matches the data-plane / app). Already set in wrangler.toml [vars]
+# for production; override here only if your emulator uses a different id.
+# FIREBASE_PROJECT_ID = "maiplayer-ac56d"
+
+# Offline relay against the local RTDB emulator (your suite runs it on 9000).
+# With this set, the worker writes inboxes via the emulator REST and skips the
+# service account entirely. In production, instead set FIREBASE_CLIENT_EMAIL +
+# FIREBASE_PRIVATE_KEY (wrangler secret) and FIREBASE_DATABASE_URL.
+FIREBASE_DATABASE_EMULATOR_HOST = "127.0.0.1:9000"

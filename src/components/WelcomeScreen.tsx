@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Box, Flex, useDialog } from '@chakra-ui/react'
 import { useProjectStore } from '../stores/projectStore'
 import { logger } from '../utils/logger'
@@ -15,7 +15,14 @@ interface WelcomeScreenProps {
 }
 
 const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
-  const cloneDialog = useDialog()
+  // While a clone is in flight the dialog must be non-dismissable (no escape,
+  // no outside-click, no ×). These machine props are reactive, so flipping
+  // cloneBusy re-syncs them; CloneDialog reports the state via onBusyChange.
+  const [cloneBusy, setCloneBusy] = useState(false)
+  const cloneDialog = useDialog({
+    closeOnEscape: !cloneBusy,
+    closeOnInteractOutside: !cloneBusy,
+  })
   const { recentProjects, loadRecentProjects, cmdModeProjectPath, cmdModeProjectPaths, setCmdModeProjectPath, removeCmdModePath, clearAllRecent, welcomeScreen, setWelcomeScreen } = useProjectStore()
   const showSettings = welcomeScreen === 'settings'
 
@@ -131,7 +138,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
           </WelcomeHero>
         ) : null}
 
-        <CloneDialog dialog={cloneDialog} onCloned={onOpenProject} />
+        <CloneDialog dialog={cloneDialog} onCloned={onOpenProject} onBusyChange={setCloneBusy} />
 
         {/* Non-blocking prereq banner — only shows when a tool is missing/outdated.
             Positioned absolute near the top so it doesn't reflow the hero layout. */}

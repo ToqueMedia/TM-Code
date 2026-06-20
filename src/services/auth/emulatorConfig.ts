@@ -25,6 +25,10 @@ export const EMULATOR_CONFIG = {
     HOST: EMULATOR_HOST,
     PORT: 9199,
   },
+  DATABASE: {
+    HOST: EMULATOR_HOST,
+    PORT: 9000,
+  },
 } as const
 
 export const isDevelopment = (): boolean => {

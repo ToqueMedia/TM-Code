@@ -19,7 +19,10 @@
 import type { UserBudgetState } from './billing'
 import { clearBudgetStateCache } from './billing'
 
-const SPEED_ALLOWED_PLANS = new Set(['pro', 'max'])
+// Tiers de equipa herdam a elegibilidade do plano pessoal equivalente
+// (team-pro ≡ pro, team-max ≡ max). `state.plan` é o tier para membros de
+// equipa (projetado em getUserBudgetState).
+const SPEED_ALLOWED_PLANS = new Set(['pro', 'max', 'team-pro', 'team-max'])
 
 /** Mantido para os testes — a cache agora vive em billing.ts. */
 export function clearPlanCache(): void {

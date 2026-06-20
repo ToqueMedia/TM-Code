@@ -29,11 +29,14 @@ import { usePermissionStore } from '../stores/permissionStore'
 import { devServerManager } from '../services/devServerManager'
 import DevServerStatus from './chat/DevServerStatus'
 import PublishModal from './dialogs/PublishModal'
+import { TeamChatPanel } from './collab/TeamChatPanel'
+import { useCollabSession } from '@/hooks/useCollabSession'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 
 function MainLayout() {
   const t = useTranslation()
+  useCollabSession()
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewFullscreen = useLayoutStore(s => s.isPreviewFullscreen)
   const isSidebarVisible = useLayoutStore(s => s.isSidebarVisible)
@@ -532,6 +535,9 @@ function MainLayout() {
 
       {/* Publish modal — single mount; trigger via layoutStore.setPublishModalOpen */}
       <PublishModalMount />
+
+      {/* Ephemeral team chat (P2P) — toggled from the Source Control header */}
+      <TeamChatPanel />
 
       {/* Requirements check dialog removed — templates disabled */}
     </Flex>

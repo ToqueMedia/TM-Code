@@ -1,9 +1,9 @@
 # PLAN — Colaboração P2P de Equipa (Git-like Changeset Sharing + Chat Efémero)
 
 > **Status:** Proposta / **Diferida** — implementar *depois* do Plano de Equipas (billing).
-> **Gating:** Planos **Pro** e **Max** (não depende do Plano de Equipas).
-> **Relação com o Plano de Equipas:** **INDEPENDENTE** — ver §4.
-> **Última atualização:** 2026-06-16
+> **Pertence ao Plano de Equipas:** **SIM.** A partilha de código (changesets + "merge to validate") é uma feature **DA EQUIPA**, gated à **pertença à equipa** (`teamMemberOf`) — NÃO a Pro/Max. Acontece entre **membros da mesma equipa**.
+> **O que é separado e gated Pro/Max:** **apenas o host-and-guest / estilo Live Share** (sessão partilhada em tempo real, ad-hoc por código/link) — ver §4. ESSE não depende do Plano de Equipas.
+> **Última atualização:** 2026-06-18 — *corrigido o enquadramento*: a versão anterior dizia (erradamente) que a partilha de código era independente/gated Pro/Max. É team-gated; só o Live Share é Pro/Max.
 
 ---
 
@@ -35,26 +35,27 @@ Cada feature é escrita **localmente** na máquina de cada um. Quando o **Membro
 
 ---
 
-## 3. Não-objetivos
+## 3. Não-objetivos (DESTE doc — a partilha de código team-gated)
 
-- ❌ **Sem agente partilhado / host-and-guests.** Cada membro corre o seu agente, na sua máquina.
 - ❌ **Sem co-edição de ficheiros ao vivo** (sem Monaco CRDT / Yjs / OT).
 - ❌ **Sem espetadores** — ninguém assiste passivamente ao prompt de outro.
 - ❌ **Sem armazenamento de mensagens de chat** em base de dados ou servidor.
-- ❌ **Sem dependência do Plano de Equipas** (billing). Funciona para qualquer grupo de utilizadores Pro/Max.
+
+> **NOTA (corrigida 2026-06-18):** o **host-and-guest / agente-partilhado em tempo real (estilo Live Share)** NÃO é um "não-objetivo rejeitado" — é uma **feature SEPARADA**, gated a **Pro/Max** e independente do Plano de Equipas (§4). Esta partilha de código (changesets) é a feature **da EQUIPA**; o Live Share é o produto distinto.
 
 ---
 
-## 4. Porquê separado do Plano de Equipas
+## 4. As DUAS colaborações (e o que pertence ao Plano de Equipas)
 
-| Eixo | Plano de Equipas | Colaboração P2P (este doc) |
+| Eixo | **Partilha de código (ESTE doc)** | **Host-and-guest / Live Share** |
 |---|---|---|
-| Natureza | Billing / contabilidade / dashboard | Partilha de código + comunicação |
-| Onde vive | Data-plane (consumo) + control-plane (`/v1/me`) + web (dashboard) | IDE (Rust git + frontend) + sinalização efémera |
-| Gating | Plano "team" | Planos **Pro** e **Max** |
-| Pode existir sem o outro? | **Sim** | **Sim** |
+| Natureza | Changesets P2P + "merge to validate" + chat efémero | Sessão partilhada em tempo real (estilo Live Share) |
+| Pertence ao Plano de Equipas? | **SIM** — feature da equipa | **NÃO** — independente |
+| Gating | **Pertença à equipa** (`teamMemberOf`) | Planos **Pro** e **Max** |
+| Com quem | Entre **membros da mesma equipa** | Qualquer grupo ad-hoc (código/link de adesão) |
+| Onde vive | IDE (Rust git + frontend) + sinalização efémera | IDE + Durable Object de sinalização |
 
-São features **ortogonais**. Acoplá-las atrasaria ambas. Ponte opcional (nice-to-have): se o utilizador *também* estiver num Plano de Equipas, a lista de convite da sessão de colaboração pode ser pré-preenchida com o *roster* da equipa.
+A **partilha de código é parte do Plano de Equipas** (membros da equipa terminam o seu lado → partilham o changeset → os outros decidem merge/descartar). O **Live Share (host-and-guest)** é o produto **separado** e gated a Pro/Max — é ESTE que é ortogonal ao billing de equipa, não a partilha de código. *(Doc do Live Share: a criar/separar deste se/quando for priorizado.)*
 
 ---
 
@@ -134,19 +135,23 @@ Novos comandos Rust (construir sobre `checkpoint.rs` / `sandbox.rs`, que já faz
 
 ### 6.4 Sessão de colaboração / descoberta de pares
 
-- **Sessão ad-hoc estilo Live Share:** um membro Pro/Max **inicia uma sessão** → recebe um **código/link de adesão** → os outros aderem → forma-se a *mesh* via o DO de sinalização. **Independente** de qualquer equipa persistida (é isto que desacopla do Plano de Equipas).
-- Ponte opcional: se houver Plano de Equipas, pré-preencher convites do *roster*.
+- **Sala = a equipa.** A descoberta é o **roster da equipa**, não um código ad-hoc: o DO de sinalização tem **uma instância por equipa** (`idFromName(teamId)`). Todos os membros online da mesma equipa entram na mesma sala e formam a *mesh*. Não há "iniciar sessão" nem link de adesão para a partilha de código.
+- **A sala (`teamId`) é a equipa a que o utilizador pertence** (`billingStore.teamMemberOf`). A IDE liga-se enquanto for membro (`useCollabSession`).
+- ⚠️ O **código/link ad-hoc estilo Live Share** referido em versões anteriores é a **outra feature** (host-and-guest, gated Pro/Max — ver §4) e está **fora deste doc**. Não confundir a descoberta da partilha de código (roster de equipa) com a do Live Share (ad-hoc).
 
 ### 6.5 Identidade, segurança e confiança
 
-- **Autenticidade:** o changeset é assinado a partir do ID token Firebase do autor → o destinatário verifica que a autoria reivindicada é genuína (impede *spoofing* de autoria que acabaria num commit local).
-- **Execução de código de terceiros:** aplicar + testar um changeset **corre código do colega**. Mesmo modelo de confiança que um `git pull` de um colega — mas torná-lo **explícito na UI** ("estás prestes a executar código de \<Membro B\>"). Opcional: validar dentro de `sandbox.rs` / `container.rs` para isolamento.
+- **Autenticidade = identidade autenticada no transporte (não assinatura crypto).** Um ID token Firebase é um JWT — não serve para assinar payloads de forma verificável pelo destinatário sem infra de chaves. Em vez disso, o **DO de sinalização verifica o ID token de cada par** (JWKS RS256, igual ao data-plane) e a autoria do changeset fica ligada à identidade autenticada do par; o DataChannel é DTLS. Não há campo de assinatura por-mensagem no envelope.
+- **Gate de membership autoritativo:** antes de admitir um par, o DO lê **`teams/{teamId}.members[uid]`** (mapa escrito **só** server-side; regras Firestore só deixam membro ler) com o ID token do próprio user — **falha fechada**. Não se confia em `teamMemberOf` do *user doc* (o user pode escrever o próprio doc).
+- **Execução de código de terceiros:** aplicar + testar um changeset **corre código do colega**. Mesmo modelo de confiança que um `git pull` de um colega — tornado **explícito na UI** ("estás prestes a correr código de \<autor\>", já implementado no `MergeToValidatePanel`). Opcional/futuro: correr os testes do changeset sob `sandbox.rs` (contenção de processo) para isolamento — *nota:* `sandbox.rs` NÃO é uma cópia de ficheiros; a reversibilidade do "merge to validate" vem do restore point (estilo `checkpoint.rs`), não do sandbox.
 - **Chat:** efémero, P2P, encriptado; persistência só local (opcional).
 
 ### 6.6 Gating de plano
 
-- **Cliente (UX):** mostrar UI de colaboração só se `billingStore.plan ∈ {'pro','max'}`.
-- **Servidor (enforcement):** o DO de sinalização **valida o JWT Firebase + o plano** (mesma resolução de plano do worker) antes de admitir um par na sessão. Gate real, não só cosmético.
+- **A partilha de código é gated à PERTENÇA À EQUIPA (`teamMemberOf`), NÃO a Pro/Max.**
+- **Cliente (UX):** mostrar UI de colaboração só se `billingStore.teamMemberOf` (helper `canShareCode()`).
+- **Servidor (enforcement):** o DO de sinalização valida o **JWT Firebase + a membership autoritativa** (`teams/{teamId}.members[uid]`, §6.5) antes de admitir um par. Gate real, não só cosmético.
+- (O gate **Pro/Max** aplica-se à feature **separada** Live Share — §4 — não a esta.)
 
 ---
 
@@ -155,12 +160,12 @@ Novos comandos Rust (construir sobre `checkpoint.rs` / `sandbox.rs`, que já faz
 | Camada | Mudança |
 |---|---|
 | Rust `commands/git.rs` | `git_export_changeset`; aplicar/finalizar changeset |
-| Rust `commands/checkpoint.rs` / `sandbox.rs` | reutilizar para restore points do "merge to validate" |
-| Rust (novo) `commands/collab.rs` | cola para sinalização/sessão (WebRTC vive no JS) |
+| Rust `commands/checkpoint.rs` | restore point do "merge to validate" reusa o pattern de snapshot (NÃO `sandbox.rs`, que é contenção de processo) |
+| Rust (novo) `commands/collab.rs` | export/apply/discard/finalize do changeset + persistência do chat (WebRTC vive no JS) |
 | Frontend (novo) `stores/collabStore.ts` | sessão, pares, changesets recebidos, chat |
 | Frontend UI | botão "Partilhar" no painel git/diff; notificação de partilha; painel "Merge to validate" (reutiliza render de diff existente, ex. `InlineDiff`); painel de chat |
-| Frontend `stores/billingStore.ts` | gate Pro/Max |
-| Infra (novo) | Durable Object de sinalização (efémero) + servidor TURN |
+| Frontend `stores/billingStore.ts` | gate à pertença à equipa (`teamMemberOf`) — NÃO Pro/Max |
+| Infra (novo) | Worker `workers/collab-signaling/` (Durable Object efémero) + TURN (diferido) |
 
 ---
 
@@ -175,20 +180,22 @@ Novos comandos Rust (construir sobre `checkpoint.rs` / `sandbox.rs`, que já faz
 
 ---
 
-## 9. Faseamento desta feature (quando for a vez)
+## 9. Faseamento desta feature — ESTADO
 
-1. **Núcleo de changeset** (Rust export/apply/finalize + restore points) — funciona até por troca manual de ficheiro, sem rede. Testável isolado.
-2. **Transporte P2P** (WebRTC + DO de sinalização + TURN) — presença + entrega de partilhas.
-3. **UI de Merge-to-validate** + notificações.
-4. **Chat de equipa** (P2P, persistência local).
-5. **Hardening** — conflitos, offline, avisos de segurança, opção R2-TTL.
+> Implementado em 2026-06-18 na branch `feat/teams-plan-billing` (commits `feat(collab)` §9 Fase 1–4). **Por fazer:** deploy do DO (`wrangler deploy`) + validação E2E (gerida pelo user) + hardening residual.
+
+1. ✅ **Núcleo de changeset** (`commands/collab.rs`: `git_export_changeset`/`collab_apply_changeset`/`collab_discard_changeset`/`collab_finalize_changeset`; restore point estilo `checkpoint.rs`). 6 testes Rust. Funciona sem rede.
+2. ✅ **Transporte P2P** — worker `workers/collab-signaling/` (DO `SignalingRoom`, 1/equipa) + malha WebRTC (`collabMesh.ts`, DataChannels `control`+`bulk`, **STUN-only**). 14 testes worker + 7 frontend.
+3. ✅ **UI de Merge-to-validate** + notificações (`MergeToValidatePanel`, `CollabShareControls`, `collabSessionService`).
+4. ✅ **Chat de equipa** P2P + persistência local opcional (`.toquemedia/collab/chat.jsonl`).
+5. ⏳ **Hardening** — aviso de código de terceiros ✅; offline com mensagem clara ✅; lista de ficheiros em conflito na UI; opção TURN/R2-TTL (diferida, decisão de custo).
 
 ---
 
-## 10. Decisões em aberto
+## 10. Decisões em aberto — RESOLVIDAS (2026-06-18)
 
-1. **Transporte:** WebRTC puro (recomendado, P2P real + zero storage) vs DO-relay não-persistente (mais simples atrás de NAT, mas tráfego transita servidor).
-2. **Entrega offline:** só-online (v1) vs relay R2-TTL.
-3. **Descoberta:** código ad-hoc (recomendado) vs *roster* de equipa.
-4. **Profundidade de conflitos** suportada na v1.
-5. **Isolamento** ao testar código de terceiros: *tree* viva vs `sandbox.rs`/`container.rs`.
+1. **Transporte:** ✅ **WebRTC puro** (P2P real + zero storage). Worker in-repo novo de sinalização.
+2. **Entrega offline:** ✅ **só-online (v1)**, falha com mensagem clara. Relay R2-TTL diferido.
+3. **Descoberta:** ✅ **roster de equipa** (sala = `teamId`, gated por `teamMemberOf`). O código ad-hoc é do Live Share, fora de âmbito.
+4. **Profundidade de conflitos (v1):** `git apply --3way` com marcadores; a UI mostra contagem + lista de ficheiros em conflito e bloqueia "Concluir" até resolver.
+5. **Isolamento ao testar código de terceiros:** ✅ **tree viva** (dev server a correr) com restore point reversível; `sandbox.rs` (contenção de processo) fica como opção futura para *correr* os testes, não para a reversibilidade.

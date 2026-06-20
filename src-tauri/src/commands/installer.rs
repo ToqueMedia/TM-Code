@@ -197,7 +197,10 @@ mod win {
     }
 
     /// (program, args, needs_elevation) for running the downloaded installer silently.
-    fn silent_invocation(tool: &str, installer: &str) -> Result<(String, Vec<String>, bool), String> {
+    fn silent_invocation(
+        tool: &str,
+        installer: &str,
+    ) -> Result<(String, Vec<String>, bool), String> {
         match tool {
             // Per-user install → no UAC; PrependPath=1 puts python + pip on PATH.
             "python" => Ok((
@@ -264,10 +267,7 @@ mod win {
             if !out.status.success() {
                 // User declined the UAC prompt → ShellExecute throws (Win32 1223).
                 let err = String::from_utf8_lossy(&out.stderr);
-                if err.contains("canceled")
-                    || err.contains("cancelled")
-                    || err.contains("1223")
-                {
+                if err.contains("canceled") || err.contains("cancelled") || err.contains("1223") {
                     return Err("Instalação cancelada no pedido de permissão (UAC).".into());
                 }
             }

@@ -155,6 +155,19 @@ export interface ToolCallDisplay {
   result?: string
   isError?: boolean
   status: 'running' | 'completed' | 'failed'
+  /**
+   * True once the tool actually BEGAN executing (set on onToolCallStart, which
+   * fires right before toolExecutor.execute() in the serial tool loop). Tool
+   * calls are added with status:'running' the moment they stream in
+   * (addPendingToolCall), but the loop runs them one at a time and blocks on
+   * each diff approval — so a turn that emits N edits shows the first one's
+   * approval card while edits 2..N sit QUEUED behind it. Without this flag
+   * they all render an active "editing" spinner, which reads as N parallel
+   * edits firing at once (a confusing "race"). `started !== true` while
+   * status==='running' means "queued, not yet started" → rendered as a calm
+   * queued row instead of the active spinner.
+   */
+  started?: boolean
   timestamp: number
   // Diff data (populated for write_file and edit_file)
   diffOldContent?: string

@@ -46,7 +46,7 @@ const LLM_CATALOG: Array<{ canonical: string; aliases: string[] }> = [
   // DeepSeek / Qwen / GLM / Inception
   { canonical: 'DeepSeek', aliases: ['deepseek', 'deepseek v3', 'deepseek v4', 'deepseek-v4-flash'] },
   { canonical: 'Qwen', aliases: ['qwen', 'qwen3', 'qwen 3', 'qwen3.6', 'qwen 3.6'] },
-  { canonical: 'GLM', aliases: ['glm', 'glm-5', 'glm-5.1', 'chatglm'] },
+  { canonical: 'GLM', aliases: ['glm', 'glm-5', 'glm-5.2', 'glm-5.1', 'chatglm'] },
   { canonical: 'Mercury 2', aliases: ['mercury 2', 'mercury2', 'inception mercury'] },
   // Cohere / xAI
   { canonical: 'Cohere Command', aliases: ['cohere', 'command-r', 'command r'] },

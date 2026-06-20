@@ -51,7 +51,14 @@ function formatTokens(n: number): string {
   return n.toLocaleString()
 }
 
-function ContextWindowIndicator() {
+interface ContextWindowIndicatorProps {
+  /** Where the hover popover opens. 'bottom' (default) suits a header bar;
+   *  'top' suits the prompt-actions row at the bottom of the screen, where a
+   *  downward popover would be clipped by the window edge. */
+  popoverPlacement?: 'top' | 'bottom'
+}
+
+function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIndicatorProps) {
   const t = useTranslation()
   // Stable, foreground-only context size — read DIRECTLY off the active
   // session's persisted `lastPromptTokens`/`lastResponseTokens`, which now hold
@@ -202,14 +209,15 @@ function ContextWindowIndicator() {
         </Box>
       ) : null}
 
-      {/* Hover popover. Rendered BELOW the indicator (not above) because
-          the parent ChatView Flex sets overflow:hidden — a popover positioned
-          above the header bar would be clipped. Below the indicator drops
-          into the message area which has its own scroll context. */}
+      {/* Hover popover. Placement is caller-driven: in the ChatView header it
+          opens BELOW (header has overflow:hidden, so above would clip); in the
+          prompt-actions row it opens ABOVE (a downward popover would fall off
+          the bottom of the window). */}
       {hovered && (
         <Box
           position="absolute"
-          top="calc(100% + 6px)"
+          top={popoverPlacement === 'bottom' ? 'calc(100% + 6px)' : undefined}
+          bottom={popoverPlacement === 'top' ? 'calc(100% + 6px)' : undefined}
           right={0}
           minW="240px"
           px="10px"

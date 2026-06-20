@@ -5451,6 +5451,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "thiserror 1.0.69",
+ "tiny_http",
  "tokio",
  "uuid",
  "window-vibrancy 0.5.3",

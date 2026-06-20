@@ -4,6 +4,7 @@ import { FiSend, FiSquare, FiCode, FiImage } from 'react-icons/fi'
 import { useBillingStore } from '../../stores/billingStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useByokStore } from '../../stores/byokStore'
+import ContextWindowIndicator from '../chat/ContextWindowIndicator'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -140,48 +141,53 @@ function PromptActions({
         </Flex>
       </Flex>
 
-      {/* Send / Stop / Queue button */}
-      {isStreaming && hasInput ? (
-        // Agent working + user typed → send to queue
-        <IconButton
-          aria-label={t("prompt.sendToQueue")}
-          size="sm"
-          bg={tokens.colors.accent.primary}
-          color={tokens.colors.text.inverse}
-          borderRadius="8px"
-          _hover={{ bg: tokens.colors.accent.primaryDark }}
-          onClick={onSend}
-        >
-          <FiSend size={14} />
-        </IconButton>
-      ) : isStreaming ? (
-        // Agent working + no input → stop
-        <IconButton
-          aria-label={t("prompt.stopGeneration")}
-          size="sm"
-          bg={tokens.colors.accent.redSubtle}
-          color={tokens.colors.accent.red}
-          borderRadius="8px"
-          _hover={{ bg: tokens.colors.accent.redMuted }}
-          onClick={onStop}
-        >
-          <FiSquare size={14} />
-        </IconButton>
-      ) : (
-        // Agent idle → normal send
-        <IconButton
-          aria-label={t("prompt.send")}
-          size="sm"
-          bg={hasInput ? tokens.colors.accent.primary : 'transparent'}
-          color={hasInput ? tokens.colors.text.inverse : tokens.colors.text.disabled}
-          borderRadius="8px"
-          _hover={hasInput ? { bg: tokens.colors.accent.primaryDark } : {}}
-          onClick={onSend}
-          disabled={!hasInput}
-        >
-          <FiSend size={14} />
-        </IconButton>
-      )}
+      {/* Per-turn context-pressure pill + Send / Stop / Queue button.
+          The context indicator lives here (not the header) so it sits on the
+          same line as the plan/source-code controls, next to send. */}
+      <Flex align="center" gap={2}>
+        <ContextWindowIndicator popoverPlacement="top" />
+        {isStreaming && hasInput ? (
+          // Agent working + user typed → send to queue
+          <IconButton
+            aria-label={t("prompt.sendToQueue")}
+            size="sm"
+            bg={tokens.colors.accent.primary}
+            color={tokens.colors.text.inverse}
+            borderRadius="8px"
+            _hover={{ bg: tokens.colors.accent.primaryDark }}
+            onClick={onSend}
+          >
+            <FiSend size={14} />
+          </IconButton>
+        ) : isStreaming ? (
+          // Agent working + no input → stop
+          <IconButton
+            aria-label={t("prompt.stopGeneration")}
+            size="sm"
+            bg={tokens.colors.accent.redSubtle}
+            color={tokens.colors.accent.red}
+            borderRadius="8px"
+            _hover={{ bg: tokens.colors.accent.redMuted }}
+            onClick={onStop}
+          >
+            <FiSquare size={14} />
+          </IconButton>
+        ) : (
+          // Agent idle → normal send
+          <IconButton
+            aria-label={t("prompt.send")}
+            size="sm"
+            bg={hasInput ? tokens.colors.accent.primary : 'transparent'}
+            color={hasInput ? tokens.colors.text.inverse : tokens.colors.text.disabled}
+            borderRadius="8px"
+            _hover={hasInput ? { bg: tokens.colors.accent.primaryDark } : {}}
+            onClick={onSend}
+            disabled={!hasInput}
+          >
+            <FiSend size={14} />
+          </IconButton>
+        )}
+      </Flex>
     </Flex>
   )
 }

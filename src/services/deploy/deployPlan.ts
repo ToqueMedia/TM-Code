@@ -17,7 +17,9 @@ import { logger } from '../../utils/logger'
 export const DEPLOY_FILE_NAME = '.toquemedia-deploy.json'
 
 // ── SSR adapters supported by cf-ssr ─────────────────────────
-export type SsrAdapter = 'next-on-pages' | 'sveltekit' | 'nuxt' | 'astro'
+// Next.js is NOT here: it deploys via `next-standalone` (Cloud Run
+// container), not a Cloudflare edge adapter. See NextStandalonePlan below.
+export type SsrAdapter = 'sveltekit' | 'nuxt' | 'astro'
 
 // ── Container runtimes supported by workers-container ────────
 export type ContainerRuntime =
@@ -71,6 +73,29 @@ export interface WorkersContainerPlan {
 }
 
 /**
+ * Next.js deployed via `output: 'standalone'` to a Cloudflare Container
+ * (Cloud Run). One app, one build — the standalone server (`server.js`)
+ * serves SSR pages, route handlers, server actions AND its own static
+ * assets. Unlike `composite` (separate client/server dirs, only `/api/*`
+ * proxied), here the worker router proxies EVERY request to the container
+ * (`proxyMode: 'all'`).
+ *
+ * Phase 1: the container serves everything, so there is no R2 upload — the
+ * deploy reuses the composite container pipeline (tarball → Cloud Build →
+ * Cloud Run) but skips the static R2 phases. Phase 2 will offload
+ * `.next/static` + `public` to R2 for edge caching.
+ *
+ * Requires `output: 'standalone'` in next.config — the detector surfaces a
+ * precise error when it's missing (the build wouldn't emit `server.js`).
+ */
+export interface NextStandalonePlan {
+  kind: 'next-standalone'
+  /** Port the standalone server listens on. Cloud Run injects PORT=8080;
+   *  Next's server.js honours process.env.PORT, so this is the contract. */
+  port: number
+}
+
+/**
  * Frontend + backend in a monorepo. Worker router proxies apiPrefix to the
  * container, serves the rest from R2 / static assets.
  */
@@ -82,7 +107,12 @@ export interface CompositePlan {
   apiPrefix: string
 }
 
-export type DeployPlan = StaticSpaPlan | CfSsrPlan | WorkersContainerPlan | CompositePlan
+export type DeployPlan =
+  | StaticSpaPlan
+  | CfSsrPlan
+  | WorkersContainerPlan
+  | CompositePlan
+  | NextStandalonePlan
 
 // ── Persist / load ───────────────────────────────────────────
 

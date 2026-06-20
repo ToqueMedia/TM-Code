@@ -2164,7 +2164,12 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const toolCalls = [...(msg.toolCalls || [])]
         for (let i = toolCalls.length - 1; i >= 0; i--) {
           if (toolCalls[i].id === toolId) {
-            toolCalls[i] = { ...toolCalls[i], input: args }
+            // `started: true` — onToolCallStart fires right before the tool's
+            // execute() in the serial loop, so this flips the call from
+            // "queued" to "actively running". Calls still waiting their turn
+            // behind a pending diff approval keep started undefined and render
+            // as a calm queued row (see ToolCallDisplay.isQueued).
+            toolCalls[i] = { ...toolCalls[i], input: args, started: true }
             break
           }
         }
@@ -2930,7 +2935,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       // Anti-overwrite guards. OpenAI streaming sends usage info in the
       // final chunk: `prompt_tokens` and `completion_tokens` are both
       // present in the last usage object. However, some BYOK adapters
-      // (such as DashScope GLM-5.1, OpenRouter Mimo) may send partial
+      // (such as DashScope GLM, OpenRouter Mimo) may send partial
       // usage data. Math.max + the `> 0` guard between them: zero never wins
       // (claude-vaz parity, services/api/claude.ts:2918-2922), and a
       // non-zero smaller value never replaces a non-zero larger one.

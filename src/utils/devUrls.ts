@@ -30,11 +30,14 @@ import {
   VITE_OLLAMA_URL,
   VITE_WORKER_URL,
   VITE_AI_WORKER_URL,
+  VITE_COLLAB_SIGNALING_URL,
   VITE_DEPLOY_URL,
   DEFAULT_AI_WORKER_URL,
+  DEFAULT_COLLAB_SIGNALING_URL,
   DEFAULT_OLLAMA_URL,
   DEFAULT_WORKER_URL,
   PRODUCTION_AI_WORKER_URL,
+  PRODUCTION_COLLAB_SIGNALING_URL,
   PRODUCTION_DEPLOY_URL,
 } from '@/utils/viteEnv'
 
@@ -110,6 +113,68 @@ export function resolveAIWorkerUrl(): string {
     console.info(`[devUrls] AI Worker URL: ${url} (env=${VITE_AI_WORKER_URL ?? '<unset>'}, fallback=${IS_VITE_DEV ? DEFAULT_AI_WORKER_URL : PRODUCTION_AI_WORKER_URL}, mac/linux remap=${!IS_WINDOWS ? 'on' : 'off'})`)
   }
   return url
+}
+
+/**
+ * Collab signaling Worker URL (WebSocket scheme). Mirrors the dev/prod/leak
+ * logic of the HTTP resolvers but for `ws://`/`wss://`: in production a leaked
+ * localhost/gateway value falls back to the deployed worker; in dev on
+ * Mac/Linux the UTM gateway host is remapped to localhost.
+ */
+let _collabUrlLogged = false
+export function resolveCollabSignalingUrl(): string {
+  const url = computeCollabSignalingUrl()
+  if (IS_VITE_DEV && !_collabUrlLogged) {
+    _collabUrlLogged = true
+    console.info(`[devUrls] Collab Signaling URL: ${url} (env=${VITE_COLLAB_SIGNALING_URL ?? '<unset>'}, derived-from-worker=${VITE_COLLAB_SIGNALING_URL ? 'no' : 'yes'})`)
+  }
+  return url
+}
+
+function computeCollabSignalingUrl(): string {
+  const env = VITE_COLLAB_SIGNALING_URL
+  if (!env) {
+    // No explicit signaling URL: in dev, DERIVE the host from the (already
+    // host-resolved) worker URL — the signaling worker runs on the same machine.
+    // This means a VM pointed at the host via VITE_WORKER_URL (e.g. the UTM
+    // gateway 192.168.64.1) reaches the signaling worker too, with NO separate
+    // var. Mac host → localhost; Windows VM → 192.168.64.1 — automatically.
+    if (IS_VITE_DEV) {
+      try {
+        const host = new URL(resolveWorkerUrl()).hostname
+        return `ws://${host}:8789`
+      } catch {
+        return DEFAULT_COLLAB_SIGNALING_URL
+      }
+    }
+    return PRODUCTION_COLLAB_SIGNALING_URL
+  }
+  if (!IS_VITE_DEV) {
+    const lower = env.toLowerCase()
+    if (
+      lower.startsWith('ws://localhost') ||
+      lower.startsWith('ws://127.0.0.1') ||
+      lower.startsWith('ws://192.168.64.1')
+    ) {
+      return PRODUCTION_COLLAB_SIGNALING_URL
+    }
+  }
+  if (IS_VITE_DEV && !IS_WINDOWS) {
+    return env.replace(/(^wss?:\/\/)192\.168\.64\.1(:\d+)?(\/.*)?$/i, (_m, scheme, port, path) => {
+      return `${scheme}localhost${port || ''}${path || ''}`
+    })
+  }
+  return env
+}
+
+/**
+ * HTTP(S) base of the collab signaling worker (same host as the WebSocket
+ * endpoint, scheme flipped) — used for the offline-relay POST. `ws→http`,
+ * `wss→https`.
+ */
+export function resolveCollabRelayUrl(): string {
+  const ws = resolveCollabSignalingUrl()
+  return ws.replace(/^ws(s?):\/\//i, (_m, s) => `http${s}://`)
 }
 
 export function resolveOllamaUrl(): string {

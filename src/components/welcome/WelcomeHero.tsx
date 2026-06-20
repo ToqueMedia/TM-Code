@@ -213,6 +213,9 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({
                   <Heading fontSize="17px" fontWeight="600" color={tokens.colors.text.primary}>
                     {t('welcome.chatMode')}
                   </Heading>
+                  <Text fontSize="11px" fontWeight="600" color={tokens.colors.accent.primary} letterSpacing="0.3px" mt="1px">
+                    {t('welcome.chatModeAudience')}
+                  </Text>
                 </Box>
                 <Box
                   px={2.5}
@@ -388,9 +391,14 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({
                     color={tokens.colors.accent.purple}
                   />
                 </Flex>
-                <Heading fontSize="17px" fontWeight="600" color={tokens.colors.text.primary}>
-                  {t('welcome.terminalMode')}
-                </Heading>
+                <Box flex="1">
+                  <Heading fontSize="17px" fontWeight="600" color={tokens.colors.text.primary}>
+                    {t('welcome.terminalMode')}
+                  </Heading>
+                  <Text fontSize="11px" fontWeight="600" color={tokens.colors.accent.purple} letterSpacing="0.3px" mt="1px">
+                    {t('welcome.terminalModeAudience')}
+                  </Text>
+                </Box>
                 <Box
                   px={2.5}
                   py={0.5}

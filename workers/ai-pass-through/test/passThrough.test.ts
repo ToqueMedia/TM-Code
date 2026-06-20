@@ -767,14 +767,15 @@ test('worker source does not import forbidden old proxy/adapters/AI SDKs', async
 })
 
 test('data-plane handler has no SSE parser or response TransformStream outside usage.ts', async () => {
-  // usage.ts é a ÚNICA exceção sancionada: observa o stream para extrair o
-  // objeto `usage` (billing autoritativo) através de um identity-transform —
-  // bytes out ≡ bytes in, nada é injetado (o teste de streaming acima
-  // continua a garantir isso byte a byte). A proibição mantém-se para todo o
+  // usage.ts e streamWatchdog.ts são as ÚNICAS exceções sancionadas: ambos
+  // identity-transforms (bytes out ≡ bytes in, nada injetado — o teste de
+  // streaming acima garante isso byte a byte). usage.ts observa o stream para
+  // o `usage`/billing; streamWatchdog.ts re-arma um timeout de inatividade e
+  // aborta um upstream estolado pós-headers. A proibição mantém-se para todo o
   // resto do worker: a lição do proxy antigo foi sobre MUTAÇÃO do stream.
   const files = await workerSourceFiles()
   const source = files
-    .filter(file => file.file !== 'auth.ts' && file.file !== 'usage.ts')
+    .filter(file => file.file !== 'auth.ts' && file.file !== 'usage.ts' && file.file !== 'streamWatchdog.ts')
     .map(file => file.source)
     .join('\n')
 
@@ -1475,4 +1476,318 @@ test('sidecar: unknown request types never consult the KV sidecar namespace', as
   const res = await handleRequest(typedRequest('totally-unknown'), kvEnv({}), { fetcher })
   assert.equal(res.status, 200)
   assert.equal(res.headers.get('x-tm-config-key'), 'active')
+})
+
+// ── Plano de Equipas — fatia hard-cap partilhada ──────────────────────────
+//
+// Membro com users/{uid}.activeTeamId consome da FATIA dele numa equipa, não
+// do plano pessoal. pie = budget base do tier + purchasedExtra; teto =
+// percentAllocation × pie. Hard cap ESTRITO: 100% da fatia → rejected, sem
+// overage, mesmo com folga na equipa. Commit é dual-write no doc da equipa.
+
+/** teams/{id} para os mocks: tier + purchasedExtra + submapa members.{uid}. */
+function firestoreTeamDoc(opts: {
+  planTier?: string
+  purchasedExtra?: number
+  cycleEnd?: string
+  percentAllocation?: number
+  memberConsumed?: number
+  memberBlocked?: boolean
+  subscriptionActive?: boolean
+  uid?: string
+} = {}): Response {
+  const uid = opts.uid ?? 'test-user' // test_static → userId === 'test-user'
+  return Response.json({
+    fields: {
+      planTier: { stringValue: opts.planTier ?? 'team-pro' },
+      subscription: { mapValue: { fields: {
+        active: { booleanValue: opts.subscriptionActive ?? true },
+        expiresAt: { stringValue: '2099-12-31T00:00:00Z' },
+      } } },
+      tokenBudget: { mapValue: { fields: {
+        purchasedExtra: { integerValue: String(opts.purchasedExtra ?? 0) },
+      } } },
+      cycle: { mapValue: { fields: {
+        cycleEnd: { stringValue: opts.cycleEnd ?? '2026-12-31' },
+      } } },
+      members: { mapValue: { fields: {
+        [uid]: { mapValue: { fields: {
+          percentAllocation: { doubleValue: opts.percentAllocation ?? 0 },
+          tokensConsumed: { integerValue: String(opts.memberConsumed ?? 0) },
+          ...(opts.memberBlocked !== undefined ? { blocked: { booleanValue: opts.memberBlocked } } : {}),
+        } } },
+      } } },
+    },
+  })
+}
+
+/** users/{uid} com activeTeamId — dispara o caminho de equipa no pré-voo. */
+function firestoreTeamUserDoc(teamId = 'team-1', opts: { blocked?: boolean; deleted?: boolean } = {}): Response {
+  return Response.json({
+    fields: {
+      activeTeamId: { stringValue: teamId },
+      ...(opts.blocked !== undefined ? { blocked: { booleanValue: opts.blocked } } : {}),
+      ...(opts.deleted !== undefined ? { deleted: { booleanValue: opts.deleted } } : {}),
+    },
+  })
+}
+
+/**
+ * Fetcher de equipa: GET a users/{uid} → doc com activeTeamId; GET a teams/{id}
+ * → doc da equipa; :runQuery (budget do tier) e commit (POST) como no
+ * fakeFetcher. O pré-voo de um membro custa 2 GETs (user + team).
+ */
+function teamFetcher(opts: {
+  upstream?: Response
+  userDoc?: () => Response
+  teamDoc?: () => Response
+  planDoc?: () => Response
+} = {}) {
+  const calls: Array<{ input: RequestInfo | URL; body: any; headers: Headers }> = []
+  const firestoreCalls: Array<{ input: RequestInfo | URL; method: string; body: any }> = []
+  const planQueryCalls: Array<{ body: any }> = []
+  return {
+    calls,
+    firestoreCalls,
+    planQueryCalls,
+    async fetch(input: RequestInfo | URL, init?: RequestInit) {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body
+      if (url.includes(':runQuery')) {
+        planQueryCalls.push({ body })
+        return opts.planDoc ? opts.planDoc() : Response.json([{ readTime: '2026-06-12T00:00:00Z' }])
+      }
+      if (url.includes('firestore.googleapis.com')) {
+        firestoreCalls.push({ input, method, body })
+        if (method === 'POST') return Response.json({ writeResults: [] })
+        if (url.includes('/documents/teams/')) return (opts.teamDoc ?? firestoreTeamDoc)()
+        return (opts.userDoc ?? (() => firestoreTeamUserDoc()))()
+      }
+      calls.push({ input, body, headers: new Headers(init?.headers) })
+      return opts.upstream ?? Response.json({ ok: true })
+    },
+  }
+}
+
+test('team: budget headers reflect the member slice (pie × allocation), at the cost of 2 reads', async () => {
+  // tier team-pro fallback 20.91M, sem extra. Fatia 50% = 10.455M.
+  // Consumido 8.364M = 80% → allowed_warning.
+  const fetcher = teamFetcher({
+    teamDoc: () => firestoreTeamDoc({ planTier: 'team-pro', percentAllocation: 0.5, memberConsumed: 8_364_000 }),
+  })
+  const res = await handleRequest(request(), env(), { fetcher })
+
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-plan'), 'pro') // H4: tier team-pro → plano-base 'pro'
+  assert.equal(res.headers.get('x-budget-status'), 'allowed_warning')
+  assert.equal(res.headers.get('x-tokens-consumed'), '8364000')
+  assert.equal(res.headers.get('x-extra-tokens'), '0') // membro não tem overage pessoal
+  assert.ok(Math.abs(parseFloat(res.headers.get('x-budget-pct') ?? '0') - 0.8) < 0.001)
+  // §3.5: headers de contexto de equipa para a IDE enquadrar fatia/bolo.
+  assert.equal(res.headers.get('x-team-id'), 'team-1')
+  assert.equal(res.headers.get('x-team-tier'), 'team-pro')
+  assert.equal(res.headers.get('x-slice-tokens'), '10455000') // 50% × 20.91M
+  assert.equal(res.headers.get('x-pie-total'), '20910000')
+  // Pré-voo do membro = 2 GETs (users/{uid} + teams/{id}).
+  assert.equal(fetcher.firestoreCalls.filter(c => c.method === 'GET').length, 2)
+})
+
+test('team: exhausted slice is rejected with 402 even if the team pool has headroom', async () => {
+  // Fatia 10% de 20.91M = 2.091M; consumido 2.091M = 100% → rejected. A equipa
+  // tem 90% por usar, mas o hard cap é estrito — só o admin a subir a % desbloqueia.
+  const fetcher = teamFetcher({
+    teamDoc: () => firestoreTeamDoc({ percentAllocation: 0.1, memberConsumed: 2_091_000 }),
+  })
+  const res = await handleRequest(request(), env({ BUDGET_ENFORCEMENT: 'enforce' }), { fetcher })
+
+  assert.equal(res.status, 402)
+  // Código dedicado (§3.2) → a IDE mostra "fala com o teu admin" em vez de comprar.
+  assert.match(await res.text(), /tm_team_slice_exhausted/)
+  assert.equal(fetcher.calls.length, 0) // upstream nunca chamado
+})
+
+test('team: slice exhaustion blocks even in SHADOW mode (feature nova, sem legados)', async () => {
+  // Pessoal em shadow só mede; equipa bloqueia já — o hard cap é o contrato da
+  // feature e não há equipas legadas a proteger.
+  const fetcher = teamFetcher({
+    teamDoc: () => firestoreTeamDoc({ percentAllocation: 0.1, memberConsumed: 2_091_000 }),
+  })
+  const res = await handleRequest(request(), env(), { fetcher }) // default = shadow
+
+  assert.equal(res.status, 402)
+  assert.match(await res.text(), /tm_team_slice_exhausted/)
+  assert.equal(fetcher.calls.length, 0)
+})
+
+test('team: purchased extra grows the pie so the slice scales (no false 402)', async () => {
+  // Base do tier (admin) = 10M; +3M avulsos → pie 13M; fatia 100% = 13M.
+  // Consumido 12M: sem o extra (base 10M) seria 120% → rejected; com o extra,
+  // 12/13 = 92% → allowed (warning, ≥80% e <95%).
+  const fetcher = teamFetcher({
+    teamDoc: () => firestoreTeamDoc({ percentAllocation: 1, purchasedExtra: 3_000_000, memberConsumed: 12_000_000 }),
+    planDoc: () => planBudgetDoc(10_000_000),
+  })
+  const res = await handleRequest(request(), env({ BUDGET_ENFORCEMENT: 'enforce' }), { fetcher })
+
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-budget-status'), 'allowed_warning')
+  assert.ok(Math.abs(parseFloat(res.headers.get('x-budget-pct') ?? '0') - 12 / 13) < 0.001)
+})
+
+test('team: commit is an atomic dual-write to teams/{id} (total + member slice), no overage', async () => {
+  const { tasks, ctx } = collectorCtx()
+  const fetcher = teamFetcher({
+    upstream: sseUpstream([USAGE_CHUNK]),
+    teamDoc: () => firestoreTeamDoc({ percentAllocation: 0.5, memberConsumed: 1_000 }),
+  })
+
+  const res = await handleRequest(
+    request('/v1/chat/completions', { stream: true, messages: [] }),
+    env(),
+    { fetcher, ctx },
+  )
+  await res.text()
+  await Promise.all(tasks)
+
+  const commits = fetcher.firestoreCalls.filter(c => c.method === 'POST')
+  assert.equal(commits.length, 1)
+  const write = commits[0].body.writes[0]
+  // Escreve no doc da EQUIPA, não em users/{uid}.
+  assert.match(write.transform.document, /\/documents\/teams\/team-1$/)
+  const t = write.transform.fieldTransforms
+  assert.equal(t[0].fieldPath, 'tokenBudget.tokensConsumed')
+  assert.equal(t[0].increment.integerValue, '150')
+  assert.equal(t[1].fieldPath, 'lifetimeTokensConsumed')
+  assert.equal(t[1].increment.integerValue, '150')
+  assert.equal(t[2].fieldPath, 'members.`test-user`.tokensConsumed')
+  assert.equal(t[2].increment.integerValue, '150')
+  // Hard cap estrito: exatamente 3 transforms, um único write (sem extra/floor).
+  assert.equal(t.length, 3)
+  assert.equal(commits[0].body.writes.length, 1)
+})
+
+test('team: a blocked team member is rejected with 403 (suspension gate reused)', async () => {
+  const fetcher = teamFetcher({
+    teamDoc: () => firestoreTeamDoc({ percentAllocation: 0.5, memberConsumed: 0, memberBlocked: true }),
+  })
+  const res = await handleRequest(request(), env(), { fetcher })
+
+  assert.equal(res.status, 403)
+  assert.match(await res.text(), /tm_account_suspended/)
+  assert.equal(fetcher.calls.length, 0)
+})
+
+test('team: stale activeTeamId (not a member) falls back to the personal plan, not 402 (M1)', async () => {
+  // User com activeTeamId apontando para uma equipa onde NÃO é membro (removido,
+  // activeTeamId por limpar) → cai no plano PESSOAL (explorer), não rejeitado.
+  const userWithStaleTeam = () => Response.json({
+    fields: {
+      userPlan: { stringValue: 'explorer' },
+      activeTeamId: { stringValue: 'team-1' },
+      tokenBudget: { mapValue: { fields: {
+        tokensConsumed: { integerValue: '100000' },
+        extraUsageBalance: { integerValue: '0' },
+        cycleEnd: { stringValue: '2026-12-31' },
+      } } },
+    },
+  })
+  const fetcher = teamFetcher({
+    userDoc: userWithStaleTeam,
+    teamDoc: () => firestoreTeamDoc({ uid: 'someone-else', percentAllocation: 1, memberConsumed: 0 }),
+  })
+  const res = await handleRequest(request(), env({ BUDGET_ENFORCEMENT: 'enforce' }), { fetcher })
+
+  assert.equal(res.status, 200) // explorer 100K/1.5M = 7% → allowed (não 402)
+  assert.equal(res.headers.get('x-plan'), 'explorer')
+})
+
+test('team: INACTIVE subscription gives no pie → falls back to personal (sem pie grátis)', async () => {
+  // Fecha o furo: equipa sem subscrição ativa não concede o budget do tier.
+  const userWithTeam = () => Response.json({
+    fields: {
+      userPlan: { stringValue: 'explorer' },
+      activeTeamId: { stringValue: 'team-1' },
+      tokenBudget: { mapValue: { fields: {
+        tokensConsumed: { integerValue: '100000' },
+        cycleEnd: { stringValue: '2026-12-31' },
+      } } },
+    },
+  })
+  const fetcher = teamFetcher({
+    userDoc: userWithTeam,
+    teamDoc: () => firestoreTeamDoc({ percentAllocation: 1, memberConsumed: 0, subscriptionActive: false }),
+  })
+  const res = await handleRequest(request(), env({ BUDGET_ENFORCEMENT: 'enforce' }), { fetcher })
+
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-plan'), 'explorer') // plano pessoal, NÃO a pie da equipa
+})
+
+// ── Watchdog de inatividade do stream (pós-headers) ──────────────────────
+// O header-timeout só cobre até ao 1º byte; este teste cobre o gémeo: o
+// provider devolve 200 + headers e depois estola (stream que nunca emite nem
+// fecha). Sem o watchdog a Response ficava aberta até o runtime a matar com
+// "code had hung". Com ele, o upstream é abortado e o readable erra.
+test('idle watchdog aborts a stalled upstream stream after headers', async () => {
+  let upstreamAborted = false
+  // Stream que NUNCA emite nem fecha — provider estolado pós-headers.
+  const stalled = new ReadableStream<Uint8Array>({})
+  const stalledResponse = new Response(stalled, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  })
+  const fetcher = {
+    async fetch(input: RequestInfo | URL, init?: RequestInit) {
+      const url = String(input)
+      if (url.includes(':runQuery')) return planBudgetDoc(20_910_000)
+      if (url.includes('firestore.googleapis.com')) return firestoreUserDoc({ plan: 'pro' })
+      // Upstream do provider: regista o abort e devolve o stream estolado.
+      init?.signal?.addEventListener('abort', () => { upstreamAborted = true })
+      return stalledResponse
+    },
+  }
+
+  const res = await handleRequest(
+    request('/v1/chat/completions', { stream: true }),
+    env({ UPSTREAM_STREAM_IDLE_TIMEOUT_MS: '25' }),
+    { fetcher, ctx: collectorCtx().ctx },
+  )
+
+  assert.equal(res.status, 200)
+  assert.ok(res.body)
+  // O readable deve errar quando o watchdog dispara (~25ms), em vez de ficar
+  // pendurado para sempre.
+  await assert.rejects(res.body!.getReader().read())
+  assert.equal(upstreamAborted, true, 'o upstream estolado deve ser abortado pelo watchdog')
+})
+
+// O knob a 0 desliga o watchdog: um stream saudável que fecha sozinho passa
+// intacto e o readable termina normalmente (sem erro espúrio).
+test('idle watchdog disabled (0) lets a healthy stream complete', async () => {
+  const healthy = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'))
+      controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'))
+      controller.close()
+    },
+  })
+  const fetcher = {
+    async fetch(input: RequestInfo | URL) {
+      const url = String(input)
+      if (url.includes(':runQuery')) return planBudgetDoc(20_910_000)
+      if (url.includes('firestore.googleapis.com')) return firestoreUserDoc({ plan: 'pro' })
+      return new Response(healthy, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    },
+  }
+
+  const res = await handleRequest(
+    request('/v1/chat/completions', { stream: true }),
+    env({ UPSTREAM_STREAM_IDLE_TIMEOUT_MS: '0' }),
+    { fetcher, ctx: collectorCtx().ctx },
+  )
+
+  assert.equal(res.status, 200)
+  const text = await res.text()
+  assert.ok(text.includes('[DONE]'))
 })

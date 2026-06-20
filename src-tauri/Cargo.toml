@@ -53,6 +53,9 @@ libc = "0.2"
 machine-uid = "0.5"
 sha2 = "0.10"
 base64 = "0.22"
+# Local HTTP proxy for the team live-preview tunnel (viewer side). Pure Rust;
+# already in the tree transitively via tauri-plugin-localhost.
+tiny_http = "0.12"
 # Cross-platform screen region capture used by the Preview "📸 Screenshot →
 # chat" floating button. The crate re-exports its bundled `image` (0.24) so
 # we don't depend on it separately — having two `image` versions in the build

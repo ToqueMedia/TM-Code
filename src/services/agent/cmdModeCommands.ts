@@ -11,6 +11,9 @@ import { useCheckpointStore } from '../../stores/checkpointStore'
 import { useCmdOverlayStore } from '../../stores/cmdOverlayStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
+import { useCollabStore, canShareCode } from '../../stores/collabStore'
+import { stopLivePreview } from '../collab/collabSessionService'
+import { startAndShareLivePreview, LIVE_PREVIEW_PORT } from '../collab/livePreviewHost'
 import AgentService from './agentService'
 import MCPService from '../mcp/mcpService'
 import { devServerManager } from '../devServerManager'
@@ -559,6 +562,14 @@ async function executeSettings(_args: string, _projectPath: string): Promise<voi
 // ─── /exit — Save → Stop → Close terminal panel → Return to WelcomeScreen ───
 
 async function executeExit(_args: string, _projectPath: string): Promise<void> {
+  // Block leaving while sharing a Live Preview — exiting unmounts TerminalView,
+  // which tears down the session and KILLS the shared dev server out from under
+  // the teammates testing it. Stop the share first (/live-preview).
+  if (useCollabStore.getState().sharingPreview) {
+    addCmdResult('/exit', t('team.exitBlockedBySharing'), 1)
+    return
+  }
+
   const state = useChatStore.getState()
 
   if (state.isStreaming) {
@@ -578,6 +589,42 @@ async function executeExit(_args: string, _projectPath: string): Promise<void> {
   }
 
   useProjectStore.getState().setCmdModeProjectPath(null)
+}
+
+// ─── /team-chat — Toggle the terminal-style team chat side panel ───
+
+async function executeTeamChat(_args: string, _projectPath: string): Promise<void> {
+  if (!canShareCode()) {
+    addCmdResult('/team-chat', t('team.notMember'), 1)
+    return
+  }
+  const { chatOpen, setChatOpen } = useCollabStore.getState()
+  setChatOpen(!chatOpen)
+}
+
+// ─── /live-preview — Start a dedicated dev server on 7773 and share it (P2P) ───
+
+async function executeLivePreview(_args: string, projectPath: string): Promise<void> {
+  if (!canShareCode()) {
+    addCmdResult('/live-preview', t('team.notMember'), 1)
+    return
+  }
+  // Toggle: a second call while sharing stops it.
+  if (useCollabStore.getState().sharingPreview) {
+    stopLivePreview()
+    addCmdResult('/live-preview', t('team.sharingStopped'), 0)
+    return
+  }
+  // Surface the chat panel so the sharer sees who's online and can coordinate.
+  useCollabStore.getState().setChatOpen(true)
+  // Starts the dedicated 7773 dev server (headless) then advertises it — this
+  // can take a while (server boot), so report the outcome AFTER, not before.
+  await startAndShareLivePreview(projectPath)
+  if (useCollabStore.getState().sharingPreview) {
+    addCmdResult('/live-preview', fmt(t('team.sharingStarted'), { port: LIVE_PREVIEW_PORT }), 0)
+  } else {
+    addCmdResult('/live-preview', t('team.previewServerFailed').replace('{error}', '—'), 1)
+  }
 }
 
 // ─── Registry ───
@@ -658,6 +705,18 @@ export const CMD_MODE_COMMANDS: SlashCommand[] = [
     description: t('terminalMode.cmd.settings'),
     enabled: true,
     execute: executeSettings,
+  },
+  {
+    name: '/team-chat',
+    description: t('terminalMode.cmd.teamChat'),
+    enabled: true,
+    execute: executeTeamChat,
+  },
+  {
+    name: '/live-preview',
+    description: t('terminalMode.cmd.livePreview'),
+    enabled: true,
+    execute: executeLivePreview,
   },
   {
     name: '/exit',

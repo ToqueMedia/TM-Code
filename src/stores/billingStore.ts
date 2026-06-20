@@ -21,6 +21,21 @@ export type CostBudgetStatus =
   | 'allowed_overage'
   | 'rejected'
 
+/**
+ * Contexto de EQUIPA (Plano de Equipas). Presente só quando o user é membro de
+ * uma equipa. O `billing` principal já traz a FATIA do membro projetada (o
+ * control-plane mete `mySliceTokens`/`myConsumedPct` lá); este bloco dá o
+ * enquadramento "a tua fatia / o bolo" + o papel (para o CTA de bloqueio).
+ */
+export interface TeamBillingContext {
+  teamId: string
+  tier: string          // 'team-pro' | 'team-max'
+  pieTotal: number      // tokens do bolo (tier base + comprado)
+  mySliceTokens: number // teto do membro em tokens
+  mySlicePct: number    // 0..1 — fatia do membro na pie
+  role: string          // 'owner' | 'member'
+}
+
 /** Shape of the /v1/me response body */
 export interface MeResponse {
   plan: UserPlanName
@@ -34,6 +49,20 @@ export interface MeResponse {
     extraUsageBalance: number
     status: CostBudgetStatus
   }
+  /** Bloco de equipa (control-plane TeamBillingSummary). Ausente = consumo NÃO
+   *  está em modo equipa agora (modo pessoal ou sem equipa). */
+  team?: {
+    teamId: string
+    tier: string
+    pieTotal: number
+    mySlicePct: number
+    mySliceTokens: number
+    role: string
+  }
+  /** Pertença ESTÁVEL — presente mesmo em modo pessoal; a IDE usa-a para oferecer
+   *  o toggle pessoal/equipa. `teamActive` = consumo a faturar a equipa agora. */
+  teamMemberOf?: string
+  teamActive?: boolean
   /** Global feature toggles. Missing → all flags default OFF. */
   features?: {
     byokEnabled?: boolean
@@ -81,6 +110,13 @@ interface BillingState {
 
   // Emergency stop
   noCredits: boolean
+
+  // Plano de Equipas: contexto da equipa quando o consumo está em MODO EQUIPA
+  // (null em modo pessoal). Enquadra "a tua fatia / o bolo" + CTA de bloqueio.
+  team: TeamBillingContext | null
+  // Pertença estável (id da equipa) — presente mesmo em modo pessoal, para a IDE
+  // mostrar e permitir o toggle pessoal/equipa. null = não pertence a equipa.
+  teamMemberOf: string | null
 }
 
 interface BillingActions {
@@ -111,6 +147,8 @@ const DEFAULT_STATE: BillingState = {
   tmsRemaining: 0,
   lastTokensUsed: 0,
   noCredits: false,
+  team: null,
+  teamMemberOf: null,
 }
 
 // ── Cache local do snapshot de billing (arranque sem flash de plano) ──
@@ -142,6 +180,8 @@ interface BillingCacheRecord {
   cycleEnd: string
   status: CostBudgetStatus
   tmsRemaining: number
+  team?: TeamBillingContext | null
+  teamMemberOf?: string | null
 }
 
 function loadBillingCache(): BillingCacheRecord | null {
@@ -180,6 +220,8 @@ export function persistBillingCache(uid: string): void {
       cycleEnd: s.cycleEnd,
       status: s.status,
       tmsRemaining: s.tmsRemaining,
+      team: s.team,
+      teamMemberOf: s.teamMemberOf,
     }
     localStorage.setItem(BILLING_CACHE_KEY, JSON.stringify(record))
   } catch {
@@ -208,6 +250,8 @@ function buildInitialState(): BillingState {
     status: cached.status,
     tmsRemaining: cached.tmsRemaining,
     noCredits: cached.status === 'rejected',
+    team: cached.team ?? null,
+    teamMemberOf: cached.teamMemberOf ?? null,
   }
 }
 
@@ -295,6 +339,30 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
     const planHeader = headers.get('X-Plan')
     if (planHeader) updates.plan = planHeader as UserPlanName
 
+    // Contexto de equipa (§3.5) — só ATUALIZA quando o header está presente
+    // (pedido de equipa); nunca LIMPA (isso é autoridade do /v1/me). Mantém o
+    // enquadramento fatia/bolo vivo entre chamadas ao /v1/me.
+    const teamId = headers.get('X-Team-Id')
+    if (teamId) {
+      const sliceTokens = parseInt(headers.get('X-Slice-Tokens') || '', 10)
+      const pieTotal = parseInt(headers.get('X-Pie-Total') || '', 10)
+      const tier = headers.get('X-Team-Tier') || ''
+      set(state => ({
+        ...updates,
+        team: {
+          teamId,
+          tier: tier || state.team?.tier || '',
+          pieTotal: Number.isFinite(pieTotal) ? pieTotal : (state.team?.pieTotal ?? 0),
+          mySliceTokens: Number.isFinite(sliceTokens) ? sliceTokens : (state.team?.mySliceTokens ?? 0),
+          mySlicePct: Number.isFinite(pieTotal) && pieTotal > 0 && Number.isFinite(sliceTokens)
+            ? sliceTokens / pieTotal
+            : (state.team?.mySlicePct ?? 0),
+          role: state.team?.role ?? 'member',
+        },
+      }))
+      return
+    }
+
     if (Object.keys(updates).length > 0) set(updates)
   },
 
@@ -314,6 +382,18 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
       status: data.billing.status,
       tmsRemaining: data.billing.extraUsageBalance,
       noCredits: data.billing.status === 'rejected',
+      // /v1/me é autoritativo: define OU LIMPA o contexto de equipa.
+      team: data.team
+        ? {
+            teamId: data.team.teamId,
+            tier: data.team.tier,
+            pieTotal: data.team.pieTotal,
+            mySliceTokens: data.team.mySliceTokens,
+            mySlicePct: data.team.mySlicePct,
+            role: data.team.role,
+          }
+        : null,
+      teamMemberOf: data.teamMemberOf ?? null,
     })
   },
 

@@ -14,6 +14,7 @@ import { acquireGitStatusPolling, refreshGitStatus } from '@/services/gitStatusP
 import { useGitStatusStore } from '@/stores/gitStatusStore'
 import { useCurrentProject } from '@/hooks/useProjectState'
 import { getFileIconByExtension } from '@/utils/iconMapper'
+import { CollabShareControls } from '@/components/collab/CollabShareControls'
 
 const statusMeta: Record<string, { color: string; label: string }> = {
   added:     { color: tokens.colors.accent.greenBright, label: 'A' },
@@ -25,6 +26,11 @@ const statusMeta: Record<string, { color: string; label: string }> = {
 
 type FeedbackType = 'success' | 'error' | null
 const ROW_HEIGHT = 28
+// Commit textarea growth bounds. It auto-grows from MIN up to MAX, then scrolls
+// inside — the cap stops a long (e.g. AI-generated) message from pushing the
+// commit button + file list out of the overflow-hidden column (user, 2026-06-17).
+const COMMIT_TEXTAREA_MIN_HEIGHT = 48
+const COMMIT_TEXTAREA_MAX_HEIGHT = 200
 const TM_CODE_COMMIT_SIGNATURE = 'Co-Authored-By: TM Code <tm.code@toquemedia.net>'
 
 // The signature is invisible to the user (never shown in the textarea) and is
@@ -65,7 +71,8 @@ function stripReasoningBlocks(text: string): string {
 const PANEL_STYLES = `
 .sc-textarea {
   width: 100%;
-  min-height: 48px;
+  min-height: ${COMMIT_TEXTAREA_MIN_HEIGHT}px;
+  max-height: ${COMMIT_TEXTAREA_MAX_HEIGHT}px;
   padding: 8px 32px 8px 10px;
   border: 1px solid ${tokens.colors.border.input};
   border-radius: 4px;
@@ -76,7 +83,7 @@ const PANEL_STYLES = `
   line-height: 18px;
   resize: none;
   outline: none;
-  overflow-y: hidden;
+  overflow-y: auto;
   box-sizing: border-box;
 }
 .sc-textarea::placeholder {
@@ -268,14 +275,16 @@ function SourceControlPanel() {
 
   // ── Auto-resize textarea ─────────────────────────────────────────────
 
-  // No scroll inside the box: it grows to fit the whole message. Trade-off:
-  // a very long message squeezes the file list (flex:1) — preferred over a
-  // scrollbar inside a commit box (user request, 2026-06-12).
+  // Grows to fit the message UP TO COMMIT_TEXTAREA_MAX_HEIGHT, then scrolls
+  // inside (CSS max-height + overflow-y:auto). Capping growth keeps the commit
+  // button + file list below visible instead of being pushed off the
+  // overflow-hidden column by a long message (user request, 2026-06-17).
+  // Below the cap it still squeezes the file list (flex:1) rather than scrolling.
   const resizeTextarea = useCallback(() => {
     const el = textareaRef.current
     if (!el) return
-    el.style.height = '48px'
-    el.style.height = `${Math.max(el.scrollHeight, 48)}px`
+    el.style.height = `${COMMIT_TEXTAREA_MIN_HEIGHT}px`
+    el.style.height = `${Math.min(Math.max(el.scrollHeight, COMMIT_TEXTAREA_MIN_HEIGHT), COMMIT_TEXTAREA_MAX_HEIGHT)}px`
   }, [])
 
   useEffect(() => {
@@ -347,7 +356,7 @@ function SourceControlPanel() {
       await GitService.commit(projectPath, ensureTmCodeCommitSignature(commitMsg))
       if (!mountedRef.current) return
       setCommitMsg('')
-      if (textareaRef.current) textareaRef.current.style.height = '48px'
+      if (textareaRef.current) textareaRef.current.style.height = `${COMMIT_TEXTAREA_MIN_HEIGHT}px`
       showFeedback('success', t('sourceControl.committedTo').replace('{branch}', branch))
       await refreshGitStatus()
     } catch (e) {
@@ -366,7 +375,7 @@ function SourceControlPanel() {
       await GitService.commit(projectPath, ensureTmCodeCommitSignature(commitMsg))
       if (!mountedRef.current) return
       setCommitMsg('')
-      if (textareaRef.current) textareaRef.current.style.height = '48px'
+      if (textareaRef.current) textareaRef.current.style.height = `${COMMIT_TEXTAREA_MIN_HEIGHT}px`
       showFeedback('success', t('sourceControl.committedAllTo').replace('{branch}', branch))
       await refreshGitStatus()
     } catch (e) {
@@ -560,9 +569,12 @@ ${diffDetail}`,
             </Text>
           )}
         </HStack>
-        <button type="button" className="sc-btn" title={t("view.refresh")} aria-label={t("view.refresh")} onClick={() => refreshGitStatus({ spinner: true })} disabled={loading}>
-          {loading ? <span className="sc-spin"><VscRefresh size={13} /></span> : <VscRefresh size={13} />}
-        </button>
+        <HStack gap={1}>
+          <CollabShareControls compact />
+          <button type="button" className="sc-btn" title={t("view.refresh")} aria-label={t("view.refresh")} onClick={() => refreshGitStatus({ spinner: true })} disabled={loading}>
+            {loading ? <span className="sc-spin"><VscRefresh size={13} /></span> : <VscRefresh size={13} />}
+          </button>
+        </HStack>
       </Flex>
 
       {/* Branch row — name + ahead/behind counters vs upstream */}

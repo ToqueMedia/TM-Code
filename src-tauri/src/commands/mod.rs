@@ -1,6 +1,7 @@
 pub mod ai_completion;
 pub mod byok;
 pub mod checkpoint;
+pub mod collab;
 pub mod container;
 pub mod data_viewer;
 pub mod debugger;
@@ -10,6 +11,7 @@ pub mod e2e;
 pub mod file_tree;
 pub mod filesystem;
 pub mod git;
+pub mod github;
 pub mod http_client;
 pub mod installer;
 pub mod issue_reporter;
@@ -21,6 +23,7 @@ pub mod sandbox;
 pub mod screenshot;
 pub mod search;
 pub mod terminal;
+pub mod tunnel;
 pub mod version;
 
 /// Strip the Windows UNC prefix (`\\?\`) from a string path if present.

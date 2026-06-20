@@ -96,15 +96,10 @@ async fn try_hold_ipv4(port: u16) -> Option<tokio::task::JoinHandle<()>> {
         port
     );
     let handle = tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((mut stream, _)) => {
-                    let response = notice_page(port);
-                    let _ = stream.write_all(response.as_bytes()).await;
-                    let _ = stream.shutdown().await;
-                }
-                Err(_) => break,
-            }
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let response = notice_page(port);
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
         }
     });
     Some(handle)
@@ -118,7 +113,10 @@ async fn scan_once() {
         .map(|p| p.iter().copied().collect())
         .unwrap_or_default();
     for port in ports {
-        let held = guards().lock().map(|g| g.contains_key(&port)).unwrap_or(false);
+        let held = guards()
+            .lock()
+            .map(|g| g.contains_key(&port))
+            .unwrap_or(false);
         let v6_busy = ipv6_occupied(port).await;
 
         if held && !v6_busy {
@@ -126,7 +124,10 @@ async fn scan_once() {
             if let Ok(mut map) = guards().lock() {
                 if let Some(guard) = map.remove(&port) {
                     guard.handle.abort();
-                    eprintln!("[port-guard] libertado 127.0.0.1:{} (IPv6 ficou livre)", port);
+                    eprintln!(
+                        "[port-guard] libertado 127.0.0.1:{} (IPv6 ficou livre)",
+                        port
+                    );
                 }
             }
         } else if !held && v6_busy {

@@ -64,6 +64,11 @@ export function buildCorsHeaders(request: Request): Headers {
     'X-Tokens-Consumed',
     'X-Extra-Tokens',
     'X-Cycle-End',
+    // Contexto de equipa (§3.5) — a IDE enquadra "fatia/bolo" + CTA de bloqueio.
+    'X-Team-Id',
+    'X-Team-Tier',
+    'X-Slice-Tokens',
+    'X-Pie-Total',
     'Retry-After',
     'X-RateLimit-Limit',
     'X-RateLimit-Remaining',
@@ -173,6 +178,10 @@ export interface BudgetHeaderMeta {
   tokensConsumed: number
   extraUsageBalance: number
   cycleEnd: string
+  /** Contexto de EQUIPA (§3.5): presente só quando o user é membro de uma
+   *  equipa. `plan` continua a ser o plano-BASE (team-pro→pro); o tier cru e a
+   *  pie/fatia em tokens vão aqui, para a IDE enquadrar "a tua fatia / o bolo". */
+  team?: { teamId: string; tier: string; sliceTokens: number; pieTotal: number }
 }
 
 export function buildResponseHeaders(upstream: Response, meta: {
@@ -229,6 +238,12 @@ export function buildResponseHeaders(upstream: Response, meta: {
     headers.set('x-tokens-consumed', String(meta.budget.tokensConsumed))
     headers.set('x-extra-tokens', String(meta.budget.extraUsageBalance))
     if (meta.budget.cycleEnd) headers.set('x-cycle-end', meta.budget.cycleEnd)
+    if (meta.budget.team) {
+      headers.set('x-team-id', meta.budget.team.teamId)
+      headers.set('x-team-tier', meta.budget.team.tier)
+      headers.set('x-slice-tokens', String(meta.budget.team.sliceTokens))
+      headers.set('x-pie-total', String(meta.budget.team.pieTotal))
+    }
   }
   return headers
 }

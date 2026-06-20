@@ -1,9 +1,11 @@
 use serde::Serialize;
+use std::io::Read;
 use std::path::Path;
 #[cfg(target_os = "windows")]
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use tauri::{AppHandle, Emitter};
 
 use super::terminal::get_user_path;
 
@@ -66,7 +68,10 @@ fn silent_command(program: &str) -> Command {
 /// via brew/xcode-select is found even without a login shell). On Windows,
 /// suppresses the brief console window flash and falls back to standard
 /// Git for Windows install paths if `git` is not on PATH.
-fn git_cmd(cwd: &str) -> Command {
+///
+/// `pub(crate)` so sibling command modules (e.g. `collab`) reuse the same
+/// binary-resolution + PATH plumbing instead of duplicating it.
+pub(crate) fn git_cmd(cwd: &str) -> Command {
     let mut cmd = Command::new(resolve_git_binary());
     cmd.current_dir(cwd);
     if let Some(path) = get_user_path() {
@@ -123,14 +128,29 @@ pub struct GitLineChange {
 ///
 /// Passing arguments directly preserves Windows drive letters (`C:\`, `D:\`,
 /// etc.) and avoids shell-quoting bugs/injection risks.
+///
+/// Two further concerns this handles, both surfaced by private-repo clones on
+/// Windows:
+///   1. **No hang.** git runs with `CREATE_NO_WINDOW` and no TTY, so a
+///      credential prompt for a private repo would block forever (`.output()`
+///      waits on a child that never exits). `GIT_TERMINAL_PROMPT=0` +
+///      `credential.interactive=false` make a missing credential fail FAST.
+///   2. **Auth.** For `https://github.com/...` URLs we inject the IDE's stored
+///      OAuth token (`github.rs`) as a per-command `http.extraHeader`, so it
+///      authenticates the clone without ever being written to `.git/config`.
+///
+/// When `progress_id` is set, git's `--progress` output (on stderr) is streamed
+/// line-by-line to the frontend as `git-clone-progress-{progress_id}` events.
 #[tauri::command]
 pub async fn git_clone_repository(
+    app: AppHandle,
     repo_url: String,
     destination_path: String,
     branch: Option<String>,
+    progress_id: Option<String>,
 ) -> Result<GitCommandResult, String> {
-    let repo_url = repo_url.trim();
-    let destination_path = destination_path.trim();
+    let repo_url = repo_url.trim().to_string();
+    let destination_path = destination_path.trim().to_string();
     let branch = branch
         .map(|b| b.trim().to_string())
         .filter(|b| !b.is_empty());
@@ -142,19 +162,21 @@ pub async fn git_clone_repository(
         return Err("Destination path is required".to_string());
     }
 
-    let destination = Path::new(destination_path);
+    let destination = Path::new(&destination_path);
     if let Some(parent) = destination.parent() {
-        if !parent.exists() {
-            return Err(format!(
-                "Destination parent directory does not exist: {}",
-                parent.display()
-            ));
-        }
-        if !parent.is_dir() {
-            return Err(format!(
-                "Destination parent is not a directory: {}",
-                parent.display()
-            ));
+        if !parent.as_os_str().is_empty() {
+            if !parent.exists() {
+                return Err(format!(
+                    "Destination parent directory does not exist: {}",
+                    parent.display()
+                ));
+            }
+            if !parent.is_dir() {
+                return Err(format!(
+                    "Destination parent is not a directory: {}",
+                    parent.display()
+                ));
+            }
         }
     }
 
@@ -171,21 +193,107 @@ pub async fn git_clone_repository(
         .unwrap_or_else(|| Path::new("."));
 
     let mut cmd = git_cmd_path(cwd);
-    cmd.arg("clone");
+
+    // Hang-proofing — see the doc comment. A private clone with no usable
+    // credential must error out, never block on an invisible prompt.
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.arg("-c").arg("credential.interactive=false");
+
+    // Authenticate private github.com clones with the IDE's stored OAuth token,
+    // injected per-command so it is NEVER persisted into the cloned repo config.
+    if let Some(header) = super::github::clone_auth_header(&repo_url) {
+        cmd.arg("-c").arg(format!("http.extraHeader={header}"));
+    }
+
+    // `--progress` forces progress output even though stderr is a pipe (git
+    // otherwise stays silent when stderr is not a TTY).
+    cmd.arg("clone").arg("--progress");
     if let Some(branch) = &branch {
         cmd.arg("--branch").arg(branch);
     }
-    cmd.arg(repo_url).arg(destination_path);
+    cmd.arg(&repo_url).arg(&destination_path);
 
-    let output = cmd
-        .output()
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("git clone failed: {}", e))?;
 
+    let progress_event = progress_id
+        .as_ref()
+        .filter(|id| !id.is_empty())
+        .map(|id| format!("git-clone-progress-{id}"));
+
+    // git writes progress to STDERR using `\r` to overwrite the current line.
+    // Read it byte-wise on a thread, flushing a progress event on every `\r`/`\n`
+    // boundary so the UI sees live "Receiving objects: NN%" updates. Both pipes
+    // are drained on threads to avoid a full-pipe deadlock.
+    let stderr_pipe = child.stderr.take();
+    let stdout_pipe = child.stdout.take();
+
+    let app_for_progress = app.clone();
+    let stderr_handle = std::thread::spawn(move || {
+        let mut collected = String::new();
+        let Some(mut pipe) = stderr_pipe else {
+            return collected;
+        };
+        let flush = |segment: &mut Vec<u8>, collected: &mut String| {
+            if segment.is_empty() {
+                return;
+            }
+            let line = String::from_utf8_lossy(segment).trim().to_string();
+            segment.clear();
+            if line.is_empty() {
+                return;
+            }
+            collected.push_str(&line);
+            collected.push('\n');
+            if let Some(evt) = &progress_event {
+                let _ = app_for_progress.emit(evt, serde_json::json!({ "line": line }));
+            }
+        };
+        let mut buf = [0u8; 4096];
+        let mut segment: Vec<u8> = Vec::new();
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    for &byte in &buf[..n] {
+                        if byte == b'\r' || byte == b'\n' {
+                            flush(&mut segment, &mut collected);
+                        } else {
+                            segment.push(byte);
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        flush(&mut segment, &mut collected);
+        collected
+    });
+
+    let stdout_handle = std::thread::spawn(move || {
+        let mut collected = String::new();
+        if let Some(mut pipe) = stdout_pipe {
+            let _ = pipe.read_to_string(&mut collected);
+        }
+        collected
+    });
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("git clone failed: {}", e))?;
+    let stderr = stderr_handle.join().unwrap_or_default();
+    let stdout = stdout_handle.join().unwrap_or_default();
+
     Ok(GitCommandResult {
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        exit_code: output.status.code().unwrap_or(-1),
-        success: output.status.success(),
+        stdout,
+        stderr,
+        exit_code: status.code().unwrap_or(-1),
+        success: status.success(),
     })
 }
 

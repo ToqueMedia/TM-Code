@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useState } from 'react'
 import { Box, Button, Flex, Input, Text } from '@chakra-ui/react'
 import {
+  FiAlertCircle,
   FiCheck,
   FiCopy,
   FiExternalLink,
@@ -8,6 +9,8 @@ import {
   FiPlay,
   FiRefreshCw,
   FiTrash2,
+  FiUploadCloud,
+  FiX,
 } from 'react-icons/fi'
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog'
 import { tokens } from '@/theme/tokens'
@@ -44,13 +47,13 @@ function preflightHostname(raw: string, summary: DeploymentSummary | null): stri
   // overall must have at least one dot and a TLD ≥2 letters. The worker uses
   // a similar regex; this one trades exotic-IDN support for cheap validation.
   if (!/^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/.test(h)) {
-    return 'Invalid format. Use something like `app.yourdomain.com` (no http://, no path).'
+    return t('deploys.domain.invalidFormat')
   }
   if (h.endsWith('.toquemedia.net')) {
-    return 'Subdomains of toquemedia.net cannot be used as custom domains — that is already your default URL.'
+    return t('deploys.domain.isDefault')
   }
   if (summary?.customDomain && summary.customDomain.toLowerCase() === h) {
-    return 'This domain is already active on this project.'
+    return t('deploys.domain.alreadyActive')
   }
   return null
 }
@@ -59,7 +62,9 @@ function DeploysSection() {
   const project = useProjectStore((s) => s.currentProject)
   const [summary, setSummary] = useState<DeploymentSummary | null>(null)
   const [deploysList, setDeploysList] = useState<DeploysListItem[]>([])
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [listLoading, setListLoading] = useState(true)
+  const [refreshingAll, setRefreshingAll] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [hostnameInput, setHostnameInput] = useState('')
   const [submittingDomain, setSubmittingDomain] = useState(false)
@@ -89,6 +94,7 @@ function DeploysSection() {
   }, [project])
 
   const loadDeploysList = useCallback(async () => {
+    setListLoading(true)
     try {
       const items = await deployService.listDeploys()
       setDeploysList(items)
@@ -96,8 +102,19 @@ function DeploysSection() {
       // Don't block the rest of the panel — surface inline only when the
       // list itself was the user's primary interest.
       console.warn('[deploys] list failed', err)
+    } finally {
+      setListLoading(false)
     }
   }, [])
+
+  const refreshAll = useCallback(async () => {
+    setRefreshingAll(true)
+    try {
+      await Promise.all([loadSummary(), loadDeploysList()])
+    } finally {
+      setRefreshingAll(false)
+    }
+  }, [loadSummary, loadDeploysList])
 
   useEffect(() => {
     loadSummary()
@@ -215,108 +232,265 @@ function DeploysSection() {
     )
   }
 
+  // The current project's row in the account-wide list carries the lifecycle
+  // status + actions; the single-project summary carries the URL + domain. We
+  // merge them in the "This project" card. When the list hasn't loaded yet but
+  // the summary says we're live, synthesize a minimal item so the actions still
+  // work (the list catches up on the next focus/refresh).
+  const currentItem: DeploysListItem | null =
+    deploysList.find((d) => d.projectId === project.id) ??
+    (summary?.exists
+      ? {
+          projectId: project.id,
+          slug: summary.slug ?? '',
+          serviceUrl: summary.serviceUrl ?? '',
+          status: 'active',
+          customDomain: summary.customDomain ?? null,
+          lastDeployedAt: summary.lastDeployedAt ?? null,
+          suspendedAt: null,
+          daysUntilArchive: null,
+        }
+      : null)
+
+  const otherDeploys = deploysList.filter((d) => d.projectId !== project.id)
+
   return (
     <Flex direction="column" gap={6}>
-      {/* All deployments — overview across the user's account, with
-          per-row suspend / resume / delete. The current project is
-          highlighted so the user knows which row is "this one". */}
-      <Section
-        title={t('deploys.yourDeployments')}
-        subtitle={
-          deploysList.length === 0
-            ? t('deploys.empty')
-            : `${deploysList.length} live or paused.`
-        }
-      >
-        {deploysList.length > 0 && (
-          <Flex direction="column" gap={2}>
-            {deploysList.map((item) => (
-              <DeployRow
-                key={item.projectId}
-                item={item}
-                isCurrent={project?.id === item.projectId}
-                busy={busyIds.has(item.projectId)}
-                onAction={handleAction}
-              />
-            ))}
-          </Flex>
-        )}
-      </Section>
-
-      {/* Current deployment */}
-      <Section
-        title="Current deployment"
-        subtitle={
-          loading
-            ? 'Loading…'
-            : summary?.exists
-            ? 'Live. Re-publishing replaces the assets in place.'
-            : 'No deployment yet. Use the Publish button in the preview toolbar.'
-        }
-      >
-        {summary?.exists && summary.serviceUrl && (
-          <UrlRow
-            url={
-              summary.customDomain && summary.sslStatus === 'active'
-                ? `https://${summary.customDomain}`
-                : summary.serviceUrl
-            }
-            provider={summary.provider}
-            lastDeployedAt={summary.lastDeployedAt}
-          />
-        )}
-      </Section>
-
-      {/* Custom domain */}
-      <Section
-        title="Custom domain"
-        subtitle="Point your own domain at this project. The SSL certificate is managed for you once DNS is verified."
-      >
-        {summary?.customDomain ? (
-          <CustomDomainPanel
-            summary={summary}
-            refreshing={refreshing}
-            lastCheckedAt={lastCheckedAt}
-            onRefresh={handleRefreshDomain}
-            onRemove={handleRemoveDomain}
-          />
-        ) : (
-          <AddDomainPanel
-            hostname={hostnameInput}
-            onChange={setHostnameInput}
-            onSubmit={handleAddDomain}
-            submitting={submittingDomain}
-            disabled={!summary?.exists}
-            disabledMessage={!summary?.exists ? 'Deploy the project first.' : undefined}
-            summary={summary}
-          />
-        )}
-      </Section>
-
-      {error && (
+      {/* Intro + global refresh — orients the user and gives a manual refresh
+          beyond the focus-triggered one. */}
+      <Flex align="flex-start" justify="space-between" gap={4}>
+        <Text fontSize="12.5px" color={tokens.colors.text.muted} lineHeight="1.6" maxW="460px">
+          {t('deploys.intro')}
+        </Text>
         <Box
-          p={3}
-          borderRadius="8px"
-          bg={tokens.colors.accent.redSubtle}
-          border={`1px solid ${tokens.colors.accent.redMuted}`}
+          as="button"
+          flexShrink={0}
+          display="flex"
+          alignItems="center"
+          gap="6px"
+          h="30px"
+          px="10px"
+          borderRadius="7px"
+          bg={tokens.colors.bg.card}
+          border={`1px solid ${tokens.colors.bg.cardBorder}`}
+          color={tokens.colors.text.secondary}
+          fontSize="11.5px"
+          fontWeight="500"
+          cursor={refreshingAll ? 'wait' : 'pointer'}
+          _hover={refreshingAll ? {} : { bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+          onClick={refreshingAll ? undefined : refreshAll}
+          title={t('deploys.refresh')}
         >
-          <Text fontSize="12px" color={tokens.colors.accent.red}>
-            {error}
-          </Text>
+          <Box css={refreshingAll ? SPIN_CSS : undefined}>
+            <FiRefreshCw size={12} />
+          </Box>
+          {t('deploys.refresh')}
         </Box>
+      </Flex>
+
+      {error && <ErrorAlert message={error} onDismiss={() => setError(null)} />}
+
+      {/* This project — the primary focus when Settings is opened from a
+          project. Consolidates URL, status, lifecycle actions, and the custom
+          domain into one place (previously split across two sections). */}
+      <Section title={t('deploys.thisProject')}>
+        {loading && !summary ? (
+          <SkeletonCard />
+        ) : currentItem ? (
+          <>
+            <ThisProjectCard
+              item={currentItem}
+              summary={summary}
+              busy={busyIds.has(currentItem.projectId)}
+              onAction={handleAction}
+            />
+            <Box mt={4}>
+              <SubHeading>{t('deploys.domain.title')}</SubHeading>
+              <Text fontSize="11.5px" color={tokens.colors.text.muted} mb={3} lineHeight="1.5">
+                {t('deploys.domain.subtitle')}
+              </Text>
+              {summary?.customDomain ? (
+                <CustomDomainPanel
+                  summary={summary}
+                  refreshing={refreshing}
+                  lastCheckedAt={lastCheckedAt}
+                  onRefresh={handleRefreshDomain}
+                  onRemove={handleRemoveDomain}
+                />
+              ) : (
+                <AddDomainPanel
+                  hostname={hostnameInput}
+                  onChange={setHostnameInput}
+                  onSubmit={handleAddDomain}
+                  submitting={submittingDomain}
+                  summary={summary}
+                />
+              )}
+            </Box>
+          </>
+        ) : (
+          <NotPublishedEmpty />
+        )}
+      </Section>
+
+      {/* Other deployments — account-wide overview (excludes the current
+          project, which has its own card above). Hidden when there are none. */}
+      {(listLoading || otherDeploys.length > 0) && (
+        <Section
+          title={t('deploys.otherDeployments')}
+          subtitle={
+            listLoading
+              ? undefined
+              : fmtT(t('deploys.summaryCount'), { count: otherDeploys.length })
+          }
+        >
+          {listLoading && deploysList.length === 0 ? (
+            <Flex direction="column" gap={2}>
+              <SkeletonRow />
+              <SkeletonRow />
+            </Flex>
+          ) : (
+            <Flex direction="column" gap={2}>
+              {otherDeploys.map((item) => (
+                <DeployRow
+                  key={item.projectId}
+                  item={item}
+                  busy={busyIds.has(item.projectId)}
+                  onAction={handleAction}
+                />
+              ))}
+            </Flex>
+          )}
+        </Section>
       )}
     </Flex>
   )
 }
 
-function DeployRow({
+const SPIN_CSS = {
+  animation: 'spin 1s linear infinite',
+  '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } },
+}
+
+const PULSE_CSS = {
+  animation: 'deployPulse 1.4s ease-in-out infinite',
+  '@keyframes deployPulse': { '0%, 100%': { opacity: 0.35 }, '50%': { opacity: 0.7 } },
+}
+
+// ── This-project card ────────────────────────────────────────────────
+
+function ThisProjectCard({
   item,
-  isCurrent,
+  summary,
   busy,
   onAction,
 }: {
   item: DeploysListItem
-  isCurrent: boolean
+  summary: DeploymentSummary | null
+  busy: boolean
+  onAction: (item: DeploysListItem, action: 'suspend' | 'resume' | 'delete') => void
+}) {
+  const isActive = item.status === 'active'
+  const isSuspended = item.status === 'suspended'
+  // Prefer the custom domain when its SSL is live; otherwise the default URL.
+  const url =
+    summary?.customDomain && summary.sslStatus === 'active'
+      ? `https://${summary.customDomain}`
+      : summary?.serviceUrl || item.serviceUrl
+
+  return (
+    <Box
+      p={4}
+      borderRadius="10px"
+      bg={tokens.colors.bg.card}
+      border={`1px solid ${tokens.colors.bg.cardBorder}`}
+    >
+      <Flex align="center" gap={2} mb={2.5}>
+        <Box
+          as="a"
+          {...{ href: url, target: '_blank', rel: 'noopener noreferrer' }}
+          flex="1"
+          minW={0}
+          fontSize="13px"
+          fontFamily="mono"
+          color={tokens.colors.text.primary}
+          _hover={{ color: tokens.colors.accent.primary, textDecoration: 'underline' }}
+          truncate
+        >
+          {url}
+        </Box>
+        <DeployStatusBadge status={item.status} />
+      </Flex>
+
+      <Flex align="center" justify="space-between" gap={2}>
+        <Text fontSize="11px" color={tokens.colors.text.muted} truncate>
+          {item.lastDeployedAt ? (
+            <>
+              {t('deploys.lastDeployed')}:{' '}
+              <Text as="span" color={tokens.colors.text.secondary}>
+                {formatTime(item.lastDeployedAt)}
+              </Text>
+            </>
+          ) : (
+            t('deploys.liveNote')
+          )}
+        </Text>
+
+        <Flex align="center" gap={1} flexShrink={0}>
+          <CopyButton text={url} />
+          <IconLink href={url} label={t('deploys.openExternal')}>
+            <FiExternalLink size={12} />
+          </IconLink>
+          <Box w="1px" h="16px" bg={tokens.colors.bg.cardBorder} mx={1} />
+          {isActive && (
+            <ActionButton
+              label={t('deploys.action.suspend')}
+              icon={<FiPause size={12} />}
+              busy={busy}
+              onClick={() => onAction(item, 'suspend')}
+            />
+          )}
+          {isSuspended && (
+            <ActionButton
+              label={t('deploys.action.resume')}
+              icon={<FiPlay size={12} />}
+              busy={busy}
+              onClick={() => onAction(item, 'resume')}
+              tone="primary"
+            />
+          )}
+          <ActionButton
+            label={t('deploys.action.delete')}
+            icon={<FiTrash2 size={12} />}
+            busy={busy}
+            onClick={() => onAction(item, 'delete')}
+            tone="danger"
+          />
+        </Flex>
+      </Flex>
+
+      {item.daysUntilArchive !== null && (
+        <Text fontSize="11px" color={tokens.colors.accent.orange} mt={2}>
+          {item.daysUntilArchive <= 0
+            ? t('deploys.daysUntilArchive.today')
+            : fmtT(t('deploys.daysUntilArchive'), {
+                days: item.daysUntilArchive,
+                plural: item.daysUntilArchive === 1 ? '' : 's',
+              })}
+        </Text>
+      )}
+    </Box>
+  )
+}
+
+// ── Account list rows ────────────────────────────────────────────────
+
+function DeployRow({
+  item,
+  busy,
+  onAction,
+}: {
+  item: DeploysListItem
   busy: boolean
   onAction: (item: DeploysListItem, action: 'suspend' | 'resume' | 'delete') => void
 }) {
@@ -327,10 +501,12 @@ function DeployRow({
     <Box
       p={3}
       borderRadius="8px"
-      bg={isCurrent ? tokens.colors.accent.primarySubtle : 'rgba(255, 255, 255, 0.03)'}
-      border={`1px solid ${isCurrent ? `${tokens.colors.accent.primary}30` : 'rgba(255, 255, 255, 0.06)'}`}
+      bg="rgba(255, 255, 255, 0.03)"
+      border="1px solid rgba(255, 255, 255, 0.06)"
+      _hover={{ borderColor: tokens.colors.bg.cardBorder }}
+      transition={`border-color ${tokens.transition.fast}`}
     >
-      <Flex align="center" gap={2} mb={item.daysUntilArchive !== null || isCurrent ? 2 : 0}>
+      <Flex align="center" gap={2} mb={item.daysUntilArchive !== null ? 2 : 0}>
         <Box
           as="a"
           {...{ href: item.serviceUrl, target: '_blank', rel: 'noopener noreferrer' }}
@@ -372,12 +548,6 @@ function DeployRow({
           tone="danger"
         />
       </Flex>
-
-      {isCurrent && (
-        <Text fontSize="10.5px" color={tokens.colors.accent.primary} fontWeight="500">
-          Current project
-        </Text>
-      )}
 
       {item.daysUntilArchive !== null && (
         <Text fontSize="11px" color={tokens.colors.accent.orange}>
@@ -458,102 +628,163 @@ function ActionButton({
   )
 }
 
+// ── Layout primitives ────────────────────────────────────────────────
+
 function Section({
   title,
   subtitle,
   children,
 }: {
   title: string
-  subtitle: string
+  subtitle?: string
   children: React.ReactNode
 }) {
   return (
     <Box>
-      <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary} mb="2px">
+      <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary} mb={subtitle ? '2px' : 3}>
         {title}
       </Text>
-      <Text fontSize="11.5px" color={tokens.colors.text.muted} mb={3} lineHeight="1.5">
-        {subtitle}
-      </Text>
+      {subtitle && (
+        <Text fontSize="11.5px" color={tokens.colors.text.muted} mb={3} lineHeight="1.5">
+          {subtitle}
+        </Text>
+      )}
       {children}
     </Box>
   )
 }
 
-function UrlRow({
-  url,
-  provider,
-  lastDeployedAt,
-}: {
-  url: string
-  provider?: string
-  lastDeployedAt?: string
-}) {
+function SubHeading({ children }: { children: React.ReactNode }) {
+  return (
+    <Text fontSize="12px" fontWeight="600" color={tokens.colors.text.secondary} mb="2px">
+      {children}
+    </Text>
+  )
+}
+
+function ErrorAlert({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  return (
+    <Flex
+      align="flex-start"
+      gap={2.5}
+      p={3}
+      borderRadius="8px"
+      bg={tokens.colors.accent.redSubtle}
+      border={`1px solid ${tokens.colors.accent.redMuted}`}
+    >
+      <Box color={tokens.colors.accent.red} mt="1px" flexShrink={0}>
+        <FiAlertCircle size={14} />
+      </Box>
+      <Text flex="1" fontSize="12px" color={tokens.colors.accent.red} lineHeight="1.5">
+        {message}
+      </Text>
+      <Box
+        as="button"
+        flexShrink={0}
+        display="flex"
+        alignItems="center"
+        justifyContent="center"
+        w="20px"
+        h="20px"
+        borderRadius="5px"
+        bg="transparent"
+        border="none"
+        cursor="pointer"
+        color={tokens.colors.accent.red}
+        opacity={0.7}
+        _hover={{ opacity: 1, bg: 'rgba(248, 81, 73, 0.12)' }}
+        onClick={onDismiss}
+        aria-label="Dismiss"
+      >
+        <FiX size={12} />
+      </Box>
+    </Flex>
+  )
+}
+
+function NotPublishedEmpty() {
+  return (
+    <Flex
+      direction="column"
+      align="center"
+      gap={2}
+      py={8}
+      px={4}
+      borderRadius="10px"
+      bg={tokens.colors.bg.card}
+      border={`1px dashed ${tokens.colors.bg.cardBorder}`}
+      textAlign="center"
+    >
+      <Flex
+        align="center"
+        justify="center"
+        w="40px"
+        h="40px"
+        borderRadius="full"
+        bg={tokens.colors.accent.primarySubtle}
+        color={tokens.colors.accent.primary}
+        mb={1}
+      >
+        <FiUploadCloud size={18} />
+      </Flex>
+      <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary}>
+        {t('deploys.notPublished')}
+      </Text>
+      <Text fontSize="11.5px" color={tokens.colors.text.muted} maxW="320px" lineHeight="1.5">
+        {t('deploys.notPublishedHint')}
+      </Text>
+    </Flex>
+  )
+}
+
+function SkeletonCard() {
   return (
     <Box
+      p={4}
+      borderRadius="10px"
+      bg={tokens.colors.bg.card}
+      border={`1px solid ${tokens.colors.bg.cardBorder}`}
+    >
+      <Flex align="center" gap={2} mb={3}>
+        <Box flex="1" h="14px" borderRadius="4px" bg={tokens.colors.bg.hoverSubtle} css={PULSE_CSS} />
+        <Box w="56px" h="18px" borderRadius="5px" bg={tokens.colors.bg.hoverSubtle} css={PULSE_CSS} />
+      </Flex>
+      <Box w="40%" h="11px" borderRadius="4px" bg={tokens.colors.bg.hoverSubtle} css={PULSE_CSS} />
+    </Box>
+  )
+}
+
+function SkeletonRow() {
+  return (
+    <Flex
+      align="center"
+      gap={2}
       p={3}
       borderRadius="8px"
       bg="rgba(255, 255, 255, 0.03)"
       border="1px solid rgba(255, 255, 255, 0.06)"
     >
-      <Flex align="center" gap={2} mb={lastDeployedAt || provider ? 2 : 0}>
-        <Text flex="1" fontSize="12.5px" fontFamily="mono" color={tokens.colors.text.primary} truncate>
-          {url}
-        </Text>
-        <CopyButton text={url} />
-        <Box
-          as="a"
-          {...{ href: url, target: '_blank', rel: 'noopener noreferrer' }}
-          w="26px"
-          h="26px"
-          display="flex"
-          alignItems="center"
-          justifyContent="center"
-          color={tokens.colors.text.muted}
-          borderRadius="6px"
-          _hover={{ bg: 'rgba(255,255,255,0.05)', color: tokens.colors.accent.primary }}
-        >
-          <FiExternalLink size={12} />
-        </Box>
-      </Flex>
-      {(lastDeployedAt || provider) && (
-        <Text fontSize="11px" color={tokens.colors.text.muted}>
-          {provider && lastDeployedAt && ' · '}
-          {lastDeployedAt && (
-            <>
-              Last deployed: <Text as="span" color={tokens.colors.text.secondary}>{formatTime(lastDeployedAt)}</Text>
-            </>
-          )}
-        </Text>
-      )}
-    </Box>
+      <Box flex="1" h="13px" borderRadius="4px" bg={tokens.colors.bg.hoverSubtle} css={PULSE_CSS} />
+      <Box w="48px" h="16px" borderRadius="5px" bg={tokens.colors.bg.hoverSubtle} css={PULSE_CSS} />
+    </Flex>
   )
 }
+
+// ── Custom domain ────────────────────────────────────────────────────
 
 function AddDomainPanel({
   hostname,
   onChange,
   onSubmit,
   submitting,
-  disabled,
-  disabledMessage,
   summary,
 }: {
   hostname: string
   onChange: (v: string) => void
   onSubmit: () => void
   submitting: boolean
-  disabled?: boolean
-  disabledMessage?: string
   summary: DeploymentSummary | null
 }) {
-  if (disabled && disabledMessage) {
-    return (
-      <Text fontSize="12px" color={tokens.colors.text.muted}>
-        {disabledMessage}
-      </Text>
-    )
-  }
   // Pre-flight runs on every keystroke — cheap regex + 2 string compares.
   // Result is null while empty (no error to show yet) and a string when
   // the input is non-empty AND fails one of the local checks.
@@ -565,7 +796,7 @@ function AddDomainPanel({
         <Input
           value={hostname}
           onChange={(e) => onChange(e.target.value)}
-          placeholder="app.yourdomain.com"
+          placeholder={t('deploys.domain.placeholder')}
           autoComplete="off"
           autoCorrect="off"
           autoCapitalize="none"
@@ -598,7 +829,7 @@ function AddDomainPanel({
         <Button
           onClick={onSubmit}
           loading={submitting}
-          loadingText="Adding…"
+          loadingText={t('deploys.domain.adding')}
           disabled={submitDisabled}
           h="38px"
           px={4}
@@ -608,7 +839,7 @@ function AddDomainPanel({
           color="#fff"
           _hover={{ boxShadow: `0 4px 16px -4px ${tokens.colors.accent.primaryGlow}` }}
         >
-          Add domain
+          {t('deploys.domain.add')}
         </Button>
       </Flex>
       {preflightError && (
@@ -643,7 +874,7 @@ function CustomDomainPanel({
   return (
     <Box>
       <Flex align="center" gap={2} mb="6px">
-        <Text fontSize="13px" fontFamily="mono" color={tokens.colors.text.primary} flex="1">
+        <Text fontSize="13px" fontFamily="mono" color={tokens.colors.text.primary} flex="1" truncate>
           {summary.customDomain}
         </Text>
         <StatusBadge active={isActive} status={summary.domainStatus ?? 'pending'} sslStatus={summary.sslStatus} />
@@ -661,15 +892,10 @@ function CustomDomainPanel({
           color={tokens.colors.text.muted}
           _hover={{ bg: 'rgba(255,255,255,0.05)', color: tokens.colors.text.primary }}
           onClick={onRefresh}
-          title="Refresh status"
+          title={t('deploys.domain.refreshStatus')}
           aria-label={t('deploys.refresh')}
         >
-          <Box
-            css={refreshing ? {
-              animation: 'spin 1s linear infinite',
-              '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } },
-            } : undefined}
-          >
+          <Box css={refreshing ? SPIN_CSS : undefined}>
             <FiRefreshCw size={12} />
           </Box>
         </Box>
@@ -687,8 +913,8 @@ function CustomDomainPanel({
           color={tokens.colors.text.muted}
           _hover={{ bg: tokens.colors.accent.redSubtle, color: tokens.colors.accent.red }}
           onClick={onRemove}
-          title="Remove custom domain"
-          aria-label="Remove"
+          title={t('deploys.domain.remove')}
+          aria-label={t('deploys.domain.remove')}
         >
           <FiTrash2 size={12} />
         </Box>
@@ -698,7 +924,8 @@ function CustomDomainPanel({
           status is fresh or stale. DNS propagation can take 24h+ so this
           context matters more for custom domains than for app-internal data. */}
       <Text fontSize="10.5px" color={tokens.colors.text.muted} mb={3} ml="2px">
-        Last checked: <Text as="span" color={tokens.colors.text.secondary}>{formatRelativeTime(lastCheckedAt)}</Text>
+        {t('deploys.domain.lastChecked')}:{' '}
+        <Text as="span" color={tokens.colors.text.secondary}>{formatRelativeTime(lastCheckedAt)}</Text>
         {' · '}
         <Text
           as="span"
@@ -709,7 +936,7 @@ function CustomDomainPanel({
           _hover={refreshing ? {} : { color: tokens.colors.text.primary }}
           onClick={refreshing ? undefined : onRefresh}
         >
-          {refreshing ? 'checking…' : 'check now'}
+          {refreshing ? t('deploys.domain.checking') : t('deploys.domain.checkNow')}
         </Text>
       </Text>
 
@@ -723,17 +950,17 @@ function CustomDomainPanel({
           mb={3}
         >
           <Text fontSize="11.5px" color={tokens.colors.accent.orange} fontWeight="500" mb={1}>
-            Add these DNS records at your domain registrar
+            {t('deploys.domain.dnsTitle')}
           </Text>
-          <Text fontSize="11px" color={tokens.colors.text.muted}>
-            Status refreshes when this window regains focus, or click "check now" above. DNS propagation can take up to 24h.
+          <Text fontSize="11px" color={tokens.colors.text.muted} lineHeight="1.5">
+            {t('deploys.domain.dnsHint')}
           </Text>
         </Box>
       )}
 
-      {summary.trafficRecord && <DnsRecord label="Traffic" record={summary.trafficRecord} />}
+      {summary.trafficRecord && <DnsRecord label={t('deploys.domain.traffic')} record={summary.trafficRecord} />}
       {summary.sslVerificationRecord && (
-        <DnsRecord label="SSL verification" record={summary.sslVerificationRecord} />
+        <DnsRecord label={t('deploys.domain.ssl')} record={summary.sslVerificationRecord} />
       )}
     </Box>
   )
@@ -784,8 +1011,8 @@ function DnsRecord({
         </Box>
       </Flex>
       <Box px={3} py={2}>
-        <Field label="Name" value={record.name} />
-        <Field label="Value" value={record.value} />
+        <Field label={t('deploys.domain.recordName')} value={record.name} />
+        <Field label={t('deploys.domain.recordValue')} value={record.value} />
       </Box>
     </Box>
   )
@@ -822,7 +1049,7 @@ function StatusBadge({
 }) {
   const color = active ? tokens.colors.accent.greenBright : tokens.colors.accent.orange
   const bg = active ? tokens.colors.accent.greenSubtle : 'rgba(247, 127, 0, 0.1)'
-  const label = active ? 'Active' : `${status}${sslStatus ? ` · SSL ${sslStatus}` : ''}`
+  const label = active ? t('deploys.domain.active') : `${status}${sslStatus ? ` · SSL ${sslStatus}` : ''}`
   return (
     <Flex
       display="inline-flex"
@@ -839,13 +1066,36 @@ function StatusBadge({
   )
 }
 
+// ── Shared bits ──────────────────────────────────────────────────────
+
+function IconLink({ href, label, children }: { href: string; label: string; children: React.ReactNode }) {
+  return (
+    <Box
+      as="a"
+      {...{ href, target: '_blank', rel: 'noopener noreferrer' }}
+      w="26px"
+      h="26px"
+      display="flex"
+      alignItems="center"
+      justifyContent="center"
+      color={tokens.colors.text.muted}
+      borderRadius="6px"
+      _hover={{ bg: 'rgba(255,255,255,0.05)', color: tokens.colors.accent.primary }}
+      title={label}
+      aria-label={label}
+    >
+      {children}
+    </Box>
+  )
+}
+
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
   const handleCopy = useCallback(() => {
     navigator.clipboard.writeText(text).catch(() => {})
     setCopied(true)
-    const t = setTimeout(() => setCopied(false), 1400)
-    return () => clearTimeout(t)
+    const id = setTimeout(() => setCopied(false), 1400)
+    return () => clearTimeout(id)
   }, [text])
   return (
     <Box
@@ -862,7 +1112,8 @@ function CopyButton({ text }: { text: string }) {
       color={copied ? tokens.colors.accent.greenBright : tokens.colors.text.muted}
       _hover={{ bg: 'rgba(255,255,255,0.05)', color: tokens.colors.text.primary }}
       onClick={handleCopy}
-      aria-label="Copy"
+      title={copied ? t('deploys.copied') : t('deploys.copy')}
+      aria-label={t('deploys.copy')}
     >
       {copied ? <FiCheck size={12} /> : <FiCopy size={12} />}
     </Box>
@@ -870,13 +1121,15 @@ function CopyButton({ text }: { text: string }) {
 }
 
 function formatRelativeTime(epochMs: number | null): string {
-  if (!epochMs) return 'never'
+  if (!epochMs) return t('deploys.time.never')
   const diff = Date.now() - epochMs
-  if (diff < 5_000) return 'just now'
-  if (diff < 60_000) return `${Math.floor(diff / 1000)}s ago`
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`
-  return new Date(epochMs).toLocaleString()
+  if (diff < 5_000) return t('deploys.time.justNow')
+  let value: string
+  if (diff < 60_000) value = `${Math.floor(diff / 1000)}s`
+  else if (diff < 3_600_000) value = `${Math.floor(diff / 60_000)}m`
+  else if (diff < 86_400_000) value = `${Math.floor(diff / 3_600_000)}h`
+  else return new Date(epochMs).toLocaleString()
+  return fmtT(t('deploys.time.ago'), { value })
 }
 
 function formatTime(iso: string): string {

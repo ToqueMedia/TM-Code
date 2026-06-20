@@ -150,11 +150,15 @@ fn file_dir(project_path: &str, session_id: &str, checkpoint_id: &str) -> Result
 /// Files that ARE committable (tasks.json, permissions.json,
 /// http-client.json) intentionally do NOT appear here — they're project
 /// context that should travel via git the same way as PLAN.md / TODO.md.
-async fn ensure_toquemedia_gitignore(project_path: &str) -> Result<(), String> {
+pub(crate) async fn ensure_toquemedia_gitignore(project_path: &str) -> Result<(), String> {
     const ENTRIES: &[(&str, &str)] = &[
         (
             "checkpoints/",
             "# Agent recovery snapshots — throwaway state, never source of truth.",
+        ),
+        (
+            "collab/",
+            "# Team-collab restore points + ephemeral P2P chat — throwaway state.",
         ),
         (
             "sessions/",

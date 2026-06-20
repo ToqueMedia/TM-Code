@@ -15,6 +15,8 @@ export interface ToolCallRowProps {
   doneFrame: number
   /** When true, the done marker uses the failed color. */
   isError?: boolean
+  /** Optional small human-readable label shown after the tool name (e.g. "— Criou a página"). */
+  humanLabel?: string
 }
 
 /**
@@ -22,7 +24,7 @@ export interface ToolCallRowProps {
  * `⟳ Reading(server/routes/users.ts)` while running, `● Read(...)` + summary
  * when done. All motion is frame-driven.
  */
-export const ToolCallRow: React.FC<ToolCallRowProps> = ({ spec, startFrame, doneFrame, isError = false }) => {
+export const ToolCallRow: React.FC<ToolCallRowProps> = ({ spec, startFrame, doneFrame, isError = false, humanLabel }) => {
   const frame = useCurrentFrame()
   const { fps } = useVideoConfig()
 
@@ -105,6 +107,11 @@ export const ToolCallRow: React.FC<ToolCallRowProps> = ({ spec, startFrame, done
             {'(' + spec.subtitle + ')'}
           </span>
         </span>
+        {humanLabel ? (
+          <span style={{ fontSize: 18, color: tokens.colors.text.secondary, fontWeight: 500 }}>
+            {'— ' + humanLabel}
+          </span>
+        ) : null}
       </div>
       <div
         style={{

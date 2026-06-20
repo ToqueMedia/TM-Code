@@ -6,6 +6,7 @@ import { TerminalStructuredDiff } from './TerminalStructuredDiff'
 import { getToolDisplay, getToolSubtitle, shortenPath } from './toolDisplay'
 import { isShellTool, ShellCommandBlock } from '../shell/ShellCommandBlock'
 import { Spinner } from './terminalSpinner'
+import { t } from '@/i18n'
 
 interface TerminalToolCallProps {
   toolCall: ToolCallDisplay
@@ -113,7 +114,12 @@ function buildTaskListPreview(result: string | undefined): string | null {
 
 export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: TerminalToolCallProps) {
   const isError = toolCall.isError || toolCall.status === 'failed'
-  const isRunning = toolCall.status === 'running'
+  // `started` (set on onToolCallStart) separates the call actually executing
+  // from those streamed-in but still QUEUED behind a pending diff approval —
+  // the serial tool loop runs edits one at a time. Without it, every queued
+  // edit shows an active spinner and reads as parallel edits firing at once.
+  const isQueued = toolCall.status === 'running' && toolCall.started !== true
+  const isRunning = toolCall.status === 'running' && toolCall.started === true
   const hasDiff = toolCall.diffOldContent !== undefined || toolCall.diffNewContent !== undefined
   const isReadTool = READ_TOOLS.has(toolCall.toolName)
   const isWriteTool = WRITE_TOOLS.has(toolCall.toolName)
@@ -130,7 +136,9 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
   }
 
   const display = getToolDisplay(toolCall.toolName)
-  const verb = isRunning ? display.running : isError ? display.failed : display.done
+  const verb = isQueued
+    ? `${t('toolLabel.queued')} · ${display.running}`
+    : isRunning ? display.running : isError ? display.failed : display.done
   const taskCompletionSummary = toolCall.toolName === 'update_tasks'
     ? buildTaskCompletionSummary(toolCall.result, toolCall.input)
     : null
@@ -146,11 +154,13 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
       ? (toolCall.input.path as string)
       : null
 
-  const statusColor = isRunning
-    ? tokens.colors.toolCall.runningText
-    : isError
-      ? tokens.colors.accent.red
-      : tokens.colors.accent.green
+  const statusColor = isQueued
+    ? tokens.colors.text.disabled
+    : isRunning
+      ? tokens.colors.toolCall.runningText
+      : isError
+        ? tokens.colors.accent.red
+        : tokens.colors.accent.green
 
   const readSummary = useMemo(
     () => isReadTool && !isRunning ? buildReadSummary(toolCall.toolName, toolCall.result, toolCall.input) : null,

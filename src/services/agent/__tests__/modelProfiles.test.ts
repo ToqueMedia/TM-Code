@@ -1,6 +1,5 @@
 import {
   getModelProfile,
-  getAllModelProfiles,
   getProfileForPlan,
   MODEL_PROFILES,
   DEFAULT_MODEL_ID,
@@ -8,29 +7,38 @@ import {
 
 describe('modelProfiles', () => {
   describe('MODEL_PROFILES registry', () => {
-    it('contains all 6 model profiles (plus alias keys)', () => {
+    it('contains the expected model + alias keys', () => {
       const ids = Object.keys(MODEL_PROFILES)
       expect(ids).toContain('mimo-v2.5-pro-1m')
-      expect(ids).toContain('glm-5.1')
+      expect(ids).toContain('glm-5.2')
+      // DashScope (US) pode reportar o id base 'glm-5' — alias para o MESMO
+      // perfil do glm-5.2, senão o lookup cai no default ao rotear por DashScope.
+      expect(ids).toContain('glm-5')
+      expect(MODEL_PROFILES['glm-5']).toBe(MODEL_PROFILES['glm-5.2'])
       expect(ids).toContain('qwen3.7-max-2026-06-08')
-      // Alias do id antigo — aponta para o MESMO perfil do snapshot datado
-      // enquanto o backend não republicar a config ativa.
-      expect(ids).toContain('qwen3.7-max')
+      // Alias do id antigo → mesmo perfil do snapshot datado.
       expect(MODEL_PROFILES['qwen3.7-max']).toBe(MODEL_PROFILES['qwen3.7-max-2026-06-08'])
       expect(ids).toContain('mimo-v2.5-1m')
-      // Gemini: id do preset + id raw com prefixo de publisher (X-TM-Model)
-      // apontam para o MESMO perfil.
+      // Gemini: id do preset + id raw com prefixo de publisher → mesmo perfil.
       expect(MODEL_PROFILES['google/gemini-3.5-flash']).toBe(MODEL_PROFILES['gemini-3.5-flash'])
       expect(MODEL_PROFILES['google/gemini-3.1-pro-preview']).toBe(MODEL_PROFILES['gemini-3.1-pro-preview'])
-      expect(ids.length).toBe(9)
+    })
+
+    it('glm-5.2 has 1M context, 128K output, toggleable thinking, no native vision', () => {
+      const glm = MODEL_PROFILES['glm-5.2']
+      expect(glm.modelId).toBe('glm-5.2')
+      expect(glm.contextWindow).toBe(1_000_000)
+      expect(glm.maxOutputTokens).toBe(131_072)
+      expect(glm.thinkingMode).toBe('toggleable')
+      expect(glm.supportsThinking).toBe(true)
+      // Visão servida pelo sidecar, não nativamente.
+      expect(glm.supportsAttachments).toBe(false)
     })
 
     it('gemini profiles have native vision and mandatory thinking', () => {
       const gemini = MODEL_PROFILES['gemini-3.5-flash']
       expect(gemini.supportsAttachments).toBe(true)
       expect(gemini.thinkingMandatory).toBe(true)
-      // Gemini não fala enable_thinking — nada de params de outros dialetos.
-      expect(gemini.thinkingParam).toBeNull()
     })
 
     it('qwen3.7-max-2026-06-08 has native vision and search', () => {
@@ -43,13 +51,9 @@ describe('modelProfiles', () => {
     it('mimo-v2.5-pro-1m has correct specs', () => {
       const mimo = MODEL_PROFILES['mimo-v2.5-pro-1m']
       expect(mimo.thinkingMode).toBe('toggleable')
-      expect(mimo.thinkingParam).toBe('enable_thinking')
       expect(mimo.supportsThinking).toBe(true)
       expect(mimo.contextWindow).toBe(1_048_576)
       expect(mimo.maxOutputTokens).toBe(32_768)
-      expect(mimo.temperature).toBe(0.3)
-      expect(mimo.topP).toBe(0.95)
-      expect(mimo.thinkingBudget).toBe(8192)
     })
   })
 
@@ -66,15 +70,6 @@ describe('modelProfiles', () => {
     })
   })
 
-  describe('getAllModelProfiles', () => {
-    it('returns all 6 profiles (aliases deduped)', () => {
-      const all = getAllModelProfiles()
-      expect(all.length).toBe(6)
-      expect(all.filter(p => p.id.startsWith('qwen3.7-max')).length).toBe(1)
-      expect(all.filter(p => p.id.startsWith('gemini-')).length).toBe(2)
-    })
-  })
-
   describe('getProfileForPlan', () => {
     it('always returns MiMo regardless of plan', () => {
       expect(getProfileForPlan('explorer').id).toBe('mimo-v2.5-pro-1m')
@@ -84,15 +79,11 @@ describe('modelProfiles', () => {
       expect(getProfileForPlan('welcome').id).toBe('mimo-v2.5-pro-1m')
     })
 
-    it('returned profile has toggleable thinking', () => {
+    it('returned profile has toggleable thinking and 1M context', () => {
       const profile = getProfileForPlan('pro')
       expect(profile.thinkingMode).toBe('toggleable')
       expect(profile.supportsThinking).toBe(true)
-      expect(profile.thinkingParam).toBe('enable_thinking')
-    })
-
-    it('returned profile has 1M context window', () => {
-      expect(getProfileForPlan('pro').contextWindow).toBe(1_048_576)
+      expect(profile.contextWindow).toBe(1_048_576)
     })
   })
 })

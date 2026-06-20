@@ -683,7 +683,7 @@ export function usePromptBar() {
     agentStore.setStatus('awaiting_response')
 
     // Split on model capability. Vision-capable models (Qwen 3.6 Plus
-    // for image analysis, GLM-5.1 as primary) receive an OpenAI-compatible
+    // for image analysis, GLM as primary) receive an OpenAI-compatible
     // content parts array with real image_url parts. Text-only models
     // receive a flattened string with `<attached_image .../>` placeholders.
     //
@@ -691,7 +691,7 @@ export function usePromptBar() {
     // the queue stays provider-agnostic — it carries blocks, the
     // boundary decides how to ship them.
     // Model is decided by the backend. Multimodal support depends on the
-    // plan: paid plans use GLM-5.1 (primary) + Qwen 3.6 Plus (image analysis),
+    // plan: paid plans use GLM (primary) + Qwen 3.6 Plus (image analysis),
     // free uses DeepSeek V3.2 (text-only).
     const { useBillingStore } = await import('../../stores/billingStore')
     const billingPlan = useBillingStore.getState().plan
@@ -714,7 +714,7 @@ export function usePromptBar() {
       if (parts) {
         // CAPABILITY GATE (parity with agentRunner): only models with NATIVE
         // vision get the raw image_url parts. Sending image_url to a BLIND
-        // active model (MiMo V2.5 Pro, GLM-5.1 → supportsAttachments=false)
+        // active model (MiMo V2.5 Pro, GLM → supportsAttachments=false)
         // 404s with "no endpoints found that support image input". For those,
         // route the image through the vision sidecar — a multimodal model
         // (sidecar:vision, e.g. MiMo V2.5 / Qwen) describes it and the agent

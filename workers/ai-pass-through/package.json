@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "wrangler dev --config wrangler.toml --port 8788 --inspector-port 0 --persist-to ../../.wrangler/shared-state",
+    "dev": "wrangler dev --config wrangler.toml --ip 0.0.0.0 --port 8788 --inspector-port 0 --persist-to ../../.wrangler/shared-state",
     "deploy": "wrangler deploy --config wrangler.toml",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"

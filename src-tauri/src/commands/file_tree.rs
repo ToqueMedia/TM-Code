@@ -608,7 +608,7 @@ pub async fn list_recent_files(
             &mut scanned,
         );
         // Newest first, then truncate to the requested count.
-        out.sort_by(|a, b| b.modified.cmp(&a.modified));
+        out.sort_by_key(|f| std::cmp::Reverse(f.modified));
         out.truncate(limit);
         Ok(out)
     })
@@ -1142,11 +1142,20 @@ mod tests {
         let on = build(&dir, true);
         assert!(on.contains("kept.ts"), "tracked file should remain");
         assert!(!on.contains("ignored.log"), "*.log rule drops it");
-        assert!(on.contains("important.log"), "!important.log negation re-includes");
+        assert!(
+            on.contains("important.log"),
+            "!important.log negation re-includes"
+        );
         assert!(!on.contains("out.js"), "built/ dir contents dropped");
         assert!(on.contains("app.ts"), "tracked nested file remains");
-        assert!(!on.contains("local.tmp"), "nested src/.gitignore rule applied");
-        assert!(!on.contains("node_modules"), "EXCLUDED_DIRS floor still holds");
+        assert!(
+            !on.contains("local.tmp"),
+            "nested src/.gitignore rule applied"
+        );
+        assert!(
+            !on.contains("node_modules"),
+            "EXCLUDED_DIRS floor still holds"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

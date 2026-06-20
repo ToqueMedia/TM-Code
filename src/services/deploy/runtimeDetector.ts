@@ -8,7 +8,7 @@
  *
  * Signal priority (first match wins):
  *   1. Monorepo workspaces + client/server dirs   → composite
- *   2. next.js in deps                            → cf-ssr next-on-pages
+ *   2. next.js in deps + output:'standalone'       → next-standalone (Cloud Run)
  *   3. nuxt in deps                               → cf-ssr nuxt
  *   4. @sveltejs/kit in deps                      → cf-ssr sveltekit
  *   5. astro in deps + config has output:server   → cf-ssr astro
@@ -22,7 +22,7 @@
  * returned by the detector so the UI can surface "this template detected,
  * deploy support comes in Phase N".
  */
-import type { DeployPlan, StaticSpaPlan, CfSsrPlan } from './deployPlan'
+import type { DeployPlan, StaticSpaPlan, CfSsrPlan, NextStandalonePlan } from './deployPlan'
 
 // ── FsView: minimal interface the detector needs ─────────────
 export interface FsView {
@@ -113,6 +113,27 @@ function detectHiddenBackend(fs: FsView, deps: Set<string>): string | null {
   )
 }
 
+/** Read one of next.config.{js,mjs,ts,cjs}, returning its raw text. */
+function readNextConfig(fs: FsView): string | null {
+  for (const ext of ['js', 'mjs', 'ts', 'cjs']) {
+    const text = fs.readText(`next.config.${ext}`)
+    if (text) return text
+  }
+  return null
+}
+
+/**
+ * True when the Next config opts into `output: 'standalone'` — the only
+ * mode the container deploy supports (it's what emits `.next/standalone/
+ * server.js`). Tolerant of single/double quotes and whitespace. A regex is
+ * fine here: next.config is JS we can't safely eval, and the shape is
+ * unambiguous enough that an AST parse isn't worth the cost.
+ */
+function nextHasStandaloneOutput(config: string | null): boolean {
+  if (!config) return false
+  return /output\s*:\s*['"]standalone['"]/.test(config)
+}
+
 /** Read one of astro.config.{ts,mjs,js,cjs}, returning its raw text. */
 function readAstroConfig(fs: FsView): string | null {
   for (const ext of ['ts', 'mjs', 'js', 'cjs']) {
@@ -195,12 +216,31 @@ export function detectDeployPlan(fs: FsView): DetectionResult {
   const deps = allDeps(pkg)
 
   // 2. Next.js ─────────────────────────────────────────────────
+  // Next deploys as a standalone Node server on a Cloudflare Container
+  // (Cloud Run) — `output: 'standalone'` emits `.next/standalone/server.js`,
+  // which the container runs and which serves SSR + route handlers + its own
+  // static assets. Without that config the build never produces a server to
+  // run, so we detect the plan either way but only mark it deployable when
+  // standalone output is set, surfacing a precise fix otherwise.
   if (deps.has('next')) {
+    const plan: NextStandalonePlan = { kind: 'next-standalone', port: 8080 }
+    // `output: 'standalone'` is required (it emits the self-contained server
+    // the container runs), but we no longer GATE on it — the deploy flow
+    // injects it on publish (see deployService.ensureNextStandaloneConfig),
+    // mirroring the auto-generated Dockerfile. So a Next project is always
+    // deployable; we just warn when we'll be editing the config.
+    const hasStandalone = nextHasStandaloneOutput(readNextConfig(fs))
     return {
-      plan: { kind: 'cf-ssr', adapter: 'next-on-pages', assetsDir: '.vercel/output/static', workerEntry: '.vercel/output/functions/_worker.js' },
-      reason: 'Next.js project detected. Publish support for Next.js is coming soon.',
-      phase1Supported: false,
-      warnings: [],
+      plan,
+      reason: hasStandalone
+        ? 'Next.js project detected (output: standalone).'
+        : "Next.js project detected. Publish will enable `output: 'standalone'` in your next.config.",
+      phase1Supported: true,
+      warnings: hasStandalone
+        ? []
+        : [
+            "next.config has no `output: 'standalone'` — Publish will add it (required for the container build).",
+          ],
     }
   }
 
@@ -411,6 +451,10 @@ export async function detectFromProjectPath(projectPath: string): Promise<Detect
   await view.preload([
     'package.json',
     'angular.json',
+    'next.config.js',
+    'next.config.mjs',
+    'next.config.ts',
+    'next.config.cjs',
     'astro.config.ts',
     'astro.config.mjs',
     'astro.config.js',

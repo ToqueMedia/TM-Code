@@ -78,6 +78,12 @@ export interface Env {
    *  Mais folgado: sem stream, os headers só chegam quando a geração inteira
    *  termina (ex.: compactação da IDE com transcript completo). */
   UPSTREAM_NONSTREAM_HEADER_TIMEOUT_MS?: string
+  /** Timeout (ms) de INATIVIDADE do stream DEPOIS dos headers — default 90000.
+   *  O header-timeout só cobre até ao primeiro byte; este re-arma a cada chunk
+   *  e aborta o upstream se não fluírem bytes durante este intervalo (provider
+   *  que estola a meio da geração). Sem ele, a Response ficava aberta até o
+   *  runtime a matar com "code had hung". 0/negativo desliga o watchdog. */
+  UPSTREAM_STREAM_IDLE_TIMEOUT_MS?: string
   [key: string]: unknown
 }
 

@@ -84,7 +84,16 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
         <Text as="span" opacity={0.5}>{projectPath}</Text>
       </Text>
       {gitInfo && (
-        <Text fontSize="12px" color={tokens.colors.text.disabled} mt="2px" fontFamily={tokens.fontFamily.mono}>
+        <Text
+          fontSize="12px"
+          color={tokens.colors.text.disabled}
+          mt="2px"
+          fontFamily={tokens.fontFamily.mono}
+          // Branch + latest commit on a SINGLE line — a long commit subject is
+          // truncated with an ellipsis instead of wrapping to extra rows.
+          lineClamp={1}
+          wordBreak="break-all"
+        >
           <Text as="span" color={tokens.colors.accent.green}>→ {gitInfo.branch}</Text>
           {gitInfo.lastCommit && (
             <Text as="span" ml={2} opacity={0.5}>{gitInfo.lastCommit}</Text>

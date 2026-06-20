@@ -743,7 +743,10 @@ mod tests {
     #[test]
     fn normalize_keeps_valid_patterns_untouched() {
         assert_eq!(normalize_glob_pattern("**/*.tsx"), "**/*.tsx");
-        assert_eq!(normalize_glob_pattern("src/**/*.test.ts"), "src/**/*.test.ts");
+        assert_eq!(
+            normalize_glob_pattern("src/**/*.test.ts"),
+            "src/**/*.test.ts"
+        );
         assert_eq!(normalize_glob_pattern("**/package.json"), "**/package.json");
         assert_eq!(normalize_glob_pattern("*.rs"), "*.rs");
     }
@@ -753,7 +756,10 @@ mod tests {
         // O caso real de produção (2026-06-12): dialecto JS aceite, crate glob não.
         assert_eq!(normalize_glob_pattern("**/dispenser**"), "**/dispenser*");
         assert_eq!(normalize_glob_pattern("**dispenser"), "*dispenser");
-        assert_eq!(normalize_glob_pattern("dispenser**/index.ts"), "dispenser*/index.ts");
+        assert_eq!(
+            normalize_glob_pattern("dispenser**/index.ts"),
+            "dispenser*/index.ts"
+        );
         assert_eq!(normalize_glob_pattern("**/foo**bar/**"), "**/foo*bar/**");
     }
 
