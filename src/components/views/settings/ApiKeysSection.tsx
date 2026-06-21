@@ -1168,30 +1168,10 @@ function ProviderCard(props: {
           <Text fontSize="11px" color={tokens.colors.text.muted} fontWeight="500">
             {t('settings.byokContextWindow')}
           </Text>
-          <select
-            value={(contextWindow ?? '').toString()}
-            onChange={(e) => {
-              const v = e.target.value
-              setContextWindow(provider.id, v === '' ? undefined : Number(v))
-            }}
-            style={{
-              fontSize: '12px',
-              fontFamily: tokens.fontFamily.mono,
-              padding: '6px 8px',
-              borderRadius: tokens.radius.md,
-              background: tokens.colors.bg.sidebar,
-              color: tokens.colors.text.primary,
-              border: `1px solid ${tokens.colors.border.default}`,
-              cursor: 'pointer',
-              width: '100%',
-            }}
-          >
-            {CONTEXT_WINDOW_OPTIONS.map(opt => (
-              <option key={opt.label} value={opt.value ?? ''}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
+          <ContextWindowPicker
+            value={contextWindow}
+            onChange={(v) => setContextWindow(provider.id, v)}
+          />
           <Text fontSize="10px" color={tokens.colors.text.disabled} lineHeight="1.5">
             {t('settings.byokContextWindowHint')}
           </Text>
@@ -1479,6 +1459,147 @@ function CapCheckbox(props: {
         {props.label}
       </Text>
     </HStack>
+  )
+}
+
+// ── ContextWindowPicker ──
+//
+// Custom dropdown for the user-declared BYOK context window. Matches the
+// ModelPicker chrome (dark glass trigger + panel, brand-pink selection) so the
+// BYOK card reads as one designed surface rather than a stray native <select>.
+
+function ContextWindowPicker(props: {
+  value: number | undefined
+  onChange: (v: number | undefined) => void
+}) {
+  const [isOpen, setIsOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const selected =
+    CONTEXT_WINDOW_OPTIONS.find(o => o.value === props.value) ?? CONTEXT_WINDOW_OPTIONS[0]
+
+  useEffect(() => {
+    if (!isOpen) return
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setIsOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [isOpen])
+
+  return (
+    <Box ref={ref} position="relative">
+      <Flex
+        as="button"
+        align="center"
+        justify="space-between"
+        w="100%"
+        px={3}
+        py="8px"
+        borderRadius={tokens.radius.md}
+        bg={tokens.colors.bg.sidebar}
+        border="1px solid"
+        textAlign="left"
+        borderColor={isOpen ? 'rgba(254, 16, 99, 0.5)' : tokens.colors.border.default}
+        cursor="pointer"
+        transition={tokens.transition.fast}
+        _hover={{ borderColor: tokens.colors.border.subtle }}
+        _focusVisible={{ borderColor: 'rgba(254, 16, 99, 0.7)', outline: 'none' }}
+        onClick={() => setIsOpen(v => !v)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') setIsOpen(false)
+          else if ((e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') && !isOpen) {
+            e.preventDefault()
+            setIsOpen(true)
+          }
+        }}
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
+      >
+        <HStack gap={2} flex={1} minW={0}>
+          <Text fontSize="12px" color={tokens.colors.text.primary} fontWeight="500" fontFamily={tokens.fontFamily.mono}>
+            {selected.label}
+          </Text>
+          {selected.value !== undefined && (
+            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
+              {selected.value.toLocaleString()} tokens
+            </Text>
+          )}
+        </HStack>
+        <Box
+          color={tokens.colors.text.disabled}
+          transition="transform 0.15s"
+          transform={isOpen ? 'rotate(180deg)' : 'rotate(0deg)'}
+        >
+          <FiChevronDown size={14} />
+        </Box>
+      </Flex>
+
+      {isOpen && (
+        <Box
+          role="listbox"
+          position="absolute"
+          top="calc(100% + 4px)"
+          left={0}
+          right={0}
+          maxH="280px"
+          overflowY="auto"
+          bg={tokens.colors.bg.overlay}
+          border="1px solid"
+          borderColor={tokens.colors.border.panel}
+          borderRadius={tokens.radius.md}
+          boxShadow="0 8px 24px rgba(0,0,0,0.4)"
+          zIndex={tokens.zIndex.dropdown}
+          py={1}
+        >
+          {CONTEXT_WINDOW_OPTIONS.map(opt => {
+            const isSelected = opt.value === props.value
+            return (
+              <Flex
+                key={opt.label}
+                as="button"
+                role="option"
+                aria-selected={isSelected}
+                align="center"
+                justify="space-between"
+                w="100%"
+                px={3}
+                py="8px"
+                textAlign="left"
+                bg={isSelected ? 'rgba(254, 16, 99, 0.08)' : 'transparent'}
+                cursor="pointer"
+                transition={tokens.transition.fast}
+                _hover={{ bg: isSelected ? 'rgba(254, 16, 99, 0.12)' : tokens.colors.bg.hoverSubtle }}
+                onClick={() => {
+                  props.onChange(opt.value)
+                  setIsOpen(false)
+                }}
+              >
+                <HStack gap={1.5} minW={0}>
+                  <Text
+                    fontSize="12px"
+                    fontFamily={tokens.fontFamily.mono}
+                    color={isSelected ? tokens.colors.accent.primary : tokens.colors.text.primary}
+                    fontWeight={isSelected ? '600' : '500'}
+                  >
+                    {opt.label}
+                  </Text>
+                  {opt.value !== undefined && (
+                    <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
+                      {opt.value.toLocaleString()}
+                    </Text>
+                  )}
+                </HStack>
+                {isSelected && (
+                  <Box color={tokens.colors.accent.primary} flexShrink={0}>
+                    <FiCheck size={12} />
+                  </Box>
+                )}
+              </Flex>
+            )
+          })}
+        </Box>
+      )}
+    </Box>
   )
 }
 
