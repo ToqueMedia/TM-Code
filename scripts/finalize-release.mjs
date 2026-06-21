@@ -7,6 +7,59 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
 const repo = 'ToqueMedia/TM-Code';
 
+function loadGithubTokenFromDotEnv() {
+  if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) {
+    return;
+  }
+
+  const envPath = path.join(projectRoot, '.env');
+  if (!fs.existsSync(envPath)) {
+    return;
+  }
+
+  const env = fs.readFileSync(envPath, 'utf8');
+  for (const line of env.split(/\r?\n/)) {
+    const match = line.match(/^\s*(GH_TOKEN|GITHUB_TOKEN)\s*=\s*(.*)\s*$/);
+    if (!match) {
+      continue;
+    }
+
+    const value = match[2].trim().replace(/^['"]|['"]$/g, '');
+    if (value) {
+      process.env[match[1]] = value;
+      if (match[1] === 'GITHUB_TOKEN' && !process.env.GH_TOKEN) {
+        process.env.GH_TOKEN = value;
+      }
+      return;
+    }
+  }
+}
+
+loadGithubTokenFromDotEnv();
+
+function resolveCommand(command) {
+  if (process.platform !== 'win32') {
+    return command;
+  }
+
+  const whereResult = spawnSync('where.exe', [command], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+    shell: false
+  });
+
+  if (whereResult.status === 0) {
+    const resolved = whereResult.stdout.split(/\r?\n/).find(Boolean);
+    if (resolved) {
+      return resolved.trim();
+    }
+  }
+
+  return command;
+}
+
+const ghCommand = resolveCommand('gh');
+
 function resolveVersion() {
   const argVersion = process.argv.slice(2).find(arg => !arg.startsWith('--'));
   if (argVersion) {
@@ -25,7 +78,7 @@ function resolveVersion() {
 }
 
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+  const result = spawnSync(resolveCommand(command), args, {
     cwd: projectRoot,
     encoding: 'utf8',
     shell: false,
@@ -46,7 +99,7 @@ function run(command, args, options = {}) {
 }
 
 function ensureGithubCliAuth() {
-  const ghVersion = spawnSync('gh', ['--version'], {
+  const ghVersion = spawnSync(ghCommand, ['--version'], {
     cwd: projectRoot,
     encoding: 'utf8',
     shell: false
@@ -58,7 +111,7 @@ function ensureGithubCliAuth() {
     process.exit(1);
   }
 
-  const authStatus = spawnSync('gh', ['auth', 'status', '--hostname', 'github.com'], {
+  const authStatus = spawnSync(ghCommand, ['auth', 'status', '--hostname', 'github.com'], {
     cwd: projectRoot,
     encoding: 'utf8',
     shell: false
