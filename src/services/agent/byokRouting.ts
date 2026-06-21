@@ -115,7 +115,7 @@ export async function buildByokClientFromSnapshot(
   }
 
   try {
-    return createByokAgentClient({
+    const client = createByokAgentClient({
       baseURL: snapshot.baseURL,
       apiKey: key,
       apiShape,
@@ -123,6 +123,19 @@ export async function buildByokClientFromSnapshot(
       maxRetries: 0,
       timeout: opts?.lightweight ? 120_000 : 300_000,
     })
+    // Runtime evidence: the agent will talk to the user's provider directly,
+    // billed to their key — the TM worker (the only metering point) is bypassed.
+    let host = snapshot.baseURL
+    try {
+      host = new URL(snapshot.baseURL).host
+    } catch {
+      /* keep raw */
+    }
+    logger.info(
+      'byok',
+      `direct client → ${snapshot.providerId}/${snapshot.modelId} @ ${host} (TM worker bypassed; key=${key ? 'user' : 'local-none'})`,
+    )
+    return client
   } catch (err) {
     logger.warn('byok', `client build failed for ${snapshot.providerId}: ${String(err)}`)
     return null

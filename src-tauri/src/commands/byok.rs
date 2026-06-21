@@ -411,6 +411,19 @@ pub async fn byok_chat_stream(
         ));
     }
 
+    // Runtime evidence: this request goes straight to the user's provider with
+    // their own key — the TM data-plane worker is bypassed entirely, so no TM
+    // metering runs. (We log host + path only; never the key.)
+    let has_auth = input
+        .headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("authorization") || k.eq_ignore_ascii_case("x-api-key"));
+    eprintln!(
+        "[byok] direct → POST {host}{} (TM worker bypassed; user_key={})",
+        parsed.path(),
+        if has_auth { "present" } else { "none(local)" }
+    );
+
     let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(300));
     if is_local {
         // Self-signed local gateways (rare) — accept invalid certs only for
