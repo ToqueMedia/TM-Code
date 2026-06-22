@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
-import { Flex, Text } from '@chakra-ui/react'
+import { Box, Flex, Text } from '@chakra-ui/react'
+import { FiZap } from 'react-icons/fi'
 import { useAgentStore } from '../../stores/agentStore'
 import { useChatStore } from '../../stores/chatStore'
 import { tokens } from '@/theme/tokens'
@@ -55,32 +56,48 @@ export const ChatWorkingTips = memo(function ChatWorkingTips() {
 
   if (!working || !tip) return null
 
+  // Drop the trailing colon from the shared "dica:" label — here it reads as a
+  // styled badge, not inline prose.
+  const label = t('terminalMode.greeting.tipLabel').replace(/:\s*$/, '')
+
   return (
-    <Flex
-      flexShrink={0}
-      align="baseline"
-      gap={2}
-      px={4}
-      py="3px"
-      data-ui-chrome
-    >
-      <Text
-        fontSize="11px"
-        color={tokens.colors.accent.purple}
-        fontWeight="600"
-        flexShrink={0}
+    // Outer wrapper centres the hint on the SAME 900px column as the transcript
+    // and the PromptBar, so it stops breaking out to the window's left edge.
+    <Flex flexShrink={0} w="100%" justify="center" px={4} pb="6px" data-ui-chrome>
+      <Flex
+        maxW="900px"
+        w="100%"
+        align="center"
+        gap={2}
+        px={3}
+        py="6px"
+        borderRadius={tokens.radius.md}
+        bg="rgba(163, 113, 247, 0.06)"
+        border="1px solid rgba(163, 113, 247, 0.16)"
       >
-        {t('terminalMode.greeting.tipLabel')}
-      </Text>
-      <Text
-        fontSize="11px"
-        color={tokens.colors.text.muted}
-        whiteSpace="nowrap"
-        overflow="hidden"
-        textOverflow="ellipsis"
-      >
-        {tip}
-      </Text>
+        <Box color={tokens.colors.accent.purple} flexShrink={0} display="flex">
+          <FiZap size={11} />
+        </Box>
+        <Text
+          fontSize="10px"
+          fontWeight="700"
+          letterSpacing="0.06em"
+          textTransform="uppercase"
+          color={tokens.colors.accent.purple}
+          flexShrink={0}
+        >
+          {label}
+        </Text>
+        <Text
+          fontSize="11px"
+          color={tokens.colors.text.muted}
+          whiteSpace="nowrap"
+          overflow="hidden"
+          textOverflow="ellipsis"
+        >
+          {tip}
+        </Text>
+      </Flex>
     </Flex>
   )
 })
