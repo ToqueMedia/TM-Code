@@ -22,7 +22,7 @@ import { TerminalChatNotification } from './TerminalChatNotification'
 import { TerminalLivePreviewBanner } from './TerminalLivePreviewBanner'
 import { TerminalIncomingPreviewBanner } from './TerminalIncomingPreviewBanner'
 import { BillingOverageBanner } from './BillingOverageBanner'
-import { ErrorBoundary } from './terminalHelpers'
+import { ErrorBoundary, TerminalCrashFallback } from './terminalHelpers'
 import { TerminalPermissionPrompt } from './TerminalPermissionPrompt'
 import { TerminalSessionPicker } from './TerminalSessionPicker'
 import { TerminalCompactionIndicator } from './TerminalCompactionIndicator'
@@ -778,6 +778,13 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       onDrop={onViewDrop}
     >
       <TerminalTitleBar projectPath={projectPath} onBack={handleBack} />
+
+      {/* Top-level crash boundary: a render error anywhere below the title bar
+          (status line, prompt, a banner, a message that slips past its own
+          boundary) degrades to a recoverable panel instead of white-screening
+          the whole app (React #185). The title bar stays OUTSIDE so the window
+          controls remain usable after a crash. */}
+      <ErrorBoundary fallback={(err, reset) => <TerminalCrashFallback error={err} onRetry={reset} />}>
       <BillingOverageBanner />
 
       {/* Output area — overflow="hidden" on the wrapper prevents large content
@@ -953,6 +960,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       <Box display={(pendingPermission || hasPendingAskUserQuestion) ? 'none' : undefined} flexShrink={0} data-no-focus-steal>
         <CmdModePromptInput ref={promptInputRef} />
       </Box>
+      </ErrorBoundary>
     </Flex>
       {/* Keep TerminalPanel mounted when instances exist — CSS display toggle
           prevents unmount/remount which would call start_pty_shell on existing

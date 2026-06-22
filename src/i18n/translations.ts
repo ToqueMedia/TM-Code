@@ -735,6 +735,10 @@ const en = {
 
   // ── Terminal Mode Extra / Audit ───────────────────
   'terminalMode.view.loadingSession': '⟳ loading session…',
+  'terminalMode.view.renderErrorTitle': 'This message could not be displayed',
+  'terminalMode.view.crashTitle': 'Something broke while rendering the terminal',
+  'terminalMode.view.crashRetry': 'Try again',
+  'terminalMode.view.crashReload': 'Reload',
   'terminalMode.view.loadEarlier': '⟳ load earlier — {hiddenCount} hidden',
   'terminalMode.view.resizePanel': 'Resize terminal panel',
   'terminalMode.titlebar.thinkingAlwaysOn': 'Thinking is always-on for this model',
@@ -2502,6 +2506,10 @@ const pt: Record<keyof typeof en, string> = {
 
   // ── Terminal Mode Extra / Audit ───────────────────
   'terminalMode.view.loadingSession': '⟳ a carregar sessão…',
+  'terminalMode.view.renderErrorTitle': 'Esta mensagem não pôde ser apresentada',
+  'terminalMode.view.crashTitle': 'Algo correu mal ao desenhar o terminal',
+  'terminalMode.view.crashRetry': 'Tentar de novo',
+  'terminalMode.view.crashReload': 'Recarregar',
   'terminalMode.view.loadEarlier': '⟳ carregar anteriores — {hiddenCount} ocultas',
   'terminalMode.view.resizePanel': 'Redimensionar painel do terminal',
   'terminalMode.titlebar.thinkingAlwaysOn': 'O raciocínio está sempre ativo para este modelo',

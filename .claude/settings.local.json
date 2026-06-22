@@ -506,7 +506,11 @@
       "Bash(gcloud firestore *)",
       "Bash(echo \"worker-tsc=$?\")",
       "Bash(GCP_TOKEN=$\\(gcloud auth application-default print-access-token 2>/dev/null\\) NOW_ISO=$\\(date -u +\"%Y-%m-%dT%H:%M:%SZ\"\\) node restore_celso.mjs)",
-      "WebFetch(domain:api.momenu.online)"
+      "WebFetch(domain:api.momenu.online)",
+      "Bash(command -v gcloud)",
+      "Bash(gcloud --version)",
+      "Bash(gcloud run *)",
+      "Bash(gcloud projects *)"
     ]
   }
 }
