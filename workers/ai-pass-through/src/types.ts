@@ -84,6 +84,10 @@ export interface Env {
    *  que estola a meio da geração). Sem ele, a Response ficava aberta até o
    *  runtime a matar com "code had hung". 0/negativo desliga o watchdog. */
   UPSTREAM_STREAM_IDLE_TIMEOUT_MS?: string
+  /** Re-tentativas do pedido ao provedor em falhas transitórias de gateway
+   *  (HTML 400 do Tengine/DashScope, 502/503/504, timeout/transporte). Default
+   *  2 (3 tentativas no total); "0" desliga. */
+  UPSTREAM_MAX_RETRIES?: string
   [key: string]: unknown
 }
 

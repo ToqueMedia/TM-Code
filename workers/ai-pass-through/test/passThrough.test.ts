@@ -495,6 +495,48 @@ test('transport failure returns 502 and does not retry', async () => {
   assert.equal(upstreamCalls, 1)
 })
 
+test('a transient gateway HTML 400 (Tengine/DashScope) is retried then succeeds', async () => {
+  let upstreamCalls = 0
+  const fetcher = {
+    async fetch(input: RequestInfo | URL) {
+      if (String(input).includes('firestore.googleapis.com')) {
+        throw new Error('firestore unavailable')
+      }
+      upstreamCalls += 1
+      if (upstreamCalls === 1) {
+        // Página HTML do gateway (rejeição transitória ANTES da API) — não é
+        // o erro JSON real do provider.
+        return new Response('<html><head><title>400 Bad Request</title></head></html>', {
+          status: 400,
+          headers: { 'content-type': 'text/html' },
+        })
+      }
+      return Response.json({ ok: true })
+    },
+  }
+  const res = await handleRequest(request(), env(), { fetcher })
+
+  assert.equal(res.status, 200)
+  assert.equal(upstreamCalls, 2) // 1 falha de gateway + 1 sucesso
+})
+
+test('a JSON 4xx (real API error) passes through without retry', async () => {
+  let upstreamCalls = 0
+  const fetcher = {
+    async fetch(input: RequestInfo | URL) {
+      if (String(input).includes('firestore.googleapis.com')) {
+        throw new Error('firestore unavailable')
+      }
+      upstreamCalls += 1
+      return Response.json({ error: { message: 'invalid request' } }, { status: 400 })
+    },
+  }
+  const res = await handleRequest(request(), env(), { fetcher })
+
+  assert.equal(res.status, 400)
+  assert.equal(upstreamCalls, 1)
+})
+
 test('upstream that never sends headers is aborted with 504 instead of hanging', async () => {
   // O cenário do hang detector em produção: o provider aceita a ligação e
   // nunca responde. O timeout de headers aborta e devolve um 504 limpo que o

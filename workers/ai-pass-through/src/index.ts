@@ -73,6 +73,39 @@ export function resolveUpstreamStreamIdleTimeout(env: Env): number {
   return DEFAULT_UPSTREAM_STREAM_IDLE_TIMEOUT_MS
 }
 
+// ── Retry de falhas TRANSITÓRIAS do pedido ao provedor ───────────────────────
+// Default 2 re-tentativas (3 tentativas no total); `UPSTREAM_MAX_RETRIES` afina
+// sem redeploy (0 desliga).
+const DEFAULT_UPSTREAM_MAX_RETRIES = 2
+
+export function resolveUpstreamMaxRetries(env: Env): number {
+  const raw = typeof env.UPSTREAM_MAX_RETRIES === 'string' ? Number(env.UPSTREAM_MAX_RETRIES) : NaN
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : DEFAULT_UPSTREAM_MAX_RETRIES
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// Backoff curto antes de cada re-tentativa (índice 0 = antes da 1ª).
+function retryBackoffMs(attempt: number): number {
+  const ladder = [250, 750, 1500]
+  return ladder[Math.min(attempt, ladder.length - 1)]
+}
+
+// Distingue um erro de GATEWAY transitório (re-tentável) de um erro REAL da API
+// (propaga já). A API do provider responde JSON; uma página HTML num não-2xx é
+// o gateway/edge a rejeitar ANTES da API — ex.: a página Tengine "400 Bad
+// Request" do DashScope (`dashscope-us…:50001`). 502/503/504 são sempre
+// transitórios. 429 (rate limit) NÃO é re-tentado aqui — propaga com
+// retry-after para o cliente recuar.
+function isRetryableGatewayError(res: Response): boolean {
+  if (res.ok) return false
+  if (res.status === 502 || res.status === 503 || res.status === 504) return true
+  const contentType = (res.headers.get('content-type') ?? '').toLowerCase()
+  return contentType.includes('text/html')
+}
+
 interface PreparedBody {
   body: string
   /** Tamanho do corpo final em chars — input do fallback de estimativa. */
@@ -254,37 +287,78 @@ async function handleChatCompletions(
   const { headers: upstreamHeaders, providerKey } = await buildUpstreamHeaders(request, config, env, fetcher)
 
   // O signal do upstream é um controller próprio em vez de request.signal
-  // direto: o abort do cliente continua a propagar (listener abaixo, durante
-  // TODO o ciclo de vida do fetch, corpo incluído), mas ganhamos um segundo
-  // gatilho — o timeout de headers — sem nunca cortar um stream já em curso
-  // (o timer é limpo assim que os headers chegam).
-  const upstreamAbort = new AbortController()
+  // direto: o abort do cliente continua a propagar durante TODO o ciclo de
+  // vida (corpo do stream incluído), mas ganhamos um segundo gatilho — o
+  // timeout de headers — sem nunca cortar um stream já em curso (o timer é
+  // limpo assim que os headers chegam). `upstreamAbort` é mutável: cada
+  // re-tentativa usa um controller fresco e este listener aborta sempre o que
+  // está em voo (fecha sobre a variável, não o valor).
+  let upstreamAbort = new AbortController()
   const propagateClientAbort = (): void => upstreamAbort.abort()
   if (request.signal.aborted) propagateClientAbort()
   else request.signal.addEventListener('abort', propagateClientAbort, { once: true })
 
-  let upstreamHeadersTimedOut = false
-  const headerTimer = setTimeout(() => {
-    upstreamHeadersTimedOut = true
-    upstreamAbort.abort()
-  }, resolveUpstreamHeaderTimeout(env, prepared.streamRequested))
-
+  // Re-tenta o pedido ao provedor em falhas TRANSITÓRIAS de gateway/edge — o
+  // caso clássico é a página HTML "400 Bad Request" do Tengine do DashScope
+  // (rejeição no gateway, antes da API), além de 502/503/504, timeout de
+  // headers e erros de transporte. Seguro porque um não-2xx significa que
+  // NENHUM stream começou; re-enviar o mesmo corpo (string) é idempotente.
+  // Erros REAIS da API (JSON 4xx) NÃO são re-tentados — propagam já.
+  const maxRetries = resolveUpstreamMaxRetries(env)
   let upstream: Response
-  try {
-    upstream = await fetcher.fetch(upstreamUrl, {
-      method: request.method,
-      headers: upstreamHeaders,
-      body: prepared.body,
-      signal: upstreamAbort.signal,
-    })
-  } catch {
-    if (upstreamHeadersTimedOut) {
-      console.error(`[ai-pass-through] upstream header timeout user=${user.userId} url=${upstreamUrl}`)
-      return jsonError(504, 'tm_upstream_timeout', 'Active AI provider did not respond in time.')
+  for (let attempt = 0; ; attempt++) {
+    if (attempt > 0) {
+      upstreamAbort = new AbortController()
+      if (request.signal.aborted) upstreamAbort.abort()
     }
-    return jsonError(502, 'tm_upstream_transport_error', 'Unable to reach active AI provider.')
-  } finally {
-    clearTimeout(headerTimer)
+    let upstreamHeadersTimedOut = false
+    const headerTimer = setTimeout(() => {
+      upstreamHeadersTimedOut = true
+      upstreamAbort.abort()
+    }, resolveUpstreamHeaderTimeout(env, prepared.streamRequested))
+
+    let res: Response | null = null
+    try {
+      res = await fetcher.fetch(upstreamUrl, {
+        method: request.method,
+        headers: upstreamHeaders,
+        body: prepared.body,
+        signal: upstreamAbort.signal,
+      })
+    } catch {
+      // Erro de transporte ou abort — decidido abaixo.
+    } finally {
+      clearTimeout(headerTimer)
+    }
+
+    // Erro de transporte ou timeout de headers → falha já, SEM retry (como o
+    // design original): são falhas "lentas"/persistentes e re-tentar só compõe
+    // a latência. O retry abaixo cobre apenas os erros de GATEWAY recebidos
+    // (HTML 400 / 502-504) — rejeições rápidas e quase sempre transitórias.
+    if (!res) {
+      if (upstreamHeadersTimedOut) {
+        console.error(`[ai-pass-through] upstream header timeout user=${user.userId} url=${upstreamUrl}`)
+        return jsonError(504, 'tm_upstream_timeout', 'Active AI provider did not respond in time.')
+      }
+      return jsonError(502, 'tm_upstream_transport_error', 'Unable to reach active AI provider.')
+    }
+
+    if (attempt < maxRetries && isRetryableGatewayError(res)) {
+      console.warn(
+        `[ai-pass-through] upstream gateway error ${res.status} ` +
+          `(${res.headers.get('content-type') ?? '?'}) retry ${attempt + 1}/${maxRetries} user=${user.userId}`,
+      )
+      try {
+        await res.body?.cancel()
+      } catch {
+        // corpo já fechado/consumido — ignora.
+      }
+      await sleep(retryBackoffMs(attempt))
+      continue
+    }
+
+    upstream = res
+    break
   }
 
   const durationMs = Date.now() - startedAt
