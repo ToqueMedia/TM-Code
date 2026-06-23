@@ -3,7 +3,7 @@ import { generateKeyPairSync } from 'node:crypto'
 import { readFile, readdir } from 'node:fs/promises'
 import path from 'node:path'
 import test, { beforeEach } from 'node:test'
-import { clearActiveConfigCache } from '../src/activeConfig'
+import { clearActiveConfigCache, getTeamByokConfig } from '../src/activeConfig'
 import { clearJwksCache } from '../src/auth'
 import { clearPlanBudgetCache, resolveEnforcementMode, resetBillingDisabledWarning } from '../src/billing'
 import { clearAccessTokenCache } from '../src/googleAuth'
@@ -1832,4 +1832,47 @@ test('idle watchdog disabled (0) lets a healthy stream complete', async () => {
   assert.equal(res.status, 200)
   const text = await res.text()
   assert.ok(text.includes('[DONE]'))
+})
+
+// ── Team BYOK (`team:{teamId}`) ──────────────────────────────────────────────
+
+const TEAM_BYOK_CFG = JSON.stringify({
+  provider: 'dashscope',
+  model: 'qwen3-max',
+  baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+  chatCompletionsPath: '/chat/completions',
+  authHeader: 'Authorization',
+  authScheme: 'Bearer',
+  apiKey: 'sk-team-inline-123',
+  enabled: true,
+  contextWindow: 1_000_000,
+})
+
+// Reuses the kvEnv() helper defined above (sidecar tests): its mock KV returns
+// `sidecars[key] ?? null` for any non-`active` key, so a `team:{id}` entry works.
+
+test('team BYOK: getTeamByokConfig parses an enabled config with an inline key', async () => {
+  const resolved = await getTeamByokConfig(kvEnv({ 'team:T1': TEAM_BYOK_CFG }), 'T1')
+  assert.ok(resolved, 'expected a resolved team config')
+  assert.equal(resolved!.key, 'team:T1')
+  assert.equal(resolved!.source, 'kv')
+  assert.equal(resolved!.config.model, 'qwen3-max')
+  assert.equal(resolved!.config.baseUrl, 'https://dashscope-us.aliyuncs.com/compatible-mode/v1')
+  // The team key is carried inline (not a worker env secret).
+  assert.equal(resolved!.config.apiKey, 'sk-team-inline-123')
+})
+
+test('team BYOK: missing / disabled / google_oauth / invalid → null (degrade to managed)', async () => {
+  // Missing key in KV.
+  assert.equal(await getTeamByokConfig(kvEnv({}), 'T1'), null)
+  // Disabled.
+  const disabled = JSON.stringify({ ...JSON.parse(TEAM_BYOK_CFG), enabled: false })
+  assert.equal(await getTeamByokConfig(kvEnv({ 'team:T1': disabled }), 'T1'), null)
+  // Phase 1 rejects per-team Vertex (no SA flow).
+  const oauth = JSON.stringify({ ...JSON.parse(TEAM_BYOK_CFG), authScheme: 'google_oauth' })
+  assert.equal(await getTeamByokConfig(kvEnv({ 'team:T1': oauth }), 'T1'), null)
+  // Garbage JSON never breaks chat — it just degrades.
+  assert.equal(await getTeamByokConfig(kvEnv({ 'team:T1': 'not json' }), 'T1'), null)
+  // No teamId → null without touching KV.
+  assert.equal(await getTeamByokConfig(kvEnv({ 'team:T1': TEAM_BYOK_CFG }), ''), null)
 })

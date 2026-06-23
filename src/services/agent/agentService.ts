@@ -801,6 +801,10 @@ class AgentService {
       const thinkingModeRaw = headers.get("X-Model-Thinking-Mode");
       const contextWindowRaw = headers.get("X-Model-Context-Window");
       const byokActiveRaw = headers.get("X-BYOK-Active");
+      // Team BYOK: the worker served this via the team's own provider/key
+      // (config team:{teamId}). Emitted as true/false every response so a later
+      // managed-path turn clears the indicator.
+      const teamByokRaw = headers.get("X-TM-Team-Byok");
 
       const hasModelInfo =
         modelName !== null ||
@@ -839,6 +843,9 @@ class AgentService {
 
       if (byokActiveRaw !== null) {
         useAgentStore.getState().setByokActive(byokActiveRaw.toLowerCase() === "true");
+      }
+      if (teamByokRaw !== null) {
+        useAgentStore.getState().setTeamByokActive(teamByokRaw.toLowerCase() === "true");
       }
     } catch {
       /* non-critical */

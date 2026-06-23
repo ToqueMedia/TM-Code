@@ -1,4 +1,4 @@
-import { getConfigForRequest, buildUpstreamUrl, sidecarKeyForRequestType } from './activeConfig'
+import { getConfigForRequest, getTeamByokConfig, buildUpstreamUrl, sidecarKeyForRequestType } from './activeConfig'
 import { authenticateUser } from './auth'
 import {
   checkCostBudget,
@@ -174,8 +174,10 @@ async function handleChatCompletions(
   // O header NUNCA segue upstream (filtro em headers.ts) e a resposta leva
   // X-TM-Config-Key para o cliente saber quem serviu.
   const requestType = request.headers.get('x-request-type')
-  const active = await getConfigForRequest(env, requestType)
-  const config = active.config
+  // `let` because Team BYOK may override the MAIN-path config after we know the
+  // requester's team (resolved below, post-suspension-gate).
+  let active = await getConfigForRequest(env, requestType)
+  let config = active.config
 
   // Sidecars ESPECIALIZADOS (vision/web_search/fim) NÃO podem degradar para o
   // modelo ativo GERAL: mandar uma imagem a um modelo de texto dá 404 upstream,
@@ -227,10 +229,29 @@ async function handleChatCompletions(
     )
   }
 
+  // ── Team BYOK ────────────────────────────────────────────────────────
+  // Se a equipa do membro tem uma config `team:{teamId}` publicada e ativa, o
+  // modelo PRINCIPAL passa a ir ao provedor/chave da própria equipa (a equipa
+  // paga ao provedor) e o metering da TM é saltado. Só o caminho principal:
+  // pedidos de sidecar (memória/visão/…) continuam na infra TM, coerente com a
+  // política de plano pago. Config inválida/ausente/desativada → degrada para
+  // o modelo gerido (nunca parte o chat).
+  let teamByok = false
+  if (budgetState?.team?.teamId && !requestedSidecar) {
+    const tb = await getTeamByokConfig(env, budgetState.team.teamId)
+    if (tb) {
+      active = tb
+      config = tb.config
+      teamByok = true
+    }
+  }
+
   // Hoisted: o budget base do plano/tier — reusado para o pieTotal do contexto
   // de equipa nos headers (§3.5).
   let planBudget = 0
-  if (enforcement !== 'off') {
+  // Team BYOK não consome tokens da TM → sem gate de orçamento (nem fatia de
+  // equipa) para esses pedidos.
+  if (enforcement !== 'off' && !teamByok) {
     if (budgetState) {
       // Budget do plano vem do subscription_plans do admin (cache 5 min em
       // billing.ts); hardcoded/PLAN_BUDGETS_JSON só como fallback — senão o
@@ -279,7 +300,8 @@ async function handleChatCompletions(
     // extra, zero round-trips.
     speedEligible = isSpeedAllowedForPlanState(budgetState)
   }
-  const speedApplied = speedRequested && !!config.speedModel && speedEligible
+  // Team BYOK usa o modelo da equipa (sem speedModel da TM) — speed é no-op.
+  const speedApplied = !teamByok && speedRequested && !!config.speedModel && speedEligible
   const model = speedApplied && config.speedModel ? config.speedModel : config.model
 
   const upstreamUrl = buildUpstreamUrl(config)
@@ -375,7 +397,7 @@ async function handleChatCompletions(
   // com billing ligado. O corpo devolvido é byte-idêntico (usage.ts); o
   // commit corre em waitUntil DEPOIS do stream terminar para nunca atrasar
   // o primeiro byte. Aborts do cliente liquidam com o que foi observado.
-  if (enforcement !== 'off' && upstream.ok && upstream.body && responseBody === upstream.body) {
+  if (enforcement !== 'off' && !teamByok && upstream.ok && upstream.body && responseBody === upstream.body) {
     const observer = observeUsage(
       upstream.body,
       upstream.headers.get('content-type'),
@@ -448,6 +470,7 @@ async function handleChatCompletions(
       provider: config.provider,
       model,
       speedApplied,
+      teamByok,
       configSource: active.source,
       configKey: active.key,
       // Janela de contexto real do modelo ativo (quando declarada na config) —

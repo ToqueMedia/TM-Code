@@ -57,6 +57,9 @@ export function buildCorsHeaders(request: Request): Headers {
     'X-TM-Upstream-Status',
     'X-TM-Config-Source',
     'X-TM-Config-Key',
+    // Team BYOK: a equipa serviu pelo seu próprio provedor/chave — a IDE mostra
+    // o indicador "Team BYOK" e sabe que não há metering da TM neste pedido.
+    'X-TM-Team-Byok',
     // Billing — consumidos por billingStore.updateFromHeaders na IDE.
     'X-Plan',
     'X-Budget-Status',
@@ -157,7 +160,9 @@ export async function buildUpstreamHeaders(
     return { headers, providerKey: sa.client_email }
   }
 
-  const providerKey = cleanSecret(env[config.apiKeyEnv], config.authScheme)
+  // Team BYOK carries the key inline (per-team, dynamic — not a worker env
+  // secret); managed configs always resolve from env[apiKeyEnv]. Inline wins.
+  const providerKey = cleanSecret(config.apiKey ?? env[config.apiKeyEnv], config.authScheme)
   if (!providerKey) {
     throw new HttpError(500, 'tm_provider_secret_missing', 'Active provider API key is not configured.')
   }
@@ -191,6 +196,9 @@ export function buildResponseHeaders(upstream: Response, meta: {
   speedApplied: boolean
   configSource: 'kv' | 'env'
   configKey: string
+  /** Team BYOK serviu este pedido (config `team:{teamId}`). Emite
+   *  X-TM-Team-Byok para a IDE indicar e saber que não houve metering da TM. */
+  teamByok?: boolean
   /** Janela de contexto (tokens) do modelo ativo, vinda da config KV. Ausente
    *  → o header não é emitido e a IDE cai no fallback de perfil local. */
   contextWindow?: number
@@ -222,6 +230,9 @@ export function buildResponseHeaders(upstream: Response, meta: {
   headers.set('x-tm-upstream-status', String(upstream.status))
   headers.set('x-tm-config-source', meta.configSource)
   headers.set('x-tm-config-key', meta.configKey)
+  // Always emitted (true/false) so the IDE can clear a stale flag when a later
+  // turn is served by the managed path again.
+  headers.set('x-tm-team-byok', meta.teamByok ? 'true' : 'false')
   // Janela de contexto real — só quando a config a declara. A IDE usa-a como
   // denominador autoritativo da pressão de contexto E do gatilho de
   // auto-compactação (substitui a adivinha da tabela de perfis local).

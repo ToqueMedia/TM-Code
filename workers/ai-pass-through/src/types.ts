@@ -19,6 +19,12 @@ export interface ActiveAIConfig {
    *  É o esquema exigido pela Vertex AI, que não aceita API keys estáticas. */
   authScheme: 'Bearer' | 'none' | 'google_oauth'
   apiKeyEnv: string
+  /** Inline provider key — ONLY for Team BYOK configs (`team:{teamId}`), whose
+   *  key is per-team and dynamic and so cannot be a static worker env secret
+   *  like the managed `active`/`sidecar:*` configs (those always use
+   *  `apiKeyEnv`). When present, buildUpstreamHeaders uses it over `apiKeyEnv`.
+   *  The managed-config parser never populates this — only parseTeamByokConfig. */
+  apiKey?: string
   enabled: boolean
   /**
    * Janela de contexto real do modelo ativo, em tokens. Publicada na config

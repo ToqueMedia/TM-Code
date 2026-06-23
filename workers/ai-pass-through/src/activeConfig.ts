@@ -161,6 +161,71 @@ export async function getConfigForRequest(
   return getActiveConfig(env, now)
 }
 
+// ── Team BYOK (`team:{teamId}`) ─────────────────────────────────────────────
+//
+// Same shape as the managed active config, but the provider key is carried
+// INLINE (`apiKey`) — team keys are per-team and dynamic, so they can't be
+// worker env secrets like the managed `active`/`sidecar:*` configs. The
+// control-plane publishes `team:{teamId}` to this KV when a team admin enables
+// BYOK; the data-plane routes the team's MAIN model to it (sidecars stay TM
+// infra) and skips TM metering (the team pays the provider directly).
+//
+// Phase 1 is OpenAI-compatible only: a `google_oauth` team config is rejected
+// (no per-team Vertex SA flow) — it falls back to the managed model rather than
+// mis-routing. Anthropic (apiShape) needs the worker-side adapter (Phase 2).
+
+function parseTeamByokConfig(raw: string): ActiveAIConfig {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new HttpError(500, 'tm_team_byok_invalid', 'Team BYOK config is not valid JSON.')
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new HttpError(500, 'tm_team_byok_invalid', 'Team BYOK config must be an object.')
+  }
+  const obj = parsed as Record<string, unknown>
+  const apiKey = typeof obj.apiKey === 'string' && obj.apiKey.trim() !== '' ? obj.apiKey.trim() : undefined
+  // The strict parser requires apiKeyEnv; for an inline-key team config inject a
+  // placeholder so ALL other validation (provider/model/baseUrl/authScheme/…)
+  // is reused verbatim instead of duplicated.
+  if (apiKey && (typeof obj.apiKeyEnv !== 'string' || obj.apiKeyEnv.trim() === '')) {
+    obj.apiKeyEnv = '__team_inline__'
+  }
+  const base = parseActiveConfig(JSON.stringify(obj))
+  return apiKey ? { ...base, apiKey } : base
+}
+
+export async function getTeamByokConfig(
+  env: Env,
+  teamId: string,
+  now = Date.now(),
+): Promise<ResolvedActiveAIConfig | null> {
+  if (!env.ACTIVE_AI_CONFIG || !teamId) return null
+  const key = `team:${teamId}`
+  const cached = configCache.get(key)
+  if (cached && cached.expiresAt > now) return cached.value
+
+  let raw: string | null = null
+  try {
+    raw = await env.ACTIVE_AI_CONFIG.get(key)
+  } catch {
+    return null // KV read failure → degrade to managed config; never break chat.
+  }
+  if (!raw) return null
+
+  try {
+    const config = parseTeamByokConfig(raw)
+    if (!config.enabled || config.authScheme === 'google_oauth') return null
+    const resolved: ResolvedActiveAIConfig = { config, source: 'kv', key }
+    configCache.set(key, { value: resolved, expiresAt: now + CONFIG_CACHE_MS })
+    return resolved
+  } catch (error) {
+    console.warn(`[ai-pass-through] team byok config ${key} invalid, ignoring:`, error)
+    return null
+  }
+}
+
 export function buildUpstreamUrl(config: ActiveAIConfig): string {
   const path = config.chatCompletionsPath.startsWith('/')
     ? config.chatCompletionsPath
