@@ -647,6 +647,7 @@ class AgentService {
             beforeTokens: event.beforeTokens,
             trigger: "auto",
             messagesSummarized: 0,
+            summary: event.summary,
           });
           break;
 

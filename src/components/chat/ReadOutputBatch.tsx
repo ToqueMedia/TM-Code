@@ -59,7 +59,6 @@ function hasOverlap(ranges: ParsedRead[]): boolean {
 function ReadOutputBatchComponent({ calls }: ReadOutputBatchProps) {
   const t = useTranslation()
   const [expanded, setExpanded] = useState(false)
-  const id = String(calls[0]?.input?.id ?? 'unknown')
   const reads = calls.map(parseRead)
   const sorted = [...reads].sort((a, b) => a.offset - b.offset)
   const overlap = hasOverlap(sorted)
@@ -129,7 +128,7 @@ function ReadOutputBatchComponent({ calls }: ReadOutputBatchProps) {
           fontFamily={tokens.fontFamily.mono}
           flexShrink={0}
         >
-          {id} · {calls.length} read{calls.length === 1 ? '' : 's'}
+          · {calls.length} read{calls.length === 1 ? '' : 's'}
         </Text>
 
         {/* Range pills — sorted ascending so overlap reads left-to-right. */}

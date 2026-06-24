@@ -298,3 +298,36 @@ describe('rebuildConversationHistory — per-turn providerStates', () => {
     expect(results.map(r => r.toolCallId)).toEqual(['id1', 'id2'])
   })
 })
+
+describe('rebuildConversationHistory — compact_boundary summary re-emission', () => {
+  const boundary = (compactSummary?: string): ChatMessage => ({
+    id: 'b1',
+    role: 'system',
+    kind: 'compact_boundary',
+    content: 'Conversa comprimida (50K tokens).',
+    timestamp: ts,
+    ...(compactSummary ? { compactSummary } : {}),
+  })
+
+  it('re-emits the boundary summary as a user message so the model retains it', () => {
+    // Post-compaction shape: the boundary leads the trimmed history. Without
+    // re-emission the model would receive only "continue please" with no idea
+    // what it's continuing.
+    const history = rebuildConversationHistory([
+      boundary('SUMMARY OF PRIOR WORK'),
+      userMsg('continue please'),
+    ])
+    expect(history.map(m => m.role)).toEqual(['user', 'user'])
+    expect(history[0].content).toBe('SUMMARY OF PRIOR WORK')
+    expect(history[1].content).toBe('continue please')
+  })
+
+  it('still skips a boundary that carries NO summary (UI-only marker)', () => {
+    const history = rebuildConversationHistory([
+      boundary(),
+      userMsg('hi'),
+    ])
+    expect(history.map(m => m.role)).toEqual(['user'])
+    expect(history[0].content).toBe('hi')
+  })
+})
