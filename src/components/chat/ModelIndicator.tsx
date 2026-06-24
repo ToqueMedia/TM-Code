@@ -72,11 +72,16 @@ function ModelIndicator() {
   const plan = useBillingStore((s) => s.plan)
   const cloudVisible = planShowsCloudModel(plan)
 
-  // Team BYOK takes precedence: the team admin set a shared key and the worker
-  // served this turn through it (server-confirmed X-TM-Team-Byok). The member
-  // configured nothing personally, so the personal-BYOK logic below doesn't
-  // apply — show a distinct read-only green pill. Placed after all hooks run.
-  if (teamByokActive) {
+  // Team BYOK pill — shown ONLY while the member is actually consuming the
+  // team's shared key (server-confirmed X-TM-Team-Byok) AND has not switched to
+  // their own. `teamByokActive` is the LAST team-served response, so it lingers:
+  // the moment the member opts into personal use — either by configuring their
+  // own provider (`configured`) or once a personal response is confirmed
+  // (`byokActive`) — the team flag must vanish so the UX is unambiguous about
+  // what's active NOW (their key, not the team's). Without these guards the green
+  // pill wrongly stayed up after the member deactivated team consumption
+  // (reported UX bug). The personal-BYOK branch below then renders instead.
+  if (teamByokActive && !configured && !byokActive) {
     return (
       <HStack
         gap={1}
