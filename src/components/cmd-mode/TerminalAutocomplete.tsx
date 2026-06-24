@@ -124,6 +124,7 @@ export const TerminalAutocomplete = memo(function TerminalAutocomplete({
               color={isSelected ? tokens.colors.text.primary : tokens.colors.text.secondary}
               fontFamily={tokens.fontFamily.mono}
               fontWeight={isSelected ? '600' : '400'}
+              minW={0}
               overflow="hidden"
               textOverflow="ellipsis"
               whiteSpace="nowrap"

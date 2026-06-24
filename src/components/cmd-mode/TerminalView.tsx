@@ -8,6 +8,7 @@ import { usePermissionStore } from '../../stores/permissionStore'
 import { useAskUserQuestionStore } from '../../stores/askUserQuestionStore'
 import { useCmdOverlayStore } from '../../stores/cmdOverlayStore'
 import { useTerminalPanelStore, TERMINAL_PANEL_MIN_WIDTH } from '../../stores/terminalPanelStore'
+import { useLayoutStore } from '../../stores/layoutStore'
 import { useSettingsStore, CHAT_TEXT_FONT_SIZE_OPTIONS, DEFAULT_CHAT_TEXT_FONT_SIZE } from '../../stores/settingsStore'
 import { stopAgent, loadSessionById } from '../../services/agent/cmdModeCommands'
 import CmdModePromptInput, { type CmdModePromptInputRef } from './CmdModePromptInput'
@@ -25,6 +26,7 @@ import { BillingOverageBanner } from './BillingOverageBanner'
 import { ErrorBoundary, TerminalCrashFallback } from './terminalHelpers'
 import { TerminalPermissionPrompt } from './TerminalPermissionPrompt'
 import { TerminalSessionPicker } from './TerminalSessionPicker'
+import TerminalPlanViewerPanel from './TerminalPlanViewerPanel'
 import { TerminalCompactionIndicator } from './TerminalCompactionIndicator'
 import { TerminalGoalCelebration } from './TerminalGoalCelebration'
 import AgentTasksPanel from '../chat/AgentTasksPanel'
@@ -452,11 +454,12 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   //   1. Permission prompt owns Escape while visible (handled by the prompt itself)
   //   2. AskUserQuestion owns Escape (cancels the question)
   //   3. Session picker owns Escape (closes picker, does NOT exit CMD Mode)
-  //   4. Terminal panel open → close panel (does NOT exit CMD Mode)
-  //   5. Open menus (slash / @mention) own Escape to close themselves
-  //   6. Streaming → stop agent
-  //   7. Typing with text → let the textarea handle it
-  //   8. Idle → exit to welcome
+  //   4. Plan viewer open → close panel (does NOT exit CMD Mode)
+  //   5. Terminal panel open → close panel (does NOT exit CMD Mode)
+  //   6. Open menus (slash / @mention) own Escape to close themselves
+  //   7. Streaming → stop agent
+  //   8. Typing with text → let the textarea handle it
+  //   9. Idle → exit to welcome
   useEffect(() => {
     const isAgentActive = () => {
       const status = agentStatusRef.current
@@ -478,6 +481,14 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         e.preventDefault()
         e.stopPropagation()
         useCmdOverlayStore.getState().closeSessionPicker()
+        return
+      }
+      // Close the plan viewer if open — don't exit CMD mode. TerminalView owns
+      // Escape on a capture-phase listener, so the panel can't handle its own.
+      if (useLayoutStore.getState().isPlanViewerOpen) {
+        e.preventDefault()
+        e.stopPropagation()
+        useLayoutStore.getState().setPlanViewerOpen(false)
         return
       }
       // Close terminal panel first if open — don't exit CMD mode entirely.
@@ -507,9 +518,14 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     return () => window.removeEventListener('keydown', handler, true)
   }, [handleBack])
 
-  // Close the session picker automatically if the user leaves CMD Mode.
+  // Close transient overlays automatically if the user leaves CMD Mode. The
+  // plan viewer lives in the shared layoutStore, so a left-open panel would
+  // otherwise leak into Chat mode on the next open.
   useEffect(() => {
-    return () => { useCmdOverlayStore.getState().closeSessionPicker() }
+    return () => {
+      useCmdOverlayStore.getState().closeSessionPicker()
+      useLayoutStore.getState().setPlanViewerOpen(false)
+    }
   }, [])
 
   const handlePickSession = useCallback(async (session: { id: string }) => {
@@ -962,6 +978,12 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       </Box>
       </ErrorBoundary>
     </Flex>
+
+      {/* Plan viewer side panel (Terminal-styled) — push-from-right sibling, so
+          "Ver Plano Completo" / [v] in the approval card has somewhere to render.
+          Self-gates on isPlanViewerOpen (collapses to width 0 when closed). */}
+      <TerminalPlanViewerPanel projectPath={projectPath} />
+
       {/* Keep TerminalPanel mounted when instances exist — CSS display toggle
           prevents unmount/remount which would call start_pty_shell on existing
           sessions. Instances persist after non-destructive close(). */}

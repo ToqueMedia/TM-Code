@@ -103,8 +103,10 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
 
       <Box mt={2} mb={1} h="1px" bg="rgba(255,255,255,0.06)" />
 
-      {/* Dica rotativa — uma por sessão, em vez da lista completa de comandos */}
-      <Flex gap={2} align="baseline" mt={1}>
+      {/* Dica rotativa — uma por sessão, em vez da lista completa de comandos.
+          minW=0 + quebra de palavra: dicas longas (ex.: /plan — …) embrulham
+          dentro do contentor em vez de empurrar a largura para fora. */}
+      <Flex gap={2} align="baseline" mt={1} minW={0}>
         <Text
           fontFamily={tokens.fontFamily.mono}
           fontSize="12px"
@@ -114,7 +116,14 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
         >
           {t('terminalMode.greeting.tipLabel')}
         </Text>
-        <Text fontFamily={tokens.fontFamily.mono} fontSize="12px" color={tokens.colors.text.muted}>
+        <Text
+          fontFamily={tokens.fontFamily.mono}
+          fontSize="12px"
+          color={tokens.colors.text.muted}
+          minW={0}
+          wordBreak="break-word"
+          css={{ overflowWrap: 'anywhere' }}
+        >
           {tip}
         </Text>
       </Flex>
