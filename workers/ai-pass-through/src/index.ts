@@ -16,7 +16,7 @@ import { buildResponseHeaders, buildUpstreamHeaders, corsPreflight, withCors } f
 import { createRequestId, logRequest } from './logging'
 import { injectStreamOptions, observeUsage } from './usage'
 import { withStreamIdleTimeout } from './streamWatchdog'
-import { ensureGeminiThoughtSummaries } from './geminiThinking'
+import { ensureGeminiThoughtSummaries, ensureVertexPublisher } from './geminiThinking'
 import type { Env, Fetcher, WaitUntilContext } from './types'
 
 export interface HandlerOptions {
@@ -141,7 +141,9 @@ async function bodyWithActiveModel(
       if (!(key in merged)) merged[key] = value
     }
   }
-  merged.model = model
+  // Vertex (google_oauth) exige um id `<publisher>/<model>`; assume `google/`
+  // quando a config guardou um id sem publisher (ver ensureVertexPublisher).
+  merged.model = isGoogleOAuth ? ensureVertexPublisher(model) : model
 
   // Gemini/Vertex: torna o thinking (sempre ativo no modelo) VISÍVEL no stream.
   // Ao contrário do GLM/Qwen/MiMo (que emitem reasoning_content sem pedir), o

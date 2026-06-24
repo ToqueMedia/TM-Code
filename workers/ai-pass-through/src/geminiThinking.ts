@@ -49,3 +49,17 @@ export function ensureGeminiThoughtSummaries(body: Record<string, unknown>): voi
   google.thinking_config = thinkingConfig
   body.google = google
 }
+
+/**
+ * Vertex AI's OpenAI-compat endpoint requires a `<publisher>/<model>` model id.
+ * A bare id (e.g. `gemini-3.1-pro-preview`) returns 400 "Malformed publisher
+ * model … expected '<publisher>/<model>'". Default the publisher to `google/`
+ * when the id carries none; ids that already have one (`google/…`, `meta/…`,
+ * Model Garden, etc.) are returned unchanged. Pure — caller decides when Vertex
+ * (google_oauth) is in play.
+ */
+export function ensureVertexPublisher(model: string): string {
+  return typeof model === 'string' && model !== '' && !model.includes('/')
+    ? `google/${model}`
+    : model
+}

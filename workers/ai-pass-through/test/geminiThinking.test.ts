@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ensureGeminiThoughtSummaries } from '../src/geminiThinking'
+import { ensureGeminiThoughtSummaries, ensureVertexPublisher } from '../src/geminiThinking'
 
 /**
  * Garante que pedidos Gemini (google_oauth) pedem os resumos de pensamento.
@@ -47,4 +47,20 @@ test('tolerates a non-object google field', () => {
   const body: Record<string, unknown> = { google: 'nonsense' }
   ensureGeminiThoughtSummaries(body)
   assert.deepEqual(body.google, { thinking_config: { include_thoughts: true } })
+})
+
+// ── ensureVertexPublisher ────────────────────────────────────────────────────
+
+test('adds the google/ publisher prefix to a bare Vertex model id', () => {
+  assert.equal(ensureVertexPublisher('gemini-3.1-pro-preview'), 'google/gemini-3.1-pro-preview')
+  assert.equal(ensureVertexPublisher('gemini-3.5-flash'), 'google/gemini-3.5-flash')
+})
+
+test('leaves an already-qualified publisher untouched', () => {
+  assert.equal(ensureVertexPublisher('google/gemini-3.1-pro-preview'), 'google/gemini-3.1-pro-preview')
+  assert.equal(ensureVertexPublisher('meta/llama-3.1-405b'), 'meta/llama-3.1-405b')
+})
+
+test('passes an empty model through unchanged', () => {
+  assert.equal(ensureVertexPublisher(''), '')
 })
