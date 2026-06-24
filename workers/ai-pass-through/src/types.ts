@@ -94,6 +94,11 @@ export interface Env {
    *  (HTML 400 do Tengine/DashScope, 502/503/504, timeout/transporte). Default
    *  2 (3 tentativas no total); "0" desliga. */
   UPSTREAM_MAX_RETRIES?: string
+  /** Shared AES-256 secret (base64 of 32 bytes) for decrypting Team BYOK keys
+   *  stored in `team:{teamId}` KV values. Same value as the control-plane's
+   *  TEAM_BYOK_ENC_KEY (which encrypts on publish). Absent → Team BYOK is
+   *  inert (configs ignored, degrade to managed). Provision via wrangler secret. */
+  TEAM_BYOK_ENC_KEY?: string
   [key: string]: unknown
 }
 

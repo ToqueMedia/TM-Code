@@ -1,4 +1,5 @@
 import { HttpError } from './errors'
+import { decryptSecret } from './byokCrypto'
 import type { ActiveAIConfig, Env, ResolvedActiveAIConfig } from './types'
 
 const CONFIG_CACHE_MS = 5_000
@@ -217,6 +218,22 @@ export async function getTeamByokConfig(
   try {
     const config = parseTeamByokConfig(raw)
     if (!config.enabled || config.authScheme === 'google_oauth') return null
+    // The team key is stored AES-GCM-encrypted; decrypt with the shared
+    // TEAM_BYOK_ENC_KEY (the control-plane encrypted it on publish). Missing
+    // secret or a decrypt failure → degrade to the managed model rather than
+    // route with a broken/garbled key.
+    if (config.apiKey) {
+      if (!env.TEAM_BYOK_ENC_KEY) {
+        console.warn(`[ai-pass-through] team byok ${key}: TEAM_BYOK_ENC_KEY missing — ignoring`)
+        return null
+      }
+      try {
+        config.apiKey = await decryptSecret(config.apiKey, env.TEAM_BYOK_ENC_KEY)
+      } catch (e) {
+        console.warn(`[ai-pass-through] team byok ${key}: key decrypt failed — ignoring:`, e)
+        return null
+      }
+    }
     const resolved: ResolvedActiveAIConfig = { config, source: 'kv', key }
     configCache.set(key, { value: resolved, expiresAt: now + CONFIG_CACHE_MS })
     return resolved
