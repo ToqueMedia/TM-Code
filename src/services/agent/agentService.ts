@@ -533,6 +533,10 @@ class AgentService {
         const knownProfile = modelName ? MODEL_PROFILES[modelName] : undefined;
         const plan = useBillingStore.getState().plan;
         const profile = knownProfile ?? getProfileForPlan(plan);
+        // The ADMIN-published window (modelContextWindow, from X-Model-Context-
+        // Window) is authoritative for auto-compact AND the blocking limit (both
+        // read this in query.ts). Never capped here — a 1M model compacts at ~1M,
+        // a 256K model at ~256K. The admin tunes it in Settings → Admin.
         return {
           contextWindow: modelContextWindow ?? knownProfile?.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
           maxOutputTokens: profile.maxOutputTokens ?? null,

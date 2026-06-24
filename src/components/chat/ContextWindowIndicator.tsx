@@ -82,11 +82,12 @@ function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIn
   const [hovered, setHovered] = useState(false)
 
   // Window resolution mirrors the auto-compact decision EXACTLY: server header
+  // (X-Model-Context-Window — the value the ADMIN publishes in Settings → Admin)
   // → known MODEL_PROFILES entry → conservative 200K FALLBACK_CONTEXT_WINDOW.
-  // An unknown model (no header, not in the profile table) reads against 200K,
-  // NOT a phantom 1M plan default — so the pill never under-reports pressure and
-  // always agrees with the IDE's compaction trigger. The admin publishes the
-  // real window via Settings → Admin to override it.
+  // The admin's published window is authoritative; the IDE never caps it. If the
+  // bar feels flat on a huge window, the admin lowers the published window — the
+  // lever is the admin Select, not a hardcoded ceiling. An unknown model (no
+  // header, not in the profile table) reads against 200K, NOT a phantom 1M.
   const rawContextWindow = headerContextWindow ?? (modelName ? MODEL_PROFILES[modelName]?.contextWindow : undefined) ?? FALLBACK_CONTEXT_WINDOW
 
   // Stay hidden only until the window is known. Show 0% as soon as it is —
@@ -99,14 +100,18 @@ function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIn
   const compactThreshold = getAutoCompactThreshold(rawContextWindow)
   const warnThreshold = getWarningThreshold(rawContextWindow)
 
-  // True context occupancy: input tokens (which include all past history
-  // — previous user messages, previous assistant outputs, tool results)
-  // PLUS the current turn's output tokens (which aren't yet in
-  // prompt_tokens because they only roll into the next turn's prompt).
-  // Using input-only understated pressure mid-turn — a 80K input +
-  // 15K output looked like 33% on a 256K window, but the real occupancy
-  // was 95K ≈ 39%, and the next turn starts at 95K+.
-  const pressureTokens = inputTokens + outputTokens
+  // Context occupancy = the prompt actually on the wire (input side), which
+  // already includes ALL prior history (past user messages, prior assistant
+  // outputs, tool results). claude-vaz parity (utils/context.ts:130-136): the
+  // pressure numerator is INPUT-ONLY — the current turn's output is NOT added.
+  //
+  // Adding output (the previous behaviour) reintroduced the per-turn sawtooth
+  // the prompt-peak was designed to kill: `lastResponseTokens` is OVERWRITTEN
+  // every internal agent-loop turn (chatStore.addTokenUsage), so a new message's
+  // small first turn dragged the bar 5%→4%→5% "sem razão aparente". `inputTokens`
+  // is a monotonic session peak → the bar only rises (until a real compaction
+  // reset). Output is still shown separately in the tooltip ("last response").
+  const pressureTokens = inputTokens
   const rawPct = effectiveWindow > 0 ? (pressureTokens / effectiveWindow) * 100 : 0
   const pct = Math.min(100, rawPct)
   const overrun = rawPct > 100
