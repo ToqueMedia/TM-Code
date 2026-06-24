@@ -171,9 +171,10 @@ export async function getConfigForRequest(
 // BYOK; the data-plane routes the team's MAIN model to it (sidecars stay TM
 // infra) and skips TM metering (the team pays the provider directly).
 //
-// Phase 1 is OpenAI-compatible only: a `google_oauth` team config is rejected
-// (no per-team Vertex SA flow) — it falls back to the managed model rather than
-// mis-routing. Anthropic (apiShape) needs the worker-side adapter (Phase 2).
+// Supports Bearer (OpenAI-compat: Gemini AI Studio, DashScope, Custom) AND
+// google_oauth (Vertex AI — the inline encrypted apiKey carries the service
+// account JSON; buildUpstreamHeaders mints an OAuth token per request).
+// Anthropic (apiShape) still needs the worker-side adapter (deferred).
 
 function parseTeamByokConfig(raw: string): ActiveAIConfig {
   let parsed: unknown
@@ -217,7 +218,10 @@ export async function getTeamByokConfig(
 
   try {
     const config = parseTeamByokConfig(raw)
-    if (!config.enabled || config.authScheme === 'google_oauth') return null
+    // Bearer (OpenAI-compat) AND google_oauth (Vertex) are both supported: for
+    // Vertex the inline (encrypted) `apiKey` carries the service-account JSON,
+    // from which buildUpstreamHeaders mints an OAuth token per request.
+    if (!config.enabled) return null
     // The team key is stored AES-GCM-encrypted; decrypt with the shared
     // TEAM_BYOK_ENC_KEY (the control-plane encrypted it on publish). Missing
     // secret or a decrypt failure → degrade to the managed model rather than

@@ -137,7 +137,9 @@ export async function buildUpstreamHeaders(
   // round-trip ao oauth2.googleapis.com é ~1×/hora/isolate). O providerKey
   // devolvido para logging é o client_email — nunca o token.
   if (config.authScheme === 'google_oauth') {
-    const raw = env[config.apiKeyEnv]
+    // Team BYOK (Vertex) carries the service-account JSON inline (decrypted);
+    // managed configs read it from env[apiKeyEnv]. Inline wins.
+    const raw = config.apiKey ?? env[config.apiKeyEnv]
     let sa: { client_email?: string; private_key?: string } | null = null
     if (typeof raw === 'string' && raw.trim() !== '') {
       try {

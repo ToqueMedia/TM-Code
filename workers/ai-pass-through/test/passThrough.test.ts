@@ -1888,13 +1888,30 @@ test('team BYOK: missing enc key / bad ciphertext / disabled / oauth / absent â†
   // Disabled.
   const disabled = await teamCfg({ enabled: false })
   assert.equal(await getTeamByokConfig(kvEnv({ 'team:T1': disabled }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY }), 'T1'), null)
-  // Phase 1 rejects per-team Vertex (no SA flow).
-  const oauth = await teamCfg({ authScheme: 'google_oauth' })
-  assert.equal(await getTeamByokConfig(kvEnv({ 'team:T1': oauth }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY }), 'T1'), null)
   // Garbage JSON + absent key + empty teamId.
   assert.equal(await getTeamByokConfig(kvEnv({ 'team:T1': 'not json' }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY }), 'T1'), null)
   assert.equal(await getTeamByokConfig(kvEnv({}, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY }), 'T1'), null)
   assert.equal(await getTeamByokConfig(kvEnv({ 'team:T1': cfg }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY }), ''), null)
+})
+
+test('team BYOK: Vertex (google_oauth) resolves with the decrypted service-account JSON', async () => {
+  const saJson = JSON.stringify({ client_email: 'svc@proj.iam.gserviceaccount.com', private_key: '-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n', project_id: 'proj' })
+  const enc = await encryptSecret(saJson, TEST_ENC_KEY)
+  const cfg = JSON.stringify({
+    provider: 'vertex',
+    model: 'google/gemini-2.5-pro',
+    baseUrl: 'https://us-east5-aiplatform.googleapis.com/v1beta1/projects/proj/locations/us-east5/endpoints/openapi',
+    chatCompletionsPath: '/chat/completions',
+    authHeader: 'Authorization',
+    authScheme: 'google_oauth',
+    apiKey: enc,
+    enabled: true,
+  })
+  const resolved = await getTeamByokConfig(kvEnv({ 'team:T1': cfg }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY }), 'T1')
+  assert.ok(resolved, 'expected google_oauth team config to resolve')
+  assert.equal(resolved!.config.authScheme, 'google_oauth')
+  // apiKey decrypted back to the SA JSON (buildUpstreamHeaders parses it to mint).
+  assert.equal(JSON.parse(resolved!.config.apiKey as string).client_email, 'svc@proj.iam.gserviceaccount.com')
 })
 
 test('byokCrypto: encrypt â†’ decrypt round-trips; wrong key fails', async () => {
