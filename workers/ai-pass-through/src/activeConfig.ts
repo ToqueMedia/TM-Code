@@ -188,6 +188,10 @@ function parseTeamByokConfig(raw: string): ActiveAIConfig {
   }
   const obj = parsed as Record<string, unknown>
   const apiKey = typeof obj.apiKey === 'string' && obj.apiKey.trim() !== '' ? obj.apiKey.trim() : undefined
+  // Virtual shared budget (tokens). 0/absent → pass-through (no metering).
+  const pool = typeof obj.pool === 'number' && Number.isFinite(obj.pool) && obj.pool > 0
+    ? Math.floor(obj.pool)
+    : undefined
   // The strict parser requires apiKeyEnv; for an inline-key team config inject a
   // placeholder so ALL other validation (provider/model/baseUrl/authScheme/…)
   // is reused verbatim instead of duplicated.
@@ -195,7 +199,7 @@ function parseTeamByokConfig(raw: string): ActiveAIConfig {
     obj.apiKeyEnv = '__team_inline__'
   }
   const base = parseActiveConfig(JSON.stringify(obj))
-  return apiKey ? { ...base, apiKey } : base
+  return { ...base, ...(apiKey ? { apiKey } : {}), ...(pool ? { pool } : {}) }
 }
 
 export async function getTeamByokConfig(

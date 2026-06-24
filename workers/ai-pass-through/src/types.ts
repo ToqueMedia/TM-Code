@@ -25,6 +25,12 @@ export interface ActiveAIConfig {
    *  `apiKeyEnv`). When present, buildUpstreamHeaders uses it over `apiKeyEnv`.
    *  The managed-config parser never populates this — only parseTeamByokConfig. */
   apiKey?: string
+  /** Team BYOK ONLY (`team:{teamId}`): the owner's virtual shared budget in
+   *  tokens — an ESTIMATE of what they prepaid the provider, NOT the real
+   *  provider balance. 0/absent → pass-through (no metering). When > 0 the
+   *  data-plane meters raw (1x) usage against it + the per-member
+   *  percentAllocation slices. Managed parser never sets it. */
+  pool?: number
   enabled: boolean
   /**
    * Janela de contexto real do modelo ativo, em tokens. Publicada na config

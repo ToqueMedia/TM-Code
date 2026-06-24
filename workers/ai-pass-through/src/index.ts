@@ -2,7 +2,9 @@ import { getConfigForRequest, getTeamByokConfig, buildUpstreamUrl, sidecarKeyFor
 import { authenticateUser } from './auth'
 import {
   checkCostBudget,
+  checkTeamByokBudget,
   commitTokenConsumption,
+  commitTeamByokConsumption,
   getUserBudgetState,
   resolveEnforcementMode,
   resolvePlanBudgetFor,
@@ -284,6 +286,29 @@ async function handleChatCompletions(
     }
   }
 
+  // ── Team BYOK: orçamento VIRTUAL opcional (opt-in pelo admin) ───────────────
+  // Quando a config da equipa define um `pool` (> 0), medimos o uso BYOK contra
+  // essa pool + a fatia do membro (a MESMA percentAllocation do Plano de
+  // Equipas) e bloqueamos quando qualquer um esgota — hard cap estrito. Sem
+  // pool → pass-through puro (sem gate, sem commit), como antes. A pool é uma
+  // ESTIMATIVA do que o admin pagou ao provedor, NÃO o saldo real.
+  let teamByokMetered = false
+  if (teamByok && config.pool && config.pool > 0 && budgetState?.team) {
+    teamByokMetered = true
+    if (enforcement !== 'off') {
+      const gate = checkTeamByokBudget(config.pool, budgetState.team)
+      if (!gate.allowed) {
+        return jsonError(
+          402,
+          'tm_team_byok_exhausted',
+          gate.reason === 'team'
+            ? 'The team BYOK budget is exhausted. Ask your team admin to top it up.'
+            : 'Your team BYOK slice is exhausted. Ask your team admin to increase your allocation.',
+        )
+      }
+    }
+  }
+
   // TM Speed (`/speed` na IDE): a app envia `X-TM-Speed: true` como sinal de
   // routing para ESTE worker — o header nunca segue upstream (o filtro x-tm-*
   // em headers.ts continua a aplicar-se). Só troca de modelo se o admin tiver
@@ -399,9 +424,21 @@ async function handleChatCompletions(
   // com billing ligado. O corpo devolvido é byte-idêntico (usage.ts); o
   // commit corre em waitUntil DEPOIS do stream terminar para nunca atrasar
   // o primeiro byte. Aborts do cliente liquidam com o que foi observado.
-  if (enforcement !== 'off' && !teamByok && upstream.ok && upstream.body && responseBody === upstream.body) {
+  // Contabilidade pós-stream — corre em waitUntil DEPOIS de o stream terminar,
+  // para nunca atrasar o primeiro byte. Dois caminhos mutuamente exclusivos:
+  //  • gerido (`!teamByok`): commitTokenConsumption (multiplicador, overage,
+  //    fatia de equipa) contra o budget da TM.
+  //  • Team BYOK com pool (`teamByokMetered`): commitTeamByokConsumption (1x,
+  //    tokens reais) contra o ledger virtual da equipa.
+  // Team BYOK SEM pool = pass-through: não entra aqui (nenhuma das condições).
+  // Em ambos só se comita em `upstream.ok` → um 502/erro nunca consome.
+  const meterBody = enforcement !== 'off' && upstream.ok && upstream.body
+    && responseBody === upstream.body && (!teamByok || teamByokMetered)
+    ? upstream.body
+    : null
+  if (meterBody) {
     const observer = observeUsage(
-      upstream.body,
+      meterBody,
       upstream.headers.get('content-type'),
       prepared.chars,
     )
@@ -410,6 +447,7 @@ async function handleChatCompletions(
 
     const multiplier = speedApplied ? resolveSpeedMultiplier(env) : 1
     const asOverage = budgetCheck?.asOverage ?? false
+    const teamId = budgetState?.team?.teamId
     waitUntil(observer.done.then(async (usage) => {
       if (!usage) return
       // Observabilidade do fallback: quando o provider omite o objeto
@@ -422,6 +460,19 @@ async function handleChatCompletions(
           `[billing] usage ESTIMATED (provider omitted usage object) user=${user.userId} ` +
           `prompt≈${usage.promptTokens} completion≈${usage.completionTokens}`,
         )
+      }
+      // Team BYOK: ledger virtual da equipa, tokens RAW (1x, sem multiplicador
+      // da TM — é a despesa do admin no provedor, não inferência gerida).
+      if (teamByokMetered && teamId) {
+        await commitTeamByokConsumption({
+          env,
+          userId: user.userId,
+          idToken,
+          teamId,
+          rawTokens: usage.promptTokens + usage.completionTokens,
+          fetcher,
+        })
+        return
       }
       const rawTokens = Math.ceil((usage.promptTokens + usage.completionTokens) * multiplier)
       await commitTokenConsumption({
@@ -454,12 +505,14 @@ async function handleChatCompletions(
     upstreamHost,
   })
   // Greppable one-liner for `wrangler tail` during a Team BYOK e2e: proves the
-  // request was served by the TEAM's own provider/key (TM managed model +
-  // metering BYPASSED), not the internal model.
+  // request was served by the TEAM's own provider/key, not the internal model.
+  // With a virtual pool the team's BYOK ledger IS metered (1x, raw); without
+  // one it's pure pass-through (no metering) — the suffix says which.
   if (teamByok) {
     console.info(
       `[team-byok] SERVED via team key → provider=${config.provider} model=${model} ` +
-        `host=${upstreamHost} status=${upstream.status} config=${active.key} (TM model+metering BYPASSED)`,
+        `host=${upstreamHost} status=${upstream.status} config=${active.key} ` +
+        `(${teamByokMetered ? `virtual pool METERED 1x, pool=${config.pool}` : 'TM model+metering BYPASSED'})`,
     )
   }
 
