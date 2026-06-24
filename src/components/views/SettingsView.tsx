@@ -2321,9 +2321,14 @@ function trimTrailingSlashes(value: string): string {
 
 // ─── Sidecars panel (admin) ──────────────────────────────────────────────────
 
-const SIDECAR_SLOTS: Array<{ type: 'vision' | 'web_search'; label: string; desc: string }> = [
+const SIDECAR_SLOTS: Array<{ type: import('../../services/adminService').SidecarType; label: string; desc: string }> = [
   { type: 'vision', label: 'Visão (imagens)', desc: 'Descreve imagens para modelos sem visão (MiMo V2.5 Pro, GLM)' },
   { type: 'web_search', label: 'Web Search', desc: 'Pesquisa web para modelos sem busca nativa' },
+  // utility: corre a CADA turno (memory-extractor/selector/distiller, summarize).
+  // Estava fora do UI — um sidecar:utility preso (ex.: glm-5.1) faturava 5.1 em
+  // todos os turnos sem forma de o ver/desligar aqui. Desligar → cai no ativo.
+  { type: 'utility', label: 'Utility (memória)', desc: 'Memória, sumarização e títulos (memory-*, summarize). Desligar → usa o modelo ativo.' },
+  { type: 'fim', label: 'FIM (autocomplete)', desc: 'Code completion inline (X-Request-Type: fim)' },
 ]
 
 function SidecarsPanel() {
@@ -2356,7 +2361,7 @@ function SidecarsPanel() {
   }, [])
   useEffect(function () { load() }, [load])
 
-  async function apply(type: 'vision' | 'web_search', action: 'publish' | 'disable') {
+  async function apply(type: import('../../services/adminService').SidecarType, action: 'publish' | 'disable') {
     setBusy(type)
     setError(null)
     try {
@@ -2372,7 +2377,7 @@ function SidecarsPanel() {
   }
 
   return (
-    <SettingsGroup title="Sidecars" badge="vision · web">
+    <SettingsGroup title="Sidecars" badge="vision · web · utility · fim">
       <Text fontSize="11px" color={tokens.colors.text.muted} mb={3}>
         Modelos auxiliares usados quando o modelo activo não tem a capacidade nativa.
         Publicados em <Box as="code" fontSize="10px">sidecar:*</Box> no KV; o data-plane roteia por X-Request-Type.

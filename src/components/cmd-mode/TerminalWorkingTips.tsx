@@ -64,10 +64,12 @@ export const TerminalWorkingTips = memo(function TerminalWorkingTips() {
   return (
     <Flex
       flexShrink={0}
+      minW={0}
       align="baseline"
       gap={2}
       px={3}
       py="4px"
+      overflow="hidden"
       bg={tokens.colors.terminal.statusbarBg}
       borderTop={`1px solid ${tokens.colors.terminal.chromeHairlineFaint}`}
     >
@@ -80,7 +82,12 @@ export const TerminalWorkingTips = memo(function TerminalWorkingTips() {
       >
         {t('terminalMode.greeting.tipLabel')}
       </Text>
+      {/* flex=1 + minW=0 são o que faz o ellipsis "pegar" num filho flex — sem
+          eles, dicas longas (ex.: /plan — …) recusam encolher abaixo do
+          conteúdo e empurram o status bar / prompt para fora. */}
       <Text
+        flex="1"
+        minW={0}
         fontFamily={tokens.fontFamily.mono}
         fontSize="12px"
         color={tokens.colors.text.muted}

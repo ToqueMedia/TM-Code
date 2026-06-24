@@ -50,10 +50,6 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
     if (!s.activeSessionId) return 0;
     return s.sessions.get(s.activeSessionId)?.lastPromptTokens ?? 0;
   });
-  const currentResponseTokens = useChatStore((s) => {
-    if (!s.activeSessionId) return 0;
-    return s.sessions.get(s.activeSessionId)?.lastResponseTokens ?? 0;
-  });
   const headerContextWindow = useAgentStore((s) => s.modelContextWindow);
   const modelName = useAgentStore((s) => s.modelName);
   const mcpServers = useMcpStore((s) => s.servers);
@@ -168,25 +164,23 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   // no progress bar) to fit CMD mode's monospace aesthetic.
   //
   // Source of truth matches the chat-mode pill:
-  //   • pressureTokens = currentPromptTokens + currentResponseTokens
-  //     (true context occupancy — input includes all past history, output
-  //     is current turn's generation not yet rolled into the next prompt).
-  //     NOT totalTokensUsed.input, which is MAX across turns of the current
-  //     request and inflates after compaction shrinks the prompt mid-loop.
-  //   • headerContextWindow (X-Model-Context-Window) — falls back to the
-  //     plan profile only pre-handshake.
-  //   • Denominator is EFFECTIVE window (raw − 20K summary headroom),
-  //     matching claude-vaz's calculateContextPercentages.
-  // Window: server header → known MODEL_PROFILES entry → conservative 200K
-  // FALLBACK_CONTEXT_WINDOW (NOT the plan profile's 1M). Matches the auto-compact
-  // decision and the chat pill so all three agree.
+  //   • pressureTokens = currentPromptTokens (= session.lastPromptTokens, the
+  //     monotonic peak of the wire prompt — includes all past history).
+  //     INPUT-ONLY, claude-vaz parity (utils/context.ts:130-136). We deliberately
+  //     do NOT add lastResponseTokens: it's overwritten per internal turn, which
+  //     made the % oscillate 5%→4%→5%. NOT totalTokensUsed.input either, which is
+  //     MAX across turns and inflates after compaction shrinks the prompt mid-loop.
+  //   • headerContextWindow (X-Model-Context-Window) — the value the ADMIN
+  //     publishes in Settings → Admin; authoritative, never capped by the IDE.
+  //     Falls back to the plan profile only pre-handshake.
+  //   • Denominator is EFFECTIVE window (admin raw − 20K summary headroom).
   const rawContextWindow =
     headerContextWindow ??
     (modelName && MODEL_PROFILES[modelName] ? MODEL_PROFILES[modelName].contextWindow : undefined) ??
     FALLBACK_CONTEXT_WINDOW;
   const effectiveWindow = getEffectiveContextWindowSize(rawContextWindow);
   const compactThreshold = getAutoCompactThreshold(rawContextWindow);
-  const pressureTokens = currentPromptTokens + currentResponseTokens;
+  const pressureTokens = currentPromptTokens;
   const ctxPct =
     effectiveWindow > 0 && pressureTokens > 0
       ? Math.min(100, (pressureTokens / effectiveWindow) * 100)
@@ -202,7 +196,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
         : tokens.colors.accent.red;
   const ctxTooltip =
     ctxPct > 0
-      ? `${t("terminalMode.status.contextUsage")}: ${pressureTokens.toLocaleString()} (${currentPromptTokens.toLocaleString()}+${currentResponseTokens.toLocaleString()}) / ${effectiveWindow.toLocaleString()} ${t("terminalMode.status.contextEffective")} (${ctxPct.toFixed(1)}%)${compactImminent ? `\n${t("terminalMode.status.autoCompact")}` : ""}`
+      ? `${t("terminalMode.status.contextUsage")}: ${pressureTokens.toLocaleString()} / ${effectiveWindow.toLocaleString()} ${t("terminalMode.status.contextEffective")} (${ctxPct.toFixed(1)}%)${compactImminent ? `\n${t("terminalMode.status.autoCompact")}` : ""}`
       : undefined;
 
   // Toolkit preflight. Tooltip lists missing pieces.

@@ -75,6 +75,35 @@ const linuxSig = readSig(`TM.Code_${bareVersion}_amd64.AppImage.sig`);
 const darwinArm64Sig = readSig(`TM.Code_${bareVersion}_aarch64.app.tar.gz.sig`);
 const darwinX64Sig = readSig(`TM.Code_${bareVersion}_x64.app.tar.gz.sig`);
 
+const requiredPlatformSigs = [
+  {
+    platform: 'linux-x86_64',
+    signature: linuxSig,
+    artifact: `TM.Code_${bareVersion}_amd64.AppImage`
+  },
+  {
+    platform: 'darwin-aarch64',
+    signature: darwinArm64Sig,
+    artifact: `TM.Code_${bareVersion}_aarch64.app.tar.gz`
+  },
+  {
+    platform: 'darwin-x86_64',
+    signature: darwinX64Sig,
+    artifact: `TM.Code_${bareVersion}_x64.app.tar.gz`
+  }
+];
+
+const missingPlatformSigs = requiredPlatformSigs.filter(item => !item.signature);
+if (missingPlatformSigs.length > 0) {
+  console.error('\n❌ Required updater artifacts are missing from the release.');
+  for (const item of missingPlatformSigs) {
+    console.error(`   ${item.platform}: ${item.artifact} and ${item.artifact}.sig`);
+  }
+  console.error('\n   Upload the missing artifacts, then rerun this script.\n');
+  fs.rmSync(sigsDir, { recursive: true, force: true });
+  process.exit(1);
+}
+
 // Look for Windows signature dynamically. Our Windows updater artifact naming
 // follows the historical release format:
 //   TM.Code_<version>_x64-setup.exe

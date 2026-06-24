@@ -272,6 +272,15 @@ export interface ChatMessage {
   compactBeforeTokens?: number
   /** Richer metadata for compact_boundary messages (trigger, token count, messages summarized). */
   compactMetadata?: CompactMetadata
+  /**
+   * The model-ready summary of the compacted-away turns, carried ON the
+   * compact_boundary marker. `rebuildConversationHistory` re-emits it into the
+   * outgoing prompt (as a user message) so the model RETAINS the prior context
+   * after auto-compaction. Without it the in-loop summary was discarded and the
+   * model lost everything before the boundary. UI-only system messages stay
+   * skipped; only a boundary WITH this field re-emits.
+   */
+  compactSummary?: string
   /** Terminal-mode local command result, rendered like a shell command block. */
   terminalCommand?: {
     command: string
@@ -468,6 +477,11 @@ export interface ByokSessionSnapshot {
    *  silently ignored by Anthropic/OpenAI/Gemini upstreams, which is why
    *  the toggle was a no-op for BYOK before this field existed. */
   thinkingShape?: 'anthropic' | 'openai_reasoning_effort' | 'qwen_enable_thinking' | 'gemini_thinking_budget' | 'openrouter_reasoning' | 'mimo_chat_template_kwargs'
+  /** Model context window frozen at snapshot time (from the hardcoded catalog).
+   *  Under BYOK the request bypasses the worker, so the IDE can't learn the
+   *  window from X-Model-Context-Window — it seeds the auto-compact limit from
+   *  here instead. `0`/absent → agentService falls back to FALLBACK_CONTEXT_WINDOW. */
+  contextWindow?: number
 }
 
 export interface SessionContext {

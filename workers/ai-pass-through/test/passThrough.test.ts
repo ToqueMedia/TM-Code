@@ -3,7 +3,8 @@ import { generateKeyPairSync } from 'node:crypto'
 import { readFile, readdir } from 'node:fs/promises'
 import path from 'node:path'
 import test, { beforeEach } from 'node:test'
-import { clearActiveConfigCache } from '../src/activeConfig'
+import { clearActiveConfigCache, getTeamByokConfig } from '../src/activeConfig'
+import { encryptSecret } from '../src/byokCrypto'
 import { clearJwksCache } from '../src/auth'
 import { clearPlanBudgetCache, resolveEnforcementMode, resetBillingDisabledWarning } from '../src/billing'
 import { clearAccessTokenCache } from '../src/googleAuth'
@@ -495,6 +496,48 @@ test('transport failure returns 502 and does not retry', async () => {
   assert.equal(upstreamCalls, 1)
 })
 
+test('a transient gateway HTML 400 (Tengine/DashScope) is retried then succeeds', async () => {
+  let upstreamCalls = 0
+  const fetcher = {
+    async fetch(input: RequestInfo | URL) {
+      if (String(input).includes('firestore.googleapis.com')) {
+        throw new Error('firestore unavailable')
+      }
+      upstreamCalls += 1
+      if (upstreamCalls === 1) {
+        // Página HTML do gateway (rejeição transitória ANTES da API) — não é
+        // o erro JSON real do provider.
+        return new Response('<html><head><title>400 Bad Request</title></head></html>', {
+          status: 400,
+          headers: { 'content-type': 'text/html' },
+        })
+      }
+      return Response.json({ ok: true })
+    },
+  }
+  const res = await handleRequest(request(), env(), { fetcher })
+
+  assert.equal(res.status, 200)
+  assert.equal(upstreamCalls, 2) // 1 falha de gateway + 1 sucesso
+})
+
+test('a JSON 4xx (real API error) passes through without retry', async () => {
+  let upstreamCalls = 0
+  const fetcher = {
+    async fetch(input: RequestInfo | URL) {
+      if (String(input).includes('firestore.googleapis.com')) {
+        throw new Error('firestore unavailable')
+      }
+      upstreamCalls += 1
+      return Response.json({ error: { message: 'invalid request' } }, { status: 400 })
+    },
+  }
+  const res = await handleRequest(request(), env(), { fetcher })
+
+  assert.equal(res.status, 400)
+  assert.equal(upstreamCalls, 1)
+})
+
 test('upstream that never sends headers is aborted with 504 instead of hanging', async () => {
   // O cenário do hang detector em produção: o provider aceita a ligação e
   // nunca responde. O timeout de headers aborta e devolve um 504 limpo que o
@@ -767,15 +810,21 @@ test('worker source does not import forbidden old proxy/adapters/AI SDKs', async
 })
 
 test('data-plane handler has no SSE parser or response TransformStream outside usage.ts', async () => {
-  // usage.ts e streamWatchdog.ts são as ÚNICAS exceções sancionadas: ambos
-  // identity-transforms (bytes out ≡ bytes in, nada injetado — o teste de
-  // streaming acima garante isso byte a byte). usage.ts observa o stream para
-  // o `usage`/billing; streamWatchdog.ts re-arma um timeout de inatividade e
-  // aborta um upstream estolado pós-headers. A proibição mantém-se para todo o
-  // resto do worker: a lição do proxy antigo foi sobre MUTAÇÃO do stream.
+  // usage.ts e streamWatchdog.ts são as exceções sancionadas no caminho do
+  // stream: ambos identity-transforms (bytes out ≡ bytes in, nada injetado — o
+  // teste de streaming acima garante isso byte a byte). usage.ts observa o
+  // stream para o `usage`/billing; streamWatchdog.ts re-arma um timeout de
+  // inatividade. byokCrypto.ts NÃO toca no stream — usa TextEncoder/TextDecoder
+  // só para AES-GCM das chaves Team BYOK; está fora desta proibição (que é
+  // sobre PARSING/MUTAÇÃO do stream SSE, a lição do proxy antigo).
   const files = await workerSourceFiles()
   const source = files
-    .filter(file => file.file !== 'auth.ts' && file.file !== 'usage.ts' && file.file !== 'streamWatchdog.ts')
+    .filter(file =>
+      file.file !== 'auth.ts' &&
+      file.file !== 'usage.ts' &&
+      file.file !== 'streamWatchdog.ts' &&
+      file.file !== 'byokCrypto.ts',
+    )
     .map(file => file.source)
     .join('\n')
 
@@ -1790,4 +1839,86 @@ test('idle watchdog disabled (0) lets a healthy stream complete', async () => {
   assert.equal(res.status, 200)
   const text = await res.text()
   assert.ok(text.includes('[DONE]'))
+})
+
+// ── Team BYOK (`team:{teamId}`) ──────────────────────────────────────────────
+
+// 32-byte AES-256 key (base64) shared by both workers in prod via the
+// TEAM_BYOK_ENC_KEY secret. Reuses kvEnv() (sidecar tests): its mock KV returns
+// `sidecars[key] ?? null` for any non-`active` key, so a `team:{id}` entry works.
+const TEST_ENC_KEY = Buffer.from('0123456789abcdef0123456789abcdef').toString('base64')
+
+async function teamCfg(overrides: Record<string, unknown> = {}): Promise<string> {
+  const apiKey = await encryptSecret('sk-team-real-key', TEST_ENC_KEY)
+  return JSON.stringify({
+    provider: 'dashscope',
+    model: 'qwen3-max',
+    baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+    chatCompletionsPath: '/chat/completions',
+    authHeader: 'Authorization',
+    authScheme: 'Bearer',
+    apiKey, // AES-GCM ciphertext (tbk1:…)
+    enabled: true,
+    contextWindow: 1_000_000,
+    ...overrides,
+  })
+}
+
+test('team BYOK: getTeamByokConfig resolves + DECRYPTS the inline key', async () => {
+  const cfg = await teamCfg()
+  const resolved = await getTeamByokConfig(
+    kvEnv({ 'team:T1': cfg }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY }),
+    'T1',
+  )
+  assert.ok(resolved, 'expected a resolved team config')
+  assert.equal(resolved!.key, 'team:T1')
+  assert.equal(resolved!.config.model, 'qwen3-max')
+  assert.equal(resolved!.config.baseUrl, 'https://dashscope-us.aliyuncs.com/compatible-mode/v1')
+  // Decrypted back to the real key for buildUpstreamHeaders.
+  assert.equal(resolved!.config.apiKey, 'sk-team-real-key')
+})
+
+test('team BYOK: missing enc key / bad ciphertext / disabled / oauth / absent → null', async () => {
+  const cfg = await teamCfg()
+  // TEAM_BYOK_ENC_KEY not provisioned → cannot decrypt → degrade.
+  assert.equal(await getTeamByokConfig(kvEnv({ 'team:T1': cfg }), 'T1'), null)
+  // Tampered/garbled ciphertext → degrade (never route with a broken key).
+  const bad = JSON.stringify({ ...JSON.parse(cfg), apiKey: 'tbk1:zzz:zzz' })
+  assert.equal(await getTeamByokConfig(kvEnv({ 'team:T1': bad }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY }), 'T1'), null)
+  // Disabled.
+  const disabled = await teamCfg({ enabled: false })
+  assert.equal(await getTeamByokConfig(kvEnv({ 'team:T1': disabled }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY }), 'T1'), null)
+  // Garbage JSON + absent key + empty teamId.
+  assert.equal(await getTeamByokConfig(kvEnv({ 'team:T1': 'not json' }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY }), 'T1'), null)
+  assert.equal(await getTeamByokConfig(kvEnv({}, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY }), 'T1'), null)
+  assert.equal(await getTeamByokConfig(kvEnv({ 'team:T1': cfg }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY }), ''), null)
+})
+
+test('team BYOK: Vertex (google_oauth) resolves with the decrypted service-account JSON', async () => {
+  const saJson = JSON.stringify({ client_email: 'svc@proj.iam.gserviceaccount.com', private_key: '-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n', project_id: 'proj' })
+  const enc = await encryptSecret(saJson, TEST_ENC_KEY)
+  const cfg = JSON.stringify({
+    provider: 'vertex',
+    model: 'google/gemini-2.5-pro',
+    baseUrl: 'https://us-east5-aiplatform.googleapis.com/v1beta1/projects/proj/locations/us-east5/endpoints/openapi',
+    chatCompletionsPath: '/chat/completions',
+    authHeader: 'Authorization',
+    authScheme: 'google_oauth',
+    apiKey: enc,
+    enabled: true,
+  })
+  const resolved = await getTeamByokConfig(kvEnv({ 'team:T1': cfg }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY }), 'T1')
+  assert.ok(resolved, 'expected google_oauth team config to resolve')
+  assert.equal(resolved!.config.authScheme, 'google_oauth')
+  // apiKey decrypted back to the SA JSON (buildUpstreamHeaders parses it to mint).
+  assert.equal(JSON.parse(resolved!.config.apiKey as string).client_email, 'svc@proj.iam.gserviceaccount.com')
+})
+
+test('byokCrypto: encrypt → decrypt round-trips; wrong key fails', async () => {
+  const { decryptSecret } = await import('../src/byokCrypto')
+  const blob = await encryptSecret('hunter2', TEST_ENC_KEY)
+  assert.ok(blob.startsWith('tbk1:'))
+  assert.equal(await decryptSecret(blob, TEST_ENC_KEY), 'hunter2')
+  const otherKey = Buffer.from('ffffffffffffffffffffffffffffffff').toString('base64')
+  await assert.rejects(() => decryptSecret(blob, otherKey))
 })

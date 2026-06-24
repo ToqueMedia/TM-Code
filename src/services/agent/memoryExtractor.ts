@@ -32,6 +32,7 @@
 
 import { logger } from '../../utils/logger'
 import { resolveAIWorkerUrl } from '../../utils/devUrls'
+import { resolveAuxByokRoute, byokAuxCompletion } from './byokRouting'
 import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
 import type { MemoryType } from './memdir'
 
@@ -126,52 +127,69 @@ ${userMessage.slice(0, 4000)}
 ## Agent's response (this turn)
 ${assistantText.slice(-4000)}`
 
-    let res: Response
-    try {
-      const appCheck = await getAppCheckHeader()
-      res = await fetch(`${workerUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${idToken}`,
-          'X-Request-Type': 'memory-extractor',
-          ...appCheck,
-        },
-        body: JSON.stringify({
-          messages: [
-            { role: 'system', content: extractorSystem },
-            { role: 'user', content: extractorUser },
-          ],
-          temperature: 0,
-          max_tokens: 1600,
-          stream: false,
-          response_format: { type: 'json_object' },
-        }),
-        signal: ac.signal,
-      })
-    } finally {
+    const messages = [
+      { role: 'system', content: extractorSystem },
+      { role: 'user', content: extractorUser },
+    ]
+
+    // Free + BYOK: extract memory on the user's own key (their cost). Paid+BYOK
+    // and non-BYOK keep the TM worker (sidecar) path below.
+    const auxRoute = resolveAuxByokRoute()
+    let content: string
+    if (auxRoute) {
       clearTimeout(timeoutId)
-    }
+      content = (await byokAuxCompletion(auxRoute.snapshot, {
+        messages,
+        maxTokens: 1600,
+        temperature: 0,
+        jsonObject: true,
+        signal: ac.signal,
+      })) ?? ''
+    } else {
+      let res: Response
+      try {
+        const appCheck = await getAppCheckHeader()
+        res = await fetch(`${workerUrl}/v1/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${idToken}`,
+            'X-Request-Type': 'memory-extractor',
+            ...appCheck,
+          },
+          body: JSON.stringify({
+            messages,
+            temperature: 0,
+            max_tokens: 1600,
+            stream: false,
+            response_format: { type: 'json_object' },
+          }),
+          signal: ac.signal,
+        })
+      } finally {
+        clearTimeout(timeoutId)
+      }
 
-    if (!res.ok) {
-      logger.debug('memdir', `[extractor] HTTP ${res.status}`)
-      return { proposals: [], latencyMs: Math.round(performance.now() - startedAt) }
-    }
+      if (!res.ok) {
+        logger.debug('memdir', `[extractor] HTTP ${res.status}`)
+        return { proposals: [], latencyMs: Math.round(performance.now() - startedAt) }
+      }
 
-    const ct = res.headers.get('content-type') ?? 'unknown'
-    const rawBody = await res.text().catch(() => '')
-    let data: { choices?: Array<{ message?: { content?: string } }> }
-    try {
-      data = JSON.parse(rawBody) as { choices?: Array<{ message?: { content?: string } }> }
-    } catch (jsonErr) {
-      // Worker may return non-JSON (HTML error page, empty body, etc.)
-      // on auth failures or upstream issues. Log status + content-type
-      // for debugging but swallow gracefully — extractor is fire-and-forget.
-      const preview = rawBody.slice(0, 200).replace(/\s+/g, ' ')
-      logger.debug('memdir', `[extractor] response is not valid JSON (HTTP ${res.status}, content-type: ${ct}, body="${preview}"):`, jsonErr)
-      return { proposals: [], latencyMs: Math.round(performance.now() - startedAt) }
+      const ct = res.headers.get('content-type') ?? 'unknown'
+      const rawBody = await res.text().catch(() => '')
+      let data: { choices?: Array<{ message?: { content?: string } }> }
+      try {
+        data = JSON.parse(rawBody) as { choices?: Array<{ message?: { content?: string } }> }
+      } catch (jsonErr) {
+        // Worker may return non-JSON (HTML error page, empty body, etc.)
+        // on auth failures or upstream issues. Log status + content-type
+        // for debugging but swallow gracefully — extractor is fire-and-forget.
+        const preview = rawBody.slice(0, 200).replace(/\s+/g, ' ')
+        logger.debug('memdir', `[extractor] response is not valid JSON (HTTP ${res.status}, content-type: ${ct}, body="${preview}"):`, jsonErr)
+        return { proposals: [], latencyMs: Math.round(performance.now() - startedAt) }
+      }
+      content = data.choices?.[0]?.message?.content ?? ''
     }
-    const content = data.choices?.[0]?.message?.content ?? ''
     if (!content) {
       return { proposals: [], latencyMs: Math.round(performance.now() - startedAt) }
     }

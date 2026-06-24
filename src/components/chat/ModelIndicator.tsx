@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { Box, HStack, Text } from '@chakra-ui/react'
-import { FiKey } from 'react-icons/fi'
+import { FiKey, FiUsers } from 'react-icons/fi'
 import { useAgentStore } from '../../stores/agentStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { useByokStore } from '../../stores/byokStore'
@@ -38,6 +38,7 @@ function planShowsCloudModel(_plan: string | null | undefined): boolean {
 function ModelIndicator() {
   // Server-confirmed state — authoritative for what the LAST response used
   const byokActive = useAgentStore(s => s.byokActive)
+  const teamByokActive = useAgentStore(s => s.teamByokActive)
   const modelName = useAgentStore(s => s.modelName)
   const modelProvider = useAgentStore(s => s.modelProvider)
 
@@ -70,6 +71,46 @@ function ModelIndicator() {
   // appears/disappears reactively when the plan handshake completes.
   const plan = useBillingStore((s) => s.plan)
   const cloudVisible = planShowsCloudModel(plan)
+
+  // Team BYOK pill — shown ONLY while the member is actually consuming the
+  // team's shared key (server-confirmed X-TM-Team-Byok) AND has not switched to
+  // their own. `teamByokActive` is the LAST team-served response, so it lingers:
+  // the moment the member opts into personal use — either by configuring their
+  // own provider (`configured`) or once a personal response is confirmed
+  // (`byokActive`) — the team flag must vanish so the UX is unambiguous about
+  // what's active NOW (their key, not the team's). Without these guards the green
+  // pill wrongly stayed up after the member deactivated team consumption
+  // (reported UX bug). The personal-BYOK branch below then renders instead.
+  if (teamByokActive && !configured && !byokActive) {
+    return (
+      <HStack
+        gap={1}
+        px={2}
+        py="3px"
+        borderRadius={tokens.radius.full}
+        bg="rgba(46, 160, 67, 0.12)"
+        border="1px solid"
+        borderColor="rgba(46, 160, 67, 0.4)"
+        title={`Team BYOK${modelName ? ` · ${modelName}` : ''} — your team's API key is serving requests`}
+      >
+        <Box color={tokens.colors.accent.green} display="flex">
+          <FiUsers size={10} />
+        </Box>
+        <Text
+          fontSize="10px"
+          fontWeight="600"
+          color={tokens.colors.accent.green}
+          fontFamily={tokens.fontFamily.mono}
+          maxW="180px"
+          overflow="hidden"
+          textOverflow="ellipsis"
+          whiteSpace="nowrap"
+        >
+          {modelName ? `${modelName} (Team)` : 'Team BYOK'}
+        </Text>
+      </HStack>
+    )
+  }
 
   // Hide the pill entirely when:
   //   - not on BYOK (neither confirmed nor configured), AND

@@ -926,7 +926,7 @@ export function usePromptBar() {
           } else if (event.type === 'compact_end') {
             agentStore.setCompactPhase('idle')
             agentStore.setStatus('awaiting_response')
-            useChatStore.getState().addCompactBoundaryMessage(event.beforeTokens, event.trigger, event.messagesSummarized)
+            useChatStore.getState().addCompactBoundaryMessage(event.beforeTokens, event.trigger, event.messagesSummarized, event.summary)
           }
         },
         // ── Queued-message steering (claude-vaz parity) ──

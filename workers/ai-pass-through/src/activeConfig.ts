@@ -1,4 +1,5 @@
 import { HttpError } from './errors'
+import { decryptSecret } from './byokCrypto'
 import type { ActiveAIConfig, Env, ResolvedActiveAIConfig } from './types'
 
 const CONFIG_CACHE_MS = 5_000
@@ -159,6 +160,95 @@ export async function getConfigForRequest(
     }
   }
   return getActiveConfig(env, now)
+}
+
+// ── Team BYOK (`team:{teamId}`) ─────────────────────────────────────────────
+//
+// Same shape as the managed active config, but the provider key is carried
+// INLINE (`apiKey`) — team keys are per-team and dynamic, so they can't be
+// worker env secrets like the managed `active`/`sidecar:*` configs. The
+// control-plane publishes `team:{teamId}` to this KV when a team admin enables
+// BYOK; the data-plane routes the team's MAIN model to it (sidecars stay TM
+// infra) and skips TM metering (the team pays the provider directly).
+//
+// Supports Bearer (OpenAI-compat: Gemini AI Studio, DashScope, Custom) AND
+// google_oauth (Vertex AI — the inline encrypted apiKey carries the service
+// account JSON; buildUpstreamHeaders mints an OAuth token per request).
+// Anthropic (apiShape) still needs the worker-side adapter (deferred).
+
+function parseTeamByokConfig(raw: string): ActiveAIConfig {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new HttpError(500, 'tm_team_byok_invalid', 'Team BYOK config is not valid JSON.')
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new HttpError(500, 'tm_team_byok_invalid', 'Team BYOK config must be an object.')
+  }
+  const obj = parsed as Record<string, unknown>
+  const apiKey = typeof obj.apiKey === 'string' && obj.apiKey.trim() !== '' ? obj.apiKey.trim() : undefined
+  // Virtual shared budget (tokens). 0/absent → pass-through (no metering).
+  const pool = typeof obj.pool === 'number' && Number.isFinite(obj.pool) && obj.pool > 0
+    ? Math.floor(obj.pool)
+    : undefined
+  // The strict parser requires apiKeyEnv; for an inline-key team config inject a
+  // placeholder so ALL other validation (provider/model/baseUrl/authScheme/…)
+  // is reused verbatim instead of duplicated.
+  if (apiKey && (typeof obj.apiKeyEnv !== 'string' || obj.apiKeyEnv.trim() === '')) {
+    obj.apiKeyEnv = '__team_inline__'
+  }
+  const base = parseActiveConfig(JSON.stringify(obj))
+  return { ...base, ...(apiKey ? { apiKey } : {}), ...(pool ? { pool } : {}) }
+}
+
+export async function getTeamByokConfig(
+  env: Env,
+  teamId: string,
+  now = Date.now(),
+): Promise<ResolvedActiveAIConfig | null> {
+  if (!env.ACTIVE_AI_CONFIG || !teamId) return null
+  const key = `team:${teamId}`
+  const cached = configCache.get(key)
+  if (cached && cached.expiresAt > now) return cached.value
+
+  let raw: string | null = null
+  try {
+    raw = await env.ACTIVE_AI_CONFIG.get(key)
+  } catch {
+    return null // KV read failure → degrade to managed config; never break chat.
+  }
+  if (!raw) return null
+
+  try {
+    const config = parseTeamByokConfig(raw)
+    // Bearer (OpenAI-compat) AND google_oauth (Vertex) are both supported: for
+    // Vertex the inline (encrypted) `apiKey` carries the service-account JSON,
+    // from which buildUpstreamHeaders mints an OAuth token per request.
+    if (!config.enabled) return null
+    // The team key is stored AES-GCM-encrypted; decrypt with the shared
+    // TEAM_BYOK_ENC_KEY (the control-plane encrypted it on publish). Missing
+    // secret or a decrypt failure → degrade to the managed model rather than
+    // route with a broken/garbled key.
+    if (config.apiKey) {
+      if (!env.TEAM_BYOK_ENC_KEY) {
+        console.warn(`[ai-pass-through] team byok ${key}: TEAM_BYOK_ENC_KEY missing — ignoring`)
+        return null
+      }
+      try {
+        config.apiKey = await decryptSecret(config.apiKey, env.TEAM_BYOK_ENC_KEY)
+      } catch (e) {
+        console.warn(`[ai-pass-through] team byok ${key}: key decrypt failed — ignoring:`, e)
+        return null
+      }
+    }
+    const resolved: ResolvedActiveAIConfig = { config, source: 'kv', key }
+    configCache.set(key, { value: resolved, expiresAt: now + CONFIG_CACHE_MS })
+    return resolved
+  } catch (error) {
+    console.warn(`[ai-pass-through] team byok config ${key} invalid, ignoring:`, error)
+    return null
+  }
 }
 
 export function buildUpstreamUrl(config: ActiveAIConfig): string {

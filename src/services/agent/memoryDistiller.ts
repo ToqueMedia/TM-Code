@@ -31,6 +31,7 @@
 
 import { logger } from '../../utils/logger'
 import { resolveAIWorkerUrl } from '../../utils/devUrls'
+import { resolveAuxByokRoute, byokAuxCompletion } from './byokRouting'
 import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
 import type { MemoryFile } from './memdir'
 
@@ -150,42 +151,59 @@ The developer will manually approve each proposal before the agent applies it. T
       'Review the entries above. Propose hygiene actions ONLY where the case is clear-cut. Return {"proposals": []} if everything looks fine.',
     ].join('\n')
 
-    let res: Response
-    try {
-      const appCheck = await getAppCheckHeader()
-      res = await fetch(`${workerUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${idToken}`,
-          'X-Request-Type': 'memory-distiller',
-          ...appCheck,
-        },
-        body: JSON.stringify({
-          messages: [
-            { role: 'system', content: distillerSystem },
-            { role: 'user', content: distillerUser },
-          ],
-          temperature: 0,
-          max_tokens: 3500,
-          stream: false,
-          response_format: { type: 'json_object' },
-        }),
-        signal: ac.signal,
-      })
-    } finally {
+    const messages = [
+      { role: 'system', content: distillerSystem },
+      { role: 'user', content: distillerUser },
+    ]
+
+    // Free + BYOK: distill on the user's own key. Paid+BYOK / non-BYOK use the
+    // TM worker (sidecar) path below.
+    const auxRoute = resolveAuxByokRoute()
+    let content: string
+    if (auxRoute) {
       clearTimeout(timeoutId)
-    }
+      content = (await byokAuxCompletion(auxRoute.snapshot, {
+        messages,
+        maxTokens: 3500,
+        temperature: 0,
+        jsonObject: true,
+        signal: ac.signal,
+      })) ?? ''
+    } else {
+      let res: Response
+      try {
+        const appCheck = await getAppCheckHeader()
+        res = await fetch(`${workerUrl}/v1/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${idToken}`,
+            'X-Request-Type': 'memory-distiller',
+            ...appCheck,
+          },
+          body: JSON.stringify({
+            messages,
+            temperature: 0,
+            max_tokens: 3500,
+            stream: false,
+            response_format: { type: 'json_object' },
+          }),
+          signal: ac.signal,
+        })
+      } finally {
+        clearTimeout(timeoutId)
+      }
 
-    if (!res.ok) {
-      logger.warn('memdir', `[distiller] HTTP ${res.status}`)
-      return null
-    }
+      if (!res.ok) {
+        logger.warn('memdir', `[distiller] HTTP ${res.status}`)
+        return null
+      }
 
-    const data = await res.json() as {
-      choices?: Array<{ message?: { content?: string } }>
+      const data = await res.json() as {
+        choices?: Array<{ message?: { content?: string } }>
+      }
+      content = data.choices?.[0]?.message?.content ?? ''
     }
-    const content = data.choices?.[0]?.message?.content ?? ''
     if (!content) return null
 
     const cleaned = content

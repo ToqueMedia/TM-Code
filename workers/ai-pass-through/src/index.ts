@@ -1,8 +1,10 @@
-import { getConfigForRequest, buildUpstreamUrl, sidecarKeyForRequestType } from './activeConfig'
+import { getConfigForRequest, getTeamByokConfig, buildUpstreamUrl, sidecarKeyForRequestType } from './activeConfig'
 import { authenticateUser } from './auth'
 import {
   checkCostBudget,
+  checkTeamByokBudget,
   commitTokenConsumption,
+  commitTeamByokConsumption,
   getUserBudgetState,
   resolveEnforcementMode,
   resolvePlanBudgetFor,
@@ -16,7 +18,7 @@ import { buildResponseHeaders, buildUpstreamHeaders, corsPreflight, withCors } f
 import { createRequestId, logRequest } from './logging'
 import { injectStreamOptions, observeUsage } from './usage'
 import { withStreamIdleTimeout } from './streamWatchdog'
-import { ensureGeminiThoughtSummaries } from './geminiThinking'
+import { ensureGeminiThoughtSummaries, ensureVertexPublisher } from './geminiThinking'
 import type { Env, Fetcher, WaitUntilContext } from './types'
 
 export interface HandlerOptions {
@@ -73,6 +75,39 @@ export function resolveUpstreamStreamIdleTimeout(env: Env): number {
   return DEFAULT_UPSTREAM_STREAM_IDLE_TIMEOUT_MS
 }
 
+// ── Retry de falhas TRANSITÓRIAS do pedido ao provedor ───────────────────────
+// Default 2 re-tentativas (3 tentativas no total); `UPSTREAM_MAX_RETRIES` afina
+// sem redeploy (0 desliga).
+const DEFAULT_UPSTREAM_MAX_RETRIES = 2
+
+export function resolveUpstreamMaxRetries(env: Env): number {
+  const raw = typeof env.UPSTREAM_MAX_RETRIES === 'string' ? Number(env.UPSTREAM_MAX_RETRIES) : NaN
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : DEFAULT_UPSTREAM_MAX_RETRIES
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// Backoff curto antes de cada re-tentativa (índice 0 = antes da 1ª).
+function retryBackoffMs(attempt: number): number {
+  const ladder = [250, 750, 1500]
+  return ladder[Math.min(attempt, ladder.length - 1)]
+}
+
+// Distingue um erro de GATEWAY transitório (re-tentável) de um erro REAL da API
+// (propaga já). A API do provider responde JSON; uma página HTML num não-2xx é
+// o gateway/edge a rejeitar ANTES da API — ex.: a página Tengine "400 Bad
+// Request" do DashScope (`dashscope-us…:50001`). 502/503/504 são sempre
+// transitórios. 429 (rate limit) NÃO é re-tentado aqui — propaga com
+// retry-after para o cliente recuar.
+function isRetryableGatewayError(res: Response): boolean {
+  if (res.ok) return false
+  if (res.status === 502 || res.status === 503 || res.status === 504) return true
+  const contentType = (res.headers.get('content-type') ?? '').toLowerCase()
+  return contentType.includes('text/html')
+}
+
 interface PreparedBody {
   body: string
   /** Tamanho do corpo final em chars — input do fallback de estimativa. */
@@ -108,7 +143,9 @@ async function bodyWithActiveModel(
       if (!(key in merged)) merged[key] = value
     }
   }
-  merged.model = model
+  // Vertex (google_oauth) exige um id `<publisher>/<model>`; assume `google/`
+  // quando a config guardou um id sem publisher (ver ensureVertexPublisher).
+  merged.model = isGoogleOAuth ? ensureVertexPublisher(model) : model
 
   // Gemini/Vertex: torna o thinking (sempre ativo no modelo) VISÍVEL no stream.
   // Ao contrário do GLM/Qwen/MiMo (que emitem reasoning_content sem pedir), o
@@ -141,8 +178,10 @@ async function handleChatCompletions(
   // O header NUNCA segue upstream (filtro em headers.ts) e a resposta leva
   // X-TM-Config-Key para o cliente saber quem serviu.
   const requestType = request.headers.get('x-request-type')
-  const active = await getConfigForRequest(env, requestType)
-  const config = active.config
+  // `let` because Team BYOK may override the MAIN-path config after we know the
+  // requester's team (resolved below, post-suspension-gate).
+  let active = await getConfigForRequest(env, requestType)
+  let config = active.config
 
   // Sidecars ESPECIALIZADOS (vision/web_search/fim) NÃO podem degradar para o
   // modelo ativo GERAL: mandar uma imagem a um modelo de texto dá 404 upstream,
@@ -194,10 +233,29 @@ async function handleChatCompletions(
     )
   }
 
+  // ── Team BYOK ────────────────────────────────────────────────────────
+  // Se a equipa do membro tem uma config `team:{teamId}` publicada e ativa, o
+  // modelo PRINCIPAL passa a ir ao provedor/chave da própria equipa (a equipa
+  // paga ao provedor) e o metering da TM é saltado. Só o caminho principal:
+  // pedidos de sidecar (memória/visão/…) continuam na infra TM, coerente com a
+  // política de plano pago. Config inválida/ausente/desativada → degrada para
+  // o modelo gerido (nunca parte o chat).
+  let teamByok = false
+  if (budgetState?.team?.teamId && !requestedSidecar) {
+    const tb = await getTeamByokConfig(env, budgetState.team.teamId)
+    if (tb) {
+      active = tb
+      config = tb.config
+      teamByok = true
+    }
+  }
+
   // Hoisted: o budget base do plano/tier — reusado para o pieTotal do contexto
   // de equipa nos headers (§3.5).
   let planBudget = 0
-  if (enforcement !== 'off') {
+  // Team BYOK não consome tokens da TM → sem gate de orçamento (nem fatia de
+  // equipa) para esses pedidos.
+  if (enforcement !== 'off' && !teamByok) {
     if (budgetState) {
       // Budget do plano vem do subscription_plans do admin (cache 5 min em
       // billing.ts); hardcoded/PLAN_BUDGETS_JSON só como fallback — senão o
@@ -228,6 +286,29 @@ async function handleChatCompletions(
     }
   }
 
+  // ── Team BYOK: orçamento VIRTUAL opcional (opt-in pelo admin) ───────────────
+  // Quando a config da equipa define um `pool` (> 0), medimos o uso BYOK contra
+  // essa pool + a fatia do membro (a MESMA percentAllocation do Plano de
+  // Equipas) e bloqueamos quando qualquer um esgota — hard cap estrito. Sem
+  // pool → pass-through puro (sem gate, sem commit), como antes. A pool é uma
+  // ESTIMATIVA do que o admin pagou ao provedor, NÃO o saldo real.
+  let teamByokMetered = false
+  if (teamByok && config.pool && config.pool > 0 && budgetState?.team) {
+    teamByokMetered = true
+    if (enforcement !== 'off') {
+      const gate = checkTeamByokBudget(config.pool, budgetState.team)
+      if (!gate.allowed) {
+        return jsonError(
+          402,
+          'tm_team_byok_exhausted',
+          gate.reason === 'team'
+            ? 'The team BYOK budget is exhausted. Ask your team admin to top it up.'
+            : 'Your team BYOK slice is exhausted. Ask your team admin to increase your allocation.',
+        )
+      }
+    }
+  }
+
   // TM Speed (`/speed` na IDE): a app envia `X-TM-Speed: true` como sinal de
   // routing para ESTE worker — o header nunca segue upstream (o filtro x-tm-*
   // em headers.ts continua a aplicar-se). Só troca de modelo se o admin tiver
@@ -246,7 +327,8 @@ async function handleChatCompletions(
     // extra, zero round-trips.
     speedEligible = isSpeedAllowedForPlanState(budgetState)
   }
-  const speedApplied = speedRequested && !!config.speedModel && speedEligible
+  // Team BYOK usa o modelo da equipa (sem speedModel da TM) — speed é no-op.
+  const speedApplied = !teamByok && speedRequested && !!config.speedModel && speedEligible
   const model = speedApplied && config.speedModel ? config.speedModel : config.model
 
   const upstreamUrl = buildUpstreamUrl(config)
@@ -254,37 +336,78 @@ async function handleChatCompletions(
   const { headers: upstreamHeaders, providerKey } = await buildUpstreamHeaders(request, config, env, fetcher)
 
   // O signal do upstream é um controller próprio em vez de request.signal
-  // direto: o abort do cliente continua a propagar (listener abaixo, durante
-  // TODO o ciclo de vida do fetch, corpo incluído), mas ganhamos um segundo
-  // gatilho — o timeout de headers — sem nunca cortar um stream já em curso
-  // (o timer é limpo assim que os headers chegam).
-  const upstreamAbort = new AbortController()
+  // direto: o abort do cliente continua a propagar durante TODO o ciclo de
+  // vida (corpo do stream incluído), mas ganhamos um segundo gatilho — o
+  // timeout de headers — sem nunca cortar um stream já em curso (o timer é
+  // limpo assim que os headers chegam). `upstreamAbort` é mutável: cada
+  // re-tentativa usa um controller fresco e este listener aborta sempre o que
+  // está em voo (fecha sobre a variável, não o valor).
+  let upstreamAbort = new AbortController()
   const propagateClientAbort = (): void => upstreamAbort.abort()
   if (request.signal.aborted) propagateClientAbort()
   else request.signal.addEventListener('abort', propagateClientAbort, { once: true })
 
-  let upstreamHeadersTimedOut = false
-  const headerTimer = setTimeout(() => {
-    upstreamHeadersTimedOut = true
-    upstreamAbort.abort()
-  }, resolveUpstreamHeaderTimeout(env, prepared.streamRequested))
-
+  // Re-tenta o pedido ao provedor em falhas TRANSITÓRIAS de gateway/edge — o
+  // caso clássico é a página HTML "400 Bad Request" do Tengine do DashScope
+  // (rejeição no gateway, antes da API), além de 502/503/504, timeout de
+  // headers e erros de transporte. Seguro porque um não-2xx significa que
+  // NENHUM stream começou; re-enviar o mesmo corpo (string) é idempotente.
+  // Erros REAIS da API (JSON 4xx) NÃO são re-tentados — propagam já.
+  const maxRetries = resolveUpstreamMaxRetries(env)
   let upstream: Response
-  try {
-    upstream = await fetcher.fetch(upstreamUrl, {
-      method: request.method,
-      headers: upstreamHeaders,
-      body: prepared.body,
-      signal: upstreamAbort.signal,
-    })
-  } catch {
-    if (upstreamHeadersTimedOut) {
-      console.error(`[ai-pass-through] upstream header timeout user=${user.userId} url=${upstreamUrl}`)
-      return jsonError(504, 'tm_upstream_timeout', 'Active AI provider did not respond in time.')
+  for (let attempt = 0; ; attempt++) {
+    if (attempt > 0) {
+      upstreamAbort = new AbortController()
+      if (request.signal.aborted) upstreamAbort.abort()
     }
-    return jsonError(502, 'tm_upstream_transport_error', 'Unable to reach active AI provider.')
-  } finally {
-    clearTimeout(headerTimer)
+    let upstreamHeadersTimedOut = false
+    const headerTimer = setTimeout(() => {
+      upstreamHeadersTimedOut = true
+      upstreamAbort.abort()
+    }, resolveUpstreamHeaderTimeout(env, prepared.streamRequested))
+
+    let res: Response | null = null
+    try {
+      res = await fetcher.fetch(upstreamUrl, {
+        method: request.method,
+        headers: upstreamHeaders,
+        body: prepared.body,
+        signal: upstreamAbort.signal,
+      })
+    } catch {
+      // Erro de transporte ou abort — decidido abaixo.
+    } finally {
+      clearTimeout(headerTimer)
+    }
+
+    // Erro de transporte ou timeout de headers → falha já, SEM retry (como o
+    // design original): são falhas "lentas"/persistentes e re-tentar só compõe
+    // a latência. O retry abaixo cobre apenas os erros de GATEWAY recebidos
+    // (HTML 400 / 502-504) — rejeições rápidas e quase sempre transitórias.
+    if (!res) {
+      if (upstreamHeadersTimedOut) {
+        console.error(`[ai-pass-through] upstream header timeout user=${user.userId} url=${upstreamUrl}`)
+        return jsonError(504, 'tm_upstream_timeout', 'Active AI provider did not respond in time.')
+      }
+      return jsonError(502, 'tm_upstream_transport_error', 'Unable to reach active AI provider.')
+    }
+
+    if (attempt < maxRetries && isRetryableGatewayError(res)) {
+      console.warn(
+        `[ai-pass-through] upstream gateway error ${res.status} ` +
+          `(${res.headers.get('content-type') ?? '?'}) retry ${attempt + 1}/${maxRetries} user=${user.userId}`,
+      )
+      try {
+        await res.body?.cancel()
+      } catch {
+        // corpo já fechado/consumido — ignora.
+      }
+      await sleep(retryBackoffMs(attempt))
+      continue
+    }
+
+    upstream = res
+    break
   }
 
   const durationMs = Date.now() - startedAt
@@ -301,9 +424,21 @@ async function handleChatCompletions(
   // com billing ligado. O corpo devolvido é byte-idêntico (usage.ts); o
   // commit corre em waitUntil DEPOIS do stream terminar para nunca atrasar
   // o primeiro byte. Aborts do cliente liquidam com o que foi observado.
-  if (enforcement !== 'off' && upstream.ok && upstream.body && responseBody === upstream.body) {
+  // Contabilidade pós-stream — corre em waitUntil DEPOIS de o stream terminar,
+  // para nunca atrasar o primeiro byte. Dois caminhos mutuamente exclusivos:
+  //  • gerido (`!teamByok`): commitTokenConsumption (multiplicador, overage,
+  //    fatia de equipa) contra o budget da TM.
+  //  • Team BYOK com pool (`teamByokMetered`): commitTeamByokConsumption (1x,
+  //    tokens reais) contra o ledger virtual da equipa.
+  // Team BYOK SEM pool = pass-through: não entra aqui (nenhuma das condições).
+  // Em ambos só se comita em `upstream.ok` → um 502/erro nunca consome.
+  const meterBody = enforcement !== 'off' && upstream.ok && upstream.body
+    && responseBody === upstream.body && (!teamByok || teamByokMetered)
+    ? upstream.body
+    : null
+  if (meterBody) {
     const observer = observeUsage(
-      upstream.body,
+      meterBody,
       upstream.headers.get('content-type'),
       prepared.chars,
     )
@@ -312,6 +447,7 @@ async function handleChatCompletions(
 
     const multiplier = speedApplied ? resolveSpeedMultiplier(env) : 1
     const asOverage = budgetCheck?.asOverage ?? false
+    const teamId = budgetState?.team?.teamId
     waitUntil(observer.done.then(async (usage) => {
       if (!usage) return
       // Observabilidade do fallback: quando o provider omite o objeto
@@ -324,6 +460,19 @@ async function handleChatCompletions(
           `[billing] usage ESTIMATED (provider omitted usage object) user=${user.userId} ` +
           `prompt≈${usage.promptTokens} completion≈${usage.completionTokens}`,
         )
+      }
+      // Team BYOK: ledger virtual da equipa, tokens RAW (1x, sem multiplicador
+      // da TM — é a despesa do admin no provedor, não inferência gerida).
+      if (teamByokMetered && teamId) {
+        await commitTeamByokConsumption({
+          env,
+          userId: user.userId,
+          idToken,
+          teamId,
+          rawTokens: usage.promptTokens + usage.completionTokens,
+          fetcher,
+        })
+        return
       }
       const rawTokens = Math.ceil((usage.promptTokens + usage.completionTokens) * multiplier)
       await commitTokenConsumption({
@@ -339,6 +488,9 @@ async function handleChatCompletions(
     }))
   }
 
+  const upstreamHost = (() => {
+    try { return new URL(upstreamUrl).host } catch { return upstreamUrl }
+  })()
   await logRequest({
     requestId,
     userId: user.userId,
@@ -349,7 +501,20 @@ async function handleChatCompletions(
     providerKey,
     configSource: active.source,
     configKey: active.key,
+    teamByok,
+    upstreamHost,
   })
+  // Greppable one-liner for `wrangler tail` during a Team BYOK e2e: proves the
+  // request was served by the TEAM's own provider/key, not the internal model.
+  // With a virtual pool the team's BYOK ledger IS metered (1x, raw); without
+  // one it's pure pass-through (no metering) — the suffix says which.
+  if (teamByok) {
+    console.info(
+      `[team-byok] SERVED via team key → provider=${config.provider} model=${model} ` +
+        `host=${upstreamHost} status=${upstream.status} config=${active.key} ` +
+        `(${teamByokMetered ? `virtual pool METERED 1x, pool=${config.pool}` : 'TM model+metering BYPASSED'})`,
+    )
+  }
 
   // ── Watchdog de inatividade do stream ────────────────────────────────
   // O header-timeout acima já foi limpo (finally do fetch) — a partir daqui
@@ -374,6 +539,7 @@ async function handleChatCompletions(
       provider: config.provider,
       model,
       speedApplied,
+      teamByok,
       configSource: active.source,
       configKey: active.key,
       // Janela de contexto real do modelo ativo (quando declarada na config) —

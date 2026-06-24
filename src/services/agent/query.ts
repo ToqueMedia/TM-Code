@@ -95,7 +95,7 @@ export type QueryStreamEvent =
       isError: boolean;
     }
   | { type: "compact_start"; beforeTokens: number }
-  | { type: "compact_end"; beforeTokens: number; afterTokens: number }
+  | { type: "compact_end"; beforeTokens: number; afterTokens: number; summary?: string }
   | {
       type: "agent_status";
       phase: "attempting" | "retrying" | "connected";
@@ -727,19 +727,33 @@ export async function* query(
     state.turnCount++;
 
     // ── Context management pipeline ──
-    // Order: toolResultBudget → snip → microcompact → collapse → autoCompact
+    // Order: toolResultBudget → microcompact → collapse → autoCompact
+    //
+    // Routine snip (a cheap tail-cut that drops old turns with NO summary) was
+    // REMOVED from the per-request path. Its "only snip under pressure" guard was
+    // a tautology — `currentTokens <= currentTokens * 0.5` is never true — so it
+    // fired on EVERY request once a conversation passed ~20 messages, trimming
+    // the outgoing prompt to the last ~20 messages and starving the summarizer
+    // (autoCompact rarely saw enough tokens to fire). The model went blind beyond
+    // a sliding 20-message window, with no summary of what was dropped — the
+    // concrete cause of "the model loses the thread".
+    //
+    // claude-vaz's snip is a model-INVOKED tool for opportunistic pruning, not an
+    // automatic per-turn trim; its routine compaction is summarization. We now
+    // match that: routine context management is microcompact (clears OLD tool-
+    // result CONTENT but keeps every turn) + autoCompact (summarizes near the
+    // ceiling and PERSISTS the summary). Snip remains ONLY as a forced last
+    // resort in the blocking-limit guard and the prompt_too_long recovery below,
+    // where the alternative is a guaranteed overflow.
 
     let messagesForQuery = [...messages];
 
-    // 1. Tool result budget
+    // 1. Tool result budget — cap oversized tool-result bodies (keeps structure).
     messagesForQuery = applyToolResultBudget(messagesForQuery);
 
-    // 2. Snip compact
-    const snipResult = snipCompactIfNeeded(messagesForQuery);
-    if (snipResult.messagesRemoved > 0) {
-      messagesForQuery = snipResult.messages;
-    }
-    const snipTokensFreed = snipResult.tokensFreed;
+    // 2. (routine snip removed — emergency-only below). No tokens pre-freed, so
+    //    autoCompact reasons about the full occupancy.
+    const snipTokensFreed = 0;
 
     // 3. Microcompact — keepRecent is density- AND gap-aware now (was a fixed 8
     //    with a dead "skip time-based for now" stub). computeMicrocompactKeepRecent
@@ -832,10 +846,20 @@ export async function* query(
         turnCounter: 0,
         consecutiveFailures: 0,
       };
+      // Carry the summary text out so the handler can PERSIST it on the boundary
+      // marker (chatStore.addCompactBoundaryMessage). compactNow returns a single
+      // user message whose content IS the model-ready summary. Without this the
+      // summary stayed loop-local and was discarded — the model lost all
+      // pre-boundary context on the next turn.
+      const compactSummary =
+        typeof autoResult.postCompactMessages[0]?.content === "string"
+          ? (autoResult.postCompactMessages[0].content as string)
+          : undefined;
       yield {
         type: "compact_end",
         beforeTokens: autoResult.preCompactTokenCount ?? 0,
         afterTokens: autoResult.postCompactTokenCount ?? 0,
+        summary: compactSummary,
       };
     } else if (autoResult.consecutiveFailures !== undefined) {
       tracking = {

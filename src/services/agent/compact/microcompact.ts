@@ -13,14 +13,20 @@
 
 import type { ContentBlockAPI } from '../../../types/chat'
 
-const CLEARED_MESSAGE = '[Old tool result content cleared]'
+export const CLEARED_MESSAGE = '[Old tool result content cleared]'
 
-/** Tool names whose results are eligible for microcompaction. */
+/**
+ * Tool names whose results are eligible for microcompaction. MUST match the
+ * names TM Code's toolExecutor actually registers — the port from claude-vaz
+ * kept its generic names (`bash`, `grep`, `terminal`), which match NOTHING here,
+ * so the two heaviest outputs (`execute_command` shell output and `search_files`
+ * results) were never cleared and microcompact freed far less than it should.
+ * Canonical names: see src/services/agent/toolExecutor.ts.
+ */
 const COMPACTABLE_TOOLS = new Set([
   'read_file',
-  'bash',
-  'terminal',
-  'grep',
+  'execute_command', // shell output — the biggest single context hog
+  'search_files',    // grep/rg results — also large
   'glob',
   'list_directory',
   'web_fetch',

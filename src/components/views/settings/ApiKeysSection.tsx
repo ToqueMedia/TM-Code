@@ -7,12 +7,19 @@ import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import { IS_MAC, IS_WINDOWS } from '@/utils/platform'
 
-// Provider ids pinned to the top of the catalog list, in fixed priority order.
-// This survives the lastUsed-based sort below so featured providers never drop
-// below a frequently-used provider. Mirrors the same list in byokStore — kept
-// here so the rendering sort owns its own truth (the store array can arrive
-// in any order from the backend).
-const PINNED_PROVIDER_ORDER = ['xiaomi', 'moonshot']
+// User-declarable context windows for BYOK models (tokens). Under BYOK the
+// request bypasses the worker, so the IDE can't learn the real window from a
+// response header — the user picks the value their model supports and the
+// agent's auto-compact uses it. "Default" leaves it to the catalog/fallback.
+const CONTEXT_WINDOW_OPTIONS: Array<{ label: string; value: number | undefined }> = [
+  { label: 'Default', value: undefined },
+  { label: '128K', value: 131_072 },
+  { label: '192K', value: 196_608 },
+  { label: '200K', value: 200_000 },
+  { label: '256K', value: 262_144 },
+  { label: '1M', value: 1_048_576 },
+  { label: '2M', value: 2_097_152 },
+]
 
 // Per-OS keychain label for the trust line under API key inputs. Tauri uses
 // OS-native secret storage (Apple Keychain / Windows Credential Manager /
@@ -200,19 +207,13 @@ function ApiKeysBody(props: {
   //      regardless of usage so they always surface first.
   //   2. Everything else by lastUsed descending (frequent providers float up).
   //   3. Stable insertion order as final tiebreak.
-  // Without tier 1 the pin set in byokStore.loadProviders() would be lost
-  // here — a user who used DeepSeek last would see DeepSeek above Xiaomi.
+  // Frequently-used providers float up within their group; equal lastUsed keeps
+  // the hardcoded catalog order (Array.sort is stable). No more pinned set —
+  // the catalog is a small curated list now.
   const otherProviders = useMemo(() => {
-    const pinRank = (id: string): number => {
-      const idx = PINNED_PROVIDER_ORDER.indexOf(id)
-      return idx === -1 ? Number.MAX_SAFE_INTEGER : idx
-    }
     return [...providers]
       .filter(p => !active || p.id !== active.provider.id)
       .sort((a, b) => {
-        const rA = pinRank(a.id)
-        const rB = pinRank(b.id)
-        if (rA !== rB) return rA - rB
         const aUsed = perProviderConfig[a.id]?.lastUsed ?? 0
         const bUsed = perProviderConfig[b.id]?.lastUsed ?? 0
         return bUsed - aUsed
@@ -376,8 +377,11 @@ function CatalogList(props: { providers: ByokProvider[]; enabled: boolean }) {
     const local: ByokProvider[] = []
     const custom: ByokProvider[] = []
     for (const p of filtered) {
-      if (p.custom) custom.push(p)
-      else if (p.local) local.push(p)
+      // Explicit `group` wins (Anthropic is a cloud provider shown under Custom);
+      // fall back to the legacy custom/local flags.
+      const g = p.group ?? (p.custom ? 'custom' : p.local ? 'local' : 'cloud')
+      if (g === 'custom') custom.push(p)
+      else if (g === 'local') local.push(p)
       else cloud.push(p)
     }
     return { cloud, local, custom }
@@ -803,6 +807,7 @@ function ProviderCard(props: {
   const setKey = useByokStore(s => s.setKey)
   const deleteKey = useByokStore(s => s.deleteKey)
   const setBaseURL = useByokStore(s => s.setBaseURL)
+  const setContextWindow = useByokStore(s => s.setContextWindow)
   const setActive = useByokStore(s => s.setActive)
   const testKey = useByokStore(s => s.testKey)
   const setUserDefinedModel = useByokStore(s => s.setUserDefinedModel)
@@ -815,6 +820,7 @@ function ProviderCard(props: {
   const hasKey = config?.hasKey === true
   const isConfigured = config?.configured === true
   const baseURL = config?.baseURL ?? ''
+  const contextWindow = config?.contextWindow
   const userDefined = config?.userDefinedModel
   const dynamicModels = config?.dynamicCatalog?.models ?? []
 
@@ -1155,6 +1161,22 @@ function ProviderCard(props: {
           />
         </VStack>
 
+        {/* Context window — the USER declares the model's window (BYOK bypasses
+            the worker, so there's no X-Model-Context-Window header). Drives the
+            agent's auto-compact pressure for this model. */}
+        <VStack align="stretch" gap={1.5}>
+          <Text fontSize="11px" color={tokens.colors.text.muted} fontWeight="500">
+            {t('settings.byokContextWindow')}
+          </Text>
+          <ContextWindowPicker
+            value={contextWindow}
+            onChange={(v) => setContextWindow(provider.id, v)}
+          />
+          <Text fontSize="10px" color={tokens.colors.text.disabled} lineHeight="1.5">
+            {t('settings.byokContextWindowHint')}
+          </Text>
+        </VStack>
+
         {/* Local server panel: reachability + refresh models. Replaces the
             cloud Test button for local providers — pinging the discovery
             endpoint is both validation and catalog refresh. */}
@@ -1437,6 +1459,147 @@ function CapCheckbox(props: {
         {props.label}
       </Text>
     </HStack>
+  )
+}
+
+// ── ContextWindowPicker ──
+//
+// Custom dropdown for the user-declared BYOK context window. Matches the
+// ModelPicker chrome (dark glass trigger + panel, brand-pink selection) so the
+// BYOK card reads as one designed surface rather than a stray native <select>.
+
+function ContextWindowPicker(props: {
+  value: number | undefined
+  onChange: (v: number | undefined) => void
+}) {
+  const [isOpen, setIsOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const selected =
+    CONTEXT_WINDOW_OPTIONS.find(o => o.value === props.value) ?? CONTEXT_WINDOW_OPTIONS[0]
+
+  useEffect(() => {
+    if (!isOpen) return
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setIsOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [isOpen])
+
+  return (
+    <Box ref={ref} position="relative">
+      <Flex
+        as="button"
+        align="center"
+        justify="space-between"
+        w="100%"
+        px={3}
+        py="8px"
+        borderRadius={tokens.radius.md}
+        bg={tokens.colors.bg.sidebar}
+        border="1px solid"
+        textAlign="left"
+        borderColor={isOpen ? 'rgba(254, 16, 99, 0.5)' : tokens.colors.border.default}
+        cursor="pointer"
+        transition={tokens.transition.fast}
+        _hover={{ borderColor: tokens.colors.border.subtle }}
+        _focusVisible={{ borderColor: 'rgba(254, 16, 99, 0.7)', outline: 'none' }}
+        onClick={() => setIsOpen(v => !v)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') setIsOpen(false)
+          else if ((e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') && !isOpen) {
+            e.preventDefault()
+            setIsOpen(true)
+          }
+        }}
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
+      >
+        <HStack gap={2} flex={1} minW={0}>
+          <Text fontSize="12px" color={tokens.colors.text.primary} fontWeight="500" fontFamily={tokens.fontFamily.mono}>
+            {selected.label}
+          </Text>
+          {selected.value !== undefined && (
+            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
+              {selected.value.toLocaleString()} tokens
+            </Text>
+          )}
+        </HStack>
+        <Box
+          color={tokens.colors.text.disabled}
+          transition="transform 0.15s"
+          transform={isOpen ? 'rotate(180deg)' : 'rotate(0deg)'}
+        >
+          <FiChevronDown size={14} />
+        </Box>
+      </Flex>
+
+      {isOpen && (
+        <Box
+          role="listbox"
+          position="absolute"
+          top="calc(100% + 4px)"
+          left={0}
+          right={0}
+          maxH="280px"
+          overflowY="auto"
+          bg={tokens.colors.bg.overlay}
+          border="1px solid"
+          borderColor={tokens.colors.border.panel}
+          borderRadius={tokens.radius.md}
+          boxShadow="0 8px 24px rgba(0,0,0,0.4)"
+          zIndex={tokens.zIndex.dropdown}
+          py={1}
+        >
+          {CONTEXT_WINDOW_OPTIONS.map(opt => {
+            const isSelected = opt.value === props.value
+            return (
+              <Flex
+                key={opt.label}
+                as="button"
+                role="option"
+                aria-selected={isSelected}
+                align="center"
+                justify="space-between"
+                w="100%"
+                px={3}
+                py="8px"
+                textAlign="left"
+                bg={isSelected ? 'rgba(254, 16, 99, 0.08)' : 'transparent'}
+                cursor="pointer"
+                transition={tokens.transition.fast}
+                _hover={{ bg: isSelected ? 'rgba(254, 16, 99, 0.12)' : tokens.colors.bg.hoverSubtle }}
+                onClick={() => {
+                  props.onChange(opt.value)
+                  setIsOpen(false)
+                }}
+              >
+                <HStack gap={1.5} minW={0}>
+                  <Text
+                    fontSize="12px"
+                    fontFamily={tokens.fontFamily.mono}
+                    color={isSelected ? tokens.colors.accent.primary : tokens.colors.text.primary}
+                    fontWeight={isSelected ? '600' : '500'}
+                  >
+                    {opt.label}
+                  </Text>
+                  {opt.value !== undefined && (
+                    <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
+                      {opt.value.toLocaleString()}
+                    </Text>
+                  )}
+                </HStack>
+                {isSelected && (
+                  <Box color={tokens.colors.accent.primary} flexShrink={0}>
+                    <FiCheck size={12} />
+                  </Box>
+                )}
+              </Flex>
+            )
+          })}
+        </Box>
+      )}
+    </Box>
   )
 }
 

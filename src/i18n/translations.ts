@@ -198,6 +198,8 @@ const en = {
   'settings.byokDeleteKey': 'Delete key',
   'settings.byokBaseURL': 'Base URL (optional)',
   'settings.byokBaseURLPlaceholder': 'Override for org gateways — API root only, no /chat/completions',
+  'settings.byokContextWindow': 'Context window',
+  'settings.byokContextWindowHint': 'Set the window your model supports — it drives the agent’s auto-compaction. "Default" uses the catalog value.',
   'settings.byokModel': 'Model',
   'settings.byokTest': 'Test',
   'settings.byokTesting': 'Testing…',
@@ -733,6 +735,10 @@ const en = {
 
   // ── Terminal Mode Extra / Audit ───────────────────
   'terminalMode.view.loadingSession': '⟳ loading session…',
+  'terminalMode.view.renderErrorTitle': 'This message could not be displayed',
+  'terminalMode.view.crashTitle': 'Something broke while rendering the terminal',
+  'terminalMode.view.crashRetry': 'Try again',
+  'terminalMode.view.crashReload': 'Reload',
   'terminalMode.view.loadEarlier': '⟳ load earlier — {hiddenCount} hidden',
   'terminalMode.view.resizePanel': 'Resize terminal panel',
   'terminalMode.titlebar.thinkingAlwaysOn': 'Thinking is always-on for this model',
@@ -1968,6 +1974,8 @@ const pt: Record<keyof typeof en, string> = {
   'settings.byokDeleteKey': 'Apagar chave',
   'settings.byokBaseURL': 'URL base (opcional)',
   'settings.byokBaseURLPlaceholder': 'Override para gateways internos — só a raiz da API, sem /chat/completions',
+  'settings.byokContextWindow': 'Janela de contexto',
+  'settings.byokContextWindowHint': 'Define a janela que o teu modelo suporta — comanda a auto-compactação do agente. "Default" usa o valor do catálogo.',
   'settings.byokModel': 'Modelo',
   'settings.byokTest': 'Testar',
   'settings.byokTesting': 'A testar…',
@@ -2498,6 +2506,10 @@ const pt: Record<keyof typeof en, string> = {
 
   // ── Terminal Mode Extra / Audit ───────────────────
   'terminalMode.view.loadingSession': '⟳ a carregar sessão…',
+  'terminalMode.view.renderErrorTitle': 'Esta mensagem não pôde ser apresentada',
+  'terminalMode.view.crashTitle': 'Algo correu mal ao desenhar o terminal',
+  'terminalMode.view.crashRetry': 'Tentar de novo',
+  'terminalMode.view.crashReload': 'Recarregar',
   'terminalMode.view.loadEarlier': '⟳ carregar anteriores — {hiddenCount} ocultas',
   'terminalMode.view.resizePanel': 'Redimensionar painel do terminal',
   'terminalMode.titlebar.thinkingAlwaysOn': 'O raciocínio está sempre ativo para este modelo',

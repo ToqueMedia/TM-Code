@@ -2,10 +2,12 @@
  * Shared helpers, markdown components, and Error Boundary for CMD mode terminal UI.
  */
 import React, { type ComponentProps } from 'react'
-import { Flex, Text } from '@chakra-ui/react'
+import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiAlertTriangle } from 'react-icons/fi'
 import type { Components } from 'react-markdown'
 import { tokens } from '@/theme/tokens'
+import { logger } from '../../utils/logger'
+import { t } from '@/i18n/useTranslation'
 
 // ─── Formatters ───
 
@@ -164,7 +166,11 @@ export const terminalMarkdownComponents: Components = {
 // ─── Error Boundary ───
 
 type ErrorBoundaryState = { hasError: boolean; error: Error | null }
-type ErrorBoundaryProps = { children: React.ReactNode; fallback?: React.ReactNode }
+/** A static node, or a render-prop that receives the error + a reset() to retry. */
+type ErrorBoundaryFallback =
+  | React.ReactNode
+  | ((error: Error | null, reset: () => void) => React.ReactNode)
+type ErrorBoundaryProps = { children: React.ReactNode; fallback?: ErrorBoundaryFallback }
 
 export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
   constructor(props: ErrorBoundaryProps) {
@@ -176,17 +182,143 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
     return { hasError: true, error }
   }
 
+  private reset = () => this.setState({ hasError: false, error: null })
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    // Terminal mode previously swallowed per-message render errors silently —
+    // the message just vanished with no trace. Log with the componentStack so
+    // these are diagnosable (directly aids the React #185 investigation, whose
+    // root cause was pending a componentStack).
+    logger.error(
+      'terminal',
+      `message render error: ${error.message}`,
+      error,
+      info.componentStack,
+    )
+  }
+
   render() {
     if (this.state.hasError) {
-      return this.props.fallback || (
-        <Flex px={2} py={1} borderRadius="3px" bg="rgba(248,81,73,0.08)" border="1px solid rgba(248,81,73,0.2)" gap={2} align="center">
-          <FiAlertTriangle color={tokens.colors.accent.red} size={11} />
-          <Text fontSize="11px" color={tokens.colors.accent.red} fontFamily={tokens.fontFamily.mono}>
-            {this.state.error?.message || 'render error'}
-          </Text>
+      const { fallback } = this.props
+      if (typeof fallback === 'function') return fallback(this.state.error, this.reset)
+      if (fallback) return fallback
+      const message = this.state.error?.message || 'unknown render error'
+      // Refined-terminal contract: flat, mono, single red accent. Frame it as
+      // "this one message failed" (the rest of the transcript is intact) rather
+      // than dumping a raw stack — and clamp the reason so a giant React error
+      // string doesn't blow out the scrollback.
+      return (
+        <Flex
+          px={2}
+          py="6px"
+          my="2px"
+          borderRadius={tokens.radius.sm}
+          bg="rgba(248, 81, 73, 0.06)"
+          border="1px solid rgba(248, 81, 73, 0.18)"
+          gap={2}
+          align="flex-start"
+          data-ui-chrome
+        >
+          <Box color={tokens.colors.accent.red} flexShrink={0} mt="1px" display="flex">
+            <FiAlertTriangle size={12} />
+          </Box>
+          <Box minW={0} flex={1}>
+            <Text fontSize="11px" fontWeight="600" color={tokens.colors.accent.red} fontFamily={tokens.fontFamily.mono}>
+              {t('terminalMode.view.renderErrorTitle')}
+            </Text>
+            <Text
+              fontSize="10px"
+              color={tokens.colors.text.muted}
+              fontFamily={tokens.fontFamily.mono}
+              mt="2px"
+              css={{
+                display: '-webkit-box',
+                WebkitLineClamp: 3,
+                WebkitBoxOrient: 'vertical',
+                overflow: 'hidden',
+                wordBreak: 'break-word',
+              }}
+            >
+              {message}
+            </Text>
+          </Box>
         </Flex>
       )
     }
     return this.props.children
   }
+}
+
+// ─── Top-level crash fallback ───
+//
+// Shown when a render error escapes the per-message boundaries (status line,
+// prompt, a banner). Previously such an error white-screened the whole app
+// (React #185). This degrades to a calm, recoverable terminal panel: Retry
+// re-renders the subtree (transient errors), Reload restarts the window.
+export function TerminalCrashFallback({ error, onRetry }: { error: Error | null; onRetry: () => void }) {
+  const message = error?.message || 'unknown error'
+  return (
+    <Flex direction="column" flex="1" minH={0} align="center" justify="center" gap={3} px={6} data-ui-chrome>
+      <Flex align="center" gap={2} color={tokens.colors.accent.red}>
+        <FiAlertTriangle size={18} />
+        <Text fontFamily={tokens.fontFamily.mono} fontSize="13px" fontWeight="700">
+          {t('terminalMode.view.crashTitle')}
+        </Text>
+      </Flex>
+      <Text
+        fontFamily={tokens.fontFamily.mono}
+        fontSize="11px"
+        color={tokens.colors.text.muted}
+        maxW="520px"
+        textAlign="center"
+        css={{
+          display: '-webkit-box',
+          WebkitLineClamp: 4,
+          WebkitBoxOrient: 'vertical',
+          overflow: 'hidden',
+          wordBreak: 'break-word',
+        }}
+      >
+        {message}
+      </Text>
+      <Flex gap={2}>
+        <Box
+          as="button"
+          fontFamily={tokens.fontFamily.mono}
+          fontSize="11px"
+          fontWeight="600"
+          px={3}
+          py="6px"
+          borderRadius={tokens.radius.sm}
+          cursor="pointer"
+          transition={`all ${tokens.transition.fast}`}
+          color={tokens.colors.accent.purple}
+          bg="rgba(163, 113, 247, 0.12)"
+          border="1px solid rgba(163, 113, 247, 0.3)"
+          _hover={{ bg: 'rgba(163, 113, 247, 0.2)' }}
+          onClick={onRetry}
+        >
+          {t('terminalMode.view.crashRetry')}
+        </Box>
+        <Box
+          as="button"
+          fontFamily={tokens.fontFamily.mono}
+          fontSize="11px"
+          fontWeight="600"
+          px={3}
+          py="6px"
+          borderRadius={tokens.radius.sm}
+          cursor="pointer"
+          transition={`all ${tokens.transition.fast}`}
+          color={tokens.colors.text.secondary}
+          bg={tokens.colors.bg.hoverSubtle}
+          border={`1px solid ${tokens.colors.border.panel}`}
+          _hover={{ color: tokens.colors.text.primary, borderColor: tokens.colors.border.glass }}
+          onClick={() => window.location.reload()}
+        >
+          {t('terminalMode.view.crashReload')}
+        </Box>
+      </Flex>
+    </Flex>
+  )
 }

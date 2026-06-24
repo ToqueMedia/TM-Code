@@ -142,7 +142,7 @@ interface ChatActions {
    * ContextWindowIndicator no longer pins to the pre-compression peak that
    * `addTokenUsage` had cached via `Math.max`.
    */
-  addCompactBoundaryMessage: (beforeTokens: number, trigger?: import('@/types/chat').CompactMetadata['trigger'], messagesSummarized?: number) => void
+  addCompactBoundaryMessage: (beforeTokens: number, trigger?: import('@/types/chat').CompactMetadata['trigger'], messagesSummarized?: number, summary?: string) => void
   /**
    * Re-capture the current BYOK selection (provider/model/baseURL/caps)
    * from byokStore and store it as the active session's byokSnapshot.
@@ -1042,8 +1042,18 @@ export function rebuildConversationHistory(messages: ChatMessage[]): Conversatio
   const toolTouches = collectToolTouches(messages)
 
   messages.forEach((msg, msgIndex) => {
-    // System messages are UI-only status lines — never send to the LLM
-    if (msg.role === 'system') return
+    // System messages are UI-only status lines — never sent to the LLM, with ONE
+    // exception: a compact_boundary that carries a summary. Re-emit that summary
+    // as a user message so the model RETAINS the compacted-away context. Without
+    // this, auto-compaction dropped its own summary and the model lost everything
+    // before the boundary (it kept only recent raw turns) — the boundary sits at
+    // the head of the trimmed history, so the summary leads the outgoing prompt.
+    if (msg.role === 'system') {
+      if (msg.kind === 'compact_boundary' && msg.compactSummary) {
+        history.push({ role: 'user', content: msg.compactSummary })
+      }
+      return
+    }
 
     if (msg.role === 'user') {
       const parts = userMessageToContentParts(msg)
@@ -1783,7 +1793,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
     },
 
-    addCompactBoundaryMessage: (beforeTokens: number, trigger: CompactMetadata['trigger'] = 'auto', messagesSummarized?: number) => {
+    addCompactBoundaryMessage: (beforeTokens: number, trigger: CompactMetadata['trigger'] = 'auto', messagesSummarized?: number, summary?: string) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
         id: messageId,
@@ -1791,6 +1801,10 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         kind: 'compact_boundary',
         compactBeforeTokens: beforeTokens,
         compactMetadata: { trigger, beforeTokens, messagesSummarized },
+        // Persist the summary ON the boundary. rebuildConversationHistory re-emits
+        // it into the outgoing prompt so the model keeps the pre-boundary context
+        // after auto-compaction (the in-loop summary is otherwise discarded).
+        ...(summary ? { compactSummary: summary } : {}),
         level: 'info',
         content: `Conversa comprimida (${Math.round(beforeTokens / 1000)}K tokens).`,
         timestamp: Date.now(),

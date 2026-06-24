@@ -142,6 +142,10 @@ export interface TeamMemberBudget {
   purchasedExtra: number
   /** Fatia do membro (0..1). */
   percentAllocation: number
+  /** Team BYOK virtual ledger (raw 1x tokens) — usado SÓ quando a config
+   *  team:{teamId} tem `pool > 0`. Independente do budget gerido por ciclo. */
+  byokTeamConsumed: number
+  byokMemberConsumed: number
 }
 
 export interface UserBudgetState {
@@ -284,6 +288,8 @@ export async function getUserBudgetState(
               teamId: activeTeamId,
               purchasedExtra: team.purchasedExtra,
               percentAllocation: team.percentAllocation,
+              byokTeamConsumed: team.byokTeamConsumed,
+              byokMemberConsumed: team.byokMemberConsumed,
             },
           }
         }
@@ -335,6 +341,10 @@ interface TeamMemberRead {
   memberConsumed: number
   memberBlocked: boolean
   cycleEnd: string
+  /** Team BYOK virtual ledger (independent of the cycle-based managed budget):
+   *  the team total + this member's slice consumed. Both raw (1x) tokens. */
+  byokTeamConsumed: number
+  byokMemberConsumed: number
 }
 
 async function getTeamMemberBudget(
@@ -352,6 +362,7 @@ async function getTeamMemberBudget(
     'subscription',
     'tokenBudget.purchasedExtra',
     'cycle.cycleEnd',
+    'byokBudget.consumed',
     `members.${fieldPathSegment(userId)}`,
   ].map(p => `mask.fieldPaths=${encodeURIComponent(p)}`).join('&')
   const url = `${firestoreBase(env)}/v1/projects/${projectId}/databases/(default)/documents/teams/${encodeURIComponent(teamId)}?${mask}`
@@ -374,6 +385,7 @@ async function getTeamMemberBudget(
         subscription?: { mapValue?: { fields?: Record<string, unknown> } }
         tokenBudget?: { mapValue?: { fields?: Record<string, unknown> } }
         cycle?: { mapValue?: { fields?: Record<string, unknown> } }
+        byokBudget?: { mapValue?: { fields?: Record<string, unknown> } }
         members?: { mapValue?: { fields?: Record<string, unknown> } }
       }
     }
@@ -390,6 +402,7 @@ async function getTeamMemberBudget(
 
     const tb = doc.fields?.tokenBudget?.mapValue?.fields ?? {}
     const cycle = doc.fields?.cycle?.mapValue?.fields ?? {}
+    const byok = doc.fields?.byokBudget?.mapValue?.fields ?? {}
     const members = doc.fields?.members?.mapValue?.fields ?? {}
     const memberRaw = members[userId] as { mapValue?: { fields?: Record<string, unknown> } } | undefined
     // M1: activeTeamId aponta para uma equipa onde o user NÃO é membro (removido
@@ -404,6 +417,8 @@ async function getTeamMemberBudget(
       memberConsumed: Math.max(0, intField(member['tokensConsumed'])),
       memberBlocked: (member['blocked'] as { booleanValue?: boolean } | undefined)?.booleanValue === true,
       cycleEnd: (cycle['cycleEnd'] as { stringValue?: string } | undefined)?.stringValue ?? '',
+      byokTeamConsumed: Math.max(0, intField(byok['consumed'])),
+      byokMemberConsumed: Math.max(0, intField(member['byokConsumed'])),
     }
   } catch (error) {
     console.warn('[billing] team read threw:', error)
@@ -493,6 +508,36 @@ export function bumpCachedConsumption(userId: string, rawTokens: number, asOvera
   if (asOverage) {
     cached.state.extraUsageBalance = Math.max(0, cached.state.extraUsageBalance - rawTokens)
   }
+}
+
+/** Como bumpCachedConsumption mas para o ledger BYOK virtual da equipa — sem
+ *  isto, pedidos consecutivos dentro da janela de cache (60s) viam a fatia
+ *  desatualizada e podiam ultrapassar o teto antes do Firestore atualizar. */
+export function bumpCachedByokConsumption(userId: string, rawTokens: number): void {
+  const cached = stateCache.get(userId)
+  if (!cached?.state?.team) return
+  cached.state.team.byokMemberConsumed += rawTokens
+  cached.state.team.byokTeamConsumed += rawTokens
+}
+
+/** Gate do Team BYOK (hard cap ESTRITO): o membro só usa a sua fatia
+ *  (percentAllocation × pool) e a equipa nunca passa a pool. Bloqueia quando
+ *  qualquer um esgota. O caller só chama isto com `pool > 0`. */
+export interface TeamByokGate {
+  allowed: boolean
+  /** 'team' = a pool total esgotou; 'member' = a fatia do membro esgotou. */
+  reason?: 'team' | 'member'
+  poolRemaining: number
+  memberRemaining: number
+}
+
+export function checkTeamByokBudget(pool: number, team: TeamMemberBudget): TeamByokGate {
+  const memberCeiling = Math.floor(Math.max(0, Math.min(1, team.percentAllocation)) * pool)
+  const memberRemaining = Math.max(0, memberCeiling - team.byokMemberConsumed)
+  const poolRemaining = Math.max(0, pool - team.byokTeamConsumed)
+  if (poolRemaining <= 0) return { allowed: false, reason: 'team', poolRemaining, memberRemaining }
+  if (memberRemaining <= 0) return { allowed: false, reason: 'member', poolRemaining, memberRemaining }
+  return { allowed: true, poolRemaining, memberRemaining }
 }
 
 // ── Cost budget check (porte do control-plane billing.ts) ────────────────
@@ -726,6 +771,64 @@ async function commitTeamConsumption(args: CommitArgs): Promise<boolean> {
     return true
   } catch (error) {
     console.error('[billing] team commit threw:', error)
+    return false
+  }
+}
+
+/**
+ * Commit do Team BYOK — ledger VIRTUAL, totalmente separado do budget gerido
+ * por ciclo. Dual-write atómico em `teams/{teamId}`: total da pool
+ * (`byokBudget.consumed`) + fatia do membro (`members.{uid}.byokConsumed`), num
+ * único :commit. Tokens RAW (1x — é a despesa real do admin no provedor, sem o
+ * multiplicador de billing da TM). Não toca em `lifetimeTokensConsumed` (esse é
+ * o contador de uso GERIDO). Só corre em sucesso do upstream → um 502/erro do
+ * provedor nunca consome (requisito do produto).
+ */
+export async function commitTeamByokConsumption(args: {
+  env: Env
+  userId: string
+  idToken: string
+  teamId: string
+  rawTokens: number
+  fetcher: Fetcher
+}): Promise<boolean> {
+  const { env, userId, idToken, teamId, rawTokens, fetcher } = args
+  if (rawTokens <= 0 || !teamId) return true
+
+  const projectId = typeof env.FIREBASE_PROJECT_ID === 'string' ? env.FIREBASE_PROJECT_ID : ''
+  if (!projectId) return false
+
+  const docName = `projects/${projectId}/databases/(default)/documents/teams/${teamId}`
+  const commitUrl = `${firestoreBase(env)}/v1/projects/${projectId}/databases/(default)/documents:commit`
+
+  const writes = [{
+    transform: {
+      document: docName,
+      fieldTransforms: [
+        { fieldPath: 'byokBudget.consumed', increment: { integerValue: String(rawTokens) } },
+        { fieldPath: `members.${fieldPathSegment(userId)}.byokConsumed`, increment: { integerValue: String(rawTokens) } },
+      ],
+    },
+  }]
+
+  try {
+    const headers = await resolveFirestoreAuthHeaders(env, idToken, fetcher)
+    const response = await fetcher.fetch(commitUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ writes }),
+      signal: AbortSignal.timeout(FIRESTORE_COMMIT_TIMEOUT_MS),
+    })
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      console.error(`[billing] team-byok commit failed (${response.status}) team=${teamId} user=${userId} tokens=${rawTokens}: ${text.slice(0, 200)}`)
+      return false
+    }
+    console.info(`[billing] committed ${rawTokens} BYOK tokens team=${teamId} member=${userId}`)
+    bumpCachedByokConsumption(userId, rawTokens)
+    return true
+  } catch (error) {
+    console.error('[billing] team-byok commit threw:', error)
     return false
   }
 }

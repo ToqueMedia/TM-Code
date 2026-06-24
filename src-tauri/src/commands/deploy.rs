@@ -130,9 +130,11 @@ fn walk_collect(dir: &Path, base: &Path, out: &mut Vec<DeployBundleFile>) -> std
 ///     `dist` when the caller doesn't supply one (Vite default). v2 strategies
 ///     resolve the right directory from the DeployPlan and pass it explicitly
 ///     (e.g. Angular's `dist/<app>/browser`).
-///   - Migration source: `<project>/backend/src/db/schema.ts` (Drizzle)
+///   - hasDatabase:     a Drizzle `schema.ts` at one of SCHEMA_CANDIDATES
+///                      (`server/schema.ts`, `backend/src/db/schema.ts`, …)
+///   - Migration source: first non-empty `*.sql` dir in MIGRATION_DIR_CANDIDATES
+///                      (`migrations/`, `backend/migrations/`, …) else schema.ts
 ///   - hasApiRoutes:    `<project>/backend/` directory exists
-///   - hasDatabase:     `<project>/backend/src/db/schema.ts` exists
 ///
 /// The v1 Hono Worker bundle path was removed in Phase 0 of PLAN-DEPLOY-V2.
 /// v2 strategies collect backend artifacts plan-aware in their own modules.
@@ -183,8 +185,28 @@ pub async fn collect_deploy_bundle(
     let backend_dir = project.join("backend");
     let has_backend = backend_dir.exists() && backend_dir.is_dir();
 
-    let schema_path = backend_dir.join("src").join("db").join("schema.ts");
-    let has_database = schema_path.exists() && schema_path.is_file();
+    // Drizzle schema candidates, ordered most- to least-specific. The
+    // `publish-backend` skill ships the schema at `server/schema.ts`; older
+    // templates used `backend/src/db/schema.ts`. Probe a candidate set so
+    // `has_database` is accurate regardless of layout — a false negative here
+    // makes the deploy skip Turso provisioning + migrations and the container
+    // crashes on boot expecting TMDB_URL/TMDB_TOKEN. Keep in sync with
+    // collect_next_db_meta's SCHEMA_CANDIDATES.
+    const SCHEMA_CANDIDATES: &[&str] = &[
+        "server/schema.ts",
+        "server/db/schema.ts",
+        "server/src/db/schema.ts",
+        "backend/src/db/schema.ts",
+        "src/db/schema.ts",
+        "src/lib/db/schema.ts",
+        "db/schema.ts",
+        "drizzle/schema.ts",
+    ];
+    let schema_path = SCHEMA_CANDIDATES
+        .iter()
+        .map(|rel| project.join(rel))
+        .find(|p| p.is_file());
+    let has_database = schema_path.is_some();
 
     // Detect the TM Code File Storage helper. Convention from the
     // publish-backend skill recipe is `backend/src/files.ts`, but legacy
@@ -195,40 +217,29 @@ pub async fn collect_deploy_bundle(
     let has_file_storage = (backend_files_helper.exists() && backend_files_helper.is_file())
         || (server_files_helper.exists() && server_files_helper.is_file());
 
-    // Migration SQL preference, in order:
-    //   1. Concatenated *.sql under backend/migrations/   ← drizzle-kit generate output (preferred — produced by Drizzle so syntax is exact)
-    //   2. Raw schema.ts content                          ← fallback for the brittle regex extractor in deployOrchestrator
+    // Migration SQL preference: concatenated *.sql from the first migrations
+    // dir that has them (the skill's drizzle.config writes `./migrations` at the
+    // project root; older templates used `backend/migrations`), else the raw
+    // schema.ts content as a fallback for the worker's DDL extractor. Keep the
+    // dir list in sync with collect_next_db_meta.
+    const MIGRATION_DIR_CANDIDATES: &[&str] = &[
+        "migrations",
+        "backend/migrations",
+        "server/migrations",
+        "drizzle",
+        "drizzle/migrations",
+    ];
     let migration_sql = if has_database {
-        let migrations_dir = backend_dir.join("migrations");
-        let sql_files: Option<Vec<PathBuf>> = if migrations_dir.exists() && migrations_dir.is_dir()
-        {
-            std::fs::read_dir(&migrations_dir).ok().map(|rd| {
-                let mut files: Vec<PathBuf> = rd
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .filter(|p| p.extension().is_some_and(|ext| ext == "sql"))
-                    .collect();
-                files.sort();
-                files
-            })
-        } else {
-            None
-        };
-
-        match sql_files.filter(|f| !f.is_empty()) {
-            Some(files) => {
-                let mut combined = String::new();
-                for f in files {
-                    if let Ok(content) = std::fs::read_to_string(&f) {
-                        combined.push_str(&content);
-                        if !content.ends_with('\n') {
-                            combined.push('\n');
-                        }
-                    }
-                }
-                Some(combined)
-            }
-            None => std::fs::read_to_string(&schema_path).ok(),
+        let sql_concat = MIGRATION_DIR_CANDIDATES
+            .iter()
+            .map(|rel| project.join(rel))
+            .filter(|d| d.is_dir())
+            .find_map(|dir| concat_sql_dir(&dir));
+        match sql_concat {
+            Some(sql) => Some(sql),
+            None => schema_path
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok()),
         }
     } else {
         None
@@ -435,6 +446,8 @@ pub async fn collect_next_db_meta(project_path: String) -> Result<NextDbMeta, St
     // Next app that happens to follow that layout still resolves.
     const SCHEMA_CANDIDATES: &[&str] = &[
         "backend/src/db/schema.ts",
+        "server/schema.ts",
+        "server/db/schema.ts",
         "server/src/db/schema.ts",
         "src/db/schema.ts",
         "src/lib/db/schema.ts",
@@ -839,12 +852,11 @@ pub async fn validate_backend_for_cloud_run(project_path: String) -> Result<Vec<
     }
     let mut findings: Vec<String> = Vec::new();
 
-    // Prisma without Drizzle → deploy pipeline silently skips Turso
-    // provisioning because `bundle.has_database` is driven by
-    // `backend/src/db/schema.ts` (Drizzle convention). The container
-    // boots expecting a DB, but Cloud Run env has no `TMDB_URL` /
-    // `TMDB_TOKEN`, so the user's Turso dashboard stays empty AND the
-    // backend crashes on first query.
+    // Prisma without Drizzle → deploy pipeline skips Turso provisioning
+    // (`bundle.has_database` is driven by a Drizzle `schema.ts`). The container
+    // boots expecting a DB, but Cloud Run env has no `TMDB_URL` / `TMDB_TOKEN`,
+    // so the user's Turso dashboard stays empty AND the backend crashes on the
+    // first query.
     let has_prisma_schema = project.join("prisma").join("schema.prisma").exists()
         || project
             .join("server")
@@ -856,21 +868,108 @@ pub async fn validate_backend_for_cloud_run(project_path: String) -> Result<Vec<
             .join("prisma")
             .join("schema.prisma")
             .exists();
-    let has_drizzle_schema = project
-        .join("backend")
-        .join("src")
-        .join("db")
-        .join("schema.ts")
-        .exists();
+    // Mirror collect_deploy_bundle's SCHEMA_CANDIDATES so a Drizzle schema at
+    // `server/schema.ts` (the skill's layout) isn't mistaken for "no Drizzle".
+    let has_drizzle_schema = [
+        "server/schema.ts",
+        "server/db/schema.ts",
+        "server/src/db/schema.ts",
+        "backend/src/db/schema.ts",
+        "src/db/schema.ts",
+        "db/schema.ts",
+        "drizzle/schema.ts",
+    ]
+    .iter()
+    .any(|rel| project.join(rel).is_file());
     if has_prisma_schema && !has_drizzle_schema {
         findings.push(
-            "prisma/schema.prisma — Prisma is not supported by the deploy pipeline. The platform provisions Turso (libSQL) and only detects Drizzle schemas at `backend/src/db/schema.ts`. Migrate to Drizzle via the `publish-backend` skill before publishing, otherwise the Turso dashboard stays empty and the container crashes on the first DB query.".to_string()
+            "prisma/schema.prisma — Prisma is not supported by the deploy pipeline. The platform provisions Turso (libSQL) and detects Drizzle schemas (e.g. `server/schema.ts`). Migrate to Drizzle via the `publish-backend` skill before publishing, otherwise the Turso dashboard stays empty and the container crashes on the first DB query.".to_string()
         );
+    }
+
+    if let Some(finding) = lint_session_trust_proxy(project) {
+        findings.push(finding);
     }
 
     walk_and_lint(project, project, &mut findings)
         .map_err(|e| format!("Lint walk failed: {}", e))?;
     Ok(findings)
+}
+
+/// Cloud Run terminates TLS at the proxy. `express-session` with a `secure`
+/// cookie silently drops the Set-Cookie unless the app trusts the proxy, so
+/// login returns 200 with no cookie and every authenticated route 401s — an
+/// invisible failure (exactly the FyCargo login bug). Flag it when the project
+/// uses express-session with a secure cookie but never enables `trust proxy`.
+/// Conservative: needs all three signals; `trust proxy` set/enabled anywhere
+/// (any file) clears it, and `secure: 'auto'` sessions are not flagged.
+fn lint_session_trust_proxy(project: &Path) -> Option<String> {
+    fn scan(
+        dir: &Path,
+        base: &Path,
+        session_file: &mut Option<String>,
+        secure_cookie: &mut bool,
+        trust_proxy: &mut bool,
+    ) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                if matches!(
+                    name.as_str(),
+                    "node_modules" | "dist" | "build" | ".git" | ".next" | ".turbo"
+                ) {
+                    continue;
+                }
+                scan(&path, base, session_file, secure_cookie, trust_proxy);
+            } else if name.ends_with(".ts") || name.ends_with(".js") {
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                if content.contains("trust proxy") {
+                    *trust_proxy = true;
+                }
+                if content.contains("express-session") && session_file.is_none() {
+                    *session_file = Some(
+                        path.strip_prefix(base)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .to_string(),
+                    );
+                }
+                // Secure cookie inside a cookie/session config: `secure: true`
+                // or `secure: <NODE_ENV === 'production'>`.
+                if (content.contains("secure: true")
+                    || (content.contains("secure:") && content.contains("production")))
+                    && (content.contains("cookie") || content.contains("session"))
+                {
+                    *secure_cookie = true;
+                }
+            }
+        }
+    }
+
+    let mut session_file: Option<String> = None;
+    let mut secure_cookie = false;
+    let mut trust_proxy = false;
+    scan(
+        project,
+        project,
+        &mut session_file,
+        &mut secure_cookie,
+        &mut trust_proxy,
+    );
+
+    match session_file {
+        Some(file) if secure_cookie && !trust_proxy => Some(format!(
+            "{} — uses `express-session` with a `secure` cookie but the app never calls `app.set('trust proxy', 1)`. Behind Cloud Run's TLS-terminating proxy the cookie is silently dropped: login returns 200 with no Set-Cookie and every authenticated route 401s. Add `app.set('trust proxy', 1)` before the session middleware, or switch to stateless JWT (see the publish-backend skill).",
+            file
+        )),
+        _ => None,
+    }
 }
 
 fn walk_and_lint(dir: &Path, base: &Path, findings: &mut Vec<String>) -> std::io::Result<()> {

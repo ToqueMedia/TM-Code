@@ -398,6 +398,11 @@ router.get('/api/bugs', async (req, res) => {
 
 The `auth-proxy` skill covers the full GIP flow (signup, signin, refresh, tenant headers). Read it if the project needs auth and you haven't seen the GIP REST shape before.
 
+**If you use cookie sessions instead of stateless JWT** (`express-session`, Passport sessions, …) — prefer not to; the stateless JWT above has no Cloud Run pitfalls. But if you must:
+- **`app.set('trust proxy', 1)` BEFORE the session middleware.** Cloud Run terminates TLS at its proxy; without trusting it, `cookie.secure: true` makes express-session silently drop the `Set-Cookie` → login returns 200 but no cookie is set and every authenticated route 401s. The failure is invisible until you hit the real deployed URL (not local dev).
+- **Never the default `MemoryStore`.** Cloud Run scales to zero and runs multiple instances, so in-memory sessions vanish between requests. Use a persistent store (a sessions table in Turso) — or just switch to stateless JWT.
+- **`SESSION_SECRET` from env, never a hardcoded default; never hardcode admin credentials in source.** Put users in the DB (hashed) or use GIP.
+
 ### 8. Dockerfile
 
 The platform runtime IS Cloud Run. Your Dockerfile must satisfy the Cloud Run container contract:

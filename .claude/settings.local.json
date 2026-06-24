@@ -506,7 +506,20 @@
       "Bash(gcloud firestore *)",
       "Bash(echo \"worker-tsc=$?\")",
       "Bash(GCP_TOKEN=$\\(gcloud auth application-default print-access-token 2>/dev/null\\) NOW_ISO=$\\(date -u +\"%Y-%m-%dT%H:%M:%SZ\"\\) node restore_celso.mjs)",
-      "WebFetch(domain:api.momenu.online)"
+      "WebFetch(domain:api.momenu.online)",
+      "Bash(command -v gcloud)",
+      "Bash(gcloud --version)",
+      "Bash(gcloud run *)",
+      "Bash(gcloud projects *)",
+      "Bash(yarn --cwd /Users/ithustle/dev/deskotp/toquemedia-studio-api deploy)",
+      "Bash(brew install *)",
+      "Bash(crane version *)",
+      "Bash(crane --help)",
+      "Bash(npx --no-install wrangler kv key get --namespace-id 7b55ce933d3c42768b79c006ffe8e570 \"slug-status:fycargo-express\" --remote)",
+      "Bash(npx --no-install wrangler secret list --env production)",
+      "Bash(npx --no-install wrangler secret list)",
+      "Bash(crane export *)",
+      "Bash(tar -x -C /tmp/fycargo-app app/server app/package.json)"
     ]
   }
 }

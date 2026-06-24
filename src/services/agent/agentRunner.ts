@@ -600,7 +600,7 @@ async function runAgentInternal(
           logger.info('agent', '✓ Context compression complete')
           agentStore.setCompactPhase('idle')
           agentStore.setStatus('awaiting_response')
-          useChatStore.getState().addCompactBoundaryMessage(event.beforeTokens, event.trigger, event.messagesSummarized)
+          useChatStore.getState().addCompactBoundaryMessage(event.beforeTokens, event.trigger, event.messagesSummarized, event.summary)
         }
       },
       // ── Queued-message steering (claude-vaz parity) ──

@@ -448,21 +448,7 @@ function SourceControlPanel() {
       const targetFiles = staged.length > 0 ? staged : unstaged
       const fileList = targetFiles.map(f => `${f.status}: ${f.path}`).join('\n')
 
-      const FirebaseAuthService = (await import('../../services/auth/firebaseAuth')).default
-      let token = await FirebaseAuthService.getInstance().getIdToken()
-      if (!token) token = await FirebaseAuthService.getInstance().getIdToken(true)
-      if (!token) throw new Error(t('sourceControl.notAuthenticated'))
-
-      const { resolveAIWorkerUrl } = await import('../../utils/devUrls')
-      const workerUrl = resolveAIWorkerUrl()
-      const { tauriFetch } = await import('../../services/tauriFetch')
-      const response = await tauriFetch(`${workerUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({
-          messages: [{
-            role: 'user',
-            content: `Generate a detailed git commit message for these changes using conventional commits format.
+      const promptContent = `Generate a detailed git commit message for these changes using conventional commits format.
 
 Base the message on the actual diff hunks and changed files below. Mention concrete modules, components, APIs, config, tests, and behavior changes when they are visible in the diff. Do not invent changes that are not supported by the diff.
 
@@ -497,17 +483,43 @@ Diff stat:
 ${diffStat}
 
 Diff hunks:
-${diffDetail}`,
-          }],
-          temperature: 0.2,
-          max_tokens: 1200,
-          stream: false,
-        }),
-      })
+${diffDetail}`
 
-      if (!response.ok) throw new Error(`API ${response.status}`)
-      const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
-      const aiMsg = data.choices?.[0]?.message?.content?.trim() || ''
+      const commitMessages = [{ role: 'user', content: promptContent }]
+      let aiMsg = ''
+      const { resolveAuxByokRoute, byokAuxCompletion } = await import('../../services/agent/byokRouting')
+      const auxRoute = resolveAuxByokRoute()
+      if (auxRoute) {
+        // Free + BYOK: generate the commit message on the user's own key.
+        aiMsg = ((await byokAuxCompletion(auxRoute.snapshot, {
+          messages: commitMessages,
+          maxTokens: 1200,
+          temperature: 0.2,
+        })) ?? '').trim()
+      } else {
+        const FirebaseAuthService = (await import('../../services/auth/firebaseAuth')).default
+        let token = await FirebaseAuthService.getInstance().getIdToken()
+        if (!token) token = await FirebaseAuthService.getInstance().getIdToken(true)
+        if (!token) throw new Error(t('sourceControl.notAuthenticated'))
+
+        const { resolveAIWorkerUrl } = await import('../../utils/devUrls')
+        const workerUrl = resolveAIWorkerUrl()
+        const { tauriFetch } = await import('../../services/tauriFetch')
+        const response = await tauriFetch(`${workerUrl}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({
+            messages: commitMessages,
+            temperature: 0.2,
+            max_tokens: 1200,
+            stream: false,
+          }),
+        })
+
+        if (!response.ok) throw new Error(`API ${response.status}`)
+        const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
+        aiMsg = data.choices?.[0]?.message?.content?.trim() || ''
+      }
 
       if (aiMsg) {
         const cleaned = stripReasoningBlocks(aiMsg)

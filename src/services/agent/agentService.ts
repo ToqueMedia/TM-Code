@@ -30,12 +30,14 @@ import { invoke } from "@/utils/invokeMetrics";
 import { logger } from "../../utils/logger";
 import { FALLBACK_CONTEXT_WINDOW } from "../../utils/contextWindow";
 import { getQueryGuard } from "./queryGuard";
-import type { ContentPart } from "../../types/chat";
+import type { ContentPart, ByokSessionSnapshot } from "../../types/chat";
 
 // ── Query engine ──
 
 import type OpenAI from "openai";
 import { createAgentClient, createSubAgentClient } from "./sdkClient";
+import { useByokStore } from "../../stores/byokStore";
+import { buildByokClientFromSnapshot, buildByokThinkingConfig } from "./byokRouting";
 import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
@@ -95,6 +97,14 @@ class AgentService {
   // Só é atualizado em runs não-lightweight (lightweight não envia o header
   // X-TM-Speed nem liga onResponseHeaders) e é reposto no início de cada run.
   private lastResponseSpeedApplied = false;
+
+  // ── BYOK direct-routing state (set per run in runQueryEngineLoop) ──
+  // When byokActive, the run routes IDE → SDK → provider DIRECT (bypassing the
+  // TM worker): resolveModel returns the BYOK model id, buildThinkingConfig
+  // sends the provider-native thinking field, buildExtraHeaders drops the
+  // worker-only headers, and the compact helpers use the BYOK client too.
+  private byokActive = false;
+  private byokSnapshot: ByokSessionSnapshot | null = null;
 
   // ── Delegated state ──
   private sessionState: SessionState;
@@ -399,19 +409,46 @@ class AgentService {
       return;
     }
 
-    // 2. Create SDK client
-    const client = this.lightweightOptions
-      ? createSubAgentClient(authToken)
-      : createAgentClient(authToken);
-    const refreshClient = async (): Promise<OpenAI | null> => {
-      const auth = FirebaseAuthService.getInstance();
-      const refreshed = await auth.getIdToken(true)
-        ?? (await auth.refreshLogin() ? await auth.getIdToken(true) : null);
-      if (!refreshed) return null;
-      return this.lightweightOptions
-        ? createSubAgentClient(refreshed)
-        : createAgentClient(refreshed);
-    };
+    // 2. Create SDK client — BYOK routes IDE → provider DIRECT; managed routes
+    //    through the TM worker. The active session's frozen BYOK snapshot wins
+    //    so switching the active provider mid-conversation only affects new
+    //    sessions.
+    const activeSession = useChatStore.getState().getActiveSession();
+    const snapshot = activeSession?.byokSnapshot ?? null;
+    const byokActive = !!snapshot && useByokStore.getState().enabled;
+    this.byokActive = byokActive;
+    this.byokSnapshot = snapshot;
+
+    let client: OpenAI;
+    let refreshClient: () => Promise<OpenAI | null>;
+    if (byokActive && snapshot) {
+      const byokClient = await this.buildByokClient(snapshot, callbacks);
+      if (!byokClient) return; // key missing for a cloud provider — error surfaced
+      client = byokClient;
+      // The BYOK key is static (no JWT to refresh); rebuild from the snapshot so
+      // a user who fixes a bad key mid-session recovers on the next turn.
+      refreshClient = async () => this.buildByokClient(snapshot, callbacks);
+      // No X-Model-* headers exist under BYOK (the worker is bypassed) — seed
+      // model info from the snapshot so the context pill, thinking toggle and
+      // auto-compact have real values.
+      if (!this.lightweightOptions) this.seedByokModelInfo(snapshot);
+    } else {
+      client = this.lightweightOptions
+        ? createSubAgentClient(authToken)
+        : createAgentClient(authToken);
+      refreshClient = async (): Promise<OpenAI | null> => {
+        const auth = FirebaseAuthService.getInstance();
+        const refreshed = await auth.getIdToken(true)
+          ?? (await auth.refreshLogin() ? await auth.getIdToken(true) : null);
+        if (!refreshed) return null;
+        return this.lightweightOptions
+          ? createSubAgentClient(refreshed)
+          : createAgentClient(refreshed);
+      };
+      // Managed run — clear any sticky BYOK marker left by a prior BYOK session
+      // (the worker never emits X-BYOK-Active, so nothing else resets it).
+      if (!this.lightweightOptions) useAgentStore.getState().setByokActive(false);
+    }
 
     // 3. Build tool definitions in OpenAI format
     // web_search NUNCA vai no schema: modelos com pesquisa nativa
@@ -496,6 +533,10 @@ class AgentService {
         const knownProfile = modelName ? MODEL_PROFILES[modelName] : undefined;
         const plan = useBillingStore.getState().plan;
         const profile = knownProfile ?? getProfileForPlan(plan);
+        // The ADMIN-published window (modelContextWindow, from X-Model-Context-
+        // Window) is authoritative for auto-compact AND the blocking limit (both
+        // read this in query.ts). Never capped here — a 1M model compacts at ~1M,
+        // a 256K model at ~256K. The admin tunes it in Settings → Admin.
         return {
           contextWindow: modelContextWindow ?? knownProfile?.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
           maxOutputTokens: profile.maxOutputTokens ?? null,
@@ -606,6 +647,7 @@ class AgentService {
             beforeTokens: event.beforeTokens,
             trigger: "auto",
             messagesSummarized: 0,
+            summary: event.summary,
           });
           break;
 
@@ -664,7 +706,54 @@ class AgentService {
    * The Worker always replaces this with the active Control Plane model.
    */
   private resolveModel(): string {
+    // Under BYOK the IDE talks to the provider directly, so the real model id
+    // must go on the wire. Managed routing keeps the placeholder the worker
+    // maps to its active KV config.
+    if (this.byokActive && this.byokSnapshot) return this.byokSnapshot.modelId;
     return "tm-active-model";
+  }
+
+  /**
+   * Build the BYOK direct client for a session snapshot. Reads the user's key
+   * from the OS keychain just-in-time. Cloud providers without a key surface a
+   * BYOK_KEY_MISSING error (when callbacks are provided) and return null; local
+   * providers route without auth. Returns null on any failure so callers fall
+   * back gracefully (the main loop aborts the run; compact returns unchanged).
+   */
+  private async buildByokClient(
+    snapshot: ByokSessionSnapshot,
+    callbacks?: AgentCallbacks,
+  ): Promise<OpenAI | null> {
+    return buildByokClientFromSnapshot(snapshot, {
+      lightweight: !!this.lightweightOptions,
+      onKeyMissing: () =>
+        callbacks?.onError(
+          new ServiceError(
+            `BYOK: no API key set for "${snapshot.providerId}". Add it in Settings → API Keys.`,
+            "BYOK_KEY_MISSING",
+            false,
+          ),
+        ),
+    });
+  }
+
+  /**
+   * Seed agentStore model info from the BYOK snapshot. Replaces the X-Model-*
+   * response-header path (absent under BYOK) so the context-window pill, the
+   * thinking toggle and the auto-compact limit reflect the user's model.
+   */
+  private seedByokModelInfo(snapshot: ByokSessionSnapshot): void {
+    const supportsThinking = snapshot.supportsThinking === true;
+    const thinkingMode = supportsThinking ? "toggleable" : "none";
+    const cw =
+      snapshot.contextWindow && snapshot.contextWindow > 0
+        ? snapshot.contextWindow
+        : undefined;
+    useAgentStore
+      .getState()
+      .setModelInfo(snapshot.modelId, snapshot.providerId, thinkingMode, cw);
+    useAgentStore.getState().setByokActive(true);
+    if (cw) this.sessionState.setContextWindowSize(cw);
   }
 
   /**
@@ -695,7 +784,8 @@ class AgentService {
       logger.info(
         "model",
         `served: model=${activeModel ?? "?"} provider=${headers.get("X-TM-Provider") ?? "?"} ` +
-          `config=${headers.get("X-TM-Config-Key") ?? "?"} speed=${this.lastResponseSpeedApplied}`,
+          `config=${headers.get("X-TM-Config-Key") ?? "?"} teamByok=${headers.get("X-TM-Team-Byok") ?? "?"} ` +
+          `speed=${this.lastResponseSpeedApplied}`,
       );
     } catch {
       /* non-critical */
@@ -717,6 +807,10 @@ class AgentService {
       const thinkingModeRaw = headers.get("X-Model-Thinking-Mode");
       const contextWindowRaw = headers.get("X-Model-Context-Window");
       const byokActiveRaw = headers.get("X-BYOK-Active");
+      // Team BYOK: the worker served this via the team's own provider/key
+      // (config team:{teamId}). Emitted as true/false every response so a later
+      // managed-path turn clears the indicator.
+      const teamByokRaw = headers.get("X-TM-Team-Byok");
 
       const hasModelInfo =
         modelName !== null ||
@@ -756,12 +850,20 @@ class AgentService {
       if (byokActiveRaw !== null) {
         useAgentStore.getState().setByokActive(byokActiveRaw.toLowerCase() === "true");
       }
+      if (teamByokRaw !== null) {
+        useAgentStore.getState().setTeamByokActive(teamByokRaw.toLowerCase() === "true");
+      }
     } catch {
       /* non-critical */
     }
   }
 
   private buildExtraHeaders(): Record<string, string> | undefined {
+    // BYOK talks to the provider directly — worker-contract headers
+    // (X-Request-Type / X-TM-Speed) are meaningless there and some strict
+    // OpenAI-compatible endpoints reject unknown headers. Auth goes via the
+    // client's defaultHeaders, not here.
+    if (this.byokActive) return undefined;
     const headers: Record<string, string> = {};
     if (this.requestType) headers["X-Request-Type"] = this.requestType;
     if (!this.lightweightOptions && useTmSpeedStore.getState().enabled) {
@@ -771,14 +873,25 @@ class AgentService {
   }
 
   /**
-   * The TMS data plane is provider-agnostic. The active provider/model is a
-   * Control Plane decision, so the IDE must not send provider-specific thinking
-   * fields such as enable_thinking, thinking, or reasoning. Those fields caused
-   * strict OpenAI-compatible providers like Gemini to reject otherwise valid
-   * requests with 400.
+   * Thinking/reasoning config.
+   *
+   * MANAGED path: returns undefined. The TMS data plane is provider-agnostic
+   * and the active model is a Control-Plane decision, so the IDE must not send
+   * provider-specific thinking fields (enable_thinking / thinking / reasoning) —
+   * strict OpenAI-compatible providers like Gemini reject them with 400.
+   *
+   * BYOK path: the IDE talks to the provider directly, so it MUST send the
+   * provider-native field. We trust the baseURL host for the shape
+   * (resolveThinkingHint — the host that actually receives the request is the
+   * ground truth) and only emit when the catalog marks THIS model as a thinking
+   * model (avoids enable_thinking 400s on non-reasoning Qwen SKUs). The
+   * anthropic `thinking` object is translated to the Messages API by
+   * anthropicAdapter. Default is thinking-ON for reasoning models (the user
+   * picked one); a future toggle can flip this.
    */
   private buildThinkingConfig(): Record<string, unknown> | undefined {
-    return undefined;
+    if (!this.byokActive || !this.byokSnapshot) return undefined;
+    return buildByokThinkingConfig(this.byokSnapshot);
   }
 
   /**
@@ -1153,10 +1266,13 @@ class AgentService {
     const authToken = await FirebaseAuthService.getInstance().getIdToken();
     if (!authToken) return messages; // Can't compact without auth — return unchanged
 
-    const client = createAgentClient(authToken, {
-      maxRetries: 0,
-      timeout: 60_000,
-    });
+    // Compaction must use the SAME carrier as the conversation — under BYOK
+    // it runs on the user's key/model (free plan: their cost), never the worker.
+    const client =
+      this.byokActive && this.byokSnapshot
+        ? await this.buildByokClient(this.byokSnapshot)
+        : createAgentClient(authToken, { maxRetries: 0, timeout: 60_000 });
+    if (!client) return messages; // BYOK key missing — skip compaction
     const model = this.resolveModel();
 
     // Build compact prompt
@@ -1229,10 +1345,12 @@ class AgentService {
     const authToken = await FirebaseAuthService.getInstance().getIdToken();
     if (!authToken) return mechanicalFallback(messages);
 
-    const client = createAgentClient(authToken, {
-      maxRetries: 0,
-      timeout: 60_000,
-    });
+    // Same carrier as the conversation — BYOK summary runs on the user's key.
+    const client =
+      this.byokActive && this.byokSnapshot
+        ? await this.buildByokClient(this.byokSnapshot)
+        : createAgentClient(authToken, { maxRetries: 0, timeout: 60_000 });
+    if (!client) return mechanicalFallback(messages); // BYOK key missing
     const model = this.resolveModel();
     const { getCompactPrompt } = await import("./compact/prompt");
 

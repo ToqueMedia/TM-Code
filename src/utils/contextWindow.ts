@@ -56,6 +56,13 @@ export const MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000
  * safe; assuming 1M was the bug that let small-window models overflow. The
  * admin publishes the real window via Settings → Admin to override it.
  */
+// The real context window is whatever the ADMIN publishes per active model in
+// Settings → Admin (X-Model-Context-Window: 128k / 200k / 256k / 512k / 768k /
+// 1M / 2M). The IDE NEVER caps or second-guesses that value — a 256K model is
+// 256K, a 1M model is 1M. FALLBACK is used ONLY when no window is known at all
+// (pre-handshake / unknown model), never to override a published window. If a
+// large window makes the pill feel flat, the lever is the admin Select, not a
+// hardcoded ceiling here.
 export const FALLBACK_CONTEXT_WINDOW = 200_000
 
 export const AUTOCOMPACT_BUFFER_FLOOR = 13_000

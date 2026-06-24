@@ -19,6 +19,18 @@ export interface ActiveAIConfig {
    *  É o esquema exigido pela Vertex AI, que não aceita API keys estáticas. */
   authScheme: 'Bearer' | 'none' | 'google_oauth'
   apiKeyEnv: string
+  /** Inline provider key — ONLY for Team BYOK configs (`team:{teamId}`), whose
+   *  key is per-team and dynamic and so cannot be a static worker env secret
+   *  like the managed `active`/`sidecar:*` configs (those always use
+   *  `apiKeyEnv`). When present, buildUpstreamHeaders uses it over `apiKeyEnv`.
+   *  The managed-config parser never populates this — only parseTeamByokConfig. */
+  apiKey?: string
+  /** Team BYOK ONLY (`team:{teamId}`): the owner's virtual shared budget in
+   *  tokens — an ESTIMATE of what they prepaid the provider, NOT the real
+   *  provider balance. 0/absent → pass-through (no metering). When > 0 the
+   *  data-plane meters raw (1x) usage against it + the per-member
+   *  percentAllocation slices. Managed parser never sets it. */
+  pool?: number
   enabled: boolean
   /**
    * Janela de contexto real do modelo ativo, em tokens. Publicada na config
@@ -84,6 +96,15 @@ export interface Env {
    *  que estola a meio da geração). Sem ele, a Response ficava aberta até o
    *  runtime a matar com "code had hung". 0/negativo desliga o watchdog. */
   UPSTREAM_STREAM_IDLE_TIMEOUT_MS?: string
+  /** Re-tentativas do pedido ao provedor em falhas transitórias de gateway
+   *  (HTML 400 do Tengine/DashScope, 502/503/504, timeout/transporte). Default
+   *  2 (3 tentativas no total); "0" desliga. */
+  UPSTREAM_MAX_RETRIES?: string
+  /** Shared AES-256 secret (base64 of 32 bytes) for decrypting Team BYOK keys
+   *  stored in `team:{teamId}` KV values. Same value as the control-plane's
+   *  TEAM_BYOK_ENC_KEY (which encrypts on publish). Absent → Team BYOK is
+   *  inert (configs ignored, degrade to managed). Provision via wrangler secret. */
+  TEAM_BYOK_ENC_KEY?: string
   [key: string]: unknown
 }
 

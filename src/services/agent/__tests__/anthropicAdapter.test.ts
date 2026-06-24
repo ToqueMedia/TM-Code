@@ -1,0 +1,215 @@
+/**
+ * Tests for the Anthropic ⇄ OpenAI shape adapter (BYOK direct routing).
+ * The streaming tool-call translation is the highest-risk piece — block-index
+ * bookkeeping + input_json_delta reassembly — so it gets a recorded transcript.
+ */
+
+// jsdom doesn't always expose Node's web-stream / encoder globals — polyfill
+// before importing the module under test.
+import { TextEncoder as NodeTE, TextDecoder as NodeTD } from 'util'
+import { TransformStream as NodeTS, ReadableStream as NodeRS } from 'node:stream/web'
+const g = globalThis as unknown as Record<string, unknown>
+if (typeof g.TextEncoder === 'undefined') g.TextEncoder = NodeTE
+if (typeof g.TextDecoder === 'undefined') g.TextDecoder = NodeTD
+if (typeof g.TransformStream === 'undefined') g.TransformStream = NodeTS as unknown
+if (typeof g.ReadableStream === 'undefined') g.ReadableStream = NodeRS as unknown
+
+import {
+  toAnthropicRequest,
+  anthropicResponseToOpenAI,
+  anthropicSSEToOpenAISSE,
+} from '../anthropicAdapter'
+
+describe('toAnthropicRequest', () => {
+  it('extracts the system message into the top-level system field', () => {
+    const out = toAnthropicRequest({
+      model: 'claude-opus-4-8',
+      max_tokens: 1000,
+      messages: [
+        { role: 'system', content: 'You are helpful.' },
+        { role: 'user', content: 'Hi' },
+      ],
+    })
+    expect(out.system).toBe('You are helpful.')
+    expect(out.messages).toEqual([{ role: 'user', content: [{ type: 'text', text: 'Hi' }] }])
+  })
+
+  it('maps assistant tool_calls to tool_use and tool results to a user tool_result', () => {
+    const out = toAnthropicRequest({
+      model: 'm',
+      max_tokens: 100,
+      messages: [
+        { role: 'user', content: 'read it' },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            { id: 'tc1', type: 'function', function: { name: 'read_file', arguments: '{"path":"a.ts"}' } },
+          ],
+        },
+        { role: 'tool', tool_call_id: 'tc1', content: 'file contents' },
+      ],
+    })
+    const messages = out.messages as Array<Record<string, unknown>>
+    expect(messages[1]).toEqual({
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: 'tc1', name: 'read_file', input: { path: 'a.ts' } }],
+    })
+    expect(messages[2]).toEqual({
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'tc1', content: 'file contents' }],
+    })
+  })
+
+  it('coalesces adjacent same-role turns so roles strictly alternate', () => {
+    const out = toAnthropicRequest({
+      model: 'm',
+      max_tokens: 100,
+      messages: [
+        { role: 'assistant', content: '', tool_calls: [{ id: 'a', function: { name: 'f', arguments: '{}' } }] },
+        { role: 'tool', tool_call_id: 'a', content: 'r1' },
+        { role: 'tool', tool_call_id: 'b', content: 'r2' },
+      ],
+    })
+    const messages = out.messages as Array<Record<string, unknown>>
+    // The two tool results collapse into ONE user turn (Anthropic alternation).
+    expect(messages).toHaveLength(2)
+    expect(messages[1].role).toBe('user')
+    expect((messages[1].content as unknown[]).length).toBe(2)
+  })
+
+  it('converts tool definitions to input_schema', () => {
+    const out = toAnthropicRequest({
+      model: 'm',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'x' }],
+      tools: [
+        { type: 'function', function: { name: 'read_file', description: 'reads', parameters: { type: 'object', properties: { path: { type: 'string' } } } } },
+      ],
+    })
+    expect(out.tools).toEqual([
+      { name: 'read_file', description: 'reads', input_schema: { type: 'object', properties: { path: { type: 'string' } } } },
+    ])
+  })
+
+  it('passes thinking through and bumps max_tokens above the budget', () => {
+    const out = toAnthropicRequest({
+      model: 'm',
+      max_tokens: 1000,
+      messages: [{ role: 'user', content: 'x' }],
+      thinking: { type: 'enabled', budget_tokens: 8192 },
+    })
+    expect(out.thinking).toEqual({ type: 'enabled', budget_tokens: 8192 })
+    expect(out.max_tokens as number).toBeGreaterThan(8192)
+  })
+})
+
+describe('anthropicResponseToOpenAI (non-stream)', () => {
+  it('translates a Messages response to a ChatCompletion', () => {
+    const out = anthropicResponseToOpenAI({
+      id: 'msg_1',
+      content: [{ type: 'text', text: 'done' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 7, output_tokens: 3 },
+    })
+    const choice = (out.choices as Array<Record<string, unknown>>)[0]
+    const message = choice.message as Record<string, unknown>
+    expect(message.content).toBe('done')
+    expect(choice.finish_reason).toBe('stop')
+    expect(out.usage).toEqual({ prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 })
+  })
+})
+
+describe('anthropicSSEToOpenAISSE (streaming)', () => {
+  const ANTHROPIC_SSE = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10,"output_tokens":0}}}',
+    '',
+    'event: content_block_start',
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}',
+    '',
+    'event: content_block_start',
+    'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":"}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\\"a.ts\\"}"}}',
+    '',
+    'event: message_delta',
+    'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}',
+    '',
+    'event: message_stop',
+    'data: {"type":"message_stop"}',
+    '',
+  ].join('\n')
+
+  async function drive(sse: string): Promise<{ chunks: Record<string, unknown>[]; sawDone: boolean }> {
+    const ts = anthropicSSEToOpenAISSE()
+    const writer = ts.writable.getWriter()
+    const reader = ts.readable.getReader()
+    const enc = new TextEncoder()
+    // Write + close WITHOUT awaiting first — a TransformStream applies
+    // backpressure to writable until readable is drained, so we must read
+    // concurrently or write() deadlocks.
+    const writeDone = (async () => {
+      await writer.write(enc.encode(sse))
+      await writer.close()
+    })()
+
+    const dec = new TextDecoder()
+    let out = ''
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      out += dec.decode(value as Uint8Array, { stream: true })
+    }
+    await writeDone
+    const chunks: Record<string, unknown>[] = []
+    let sawDone = false
+    for (const line of out.split('\n')) {
+      const t = line.trim()
+      if (!t.startsWith('data:')) continue
+      const payload = t.slice(5).trim()
+      if (payload === '[DONE]') { sawDone = true; continue }
+      chunks.push(JSON.parse(payload))
+    }
+    return { chunks, sawDone }
+  }
+
+  it('reassembles text, a streamed tool call, finish_reason and usage', async () => {
+    const { chunks, sawDone } = await drive(ANTHROPIC_SSE)
+
+    // Concatenated text content.
+    const text = chunks
+      .map((c) => ((c.choices as any[])?.[0]?.delta?.content as string) ?? '')
+      .join('')
+    expect(text).toBe('Hello')
+
+    // Tool call: name from content_block_start, args reassembled from deltas.
+    let toolName = ''
+    let toolArgs = ''
+    let toolIndex = -1
+    for (const c of chunks) {
+      const tc = (c.choices as any[])?.[0]?.delta?.tool_calls?.[0]
+      if (!tc) continue
+      if (tc.function?.name) { toolName = tc.function.name; toolIndex = tc.index }
+      if (tc.function?.arguments) toolArgs += tc.function.arguments
+    }
+    expect(toolName).toBe('read_file')
+    expect(toolIndex).toBe(0)
+    expect(JSON.parse(toolArgs)).toEqual({ path: 'a.ts' })
+
+    // finish_reason + usage on the final chunk.
+    const finishChunk = chunks.find((c) => (c.choices as any[])?.[0]?.finish_reason)
+    expect((finishChunk!.choices as any[])[0].finish_reason).toBe('tool_calls')
+    expect(finishChunk!.usage).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 })
+
+    expect(sawDone).toBe(true)
+  })
+})

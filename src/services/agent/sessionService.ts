@@ -15,11 +15,23 @@ import { useByokStore } from '../../stores/byokStore'
  *  forwards them as X-BYOK-Capabilities and the backend trusts them over
  *  the registry. */
 export function captureByokSnapshot(): ByokSessionSnapshot | null {
-  const active = useByokStore.getState().resolveActive()
+  const state = useByokStore.getState()
+  const active = state.resolveActive()
   if (!active) return null
   const inRegistry = active.provider.models.some(m => m.id === active.model.id)
   const isCustom = active.provider.custom === true
   const isLocal = active.provider.local === true
+  // Context window: the USER declares it in Settings (perProviderConfig) since
+  // the BYOK request bypasses the worker (no X-Model-Context-Window header).
+  // Fall back to the catalog model's window, then to undefined (agentService
+  // then uses FALLBACK_CONTEXT_WINDOW).
+  const userCw = state.perProviderConfig[active.provider.id]?.contextWindow
+  const contextWindow =
+    userCw && userCw > 0
+      ? userCw
+      : active.model.contextWindow > 0
+        ? active.model.contextWindow
+        : undefined
   return {
     providerId: active.provider.id,
     modelId: active.model.id,
@@ -32,6 +44,7 @@ export function captureByokSnapshot(): ByokSessionSnapshot | null {
     // (anthropic / openai / qwen / gemini), not the plan-profile shape.
     supportsThinking: active.model.supportsThinking,
     thinkingShape: active.model.thinkingShape,
+    contextWindow,
   }
 }
 

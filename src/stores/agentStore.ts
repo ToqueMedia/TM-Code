@@ -63,6 +63,12 @@ interface AgentState {
    */
   byokActive: boolean;
   /**
+   * Team BYOK served the most recent response (server-side X-TM-Team-Byok). The
+   * team's own provider/key handled it — no TM metering. Like byokActive, drifts
+   * back to false when a managed-path request follows.
+   */
+  teamByokActive: boolean;
+  /**
    * Phase A telemetry: cumulative count of times the safe tool pool blocked
    * a tool from starting because of an in-flight non-concurrency-safe sibling.
    * Each increment represents a "would-have-been-a-race" today's Promise.all
@@ -98,6 +104,7 @@ interface AgentActions {
     contextWindow?: number | null,
   ) => void;
   setByokActive: (active: boolean) => void;
+  setTeamByokActive: (active: boolean) => void;
   // Task management
   setTasks: (tasks: AgentTask[]) => void;
   clearTasks: () => void;
@@ -123,6 +130,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
   thinkingMode: null,
   modelContextWindow: null,
   byokActive: false,
+  teamByokActive: false,
   poolConcurrencyConflictsAvoided: 0,
   cumulativeToolCalls: 0,
   writesWithoutDevServerLogs: 0,
@@ -164,6 +172,10 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
 
   setByokActive: (active: boolean) => {
     set({ byokActive: active });
+  },
+
+  setTeamByokActive: (active: boolean) => {
+    set({ teamByokActive: active });
   },
 
   setTasks: (tasks: AgentTask[]) => {
@@ -212,6 +224,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
       thinkingMode: null,
       modelContextWindow: null,
       byokActive: false,
+      teamByokActive: false,
       poolConcurrencyConflictsAvoided: 0,
       cumulativeToolCalls: 0,
       writesWithoutDevServerLogs: 0,
@@ -230,6 +243,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
       thinkingMode: null,
       modelContextWindow: null,
       byokActive: false,
+      teamByokActive: false,
       poolConcurrencyConflictsAvoided: 0,
       cumulativeToolCalls: 0,
       writesWithoutDevServerLogs: 0,
