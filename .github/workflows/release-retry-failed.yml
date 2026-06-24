@@ -123,7 +123,6 @@ jobs:
           fi
 
   build-macos-intel:
-    if: false
     needs: verify-release
     runs-on: macos-15-intel
     steps:
@@ -218,7 +217,7 @@ jobs:
           fi
 
   generate-updater:
-    needs: [verify-release, build-macos-apple-silicon]
+    needs: [verify-release, build-macos-apple-silicon, build-macos-intel]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -235,7 +234,7 @@ jobs:
           node scripts/generate-latest-json.mjs "${{ needs.verify-release.outputs.version }}"
 
   publish-release:
-    needs: [verify-release, build-macos-apple-silicon, generate-updater]
+    needs: [verify-release, build-macos-apple-silicon, build-macos-intel, generate-updater]
     runs-on: ubuntu-latest
     steps:
       - name: Publish release (remove draft)
