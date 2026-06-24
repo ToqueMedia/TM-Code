@@ -779,7 +779,8 @@ class AgentService {
       logger.info(
         "model",
         `served: model=${activeModel ?? "?"} provider=${headers.get("X-TM-Provider") ?? "?"} ` +
-          `config=${headers.get("X-TM-Config-Key") ?? "?"} speed=${this.lastResponseSpeedApplied}`,
+          `config=${headers.get("X-TM-Config-Key") ?? "?"} teamByok=${headers.get("X-TM-Team-Byok") ?? "?"} ` +
+          `speed=${this.lastResponseSpeedApplied}`,
       );
     } catch {
       /* non-critical */

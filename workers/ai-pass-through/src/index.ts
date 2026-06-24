@@ -435,6 +435,9 @@ async function handleChatCompletions(
     }))
   }
 
+  const upstreamHost = (() => {
+    try { return new URL(upstreamUrl).host } catch { return upstreamUrl }
+  })()
   await logRequest({
     requestId,
     userId: user.userId,
@@ -445,7 +448,18 @@ async function handleChatCompletions(
     providerKey,
     configSource: active.source,
     configKey: active.key,
+    teamByok,
+    upstreamHost,
   })
+  // Greppable one-liner for `wrangler tail` during a Team BYOK e2e: proves the
+  // request was served by the TEAM's own provider/key (TM managed model +
+  // metering BYPASSED), not the internal model.
+  if (teamByok) {
+    console.info(
+      `[team-byok] SERVED via team key → provider=${config.provider} model=${model} ` +
+        `host=${upstreamHost} status=${upstream.status} config=${active.key} (TM model+metering BYPASSED)`,
+    )
+  }
 
   // ── Watchdog de inatividade do stream ────────────────────────────────
   // O header-timeout acima já foi limpo (finally do fetch) — a partir daqui
