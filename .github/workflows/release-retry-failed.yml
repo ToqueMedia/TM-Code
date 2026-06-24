@@ -78,9 +78,6 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: 'Developer ID Application: TOQUE MEDIA - PRESTACAO DE SERVICOS, LDA (D39GPSWXDH)'
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           VITE_USE_EMULATORS: 'false'
           VITE_WORKER_URL: 'https://api-agents.toquemedia.net'
           VITE_APPCHECK_ENABLED: 'true'
@@ -176,9 +173,6 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: 'Developer ID Application: TOQUE MEDIA - PRESTACAO DE SERVICOS, LDA (D39GPSWXDH)'
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           VITE_USE_EMULATORS: 'false'
           VITE_WORKER_URL: 'https://api-agents.toquemedia.net'
           VITE_APPCHECK_ENABLED: 'true'
