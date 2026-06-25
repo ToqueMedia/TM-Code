@@ -536,7 +536,7 @@ function App() {
 		// Reset transient agent state so last-response model/provider and BYOK
 		// confirmation don't leak from the previous project. Keep the task
 		// tracker intact here: projectStore / TerminalView hydrate it from the
-		// new project's .toquemedia/tasks.json, and clearing in this effect can
+		// new project's app-managed state, and clearing in this effect can
 		// race after hydration and make the task panel disappear.
 		useAgentStore.getState().resetTransientState();
 

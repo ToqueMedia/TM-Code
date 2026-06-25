@@ -14,11 +14,12 @@
  * is the exact thing the `invokedSkills` design exists to prevent
  * (e.g. "use GoogleAuthProvider" when the auth-proxy skill forbids it).
  *
- * Storage: `<project>/.toquemedia/sessions/<sessionId>.invoked-skills.json`.
- * Co-located with the rest of the session's files, gitignored.
+ * Storage: app per-project sessions dir, co-located with the rest of the
+ * session's files but outside the user's project tree.
  */
 
 import { invoke } from '@tauri-apps/api/core'
+import { getProjectSessionsDir } from '../projectStatePaths'
 import type { InvokedSkill } from './skillService'
 
 interface InvokedSkillsFileV1 {
@@ -28,9 +29,8 @@ interface InvokedSkillsFileV1 {
   skills: InvokedSkill[]
 }
 
-function invokedSkillsPath(projectPath: string, sessionId: string): string {
-  const normalized = projectPath.replace(/\\/g, '/').replace(/\/$/, '')
-  return `${normalized}/.toquemedia/sessions/${sessionId}.invoked-skills.json`
+async function invokedSkillsPath(projectPath: string, sessionId: string): Promise<string> {
+  return `${await getProjectSessionsDir(projectPath)}/${sessionId}.invoked-skills.json`
 }
 
 export async function loadInvokedSkillsFromDisk(
@@ -40,7 +40,7 @@ export async function loadInvokedSkillsFromDisk(
   if (!projectPath || !sessionId) return []
   try {
     const raw = await invoke<string>('read_file', {
-      path: invokedSkillsPath(projectPath, sessionId),
+      path: await invokedSkillsPath(projectPath, sessionId),
     })
     const parsed = JSON.parse(raw) as Partial<InvokedSkillsFileV1>
     if (
@@ -68,9 +68,9 @@ export async function saveInvokedSkillsToDisk(
   skills: InvokedSkill[],
 ): Promise<void> {
   if (!projectPath || !sessionId) return
-  const path = invokedSkillsPath(projectPath, sessionId)
+  const path = await invokedSkillsPath(projectPath, sessionId)
   // Empty list → delete file. Avoids a permanent breadcrumb in
-  // `.toquemedia/sessions/` for sessions that never invoked a skill.
+  // app state for sessions that never invoked a skill.
   if (skills.length === 0) {
     try {
       await invoke('delete_file_or_directory', { path })

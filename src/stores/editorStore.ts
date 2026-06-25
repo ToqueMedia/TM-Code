@@ -159,7 +159,7 @@ const getUnsavedChangesService = () => UnsavedChangesService.getInstance();
 const getAutoSaveQueue = () => AutoSaveQueue.getInstance();
 
 /**
- * Apply dirty-buffer overrides loaded from `<project>/.toquemedia/editor-state.json`.
+ * Apply dirty-buffer overrides loaded from app-managed project state.
  * Called from `projectStore.openProject` AFTER the editor has rehydrated its
  * tabs from localStorage (paths + cursor). For each path with a dirty entry,
  * overwrite the in-memory content with the unsaved version and flip
@@ -197,7 +197,7 @@ export function applyDirtyOverrides(dirty: Record<string, string>): void {
 // state (see `partialize` near the bottom of this file). Dirty buffer
 // content — the unsaved edits the user has typed into Monaco — is the
 // catastrophic data-loss path on crash/reload, so it goes to per-project
-// disk at `.toquemedia/editor-state.json` via `editorStatePersistence`.
+// disk via `editorStatePersistence`.
 //
 // Debounced 800ms: long enough to coalesce a typing burst into one write,
 // short enough to capture before a graceful quit. The autoSaveQueue

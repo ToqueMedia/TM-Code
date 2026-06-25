@@ -79,6 +79,8 @@ commands.allow = [
   "write_agent_state",
   "delete_agent_state",
   "ensure_toquemedia_gitignore_cmd",
+  "get_project_state_dir",
+  "migrate_project_state",
   "read_memory_file",
   "write_memory_file",
   "delete_memory_file",

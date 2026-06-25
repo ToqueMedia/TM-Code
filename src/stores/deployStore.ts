@@ -76,7 +76,7 @@ function blank(projectId: string): DeployRecord {
 
 // === Deploy-state persistence ===
 //
-// One file per project at `<project>/.toquemedia/deploy-state.json`. Captures
+// One file per project in app-managed state. Captures
 // the latest DeployRecord so a reload during an in-flight deploy doesn't
 // blank the panel. Debounced 300ms — deploys emit many small progress
 // updates and we want to coalesce.

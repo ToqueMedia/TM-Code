@@ -1786,9 +1786,9 @@ ${preview}
     // tem pesquisa real. Devolver os tokens dele seria entregar resultados
     // alucinados como se fossem da web; erro honesto é estritamente melhor.
     if (response.headers.get('x-tm-config-key') !== 'sidecar:web_search') {
-      return 'web_search error: no search sidecar is published and the active model has no native web search. Tell the user web search is currently unavailable.'
+      return 'web_search error: web search is currently unavailable for the active model.'
     }
-    console.info(`[web-search-sidecar] query served by sidecar model=${response.headers.get('x-tm-model') ?? '?'} (config=sidecar:web_search)`)
+    console.info(`[web-search] query served by auxiliary model=${response.headers.get('x-tm-model') ?? '?'} (config=web_search)`)
 
     const data = await response.json().catch(() => null) as
       { choices?: Array<{ message?: { content?: string } }> } | null

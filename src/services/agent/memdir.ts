@@ -8,11 +8,10 @@
  *     Survives project switches. Holds `user_*.md` and `feedback_*.md`
  *     entries (and the global `MEMORY.md` index).
  *
- *   - **Project memory** (`<project>/.toquemedia/memory/`) — project-bound
+ *   - **Project memory** (app-managed per-project state) — project-bound
  *     facts: initiatives in flight, where to find X in this repo, project-
- *     specific conventions. Committable so the memory travels with the
- *     project to another machine / contributor. Holds `project_*.md` and
- *     `reference_*.md` entries.
+ *     specific conventions. Holds `project_*.md` and `reference_*.md`
+ *     entries.
  *
  * Closed taxonomy (mirrors claude-vaz's auto-memory contract):
  *   - `user`      — developer profile (role, expertise, working style)

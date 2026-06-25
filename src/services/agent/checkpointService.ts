@@ -1,10 +1,9 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { logger } from '../../utils/logger'
 import { hashFilePath } from '../../utils/crypto'
-// `hashProjectPath` is no longer used: checkpoints moved into the project's
-// own `.toquemedia/checkpoints/` directory (2026-05 migration), so the path
-// is the natural key — no hash needed for filesystem-safety. Per-file paths
-// are still hashed (filename-length / character safety on disk).
+// Per-file paths are still hashed for filename-length / character safety on
+// disk. Project-level checkpoint storage is resolved by Rust from
+// `.toquemedia-id` into app-managed project state.
 
 const MAX_CHECKPOINTS_PER_SESSION = 100
 const PERSIST_DEBOUNCE_MS = 500
@@ -61,9 +60,7 @@ class CheckpointService {
   private static instance: CheckpointService
   private checkpoints: Checkpoint[] = []
   private currentSessionId: string | null = null
-  /** Absolute project path — used as the checkpoint storage key. Replaces
-   *  the legacy `currentProjectHash` (the home-dir hash-based path retired
-   *  when checkpoints moved INSIDE the project at .toquemedia/checkpoints/). */
+  /** Absolute project path — Rust resolves it to app-managed project state. */
   private currentProjectPath: string | null = null
   /** Tracks which file paths were touched during this session (for session diff). */
   private sessionBaseline: Set<string> = new Set()
@@ -596,10 +593,8 @@ class CheckpointService {
    * project they reference. Also clears in-memory state if the project being
    * deleted happens to be the one this service is currently scoped to.
    *
-   * Post-migration note: when the project directory itself is being deleted,
-   * its `.toquemedia/checkpoints/` folder goes with it — this command then
-   * becomes a no-op-with-cleanup. It's still useful for "Clear checkpoints"
-   * surfaces that wipe snapshots without deleting the project.
+   * The Rust command is still useful for "Clear checkpoints" surfaces that
+   * wipe snapshots without deleting the project.
    */
   async deleteAllProjectCheckpoints(projectPath: string): Promise<void> {
     try {

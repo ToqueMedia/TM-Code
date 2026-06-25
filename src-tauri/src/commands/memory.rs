@@ -2,8 +2,8 @@
 //!
 //! Ported from claude-vaz's `memdir/` system. Two scopes coexist:
 //!
-//!   - **Project memory**: `<project>/.toquemedia/memory/` — committable,
-//!     travels with the project. Holds `project_*` and `reference_*` entries
+//!   - **Project memory**: app-managed per-project state. Holds `project_*`
+//!     and `reference_*` entries
 //!     that describe ongoing work, repo conventions, where to look up X.
 //!
 //!   - **User memory**: `~/.toquemedia-studio/memory/` — cross-project,
@@ -23,9 +23,9 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::canonicalize_path;
+use super::project_state::project_state_root;
 
-/// Memory scope — `Project` is `<project>/.toquemedia/memory/`, `User` is
+/// Memory scope — `Project` is app-managed per-project state, `User` is
 /// `~/.toquemedia-studio/memory/`. The TS layer picks the scope per file.
 #[derive(Debug, Clone, Copy)]
 enum MemoryScope {
@@ -83,13 +83,7 @@ fn memory_root(
     match scope {
         MemoryScope::Project => {
             let project = project_path.ok_or("Project memory requires projectPath")?;
-            let p = Path::new(project);
-            if !p.exists() || !p.is_dir() {
-                return Err(format!("Project path does not exist: {}", project));
-            }
-            let canonical =
-                canonicalize_path(p).map_err(|e| format!("Invalid project path: {}", e))?;
-            let mut dir = canonical.join(".toquemedia").join("memory");
+            let mut dir = project_state_root(project)?.join("memory");
             if let Some(sub) = subdirectory {
                 // Validate subdirectory: alphanumeric, hyphens, underscores only
                 if !sub
@@ -99,9 +93,6 @@ fn memory_root(
                     return Err(format!("Invalid subdirectory name: {}", sub));
                 }
                 dir = dir.join(sub);
-            }
-            if !dir.starts_with(&canonical) {
-                return Err("Resolved memory path escapes project root".to_string());
             }
             Ok(dir)
         }

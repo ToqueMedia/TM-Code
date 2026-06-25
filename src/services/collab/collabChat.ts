@@ -1,6 +1,6 @@
 // Ephemeral team chat over the WebRTC `control` DataChannel. Messages are P2P
 // and DTLS-encrypted — they never touch a server. Optional local persistence
-// (a JSONL file under .toquemedia/collab/) is handled by the session service;
+// (a JSONL file under app-managed project state) is handled by the session service;
 // this module holds the message type + pure (de)serialization so the wire
 // format is unit-testable.
 

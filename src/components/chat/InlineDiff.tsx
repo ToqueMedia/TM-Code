@@ -149,29 +149,34 @@ function InlineDiff({
 
   return (
     <Box
-      border={`1px solid ${isResolved ? 'rgba(255,255,255,0.04)' : 'rgba(255, 255, 255, 0.06)'}`}
-      borderRadius="10px"
+      border={`1px solid ${isResolved ? 'rgba(255,255,255,0.05)' : 'rgba(255, 255, 255, 0.08)'}`}
+      borderRadius="8px"
       overflow="hidden"
       my={2}
       bg={tokens.colors.bg.codeBlock}
-      transition="all 0.2s"
+      boxShadow={isResolved ? 'none' : '0 10px 28px rgba(0,0,0,0.18)'}
+      transition="border-color 0.2s, box-shadow 0.2s"
     >
       {/* Header */}
       <Flex
         align="center"
         justify="space-between"
         px={3}
-        py="7px"
-        bg="rgba(255, 255, 255, 0.03)"
-        borderBottom="1px solid rgba(255, 255, 255, 0.05)"
+        minH="34px"
+        py="6px"
+        bg="rgba(255, 255, 255, 0.025)"
+        borderBottom="1px solid rgba(255, 255, 255, 0.06)"
       >
-        <Flex align="center" gap={2}>
-          <Image src={getFileIconUrl(filePath)} w="15px" h="15px" flexShrink={0} />
+        <Flex align="center" gap={2} minW={0}>
+          <Image src={getFileIconUrl(filePath)} alt="" w="15px" h="15px" flexShrink={0} />
           <Text
             fontSize="12px"
             color={tokens.colors.accent.primary}
             fontFamily={tokens.fontFamily.mono}
             fontWeight="500"
+            overflow="hidden"
+            textOverflow="ellipsis"
+            whiteSpace="nowrap"
           >
             {fileName}
           </Text>
@@ -220,9 +225,8 @@ function InlineDiff({
         </Flex>
       </Flex>
 
-      {/* Diff content — only changed lines (+/-) grouped into hunks. No
-          horizontal scroll: long lines WRAP (see the code box's pre-wrap) so
-          the whole change is readable inside the bubble width. */}
+      {/* Diff content — editor-like grid. Long lines wrap inside the code
+          column, while fixed gutter columns keep line numbers aligned. */}
       <Box
         overflowX="hidden"
         fontSize="12px"
@@ -243,19 +247,21 @@ function InlineDiff({
           displayHunks.map((hunk, hi) => (
             <Box key={`hunk-${hi}`}>
               {hi > 0 && (
-                <Flex
-                  align="center"
+                <Box
                   h="16px"
                   bg="rgba(255,255,255,0.015)"
                   borderTop="1px dashed rgba(255,255,255,0.06)"
                   borderBottom="1px dashed rgba(255,255,255,0.06)"
                   userSelect="none"
+                  display="grid"
+                  alignItems="center"
+                  gridTemplateColumns="44px 44px 22px minmax(0, 1fr)"
+                  minW={0}
                 >
-                  <Box w="96px" flexShrink={0} />
-                  <Text fontSize="10px" color="rgba(255,255,255,0.25)" fontFamily={tokens.fontFamily.mono}>
+                  <Text gridColumn="4" fontSize="10px" color="rgba(255,255,255,0.25)" fontFamily={tokens.fontFamily.mono}>
                     ···
                   </Text>
-                </Flex>
+                </Box>
               )}
               {hunk.map((line) => {
                 let bg = 'transparent'
@@ -282,44 +288,47 @@ function InlineDiff({
                   : 'rgba(255,255,255,0.25)'
                 const lineTokens = getLineTokens(line)
                 return (
-                  <Flex
+                  <Box
                     key={`${line.type}-${line.oldNum ?? 'n'}-${line.newNum ?? 'n'}`}
                     bg={bg}
-                    align="stretch"
                     minH="20px"
+                    display="grid"
+                    gridTemplateColumns="44px 44px 22px minmax(0, 1fr)"
+                    minW={0}
                   >
-                    <Flex
-                      w="38px"
-                      flexShrink={0}
-                      justify="flex-end"
-                      align="flex-start"
-                      pt="4px"
-                      pr="8px"
+                    <Box
+                      minH="20px"
+                      display="flex"
+                      justifyContent="flex-end"
+                      alignItems="flex-start"
+                      pt="2px"
+                      pr="10px"
                       bg={gutterBg}
                       userSelect="none"
                     >
-                      <Text fontSize="10px" color={gutterTextColor}>
+                      <Text fontSize="10px" lineHeight="20px" color={gutterTextColor} whiteSpace="nowrap">
                         {line.oldNum ?? ''}
                       </Text>
-                    </Flex>
-                    <Flex
-                      w="38px"
-                      flexShrink={0}
-                      justify="flex-end"
-                      align="flex-start"
-                      pt="4px"
-                      pr="8px"
+                    </Box>
+                    <Box
+                      minH="20px"
+                      display="flex"
+                      justifyContent="flex-end"
+                      alignItems="flex-start"
+                      pt="2px"
+                      pr="10px"
                       bg={gutterBg}
                       borderRight={`1px solid ${gutterBorder}`}
                       userSelect="none"
                     >
-                      <Text fontSize="10px" color={gutterTextColor}>
+                      <Text fontSize="10px" lineHeight="20px" color={gutterTextColor} whiteSpace="nowrap">
                         {line.newNum ?? ''}
                       </Text>
-                    </Flex>
-                    <Flex w="20px" flexShrink={0} justify="center" align="flex-start" pt="4px" userSelect="none">
+                    </Box>
+                    <Flex minH="20px" justify="center" align="flex-start" pt="2px" userSelect="none">
                       <Text
                         fontSize="11px"
+                        lineHeight="20px"
                         color={line.type === 'added'
                           ? tokens.colors.diff.addedText
                           : line.type === 'removed'
@@ -330,14 +339,21 @@ function InlineDiff({
                         {prefixChar}
                       </Text>
                     </Flex>
-                    <Box flex="1" minW={0} pr={3} whiteSpace="pre-wrap" overflowWrap="anywhere" fontSize="12px">
+                    <Box
+                      minW={0}
+                      pr={4}
+                      whiteSpace="pre-wrap"
+                      overflowWrap="anywhere"
+                      fontSize="12px"
+                      lineHeight="20px"
+                    >
                       {lineTokens.map((token, ti) => (
                         <span key={ti} style={{ color: token.color }}>
                           {token.text}
                         </span>
                       ))}
                     </Box>
-                  </Flex>
+                  </Box>
                 )
               })}
             </Box>
@@ -393,6 +409,7 @@ function InlineDiff({
             _hover={{ bg: 'rgba(46, 160, 67, 0.18)', borderColor: 'rgba(46, 160, 67, 0.35)' }}
             _active={{ transform: 'scale(0.97)' }}
             onClick={onApprove}
+            aria-label={`Accept changes in ${fileName}`}
           >
             <FiCheck size={12} />
             Accept
@@ -416,6 +433,7 @@ function InlineDiff({
             _hover={{ bg: 'rgba(46, 160, 67, 0.08)', borderColor: 'rgba(46, 160, 67, 0.3)' }}
             _active={{ transform: 'scale(0.97)' }}
             onClick={onApproveAll}
+            aria-label="Accept all pending changes"
           >
             <FiCheckCircle size={12} />
             Accept all
@@ -439,6 +457,7 @@ function InlineDiff({
             _hover={{ bg: 'rgba(248, 81, 73, 0.08)', borderColor: 'rgba(248, 81, 73, 0.3)' }}
             _active={{ transform: 'scale(0.97)' }}
             onClick={onDeny}
+            aria-label={`Reject changes in ${fileName}`}
           >
             <FiX size={12} />
             Reject
@@ -462,6 +481,7 @@ function InlineDiff({
             _hover={{ bg: 'rgba(248, 81, 73, 0.18)', borderColor: 'rgba(248, 81, 73, 0.35)' }}
             _active={{ transform: 'scale(0.97)' }}
             onClick={onRejectAll}
+            aria-label="Reject all pending changes"
           >
             <FiX size={12} />
             Reject all

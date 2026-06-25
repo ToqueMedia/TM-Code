@@ -8,8 +8,8 @@
  * deploy panel, and either re-clicks Publish (duplicate deploy, quota
  * waste) or thinks the deploy failed when it didn't.
  *
- * Disk snapshot: `<project>/.toquemedia/deploy-state.json`. One file per
- * project — only the latest deploy matters at any time (concurrent
+ * Disk snapshot: app-managed per-project state. One file per project — only
+ * the latest deploy matters at any time (concurrent
  * deploys for the same project aren't supported by the worker contract).
  *
  * What's persisted: the FULL DeployRecord. The orchestration source of
@@ -32,6 +32,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import type { DeployRecord } from '../stores/deployStore'
+import { getLegacyProjectStateDir, getProjectStateDir } from './projectStatePaths'
 
 const DEPLOY_FILENAME = 'deploy-state.json'
 
@@ -41,9 +42,12 @@ interface DeployStateFileV1 {
   record: DeployRecord
 }
 
-function deployStatePath(projectPath: string): string {
-  const normalized = projectPath.replace(/\\/g, '/').replace(/\/$/, '')
-  return `${normalized}/.toquemedia/${DEPLOY_FILENAME}`
+async function deployStatePath(projectPath: string): Promise<string> {
+  return `${await getProjectStateDir(projectPath)}/${DEPLOY_FILENAME}`
+}
+
+function legacyDeployStatePath(projectPath: string): string {
+  return `${getLegacyProjectStateDir(projectPath)}/${DEPLOY_FILENAME}`
 }
 
 export async function loadDeployStateFromDisk(
@@ -51,7 +55,10 @@ export async function loadDeployStateFromDisk(
 ): Promise<DeployRecord | null> {
   if (!projectPath) return null
   try {
-    const raw = await invoke<string>('read_file', { path: deployStatePath(projectPath) })
+    const path = await deployStatePath(projectPath)
+    const raw = await invoke<string>('read_file', { path }).catch(() =>
+      invoke<string>('read_file', { path: legacyDeployStatePath(projectPath) })
+    )
     const parsed = JSON.parse(raw) as Partial<DeployStateFileV1>
     if (!parsed || parsed.schemaVersion !== 1 || !parsed.record) return null
     return parsed.record
@@ -72,7 +79,7 @@ export async function saveDeployStateToDisk(
   }
   try {
     await invoke('write_file', {
-      path: deployStatePath(projectPath),
+      path: await deployStatePath(projectPath),
       content: JSON.stringify(payload, null, 2),
     })
   } catch { /* swallow */ }
@@ -81,6 +88,7 @@ export async function saveDeployStateToDisk(
 export async function clearDeployStateOnDisk(projectPath: string): Promise<void> {
   if (!projectPath) return
   try {
-    await invoke('delete_file_or_directory', { path: deployStatePath(projectPath) })
+    await invoke('delete_file_or_directory', { path: await deployStatePath(projectPath) })
+    await invoke('delete_file_or_directory', { path: legacyDeployStatePath(projectPath) }).catch(() => {})
   } catch { /* swallow */ }
 }

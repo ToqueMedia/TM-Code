@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
+use super::project_state::{legacy_project_state_dir, project_state_root};
 use super::{canonicalize_path, normalize_path_for_frontend};
 
 // Deploy-pipeline ops (collect_deploy_bundle, collect_backend_tarball,
@@ -597,23 +598,23 @@ pub async fn read_skill_content(skill_path: String) -> Result<SkillContent, Stri
     })
 }
 
-// ── Agent state persistence (.toquemedia/) ─────────────────────────────
+// ── Agent state persistence ────────────────────────────────────────────
 //
-// Per-project hidden folder for agent state that must survive across:
+// App-managed per-project state that must survive across:
 //   - app restarts (battery dies, crash, IDE quit + reopen),
 //   - session boundaries (budget interrupt, then resume hours later),
-//   - filesystem-as-snapshot views (the folder is committable so the
-//     state can travel with the project to another machine / agent).
+//   - filesystem-as-snapshot views without adding tool state to the project
+//     tree.
 //
-// The folder lives at `<project>/.toquemedia/`. Only files whose name
+// The folder lives in the app data directory. Only files whose name
 // matches `[a-zA-Z0-9_.-]+` are read or written — no path traversal,
 // no nested directories, no symlinks followed. The whole API is
 // project-rooted: the caller passes the project path; the resolved
-// `.toquemedia/<filename>` MUST live underneath after canonicalisation
+// `<state>/<filename>` MUST live underneath after canonicalisation
 // or the call refuses.
 //
 // Pattern matches `write_env_vars` defense-in-depth: canonicalise the
-// project root, join, then `starts_with(project_root)` check before
+// state root, join, then `starts_with(state_root)` check before
 // any I/O.
 
 fn validate_agent_state_filename(filename: &str) -> Result<(), String> {
@@ -643,19 +644,12 @@ fn validate_agent_state_filename(filename: &str) -> Result<(), String> {
 
 fn agent_state_path(project_path: &str, filename: &str) -> Result<PathBuf, String> {
     validate_agent_state_filename(filename)?;
-    let project = Path::new(project_path);
-    if !project.exists() || !project.is_dir() {
-        return Err(format!("Project path does not exist: {}", project_path));
-    }
-    let canonical_project =
-        canonicalize_path(project).map_err(|e| format!("Invalid project path: {}", e))?;
-    let dir = canonical_project.join(".toquemedia");
-    let file = dir.join(filename);
-    // Defense-in-depth: resolved file path must still be inside the project.
-    if !file.starts_with(&canonical_project) {
-        return Err("Resolved .toquemedia path escapes project root".to_string());
-    }
-    Ok(file)
+    Ok(project_state_root(project_path)?.join(filename))
+}
+
+fn legacy_agent_state_path(project_path: &str, filename: &str) -> Result<PathBuf, String> {
+    validate_agent_state_filename(filename)?;
+    Ok(legacy_project_state_dir(project_path)?.join(filename))
 }
 
 fn unique_sibling_tmp_path(path: &Path) -> PathBuf {
@@ -671,7 +665,7 @@ fn unique_sibling_tmp_path(path: &Path) -> PathBuf {
     path.with_file_name(format!("{filename}.{pid}.{nanos}.tmp"))
 }
 
-/// Read a JSON state blob from `<project>/.toquemedia/<filename>`.
+/// Read a JSON state blob from app-managed per-project state.
 ///
 /// Returns `Ok(None)` when the file does not exist — distinguishes
 /// "never written" from "read failure" so the TS layer can hydrate from
@@ -683,16 +677,22 @@ pub async fn read_agent_state(
 ) -> Result<Option<String>, String> {
     let path = agent_state_path(&project_path, &filename)?;
     if !path.exists() {
-        return Ok(None);
+        let legacy = legacy_agent_state_path(&project_path, &filename)?;
+        if !legacy.exists() {
+            return Ok(None);
+        }
+        return std::fs::read_to_string(&legacy)
+            .map(Some)
+            .map_err(|e| format!("Failed to read legacy {}: {}", filename, e));
     }
     std::fs::read_to_string(&path)
         .map(Some)
         .map_err(|e| format!("Failed to read {}: {}", filename, e))
 }
 
-/// Write a JSON state blob to `<project>/.toquemedia/<filename>`.
+/// Write a JSON state blob to app-managed per-project state.
 ///
-/// Creates the `.toquemedia/` directory on first call. Writes are
+/// Creates the project state directory on first call. Writes are
 /// atomic-ish: write to a unique sibling temp file then rename, so a crash mid-
 /// write does not leave a half-file the next read would parse as
 /// corrupted JSON. The temp name must be unique because permission/task state
@@ -706,11 +706,11 @@ pub async fn write_agent_state(
 ) -> Result<(), String> {
     let path = agent_state_path(&project_path, &filename)?;
 
-    // Ensure the .toquemedia directory exists before writing
+    // Ensure the project state directory exists before writing
     if let Some(parent) = path.parent() {
         if !parent.exists() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create .toquemedia directory: {}", e))?;
+                .map_err(|e| format!("Failed to create project state directory: {}", e))?;
         }
     }
 
@@ -720,7 +720,7 @@ pub async fn write_agent_state(
     Ok(())
 }
 
-/// Delete a JSON state blob from `<project>/.toquemedia/<filename>`.
+/// Delete a JSON state blob from app-managed per-project state.
 ///
 /// Returns `Ok(())` even when the file does not exist — a delete of a
 /// never-persisted state is a no-op, not an error. Used by the TS layer
@@ -730,10 +730,15 @@ pub async fn write_agent_state(
 #[tauri::command]
 pub async fn delete_agent_state(project_path: String, filename: String) -> Result<(), String> {
     let path = agent_state_path(&project_path, &filename)?;
-    if !path.exists() {
-        return Ok(());
+    let legacy = legacy_agent_state_path(&project_path, &filename)?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| format!("Failed to delete {}: {}", filename, e))?;
     }
-    std::fs::remove_file(&path).map_err(|e| format!("Failed to delete {}: {}", filename, e))
+    if legacy.exists() {
+        std::fs::remove_file(&legacy)
+            .map_err(|e| format!("Failed to delete legacy {}: {}", filename, e))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

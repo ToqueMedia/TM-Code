@@ -9,6 +9,7 @@ import {
   getAutoCompactThreshold,
   getEffectiveContextWindowSize,
   getWarningThreshold,
+  totalContextTokens,
 } from '../../utils/contextWindow'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n/useTranslation'
@@ -60,22 +61,21 @@ interface ContextWindowIndicatorProps {
 
 function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIndicatorProps) {
   const t = useTranslation()
-  // Stable, foreground-only context size — read DIRECTLY off the active
-  // session's persisted `lastPromptTokens`/`lastResponseTokens`, which now hold
-  // the real wire size of the most recent FOREGROUND turn (see
-  // chatStore.addTokenUsage). We deliberately NO LONGER read the global
-  // `currentPrompt/currentResponse` counters: those are zeroed at every request
-  // start AND re-filled by invisible background / auto-wake runs, which made the
-  // pill jump "sem razão aparente". The session fields move only when the
-  // foreground conversation's context actually changes, and reset only on
-  // compaction — so the pill rises in steps and drops only for real reasons.
+  // Stable foreground context size: use the active session's persisted peak,
+  // but prefer live counters while a foreground turn is streaming. That keeps
+  // BYOK runs visible before the final usage event lands, while Math.max avoids
+  // the old sawtooth from smaller mid-loop usage reports.
   const inputTokens = useChatStore((s) => {
+    const live = s.currentPromptTokens
     if (!s.activeSessionId) return 0
-    return s.sessions.get(s.activeSessionId)?.lastPromptTokens ?? 0
+    const persisted = s.sessions.get(s.activeSessionId)?.lastPromptTokens ?? 0
+    return Math.max(live, persisted)
   })
   const outputTokens = useChatStore((s) => {
+    const live = s.currentResponseTokens
     if (!s.activeSessionId) return 0
-    return s.sessions.get(s.activeSessionId)?.lastResponseTokens ?? 0
+    const persisted = s.sessions.get(s.activeSessionId)?.lastResponseTokens ?? 0
+    return Math.max(live, persisted)
   })
   const headerContextWindow = useAgentStore((s) => s.modelContextWindow)
   const modelName = useAgentStore((s) => s.modelName)
@@ -100,18 +100,10 @@ function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIn
   const compactThreshold = getAutoCompactThreshold(rawContextWindow)
   const warnThreshold = getWarningThreshold(rawContextWindow)
 
-  // Context occupancy = the prompt actually on the wire (input side), which
-  // already includes ALL prior history (past user messages, prior assistant
-  // outputs, tool results). claude-vaz parity (utils/context.ts:130-136): the
-  // pressure numerator is INPUT-ONLY — the current turn's output is NOT added.
-  //
-  // Adding output (the previous behaviour) reintroduced the per-turn sawtooth
-  // the prompt-peak was designed to kill: `lastResponseTokens` is OVERWRITTEN
-  // every internal agent-loop turn (chatStore.addTokenUsage), so a new message's
-  // small first turn dragged the bar 5%→4%→5% "sem razão aparente". `inputTokens`
-  // is a monotonic session peak → the bar only rises (until a real compaction
-  // reset). Output is still shown separately in the tooltip ("last response").
-  const pressureTokens = inputTokens
+  // Context occupancy uses input + output. The next turn's prompt includes the
+  // previous output, so showing only input understated pressure during long BYOK
+  // runs and made the bar jump late.
+  const pressureTokens = totalContextTokens(inputTokens, outputTokens)
   const rawPct = effectiveWindow > 0 ? (pressureTokens / effectiveWindow) * 100 : 0
   const pct = Math.min(100, rawPct)
   const overrun = rawPct > 100

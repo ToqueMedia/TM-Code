@@ -3,6 +3,7 @@ import { ChatSession, ChatMessage, PersistedSession, SessionSummary, ToolCallDis
 import { logger } from '../../utils/logger'
 import { hashProjectPath, encryptSession, decryptSession } from '../../utils/crypto'
 import { useByokStore } from '../../stores/byokStore'
+import { getProjectSessionsDir } from '../projectStatePaths'
 
 /** Snapshot the current BYOK selection so the session uses the same provider
  *  and model for its entire lifetime, even if the user later switches the
@@ -53,10 +54,9 @@ const MAX_TOOL_RESULT_LENGTH = 2000
 /** Teto do mentionContext persistido por mensagem (~30K chars ≈ 7.5K tokens).
  *  Display/contexto continua completo em memória; só o disco é capado. */
 const MAX_MENTION_CONTEXT_PERSIST = 30_000
-/** Legacy home-dir root for sessions written before the 2026-05 migration
- *  to `<project>/.toquemedia/sessions/`. Kept only as the SOURCE side of
- *  the one-shot migration in `migrateLegacySessions`; nothing else reads
- *  from here. */
+/** Legacy home-dir root for sessions written before project-id based app
+ *  state. Kept only as the SOURCE side of the one-shot migration in
+ *  `migrateLegacySessions`; nothing else reads from here. */
 const LEGACY_BASE_DIR_NAME = '.toquemedia-studio'
 
 class SessionService {
@@ -111,14 +111,10 @@ class SessionService {
     return this.basePath
   }
 
-  /** Sessions live INSIDE the project at `<project>/.toquemedia/sessions/`
-   *  (migrated 2026-05 from `~/.toquemedia-studio/sessions/{projectHash}/`).
-   *  Project-rooted so the conversation history travels with the project:
-   *  move the folder to another machine, the agent picks up where it left
-   *  off without an opaque hash key going stale on the new machine. */
+  /** Sessions are tool state. They live in the app's per-project state dir,
+   *  keyed by `.toquemedia-id`, so the user's project tree stays clean. */
   private async getSessionsDir(projectPath: string): Promise<string> {
-    const normalized = projectPath.replace(/\\/g, '/').replace(/\/$/, '')
-    return `${normalized}/.toquemedia/sessions`
+    return getProjectSessionsDir(projectPath)
   }
 
   /** Path under the LEGACY home-dir scheme. Used only during migration. */
@@ -146,6 +142,12 @@ class SessionService {
   // === Lifecycle ===
 
   async init(projectPath: string): Promise<void> {
+    try {
+      await invoke('migrate_project_state', { projectPath })
+    } catch (error) {
+      logger.warn('session', 'Project state migration failed (non-fatal):', error)
+    }
+
     const dir = await this.getSessionsDir(projectPath)
     try {
       await invoke('create_directories_all', { path: dir })
@@ -166,12 +168,11 @@ class SessionService {
       logger.warn('session', 'Legacy session migration failed (non-fatal):', error)
     }
 
-    // Ensure `.toquemedia/.gitignore` carries the sessions/ + queue
-    // entries. The Rust helper is idempotent — adds only what's missing.
+    // Legacy no-op kept for older frontend/native combinations.
     try {
       await invoke('ensure_toquemedia_gitignore_cmd', { projectPath })
     } catch (error) {
-      logger.warn('session', 'Failed to write .toquemedia/.gitignore:', error)
+      logger.warn('session', 'Legacy state ignore update failed:', error)
     }
 
     // Clean up stale empty sessions from previous runs (e.g. if app crashed before cleanup)
@@ -184,9 +185,9 @@ class SessionService {
 
   /**
    * One-shot best-effort migration of the legacy session tree from
-   * `~/.toquemedia-studio/sessions/{projectHash}/` into the project's
-   * own `.toquemedia/sessions/`. Idempotent via a `.migrated` marker
-   * file in the new directory — after the first successful run, every
+   * `~/.toquemedia-studio/sessions/{projectHash}/` into the project-id keyed
+   * sessions directory. Idempotent via a `.migrated` marker file in the new
+   * directory — after the first successful run, every
    * subsequent init returns immediately.
    *
    * The migration is intentionally simple: copy every file from legacy

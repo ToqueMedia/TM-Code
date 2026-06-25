@@ -14,7 +14,7 @@
  *   - Fires fire-and-forget AFTER each completed assistant turn.
  *   - Calls the per-plan side-car model (same routing as memory-selector).
  *   - Returns a list of proposals — `name`, `type`, `description`, `body`.
- *   - Proposals are appended to `<project>/.toquemedia/memory/_proposed.jsonl`
+ *   - Proposals are appended to the project memory proposal audit
  *     (audit trail) AND surfaced as a system reminder on the agent's
  *     next turn so the model decides whether to actually save_memory
  *     them or discard.

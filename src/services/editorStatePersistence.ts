@@ -15,7 +15,8 @@
  * setting `isDirty: false` for everything. The unsaved edits are gone with
  * no warning.
  *
- * Storage: `<project>/.toquemedia/editor-state.json` with the shape:
+ * Storage: app per-project state dir (`~/.toquemedia-studio/projects/<id>/`)
+ * with the shape:
  *   { schemaVersion, updatedAt, dirty: { [filePath]: content } }
  *
  * Only DIRTY files are written — clean files don't need to be re-snapshotted
@@ -23,17 +24,15 @@
  * scroll position live in the existing localStorage persist path; this
  * file's job is strictly data recovery for unsaved work.
  *
- * Why per-project disk (and not localStorage):
+ * Why app-managed per-project disk (and not localStorage):
  *   - localStorage has a ~5-10MB hard limit shared across ALL projects;
  *     dirty buffers in a single project can exceed that easily.
- *   - The state is project-scoped, not user-scoped — it should travel
- *     with the project (move folders between machines, etc.).
- *   - The file is gitignored (sessions/ pattern covers it via the same
- *     `.toquemedia/.gitignore` Rust helper) — unsaved work is by
- *     definition not yet committable.
+ *   - The state is project-scoped but tool-owned — it should not clutter the
+ *     user's repo tree or appear as source-controlled project content.
  */
 
 import { invoke } from '@tauri-apps/api/core'
+import { getLegacyProjectStateDir, getProjectStateDir } from './projectStatePaths'
 
 const EDITOR_STATE_FILENAME = 'editor-state.json'
 
@@ -47,9 +46,26 @@ interface EditorStateFileV1 {
   dirty: Record<string, string>
 }
 
-function editorStatePath(projectPath: string): string {
-  const normalized = projectPath.replace(/\\/g, '/').replace(/\/$/, '')
-  return `${normalized}/.toquemedia/${EDITOR_STATE_FILENAME}`
+async function editorStatePath(projectPath: string): Promise<string> {
+  return `${await getProjectStateDir(projectPath)}/${EDITOR_STATE_FILENAME}`
+}
+
+function legacyEditorStatePath(projectPath: string): string {
+  return `${getLegacyProjectStateDir(projectPath)}/${EDITOR_STATE_FILENAME}`
+}
+
+function parseEditorState(raw: string): Record<string, string> {
+  const parsed = JSON.parse(raw) as Partial<EditorStateFileV1>
+  if (!parsed || parsed.schemaVersion !== 1 || typeof parsed.dirty !== 'object' || parsed.dirty === null) {
+    return {}
+  }
+  const out: Record<string, string> = {}
+  for (const [path, content] of Object.entries(parsed.dirty)) {
+    if (typeof path === 'string' && typeof content === 'string') {
+      out[path] = content
+    }
+  }
+  return out
 }
 
 /**
@@ -61,29 +77,22 @@ export async function loadEditorStateFromDisk(
 ): Promise<Record<string, string>> {
   if (!projectPath) return {}
   try {
-    const raw = await invoke<string>('read_file', { path: editorStatePath(projectPath) })
-    const parsed = JSON.parse(raw) as Partial<EditorStateFileV1>
-    if (!parsed || parsed.schemaVersion !== 1 || typeof parsed.dirty !== 'object' || parsed.dirty === null) {
+    const raw = await invoke<string>('read_file', { path: await editorStatePath(projectPath) })
+    return parseEditorState(raw)
+  } catch {
+    try {
+      const raw = await invoke<string>('read_file', { path: legacyEditorStatePath(projectPath) })
+      return parseEditorState(raw)
+    } catch {
       return {}
     }
-    // Defensive: filter out non-string entries — single bad row mustn't
-    // wedge the whole hydrate.
-    const out: Record<string, string> = {}
-    for (const [path, content] of Object.entries(parsed.dirty)) {
-      if (typeof path === 'string' && typeof content === 'string') {
-        out[path] = content
-      }
-    }
-    return out
-  } catch {
-    return {}
   }
 }
 
 /**
  * Persist the dirty-buffer map for a project. When `dirty` is empty (every
  * open file is in sync with disk), delete the file rather than writing an
- * empty object — keeps the project tree clean for users who never have
+ * empty object — keeps the app state clean for users who never have
  * unsaved edits at IDE-close time.
  */
 export async function saveEditorStateToDisk(
@@ -91,7 +100,7 @@ export async function saveEditorStateToDisk(
   dirty: Record<string, string>,
 ): Promise<void> {
   if (!projectPath) return
-  const path = editorStatePath(projectPath)
+  const path = await editorStatePath(projectPath)
   if (Object.keys(dirty).length === 0) {
     try {
       await invoke('delete_file_or_directory', { path })

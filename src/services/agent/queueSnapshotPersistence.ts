@@ -8,9 +8,8 @@
  * force-quit while the queue has unprocessed entries, those prompts
  * vanish silently. The user has no way to recover what they typed.
  *
- * Snapshot file: `<project>/.toquemedia/sessions/<sessionId>.queue-snapshot.json`
- * — co-located with the rest of the session's files and gitignored via
- * the `.toquemedia/.gitignore` we already write.
+ * Snapshot file: app per-project sessions dir, co-located with the rest of the
+ * session's files but outside the user's project tree.
  *
  * Lifecycle:
  *   - Written on every mutation (enqueue / dequeue / remove / clear),
@@ -29,6 +28,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core'
+import { getProjectSessionsDir } from '../projectStatePaths'
 import type { QueuedCommand } from './messageQueue'
 
 interface QueueSnapshotFileV1 {
@@ -38,9 +38,8 @@ interface QueueSnapshotFileV1 {
   items: QueuedCommand[]
 }
 
-function snapshotPath(projectPath: string, sessionId: string): string {
-  const normalized = projectPath.replace(/\\/g, '/').replace(/\/$/, '')
-  return `${normalized}/.toquemedia/sessions/${sessionId}.queue-snapshot.json`
+async function snapshotPath(projectPath: string, sessionId: string): Promise<string> {
+  return `${await getProjectSessionsDir(projectPath)}/${sessionId}.queue-snapshot.json`
 }
 
 export async function loadQueueSnapshot(
@@ -50,7 +49,7 @@ export async function loadQueueSnapshot(
   if (!projectPath || !sessionId) return []
   try {
     const raw = await invoke<string>('read_file', {
-      path: snapshotPath(projectPath, sessionId),
+      path: await snapshotPath(projectPath, sessionId),
     })
     const parsed = JSON.parse(raw) as Partial<QueueSnapshotFileV1>
     if (
@@ -73,10 +72,9 @@ export async function saveQueueSnapshot(
   items: readonly QueuedCommand[],
 ): Promise<void> {
   if (!projectPath || !sessionId) return
-  const path = snapshotPath(projectPath, sessionId)
+  const path = await snapshotPath(projectPath, sessionId)
   // Empty queue → delete file rather than write an empty snapshot. The
-  // gitignored `.toquemedia/sessions/` would otherwise accumulate stale
-  // 0-item snapshots per session forever.
+  // App state would otherwise accumulate stale 0-item snapshots per session.
   if (items.length === 0) {
     try {
       await invoke('delete_file_or_directory', { path })
