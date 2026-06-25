@@ -1,8 +1,6 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { listen, UnlistenFn } from '@tauri-apps/api/event'
 import { useLayoutStore, type ProjectKind } from '../stores/layoutStore'
-import { useChatStore } from '../stores/chatStore'
-import { useAgentStore } from '../stores/agentStore'
 import { logger } from '../utils/logger'
 import {
   URL_REGEX_GLOBAL,
@@ -163,7 +161,6 @@ class DevServerManager {
   private eaddrinuseRestarts = 0
   private unlistenOutput: UnlistenFn | null = null
   private unlistenExit: UnlistenFn | null = null
-  private unsubPreviewDefer: (() => void) | null = null
 
   static getInstance(): DevServerManager {
     if (!DevServerManager.instance) {
@@ -563,35 +560,15 @@ class DevServerManager {
 
     slot.status = 'running'
 
-    // Auto-switch to preview view once the first URL lands.
-    //
-    // Gate on agent status NOT being 'error' — when a turn ends with an
-    // upstream 5xx / network drop, the chat indicator drops isStreaming back
-    // to false but the work the user asked for never landed. The auto-switch
-    // used to fire anyway and open the preview, misleading the user into
-    // thinking the agent had finished successfully. With this gate, the
-    // preview stays out of the way and the error banner / system message
-    // remain the dominant signal.
-    const isStreaming = useChatStore.getState().isStreaming
-    const agentErrored = useAgentStore.getState().status === 'error'
-    if (!isStreaming && !agentErrored) {
-      layoutStore.setViewMode('preview')
-    } else if (!this.unsubPreviewDefer) {
-      const unsub = useChatStore.subscribe((state, prev) => {
-        if (prev.isStreaming && !state.isStreaming) {
-          unsub()
-          this.unsubPreviewDefer = null
-          // Re-check the agent status at the moment streaming actually
-          // ends — a 5xx mid-stream can flip isStreaming→false while
-          // agentStore.status='error', and we don't want the deferred
-          // subscriber to leak the user to preview after that race.
-          if (useAgentStore.getState().status !== 'error') {
-            useLayoutStore.getState().setViewMode('preview')
-          }
-        }
-      })
-      this.unsubPreviewDefer = unsub
-    }
+    // Preview is NO LONGER auto-opened when the dev server becomes ready
+    // (user request 2026-06-24). Opening the preview is now the developer's
+    // action: the server keeps running in the background and `activatePreview`
+    // (the Preview button) switches the view on demand — selectIsPreviewServerRunning
+    // already reflects this running slot, so the click is instant. The agent is
+    // instructed (via the start_dev_server tool result) to point the user at the
+    // Preview button when it finishes. The old isStreaming/agentErrored gate and
+    // the deferred subscriber existed only to time that auto-switch safely; with
+    // no auto-switch, there is nothing left to gate.
   }
 
   private handleExit(pid: number): void {
@@ -715,8 +692,6 @@ class DevServerManager {
     this.unlistenOutput = null
     this.unlistenExit?.()
     this.unlistenExit = null
-    this.unsubPreviewDefer?.()
-    this.unsubPreviewDefer = null
   }
 
   /**

@@ -549,6 +549,33 @@ async function runAgentInternal(
           finalized = true
           useChatStore.getState().finalizeAssistantMessage()
         }
+        // Close the task tracker on a clean finish. The agent routinely ends a
+        // run with its final task still `in_progress` — it does the work but
+        // skips the closing update_tasks call — which strands the
+        // AgentTasksPanel open on a half-finished row that never auto-hides.
+        // On a successful, user-initiated, non-aborted run we flip any lingering
+        // `in_progress` task to `completed`, guaranteeing the last worked task is
+        // always marked done. `pending` tasks are deliberately left untouched: a
+        // /plan seed is ALL-pending and onDone fires right after seeding, so
+        // auto-completing those would mark an entire just-created plan as done.
+        // (Aborted runs and background auto-wakes are skipped.)
+        if (!isBackgroundRun && !agentService.isAborted()) {
+          const tasks = useAgentStore.getState().tasks
+          if (tasks.some(tk => tk.status === 'in_progress')) {
+            const closed = tasks.map(tk =>
+              tk.status === 'in_progress'
+                ? { ...tk, status: 'completed' as const, evidence: tk.evidence || 'Run completed' }
+                : tk,
+            )
+            useAgentStore.getState().setTasks(closed)
+            const projectPath = useProjectStore.getState().currentProject?.path
+            if (projectPath) {
+              void import('./taskPersistence')
+                .then(({ saveTasksToDisk }) => saveTasksToDisk(projectPath, closed))
+                .catch(() => { /* persistence is best-effort */ })
+            }
+          }
+        }
         agentStore.setStatus('idle')
         logger.info('agent', `✓ Agent done (total: ${Date.now() - loopStartTime}ms)`)
         useProblemsStore.getState().scanProject().catch(() => {})
