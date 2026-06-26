@@ -1470,23 +1470,11 @@ ${preview}
         if (useLayoutStore.getState().devServer) return
         useLayoutStore.getState().initDevServer({ pid: 0, projectKind: 'frontend' })
         useLayoutStore.getState().setDevServerFrontendUrl(url)
-        // Surface the preview only once the agent's turn has ENDED — never
-        // mid-stream. A raw `execute_command` that boots a server can match
-        // here while the agent is still mid-task (and still streaming its
-        // report); switching the view then is exactly the "preview opens too
-        // early" complaint. If still streaming, defer the switch to the moment
-        // the run finalises (isStreaming → false), mirroring devServerManager's
-        // own gate so both server-start paths behave identically.
-        if (!useChatStore.getState().isStreaming) {
-          useLayoutStore.getState().setViewMode('preview')
-        } else {
-          const unsub = useChatStore.subscribe((s, prev) => {
-            if (prev.isStreaming && !s.isStreaming) {
-              unsub()
-              useLayoutStore.getState().setViewMode('preview')
-            }
-          })
-        }
+        // The dev-server URL is registered (so the Preview button works) but the
+        // view is NOT auto-switched to preview (user request 2026-06-24). Opening
+        // the preview is the developer's action now; the agent points them at the
+        // Preview button when it finishes. Mirrors devServerManager.handleReady,
+        // which also dropped its auto-switch — both server-start paths stay quiet.
         break
       }
     }
@@ -1798,9 +1786,9 @@ ${preview}
     // tem pesquisa real. Devolver os tokens dele seria entregar resultados
     // alucinados como se fossem da web; erro honesto é estritamente melhor.
     if (response.headers.get('x-tm-config-key') !== 'sidecar:web_search') {
-      return 'web_search error: no search sidecar is published and the active model has no native web search. Tell the user web search is currently unavailable.'
+      return 'web_search error: web search is currently unavailable for the active model.'
     }
-    console.info(`[web-search-sidecar] query served by sidecar model=${response.headers.get('x-tm-model') ?? '?'} (config=sidecar:web_search)`)
+    console.info(`[web-search] query served by auxiliary model=${response.headers.get('x-tm-model') ?? '?'} (config=web_search)`)
 
     const data = await response.json().catch(() => null) as
       { choices?: Array<{ message?: { content?: string } }> } | null
@@ -2945,7 +2933,7 @@ ${preview}
     this.tools.set('start_dev_server', {
       definition: {
         name: 'start_dev_server',
-        description: `Start the project's dev server as a background process. Returns immediately — the correct preview panel opens automatically when the server is ready. ONE dev server per project.
+        description: `Start the project's dev server as a background process. Returns immediately and the server keeps running in the background. The preview does NOT open by itself — when you finish, tell the user the app is running and to click the **Preview** button (top-right of the chat) to open it. ONE dev server per project.
 
 Pass the command that runs the WHOLE project (e.g. "npm run dev" — even if it fans out frontend+backend via concurrently, workspaces, or turbo).
 
@@ -3009,9 +2997,9 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           const url = devServerManager.getUrl()
           const hintNote = frontendPortHint ? ` [frontend port hint: ${frontendPortHint}]` : ''
           if (url) {
-            return `Dev server started and running at ${url} (${projectKind})${hintNote}. The correct preview panel will open automatically.`
+            return `Dev server started and running at ${url} (${projectKind})${hintNote}. The preview does NOT open automatically — when you're done, tell the user the app is running and to click the Preview button (top-right of the chat) to view it.`
           }
-          return `Dev server starting with command: ${command} (${projectKind})${hintNote}. The preview panel will open automatically when the server is ready.`
+          return `Dev server starting with command: ${command} (${projectKind})${hintNote}. It boots in the background; the preview does NOT open automatically. When you finish, tell the user to click the Preview button (top-right of the chat) to open it.`
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
           return `Error starting dev server: ${msg}. You can try a different command or check that dependencies are installed.`

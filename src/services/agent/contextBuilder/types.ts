@@ -133,7 +133,7 @@ export interface PromptContext {
    *  approaches. Null when no user memory exists yet. */
   userMemoryIndex: string | null
   /** Pre-loaded project-scope MEMORY.md index content
-   *  (`<project>/.toquemedia/memory/`). Project-bound facts: initiatives,
+   *  (app-managed per-project state). Project-bound facts: initiatives,
    *  references, repo conventions. Null when none exists yet. */
   projectMemoryIndex: string | null
   /** True iff at least one injected memory file is past the

@@ -65,6 +65,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const messages = session?.messages || []
+  const [projectStateReady, setProjectStateReady] = useState(false)
 
   // Guarded exit: while sharing a Live Preview, leaving Terminal mode would tear
   // down the session and kill the shared dev server out from under the team.
@@ -165,16 +166,17 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   useEffect(() => {
     if (!projectPath) return
     sessionCreatedRef.current = false
+    setProjectStateReady(false)
     return () => { sessionCreatedRef.current = false }
   }, [projectPath])
 
   useEffect(() => {
-    if (!projectPath || sessionCreatedRef.current) return
+    if (!projectPath || !projectStateReady || sessionCreatedRef.current) return
     if (!useChatStore.getState().activeSessionId) {
       sessionCreatedRef.current = true
       useChatStore.getState().createSession(projectPath)
     }
-  }, [activeSessionId, projectPath])
+  }, [activeSessionId, projectPath, projectStateReady])
 
   // Focus the prompt input on mount so the user can start typing immediately.
   useEffect(() => {
@@ -190,34 +192,50 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     if (!projectPath) return
     let cancelled = false
 
-    // Tasks — hydrate new project's tasks.json atomically.
-    // We do NOT clear before load: clearTasks() + async loadFromDisk creates
-    // a race window where the store is empty but tasks.json still exists on
-    // disk. If the agent reads prompt context during this gap, it sees
-    // tasks=[] and may re-seed a fresh tracker, overwriting the real state.
-    // Instead, loadFromDisk resolves with the new project's tasks (or []),
-    // and setTasks() atomically replaces the old project's data — no
-    // intermediate empty state. If the load fails, we clear stale data as
-    // a fallback (old project's tasks are worse than empty).
-    const { setTasks, clearTasks } = useAgentStore.getState()
-    import('../../services/agent/taskPersistence').then(({ loadTasksFromDisk }) =>
-      loadTasksFromDisk(projectPath)
-        .then(tasks => { if (!cancelled) setTasks(tasks) })
-        .catch(() => { if (!cancelled) clearTasks() }),
-    )
+    const hydrateProjectState = async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core')
+        await invoke('migrate_project_state', { projectPath })
+      } catch { /* migration is best-effort; readers still fall back where safe */ }
 
-    // Permissions — clear stale trust grants, hydrate new project's
-    // permissions.json. Without this, scopes approved in Project A leak
-    // into Project B (auto-approved tools without user consent).
-    import('../../stores/permissionStore').then(({ hydrateApprovedScopes }) =>
-      import('../../services/agent/permissionPersistence').then(({ loadPermissionsFromDisk }) =>
-        loadPermissionsFromDisk(projectPath)
-          .then(perms => { if (!cancelled) hydrateApprovedScopes(perms.scopes, projectPath, perms.tools, perms.directories) })
-          .catch(() => { /* non-critical — empty grants means re-prompt */ }),
-      ),
-    )
+      // Tasks — hydrate new project's tasks atomically.
+      // We do NOT clear before load: clearTasks() + async loadFromDisk creates
+      // a race window where the store is empty but tasks.json still exists on
+      // disk. If the agent reads prompt context during this gap, it sees
+      // tasks=[] and may re-seed a fresh tracker, overwriting the real state.
+      // Instead, loadFromDisk resolves with the new project's tasks (or []),
+      // and setTasks() atomically replaces the old project's data — no
+      // intermediate empty state. If the load fails, we clear stale data as
+      // a fallback (old project's tasks are worse than empty).
+      const { setTasks, clearTasks } = useAgentStore.getState()
+      try {
+        const { loadTasksFromDisk } = await import('../../services/agent/taskPersistence')
+        const tasks = await loadTasksFromDisk(projectPath)
+        if (!cancelled) setTasks(tasks)
+      } catch {
+        if (!cancelled) clearTasks()
+      }
 
-    return () => { cancelled = true }
+      // Permissions — clear stale trust grants, hydrate new project's grants.
+      // Without this, scopes approved in Project A leak into Project B
+      // (auto-approved tools without user consent).
+      try {
+        const [{ hydrateApprovedScopes }, { loadPermissionsFromDisk }] = await Promise.all([
+          import('../../stores/permissionStore'),
+          import('../../services/agent/permissionPersistence'),
+        ])
+        const perms = await loadPermissionsFromDisk(projectPath)
+        if (!cancelled) hydrateApprovedScopes(perms.scopes, projectPath, perms.tools, perms.directories)
+      } catch { /* non-critical — empty grants means re-prompt */ }
+
+      if (!cancelled) setProjectStateReady(true)
+    }
+
+    void hydrateProjectState()
+
+    return () => {
+      cancelled = true
+    }
   }, [projectPath])
 
   // Notify backend of project path exactly once per path.
@@ -973,7 +991,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         <TerminalStatusLine />
       </Box>
 
-      <Box display={(pendingPermission || hasPendingAskUserQuestion) ? 'none' : undefined} flexShrink={0} data-no-focus-steal>
+      <Box display={(pendingPermission || hasPendingAskUserQuestion || !projectStateReady) ? 'none' : undefined} flexShrink={0} data-no-focus-steal>
         <CmdModePromptInput ref={promptInputRef} />
       </Box>
       </ErrorBoundary>

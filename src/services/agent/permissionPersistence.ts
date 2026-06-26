@@ -6,7 +6,7 @@
  *  - **Tools** (e.g. `'execute_command'`): user clicked "Always allow" for a
  *    specific tool in this project.
  *
- * The grants live at `<project>/.toquemedia/permissions.json` —
+ * The grants live in app-managed per-project state —
  * **project-scoped on purpose**: trust scales with the project, not
  * with the IDE installation. Trusting "all core tools" on Project A
  * does not imply trusting them on Project B. Opening a new project

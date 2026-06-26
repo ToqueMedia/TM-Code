@@ -7,7 +7,7 @@
  * developer was working on, history disappears, and a 30-minute debugging
  * session of incremental request-tuning is lost.
  *
- * State persisted at `<project>/.toquemedia/http-client.json`:
+ * State persisted in app-managed per-project state:
  *   - `tabs` — the request bodies, headers, params, form-data, auth.
  *     We strip `response`, `isLoading`, and `error` before writing —
  *     those are transient runtime fields that aren't meaningful after a

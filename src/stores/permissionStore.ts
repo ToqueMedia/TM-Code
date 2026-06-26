@@ -41,7 +41,7 @@ async function logPermission(message: string, level: 'info' | 'warn' | 'error' |
 /** Persist/reload autoApproveDiffs from localStorage.
  *  This is a CROSS-PROJECT user preference (the toggle is in chat chrome),
  *  so it stays in localStorage. The per-project `approvedScopes` set is a
- *  trust grant and lives in `<project>/.toquemedia/permissions.json` via
+ *  trust grant and lives in app-managed per-project state via
  *  `permissionPersistence.ts` — see that file for the rationale. */
 const STORAGE_KEY = 'chat_autoApproveDiffs'
 function loadAutoApproveDiffs(): boolean {
@@ -52,8 +52,8 @@ function saveAutoApproveDiffs(value: boolean) {
 }
 
 /** Fire-and-forget write of `approvedScopes` + `projectToolAllowlist` to
- *  the current project's `.toquemedia/permissions.json`. Uses the store's
- *  own `projectPath` so it works in both Chat Mode (set by
+ *  the current project's app-managed state. Uses the store's own
+ *  `projectPath` so it works in both Chat Mode (set by
  *  projectStore.openProject) and Terminal Mode (set by TerminalView)
  *  without depending on projectStore. */
 function persistPermissions(): void {
@@ -127,8 +127,8 @@ const SAFE_TOOLS = new Set([
   // skills mid-session triggers a permission prompt per skill (the agent
   // typically reads several), which is hostile UX.
   'read_skill',
-  // Memory persistence tools — confined to the validated `.toquemedia/memory/`
-  // and `~/.toquemedia-studio/memory/` directories by the Rust layer.
+  // Memory persistence tools — confined to validated app/user memory dirs by
+  // the Rust layer.
   // Prompting per-call would train the user to click through, which
   // defeats the point of a memory system that exists to reduce friction.
   'save_memory',
@@ -201,7 +201,7 @@ interface PermissionState {
   /** Global tool names the user clicked "Always allow" for (cross-project). */
   globalToolAllowlist: Set<string>
   /** Extra directories the user approved for agent file access, beyond the
-   *  project root. Persists per-project in .toquemedia/permissions.json. */
+   *  project root. Persists in app-managed per-project state. */
   additionalDirectories: Set<string>
   /** When true, file diffs (write_file/edit_file/create_file) are auto-accepted without user confirmation */
   autoApproveDiffs: boolean

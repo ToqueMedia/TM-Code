@@ -8,8 +8,8 @@
  * exact code snippet, error message, or quoted user requirement that
  * lived in those compacted turns. The summary is by definition lossy.
  *
- * This module preserves the raw pre-compact transcript to disk at
- * `<project>/.toquemedia/sessions/<sessionId>.pre-compact-<N>.jsonl` so
+ * This module preserves the raw pre-compact transcript in the app's
+ * per-project sessions dir so
  * the model can `read_file` the archive on demand — recovering the exact
  * tool result, the user's verbatim instruction, the original error
  * message, whatever the summary lossily collapsed.
@@ -31,6 +31,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core'
+import { getProjectSessionsDir } from '../projectStatePaths'
 
 const MAX_ARCHIVES_PER_SESSION = 5
 
@@ -42,7 +43,7 @@ export interface ArchivedMessage {
 }
 
 /**
- * Write `messages` to `<project>/.toquemedia/sessions/<sessionId>.pre-compact-<idx>.jsonl`.
+ * Write `messages` to the app per-project sessions archive file.
  * Picks the next available index (lowest unused 1..MAX_ARCHIVES), then if
  * MAX is reached, rotates: deletes the oldest, renames N→N-1, writes to
  * MAX. Returns the absolute path of the archive on success, or null when
@@ -55,9 +56,9 @@ export async function archivePreCompactTranscript(
 ): Promise<string | null> {
   if (!projectPath || !sessionId || messages.length === 0) return null
 
-  const normalized = projectPath.replace(/\\/g, '/').replace(/\/$/, '')
+  const sessionsDir = await getProjectSessionsDir(projectPath)
   const archivePath = (n: number) =>
-    `${normalized}/.toquemedia/sessions/${sessionId}.pre-compact-${n}.jsonl`
+    `${sessionsDir}/${sessionId}.pre-compact-${n}.jsonl`
 
   // Probe which slots are taken. `list_directory` returns full paths or
   // basenames; we just want to know if our specific files exist. Cheap

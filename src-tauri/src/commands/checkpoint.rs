@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use super::canonicalize_path;
+use super::project_state::project_state_root;
 
 /// Metadata about a single checkpoint.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -53,26 +53,10 @@ pub struct CheckpointIndex {
 // Path helpers
 // ---------------------------------------------------------------------------
 //
-// Checkpoints live INSIDE the project at `<project>/.toquemedia/checkpoints/`
-// (migrated 2026-05 from `~/.toquemedia-studio/checkpoints/{projectHash}/`).
-//
-// Why move into the project:
-//   - Travels with the project. Move/zip/copy the folder → checkpoints come too.
-//     The legacy home-dir tree was keyed by project_hash, so a project moved
-//     to another machine effectively lost its checkpoints (the hash on the
-//     new machine differed).
-//   - Project-scoped lifetime. Project deletion automatically clears its
-//     checkpoints — no orphans accumulating in `~/.toquemedia-studio/`.
-//   - Inspectable / debuggable. Developer can look at the snapshot files
-//     directly without spelunking through a hashed home-dir tree.
-//
-// Each session still gets its own subdirectory under
-// `.toquemedia/checkpoints/<sessionId>/`. Snapshot files live under
-// `.toquemedia/checkpoints/<sessionId>/files/<checkpointId>/`.
-//
-// The `.toquemedia/checkpoints/` directory is gitignored by default
-// (see `ensure_toquemedia_gitignore`) — snapshots are throwaway recovery
-// state, not source of truth.
+// Checkpoints are tool state, not project source. They live in the app's
+// per-project state directory keyed by `.toquemedia-id`, so new projects stay
+// clean while existing projects can be migrated safely from the legacy
+// project-local state location.
 
 fn validate_session_id(session_id: &str) -> Result<(), String> {
     if session_id.is_empty() || session_id.len() > 128 {
@@ -113,17 +97,7 @@ fn validate_file_path_hash(hash: &str) -> Result<(), String> {
 }
 
 fn checkpoints_root(project_path: &str) -> Result<PathBuf, String> {
-    let project = Path::new(project_path);
-    if !project.exists() || !project.is_dir() {
-        return Err(format!("Project path does not exist: {}", project_path));
-    }
-    let canonical =
-        canonicalize_path(project).map_err(|e| format!("Invalid project path: {}", e))?;
-    let dir = canonical.join(".toquemedia").join("checkpoints");
-    if !dir.starts_with(&canonical) {
-        return Err("Resolved checkpoints path escapes project root".to_string());
-    }
-    Ok(dir)
+    Ok(project_state_root(project_path)?.join("checkpoints"))
 }
 
 fn session_dir(project_path: &str, session_id: &str) -> Result<PathBuf, String> {
@@ -138,91 +112,13 @@ fn file_dir(project_path: &str, session_id: &str, checkpoint_id: &str) -> Result
         .join(checkpoint_id))
 }
 
-/// Ensure `<project>/.toquemedia/.gitignore` exists and contains all
-/// entries that must NOT be committed to git: throwaway recovery state
-/// (checkpoints/) plus per-conversation history that may contain sensitive
-/// prompts or pasted code (sessions/, queue-operations.jsonl).
-///
-/// Idempotent — checks each entry independently before appending, so it's
-/// safe to call on every save without growing the file. Best-effort:
-/// failures are logged at the call site, never break the save.
-///
-/// Files that ARE committable (tasks.json, permissions.json,
-/// http-client.json) intentionally do NOT appear here — they're project
-/// context that should travel via git the same way as PLAN.md / TODO.md.
+/// Legacy no-op kept so older frontend code can call it safely.
 pub(crate) async fn ensure_toquemedia_gitignore(project_path: &str) -> Result<(), String> {
-    const ENTRIES: &[(&str, &str)] = &[
-        (
-            "checkpoints/",
-            "# Agent recovery snapshots — throwaway state, never source of truth.",
-        ),
-        (
-            "collab/",
-            "# Team-collab restore points + ephemeral P2P chat — throwaway state.",
-        ),
-        (
-            "sessions/",
-            "# Conversation history — may contain sensitive prompts or pasted code.",
-        ),
-        (
-            "queue-operations.jsonl",
-            "# Per-turn queue operation log — debug-only, not portable.",
-        ),
-        (
-            "editor-state.json",
-            "# Unsaved editor buffers — recovery state, never source of truth.",
-        ),
-    ];
-
-    let project = Path::new(project_path);
-    let canonical =
-        canonicalize_path(project).map_err(|e| format!("Invalid project path: {}", e))?;
-    let gitignore = canonical.join(".toquemedia").join(".gitignore");
-    if let Some(parent) = gitignore.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("Failed to create .toquemedia/: {}", e))?;
-    }
-
-    let existing = tokio::fs::read_to_string(&gitignore)
-        .await
-        .unwrap_or_default();
-    let present: std::collections::HashSet<&str> = existing
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect();
-
-    let mut to_add: Vec<(&str, &str)> = Vec::new();
-    for &(entry, comment) in ENTRIES {
-        if !present.contains(entry) {
-            to_add.push((entry, comment));
-        }
-    }
-    if to_add.is_empty() {
-        return Ok(());
-    }
-
-    let mut merged = existing;
-    if !merged.is_empty() && !merged.ends_with('\n') {
-        merged.push('\n');
-    }
-    for (entry, comment) in to_add {
-        merged.push_str(comment);
-        merged.push('\n');
-        merged.push_str(entry);
-        merged.push('\n');
-    }
-
-    tokio::fs::write(&gitignore, merged)
-        .await
-        .map_err(|e| format!("Failed to write .toquemedia/.gitignore: {}", e))?;
+    let _ = project_path;
     Ok(())
 }
 
-/// Public Tauri command — exposes `ensure_toquemedia_gitignore` to the TS
-/// layer so session/queue persistence (which writes through plain
-/// write_file, not the agent-state surface) can opt in too. Idempotent.
+/// Public Tauri command kept for compatibility with older frontend code.
 #[tauri::command]
 pub async fn ensure_toquemedia_gitignore_cmd(project_path: String) -> Result<(), String> {
     ensure_toquemedia_gitignore(&project_path).await
@@ -377,11 +273,10 @@ pub async fn delete_checkpoint_session(
 /// Called from the project-deletion flow so checkpoints don't outlive the
 /// project they reference. Idempotent — NotFound is treated as success.
 ///
-/// Note: post-migration this is essentially a no-op-with-cleanup — when the
-/// caller deletes the project directory itself, the `.toquemedia/checkpoints/`
-/// folder goes with it. This command is kept for callers that want to wipe
-/// snapshots WITHOUT deleting the project (e.g. "Clear all checkpoints"
-/// button in settings, if added).
+/// This command is kept for callers that want to wipe snapshots WITHOUT
+/// deleting the project (e.g. "Clear all checkpoints" button in settings, if
+/// added). Project deletion should call it because state now lives outside the
+/// project tree.
 #[tauri::command]
 pub async fn delete_checkpoint_project(project_path: String) -> Result<(), String> {
     let dir = checkpoints_root(&project_path)?;

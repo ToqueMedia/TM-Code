@@ -13,6 +13,7 @@ import ContextBuilder from './contextBuilder'
 import ToolExecutor from './toolExecutor'
 import MCPService from '../mcp/mcpService'
 import { browserSession } from '../browserSessionManager'
+import { getProjectSessionsDir } from '../projectStatePaths'
 import { resolveAttachments, resolveImageToDataUri } from '../attachmentService'
 import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText, extractDisplayFromValue } from './promptValueHelpers'
 import { dequeueAllMatching, isSlashCommand, joinPromptValues } from './messageQueue'
@@ -271,12 +272,12 @@ async function runAgentInternal(
   }
 
   // Set disk directory for large result persistence (survives session reloads).
-  // Path: <project>/.toquemedia/sessions/<sessionId>.large-results/
+  // Stored in the app's per-project sessions dir, outside the user's repo tree.
   if (currentProject?.path) {
     const { useChatStore } = await import('../../stores/chatStore')
     const sessionId = useChatStore.getState().activeSessionId
     if (sessionId) {
-      const dir = `${currentProject.path}/.toquemedia/sessions/${sessionId}.large-results`
+      const dir = `${await getProjectSessionsDir(currentProject.path)}/${sessionId}.large-results`
       // Ensure directory exists BEFORE setting the dir — prevents race
       // where persistLargeResultToDisk fires before mkdir completes.
       await invoke('create_directories_all', { path: dir }).catch(() => {})
@@ -359,7 +360,7 @@ async function runAgentInternal(
     // Multimodal path — only when there are actual images AND the plan supports it.
     // Capability vs política: o PLANO decide se imagens são permitidas
     // (billing); o PERFIL do modelo decide COMO chegam — image_url nativo
-    // para modelos com visão, descrição via sidecar:vision para os cegos.
+    // para modelos com visão, descrição auxiliar para os restantes.
     let visionDescribed = false
     if (hasImageAttachments && supportsMultimodal) {
       const modelName = useAgentStore.getState().modelName
@@ -371,13 +372,13 @@ async function runAgentInternal(
       if (parts && activeProfile.supportsAttachments) {
         userContent = parts
       } else if (parts) {
-        // Modelo ativo sem visão → o sidecar descreve; o agente principal
-        // recebe texto. Sidecar indisponível → null → fallback XML honesto.
+        // Modelo ativo sem visão → uma descrição auxiliar vira texto para o
+        // agente principal. Indisponível → null → fallback XML honesto.
         const description = await describeImagesViaSidecar(parts)
         if (description) {
           const textOnly = await buildAugmentedPrompt(blocksForModel, promptResolvers)
           userContent =
-            `${textOnly}\n\n<image_description source="vision-sidecar">\n${description}\n</image_description>`
+            `${textOnly}\n\n<image_description source="image-analysis">\n${description}\n</image_description>`
           visionDescribed = true
         }
       }
@@ -399,13 +400,13 @@ async function runAgentInternal(
       if (sentAsParts) {
         logger.info('agent', `✓ ${imageCount} image(s) embedded as image_url parts`)
       } else if (visionDescribed) {
-        logger.info('agent', `✓ ${imageCount} image(s) described via vision sidecar (active model has no vision)`)
+        logger.info('agent', `✓ ${imageCount} image(s) described for text-only model`)
       } else {
         logger.warn(
           'agent',
           `⚠ image(s) DEGRADED to text placeholder — model will never see pixels. ` +
           `plan=${billingPlan} supportsMultimodal=${supportsMultimodal} ` +
-          `(null parts = resolveImageDataUri failed or byte cap; or vision sidecar unavailable)`,
+          `(null parts = resolveImageDataUri failed or byte cap; or image description unavailable)`,
         )
       }
     }
@@ -548,6 +549,33 @@ async function runAgentInternal(
         if (!finalized) {
           finalized = true
           useChatStore.getState().finalizeAssistantMessage()
+        }
+        // Close the task tracker on a clean finish. The agent routinely ends a
+        // run with its final task still `in_progress` — it does the work but
+        // skips the closing update_tasks call — which strands the
+        // AgentTasksPanel open on a half-finished row that never auto-hides.
+        // On a successful, user-initiated, non-aborted run we flip any lingering
+        // `in_progress` task to `completed`, guaranteeing the last worked task is
+        // always marked done. `pending` tasks are deliberately left untouched: a
+        // /plan seed is ALL-pending and onDone fires right after seeding, so
+        // auto-completing those would mark an entire just-created plan as done.
+        // (Aborted runs and background auto-wakes are skipped.)
+        if (!isBackgroundRun && !agentService.isAborted()) {
+          const tasks = useAgentStore.getState().tasks
+          if (tasks.some(tk => tk.status === 'in_progress')) {
+            const closed = tasks.map(tk =>
+              tk.status === 'in_progress'
+                ? { ...tk, status: 'completed' as const, evidence: tk.evidence || 'Run completed' }
+                : tk,
+            )
+            useAgentStore.getState().setTasks(closed)
+            const projectPath = useProjectStore.getState().currentProject?.path
+            if (projectPath) {
+              void import('./taskPersistence')
+                .then(({ saveTasksToDisk }) => saveTasksToDisk(projectPath, closed))
+                .catch(() => { /* persistence is best-effort */ })
+            }
+          }
         }
         agentStore.setStatus('idle')
         logger.info('agent', `✓ Agent done (total: ${Date.now() - loopStartTime}ms)`)

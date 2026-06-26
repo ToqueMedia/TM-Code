@@ -20,8 +20,8 @@
  *   Image attachments live in `pastedContents` as `Attachment[]` and are
  *   resolved at execution time.
  * - Logging goes through `recordQueueOperation` from `./queueOperationLog.ts`
- *   (writes JSONL to <project>/.toquemedia/sessions/queue-operations.jsonl —
- *   gitignored) instead of Claude Code's SQLite-backed sessionStorage.
+ *   (writes JSONL to app-managed project state) instead of Claude Code's
+ *   SQLite-backed sessionStorage.
  */
 
 import {
@@ -63,8 +63,8 @@ const queueChanged = createSignal()
 // === Snapshot persistence ===
 //
 // Every queue mutation triggers a debounced write to
-// `<project>/.toquemedia/sessions/<sessionId>.queue-snapshot.json` so a
-// crash mid-batch doesn't silently lose user prompts. 200ms debounce —
+// app-managed project state so a crash mid-batch doesn't silently lose user
+// prompts. 200ms debounce —
 // queue mutations are rare; the cost of waiting longer outweighs the cost
 // of duplicate writes.
 let snapshotPersistTimeout: ReturnType<typeof setTimeout> | null = null

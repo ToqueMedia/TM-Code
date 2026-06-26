@@ -12,6 +12,11 @@
 
 import type OpenAI from "openai";
 import type { ContentBlockAPI, ProviderState } from "../../types/chat";
+// formatError: Tauri/IPC rejections are often plain objects or serde-tagged
+// enums (e.g. {"PathNotFound":"…"}), and `String(err)` collapses those to the
+// literal "[object Object]" the model then sees as the tool result. formatError
+// resolves a useful message from every shape.
+import { formatError } from "../../utils/errors";
 import {
   microcompact,
   applyToolResultBudget,
@@ -50,8 +55,15 @@ const CREDENTIAL_CONFIG_RETRY_DELAY_MS = 30_000;
 // por-minuto do projeto GCP, intermitente — 200s entre 429s). Escada
 // crescente para atravessar a janela de quota; o Retry-After do provider,
 // quando presente nos headers do erro, tem precedência (capped a 60s).
-const RATE_LIMIT_MAX_RETRIES = 3;
-const RATE_LIMIT_RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
+// Ladder alargada (pedido do user 2026-06-24): 6 tentativas a
+// 10s/20s/30s/45s/55s/60s = ~220s de janela total, para atravessar quotas
+// por-minuto mais teimosas sem desistir. Continua só ANTES de qualquer
+// output (o 429 chega sempre pré-stream). NOTA: este retry é do lado da IDE,
+// não do worker — o ai-pass-through propaga o 429 com Retry-After de
+// propósito (billing.ts) e quem recua é o cliente; mexer no worker duplicaria
+// o retry e prenderia o pedido ~220s no edge.
+const RATE_LIMIT_MAX_RETRIES = 6;
+const RATE_LIMIT_RETRY_DELAYS_MS = [10_000, 20_000, 30_000, 45_000, 55_000, 60_000];
 
 /** Lê o Retry-After (segundos) dos headers de um APIError do SDK, se existir. */
 function retryAfterMs(error: unknown): number | null {
@@ -1294,7 +1306,7 @@ export async function* query(
       // Usage and finish_reason are already captured from chunks above
       break;
     } catch (error) {
-      const errMsg = error instanceof Error ? error.message : String(error);
+      const errMsg = formatError(error);
       const outputStarted = hasStartedModelOutput({
         textParts: assistantTextParts,
         thinkingParts: assistantThinkingParts,
@@ -1792,7 +1804,7 @@ export async function* query(
           content: result.content,
         });
       } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
+        const errMsg = formatError(err);
         yield {
           type: "tool_result",
           toolUseId: tc.id,

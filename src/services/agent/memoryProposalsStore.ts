@@ -27,15 +27,12 @@
  *     load time (silently — the agent already had a chance).
  *
  * Both files live alongside MEMORY.md in the appropriate scope dir.
- * Gitignored via the same `.toquemedia/.gitignore` rule we already write
- * (memory/ entry — wait, memory/ isn't in the gitignore; only sessions/
- * and checkpoints/ are. _proposed files are scope-internal noise though;
- * I'll gitignore them with a prefix-based rule via the writer below).
  */
 
 import { invoke } from '@tauri-apps/api/core'
 import type { MemoryProposal } from './memoryExtractor'
 import type { MemoryScope } from './memdir'
+import { getProjectStateDir } from '../projectStatePaths'
 
 const PROPOSED_LOG_FILENAME = '_proposed.jsonl'
 const PROPOSED_ACTIVE_FILENAME = '_proposed-active.json'
@@ -71,7 +68,7 @@ interface ActiveProposalsFileV1 {
 
 /**
  * Resolve the absolute on-disk path for a proposal file. Project scope
- * lives next to MEMORY.md inside `.toquemedia/memory/`; user scope lives
+ * lives next to MEMORY.md inside app-managed project state; user scope lives
  * in the IDE-installation memdir under the home directory.
  */
 async function resolvePath(
@@ -81,8 +78,7 @@ async function resolvePath(
 ): Promise<string> {
   if (scope === 'project') {
     if (!projectPath) throw new Error('project-scope proposals require projectPath')
-    const normalized = projectPath.replace(/\\/g, '/').replace(/\/$/, '')
-    return `${normalized}/.toquemedia/memory/${filename}`
+    return `${await getProjectStateDir(projectPath)}/memory/${filename}`
   }
   const home = await invoke<string>('get_home_directory')
   const normalized = home.replace(/\\/g, '/').replace(/\/$/, '')

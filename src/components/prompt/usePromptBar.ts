@@ -47,6 +47,7 @@ import {
 } from '../../services/agent/promptValueHelpers'
 // useSettingsStore removed — agentModel no longer in settings
 import { getQueryGuard } from '../../services/agent/queryGuard'
+import { isAtBlockingLimit, totalContextTokens } from '../../utils/contextWindow'
 import { enqueueSerializedRun } from '../../services/agent/agentRunner'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
 import { useQueueProcessor } from '../../hooks/useQueueProcessor'
@@ -133,9 +134,11 @@ export function usePromptBar() {
   const isDisabled = hasPendingPermission || hasPendingCredential
   // Blocking limit: when context is nearly full, block input until compaction runs.
   const currentPromptTokens = useChatStore(s => s.currentPromptTokens)
+  const currentResponseTokens = useChatStore(s => s.currentResponseTokens)
   const headerContextWindow = useAgentStore(s => s.modelContextWindow)
-  const isContextBlocked = currentPromptTokens > 0 && (headerContextWindow ?? 0) > 0
-    && currentPromptTokens >= (headerContextWindow ?? 0) - 3000
+  const currentContextTokens = totalContextTokens(currentPromptTokens, currentResponseTokens)
+  const isContextBlocked = currentContextTokens > 0 && (headerContextWindow ?? 0) > 0
+    && isAtBlockingLimit(currentContextTokens, headerContextWindow ?? 0)
   // Send is blocked during scaffolding or when context is at the blocking limit.
   const isSendBlocked = isScaffolding || isContextBlocked
   // Preview button is ALWAYS visible when a project is open.
@@ -716,9 +719,7 @@ export function usePromptBar() {
         // vision get the raw image_url parts. Sending image_url to a BLIND
         // active model (MiMo V2.5 Pro, GLM → supportsAttachments=false)
         // 404s with "no endpoints found that support image input". For those,
-        // route the image through the vision sidecar — a multimodal model
-        // (sidecar:vision, e.g. MiMo V2.5 / Qwen) describes it and the agent
-        // receives the description as text.
+        // get an auxiliary image description and pass it to the agent as text.
         const modelName = useAgentStore.getState().modelName
         const activeProfile = modelName && MODEL_PROFILES[modelName]
           ? MODEL_PROFILES[modelName]
@@ -729,10 +730,10 @@ export function usePromptBar() {
           const description = await describeImagesViaSidecar(parts)
           if (description) {
             const textOnly = await buildAugmentedPrompt(content, promptResolvers)
-            userContent = `${textOnly}\n\n<image_description source="vision-sidecar">\n${description}\n</image_description>`
+            userContent = `${textOnly}\n\n<image_description source="image-analysis">\n${description}\n</image_description>`
           }
-          // description null (no sidecar published) → userContent stays null →
-          // honest XML text fallback below.
+          // description null → userContent stays null → honest XML text
+          // fallback below.
         }
       }
     }

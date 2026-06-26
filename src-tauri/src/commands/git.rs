@@ -621,7 +621,7 @@ pub async fn git_commit(project_path: String, message: String) -> Result<String,
     };
 
     let output = git_cmd(&project_path)
-        .args(["commit", "-m", &signed_message])
+        .args(["commit", "-S", "-m", &signed_message])
         .output()
         .map_err(|e| format!("git commit failed: {}", e))?;
     if !output.status.success() {

@@ -110,7 +110,7 @@ export function hydrateInvokedSkills(entries: InvokedSkill[]): void {
 
 // === Persistence ===
 //
-// Per-session disk file at `.toquemedia/sessions/<sessionId>.invoked-skills.json`.
+// Per-session disk file in app-managed project state.
 // Debounced 500ms — track/clear are infrequent (only fire on `read_skill`
 // tool calls) so the debounce mostly serves to coalesce a burst at the
 // start of a turn where the agent reads several skills back-to-back.

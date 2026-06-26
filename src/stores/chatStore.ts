@@ -52,9 +52,10 @@ interface ChatState {
   /**
    * Last turn's prompt size, replaced (not summed) on every addTokenUsage.
    * Represents the amount of context actually sent over the wire on the most
-   * recent API call — the natural denominator for the context-window pill's
-   * "X% full" calculation. Reset to 0 on new user message and on compaction
-   * boundary so the pill reflects the fresh post-compression state.
+   * recent API call. The context-window pill combines this with
+   * `currentResponseTokens` against the effective window. Reset to 0 on new
+   * user message and on compaction boundary so the pill reflects the fresh
+   * post-compression state.
    */
   currentPromptTokens: number
   /**
@@ -293,10 +294,9 @@ export function generateId(prefix: string): string {
 
 /**
  * Recover the ctx-pill values for a session that is becoming active. The
- * indicator reads `currentPromptTokens` and `currentResponseTokens` from
- * the chatStore — they are global state by design, but a session-load
- * must restore them so the pill reflects the loaded session's pressure
- * rather than whatever the previous session left.
+ * indicator can prefer live counters while streaming, but a session-load
+ * must restore persisted values so the pill reflects the loaded session's
+ * pressure rather than whatever the previous session left.
  *
  * Two paths:
  *
@@ -398,12 +398,12 @@ function debouncedSave() {
 
 // === Draft persistence ===
 //
-// Per-session prompt drafts go to `.toquemedia/sessions/<sessionId>.draft.json`
-// so a reload / crash / OS update never wipes a half-typed message. Save is
-// debounced 600ms — short enough to capture before the user switches windows
-// or quits the IDE, long enough to coalesce char-by-char typing into one
-// write. On submit, `clearDraftOnDisk` is called explicitly to delete the
-// file (separate from the empty-save-deletes path; reads cleaner at the
+// Per-session prompt drafts go to app-managed project state so a reload /
+// crash / OS update never wipes a half-typed message. Save is debounced 600ms
+// — short enough to capture before the user switches windows or quits the IDE,
+// long enough to coalesce char-by-char typing into one write. On submit,
+// `clearDraftOnDisk` is called explicitly to delete the file (separate from
+// the empty-save-deletes path; reads cleaner at the
 // call site, same end state).
 //
 // Resolves the project path and session id lazily — at schedule time we
@@ -2961,9 +2961,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             ? Math.max(state.currentPromptTokens, input)
             : state.currentPromptTokens
         const nextResponse = output
-        // The ctx pill reads `lastPromptTokens`/`lastResponseTokens` off the
-        // active session DIRECTLY (no global-counter fallback anymore), so these
-        // must hold a STABLE, foreground-only snapshot of the real context size:
+        // The ctx pill reads `lastPromptTokens`/`lastResponseTokens` and
+        // compares them with live counters, so these must hold a STABLE,
+        // foreground-only snapshot of the real context size:
         //   - SESSION PEAK, via Math.max — NOT this turn's raw wire prompt.
         //     addTokenUsage fires once per INTERNAL agent-loop turn, and a
         //     turn's prompt_tokens is non-monotonic: a landing tool result grows
@@ -3236,7 +3236,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       const isStale = () => currentProjectEpoch() !== epoch
 
       // Reset auto-approve state from any previous session. Without this,
-      // approvedScopes (persisted in .toquemedia/permissions.json) and
+      // approvedScopes (persisted in app-managed project state) and
       // autoApproveDiffs (localStorage) survive across app restarts,
       // causing the agent to skip ALL permission dialogs on boot.
       usePermissionStore.getState().resetAutoApprove()

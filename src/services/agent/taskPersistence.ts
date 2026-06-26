@@ -2,8 +2,8 @@
  * Per-project task tracker persistence.
  *
  * The agent's task tracker (the array of `{id, description, status}` rows
- * mutated by `update_tasks`) lives canonically on disk at
- * `<project>/.toquemedia/tasks.json`. The `agentStore` is a hot cache for
+ * mutated by `update_tasks`) lives canonically on disk in app-managed
+ * per-project state. The `agentStore` is a hot cache for
  * the UI, hydrated from disk on project open and written through on every
  * mutation.
  *
@@ -16,18 +16,16 @@
  *     failure mode we saw in the 2026-05-19 session (batch-completing
  *     12 → 23 in two calls because files existed).
  *
- *   - **Lives with the project, not the IDE.** The `.toquemedia/` folder
- *     is committable so the tracker can travel with the project to a new
- *     machine or even between developers; the next agent run sees the
- *     same state. Same logic as `.toquemedia-template` /
- *     `.toquemedia-id` already at the project root.
+ *   - **Project-scoped, not repo-hosted.** The state is keyed to this
+ *     project in the app data directory, keeping the user's project tree
+ *     clean while preserving per-project continuity.
  *
  *   - **Fail-soft on first open.** When the file is missing the helper
  *     returns an empty array — the agent simply starts with a fresh
  *     tracker, no error surfaced to the developer.
  *
  * The Rust commands (`read_agent_state` / `write_agent_state`) validate
- * the filename and enforce path containment under `<project>/.toquemedia/`,
+ * the filename and enforce path containment under app-managed project state,
  * so this TS wrapper does no extra path work — it just (de)serialises.
  */
 
@@ -112,7 +110,7 @@ export async function loadTasksFromDisk(projectPath: string): Promise<AgentTask[
  *      present), so the store stays clean — no stale "all done" rows.
  *   2. The developer retains the full task record on disk for review
  *      ("what did I accomplish?"), export, or audit.
- *   3. The `.toquemedia/` directory stays tidy — no fragmentation from
+ *   3. The project state directory stays tidy — no fragmentation from
  *      repeated delete→re-create cycles across sessions.
  */
 export async function saveTasksToDisk(projectPath: string, tasks: AgentTask[]): Promise<void> {

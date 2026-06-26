@@ -19,6 +19,7 @@ use commands::issue_reporter::*;
 use commands::mcp::*;
 use commands::memory::*;
 use commands::project::*;
+use commands::project_state::*;
 use commands::sandbox::*;
 use commands::screenshot::*;
 use commands::search::*;
@@ -1320,6 +1321,8 @@ pub fn run() {
             write_agent_state,
             delete_agent_state,
             ensure_toquemedia_gitignore_cmd,
+            get_project_state_dir,
+            migrate_project_state,
             read_memory_file,
             write_memory_file,
             delete_memory_file,

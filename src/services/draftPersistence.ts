@@ -7,9 +7,8 @@
  * an OS update — the most demoralising data-loss mode in a desktop IDE:
  * "I typed three paragraphs and lost it."
  *
- * Storage: `<project>/.toquemedia/sessions/<sessionId>.draft.json`.
- * Co-located with the session's main JSON. Gitignored (the
- * `.toquemedia/sessions/` entry in `.gitignore` covers it).
+ * Storage: app per-project sessions dir, co-located with the session's main
+ * JSON but outside the user's project tree.
  *
  * Lifecycle:
  *   - Created/updated on every `setDraftInput` / draft-attachment mutation,
@@ -20,10 +19,11 @@
  *   - Deleted on submit (the prompt was sent — no draft to keep).
  *
  * Empty drafts (no text AND no attachments) trigger a delete rather than
- * an empty-file write, so `.toquemedia/sessions/` stays clean.
+ * an empty-file write, so the app state stays clean.
  */
 
 import { invoke } from '@tauri-apps/api/core'
+import { getProjectSessionsDir } from './projectStatePaths'
 import type { Attachment } from '../types/chat'
 
 interface DraftFileV1 {
@@ -33,9 +33,8 @@ interface DraftFileV1 {
   attachments: Attachment[]
 }
 
-function draftPath(projectPath: string, sessionId: string): string {
-  const normalized = projectPath.replace(/\\/g, '/').replace(/\/$/, '')
-  return `${normalized}/.toquemedia/sessions/${sessionId}.draft.json`
+async function draftPath(projectPath: string, sessionId: string): Promise<string> {
+  return `${await getProjectSessionsDir(projectPath)}/${sessionId}.draft.json`
 }
 
 export interface LoadedDraft {
@@ -54,7 +53,7 @@ export async function loadDraftFromDisk(
   if (!projectPath || !sessionId) return null
   try {
     const raw = await invoke<string>('read_file', {
-      path: draftPath(projectPath, sessionId),
+      path: await draftPath(projectPath, sessionId),
     })
     const parsed = JSON.parse(raw) as Partial<DraftFileV1>
     if (!parsed || parsed.schemaVersion !== 1) return null
@@ -71,8 +70,8 @@ export async function loadDraftFromDisk(
 /**
  * Persist a session draft. When the draft is effectively empty (no text,
  * no attachments), the file is DELETED instead — this prevents a long
- * trail of empty `*.draft.json` files accumulating in
- * `.toquemedia/sessions/` for every session the user ever opened.
+ * trail of empty `*.draft.json` files accumulating for every session the user
+ * ever opened.
  *
  * Failures are swallowed; persistence is best-effort, the live store
  * stays the source of truth either way.
@@ -83,7 +82,7 @@ export async function saveDraftToDisk(
   draft: { input: string; attachments: Attachment[] },
 ): Promise<void> {
   if (!projectPath || !sessionId) return
-  const path = draftPath(projectPath, sessionId)
+  const path = await draftPath(projectPath, sessionId)
   const isEmpty = !draft.input.trim() && draft.attachments.length === 0
 
   if (isEmpty) {
@@ -126,7 +125,7 @@ export async function clearDraftOnDisk(
   if (!projectPath || !sessionId) return
   try {
     await invoke('delete_file_or_directory', {
-      path: draftPath(projectPath, sessionId),
+      path: await draftPath(projectPath, sessionId),
     })
   } catch { /* swallow */ }
 }

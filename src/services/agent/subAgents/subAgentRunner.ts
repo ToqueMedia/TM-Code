@@ -23,6 +23,7 @@ import {
 import { QueryEngine } from '../queryEngine'
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from '../query'
 import ToolExecutor from '../toolExecutor'
+import { formatError } from '../../../utils/errors'
 import { useBillingStore } from '../../../stores/billingStore'
 import { useSubAgentStore } from '../../../stores/subAgentStore'
 import { maybeWakeMainAgent } from './autoWake'
@@ -116,7 +117,9 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
       )
       return { content: raw, isError: false }
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : String(err)
+      // formatError, not String(err): Tauri rejects with plain objects /
+      // serde-tagged enums that otherwise render as "Error: [object Object]".
+      const errorMsg = formatError(err)
       return { content: `Error: ${errorMsg}`, isError: true }
     }
   }

@@ -10,8 +10,8 @@ import { useTeamTyping } from '@/hooks/useTeamTyping'
 
 /**
  * Floating ephemeral team-chat panel. Messages travel P2P over the WebRTC
- * control channel (DTLS, never a server); optional local history lives under
- * .toquemedia/collab/. Mounted once in MainLayout, shown when `chatOpen`.
+ * control channel (DTLS, never a server); optional local history lives in
+ * app-managed project state. Mounted once in MainLayout, shown when `chatOpen`.
  */
 export function TeamChatPanel() {
   const t = useTranslation()

@@ -42,6 +42,21 @@ function syncActiveSessionSnapshot(): void {
   void import('./agentStore').then(({ useAgentStore }) => {
     const agent = useAgentStore.getState()
     if (agent.byokActive) agent.setByokActive(false)
+    const active = useByokStore.getState().resolveActive()
+    if (active) {
+      const configuredWindow = useByokStore.getState().perProviderConfig[active.provider.id]?.contextWindow
+      const contextWindow = configuredWindow && configuredWindow > 0
+        ? configuredWindow
+        : active.model.contextWindow > 0
+          ? active.model.contextWindow
+          : undefined
+      agent.setModelInfo(
+        active.model.id,
+        active.provider.id,
+        active.model.supportsThinking ? 'toggleable' : 'none',
+        contextWindow,
+      )
+    }
   }).catch(() => { /* non-critical */ })
 }
 

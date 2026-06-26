@@ -15,7 +15,7 @@
 import ToolExecutor, { type OpenAIToolDefinition } from "./toolExecutor";
 import { t } from "../../i18n";
 import FirebaseAuthService from "../auth/firebaseAuth";
-import { ServiceError } from "../../utils/errors";
+import { ServiceError, formatError } from "../../utils/errors";
 import { MODEL_PROFILES, getProfileForPlan } from "./modelProfiles";
 import {
   createDiffApprovalPromise,
@@ -585,7 +585,14 @@ class AgentService {
         case "tool_use_start":
           clearWorkerStatus();
           toolNameCache.set(event.id, event.name);
-          callbacks.onToolCallPending(event.id, event.name);
+          // Announcement (onToolCallPending → the "Em fila" card) is DEFERRED
+          // to the executeTool bridge, which fires as the serial loop reaches
+          // each tool. Announcing here — eagerly, for every tool call the model
+          // streamed — rendered the whole batch up-front, so when tool #1 hit a
+          // permission gate the queued siblings stacked up and pushed the
+          // authorization prompt out of view. With the announcement at
+          // execution time, only the tool actually being run (and gated) is
+          // shown; nothing behind it appears until the user authorizes.
           break;
 
         case "tool_use_delta": {
@@ -907,7 +914,16 @@ class AgentService {
       toolUseId: string,
       signal?: AbortSignal,
     ): Promise<{ content: string; isError: boolean }> => {
-      // Notify UI that tool execution is starting
+      // Announce + start the tool AT EXECUTION TIME (claude-vaz parity). The
+      // query loop runs tools serially, so doing the announcement here — rather
+      // than eagerly for every streamed tool call — means that while one tool
+      // is blocked on a permission / diff / credential decision, the tools
+      // queued behind it are NOT rendered yet. That stops a multi-tool turn
+      // from stacking "Em fila" cards that shove the pending authorization
+      // prompt off-screen. onToolCallPending creates the card; onToolCallStart
+      // immediately flips it to "running". (Execution was already gated by the
+      // serial loop + waitForUserGates — this only fixes the visual pile-up.)
+      callbacks.onToolCallPending(toolUseId, toolName);
       callbacks.onToolCallStart(toolUseId, toolName, toolInput);
 
       try {
@@ -975,7 +991,11 @@ class AgentService {
 
         return { content: raw, isError: false };
       } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
+        // formatError (not String(err)): a Tauri reject is usually a plain
+        // object or serde-tagged enum — e.g. list_directory's build_file_tree
+        // rejecting with {"PathNotFound":"…"} — which String() turns into the
+        // literal "Error: [object Object]" the model (and the chat row) showed.
+        const errorMsg = formatError(err);
         const failKey = `${toolName}:${String(toolInput.file_path || toolInput.command || "").slice(0, 80)}`;
         const count = this.sessionState.recordToolFailure(failKey, errorMsg);
         let content = `Error: ${errorMsg}`;

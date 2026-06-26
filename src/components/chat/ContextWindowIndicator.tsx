@@ -60,22 +60,21 @@ interface ContextWindowIndicatorProps {
 
 function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIndicatorProps) {
   const t = useTranslation()
-  // Stable, foreground-only context size — read DIRECTLY off the active
-  // session's persisted `lastPromptTokens`/`lastResponseTokens`, which now hold
-  // the real wire size of the most recent FOREGROUND turn (see
-  // chatStore.addTokenUsage). We deliberately NO LONGER read the global
-  // `currentPrompt/currentResponse` counters: those are zeroed at every request
-  // start AND re-filled by invisible background / auto-wake runs, which made the
-  // pill jump "sem razão aparente". The session fields move only when the
-  // foreground conversation's context actually changes, and reset only on
-  // compaction — so the pill rises in steps and drops only for real reasons.
+  // Stable foreground context size: use the active session's persisted peak,
+  // but prefer live counters while a foreground turn is streaming. That keeps
+  // BYOK runs visible before the final usage event lands, while Math.max avoids
+  // the old sawtooth from smaller mid-loop usage reports.
   const inputTokens = useChatStore((s) => {
+    const live = s.currentPromptTokens
     if (!s.activeSessionId) return 0
-    return s.sessions.get(s.activeSessionId)?.lastPromptTokens ?? 0
+    const persisted = s.sessions.get(s.activeSessionId)?.lastPromptTokens ?? 0
+    return Math.max(live, persisted)
   })
   const outputTokens = useChatStore((s) => {
+    const live = s.currentResponseTokens
     if (!s.activeSessionId) return 0
-    return s.sessions.get(s.activeSessionId)?.lastResponseTokens ?? 0
+    const persisted = s.sessions.get(s.activeSessionId)?.lastResponseTokens ?? 0
+    return Math.max(live, persisted)
   })
   const headerContextWindow = useAgentStore((s) => s.modelContextWindow)
   const modelName = useAgentStore((s) => s.modelName)

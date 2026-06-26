@@ -2,22 +2,19 @@
 //!
 //! Chat is P2P (WebRTC mesh + DO relay fallback) and never touches a server.
 //! Persistence is purely local + opt-in: each message is appended as one JSON
-//! line to `.toquemedia/collab/chat.jsonl` so a member can reopen the project
-//! and still see recent team chat. The file is gitignored (`collab/`).
+//! line to the app's per-project state directory so a member can reopen the
+//! project and still see recent team chat without cluttering the project tree.
 //!
 //! (The former changeset code-sharing was replaced by the live-preview tunnel —
 //! see `commands/tunnel.rs`.)
 
 use std::path::PathBuf;
 
-use super::canonicalize_path;
 use super::checkpoint::ensure_toquemedia_gitignore;
+use super::project_state::project_state_root;
 
 fn chat_log_path(project_path: &str) -> Result<PathBuf, String> {
-    let canonical = canonicalize_path(std::path::Path::new(project_path))
-        .map_err(|e| format!("Invalid project path: {}", e))?;
-    Ok(canonical
-        .join(".toquemedia")
+    Ok(project_state_root(project_path)?
         .join("collab")
         .join("chat.jsonl"))
 }

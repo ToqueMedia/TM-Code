@@ -28,7 +28,11 @@ import { useTranslation } from '@/i18n/useTranslation'
 function AgentTasksPanel() {
   const tasks = useAgentStore(s => s.tasks)
   const t = useTranslation()
-  const [collapsed, setCollapsed] = useState(false)
+  // Starts collapsed (user request): the panel sits above the prompt, and a
+  // long task list expanded by default eats the vertical real estate the
+  // developer needs for the conversation. The header still shows the
+  // "N/total" progress at a glance; clicking it expands the rows.
+  const [collapsed, setCollapsed] = useState(true)
   const [expanded, setExpanded] = useState(false)
 
   if (tasks.length === 0) return null

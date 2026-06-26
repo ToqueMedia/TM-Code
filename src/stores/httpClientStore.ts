@@ -3,7 +3,7 @@ import { invoke } from '@/utils/invokeMetrics'
 import { useLayoutStore, selectBackendUrl } from './layoutStore'
 
 /**
- * Debounced write-through to `.toquemedia/http-client.json`. Subscribes to
+ * Debounced write-through to app-managed per-project state. Subscribes to
  * the store's `(tabs, activeTabId, history)` triple at module init time
  * (see bottom of file) and queues a single save 800ms after the last
  * mutation lands. The store remains the live view; disk is just the

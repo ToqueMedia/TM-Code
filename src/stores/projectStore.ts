@@ -265,6 +265,11 @@ export const useProjectStore = create<ProjectStore>()(
 
         try {
           const projectInfo: ProjectInfo = await invoke('open_project', { path, initGit: options?.initGit });
+          try {
+            await invoke('migrate_project_state', { projectPath: path });
+          } catch (error) {
+            logger.warn('project', 'Project state migration failed:', error);
+          }
           // Avoid a redundant second IPC: Rust's `open_project` already wrote
           // the recents file, and we have all four fields RecentProject needs
           // in `projectInfo`. Constructing the entry locally + prepending +
@@ -325,12 +330,11 @@ export const useProjectStore = create<ProjectStore>()(
             logger.warn('project', 'Failed to load project state:', error);
           }
 
-          // Hydrate the agent task tracker from disk. The tracker lives at
-          // `<project>/.toquemedia/tasks.json` — committable so it travels
-          // with the project, and the canonical source so a budget interrupt
-          // / app restart / new chat session in the same project doesn't
-          // make the agent re-infer progress from the filesystem (the
-          // failure mode behind the 2026-05-19 batch-completion bug).
+          // Hydrate the agent task tracker from disk. The tracker lives in
+          // app-managed per-project state, so a budget interrupt / app restart
+          // / new chat session in the same project doesn't make the agent
+          // re-infer progress from the filesystem (the failure mode behind
+          // the 2026-05-19 batch-completion bug).
           try {
             const [{ loadTasksFromDisk }, { useAgentStore }] = await Promise.all([
               import('../services/agent/taskPersistence'),
@@ -612,13 +616,9 @@ export const useProjectStore = create<ProjectStore>()(
             logger.warn('project', 'remove_from_recent_projects failed:', err);
           }
 
-          // Async cleanup: delete every per-project artefact. Sessions
-          // and checkpoints both live inside the project at
-          // `<project>/.toquemedia/{sessions,checkpoints}/` (2026-05
-          // migration — previously in `~/.toquemedia-studio/`). Deleting
-          // the project directory itself would also wipe them, but the
-          // explicit calls below ensure cleanup runs even when the
-          // project folder removal fails or is partial.
+          // Async cleanup: delete app-managed artefacts before deleting the
+          // project folder. The explicit calls below keep cleanup best-effort
+          // even when the project folder removal fails or is partial.
           await sessionService.deleteAllProjectSessions(projectPath);
           await CheckpointService.getInstance().deleteAllProjectCheckpoints(projectPath);
           await invoke('delete_project', { projectId, projectPath });

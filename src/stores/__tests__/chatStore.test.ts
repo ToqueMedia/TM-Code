@@ -275,8 +275,8 @@ describe('chatStore', () => {
       //
       // See addTokenUsage's comment block (chatStore.ts ~line 2020) for the
       // full rationale and the bug that drove the 2026-05-02 refactor from
-      // SUM to MAX. The window-pressure pill uses `currentPromptTokens`
-      // (per-turn, REPLACED) for its denominator so the metrics don't drift.
+      // SUM to MAX. The window-pressure pill combines the live/persisted
+      // input and output counters against the effective model window.
       useChatStore.getState().addTokenUsage(100, 50)
       useChatStore.getState().addTokenUsage(200, 75)
 
