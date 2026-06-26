@@ -22,6 +22,7 @@ describe('modelProfiles', () => {
       // Gemini: id do preset + id raw com prefixo de publisher → mesmo perfil.
       expect(MODEL_PROFILES['google/gemini-3.5-flash']).toBe(MODEL_PROFILES['gemini-3.5-flash'])
       expect(MODEL_PROFILES['google/gemini-3.1-pro-preview']).toBe(MODEL_PROFILES['gemini-3.1-pro-preview'])
+      expect(ids).toContain('step-3.7-flash')
     })
 
     it('glm-5.2 has 1M context, 128K output, toggleable thinking, no native vision', () => {
@@ -46,6 +47,15 @@ describe('modelProfiles', () => {
       expect(qwen.modelId).toBe('qwen3.7-max-2026-06-08')
       expect(qwen.supportsAttachments).toBe(true)
       expect(qwen.supportsSearch).toBe(true)
+    })
+
+    it('step-3.7-flash has 256K context, native vision and toggleable thinking', () => {
+      const step = MODEL_PROFILES['step-3.7-flash']
+      expect(step.modelId).toBe('step-3.7-flash')
+      expect(step.contextWindow).toBe(262_144)
+      expect(step.supportsAttachments).toBe(true)
+      expect(step.thinkingMode).toBe('toggleable')
+      expect(step.supportsThinking).toBe(true)
     })
 
     it('mimo-v2.5-pro-1m has correct specs', () => {

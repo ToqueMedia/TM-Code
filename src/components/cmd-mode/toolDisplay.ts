@@ -30,6 +30,7 @@ const TOOL_DISPLAY: Record<string, ToolDisplay> = {
   execute_command_background: { running: 'Starting background command', done: 'Background command started', failed: 'Background command failed' },
   check_background_commands: { running: 'Checking background commands', done: 'Checked background commands', failed: 'Background check failed' },
   start_dev_server: { running: 'Starting dev server', done: 'Dev server started', failed: 'Dev server failed' },
+  stop_dev_server: { running: 'Stopping dev server', done: 'Dev server stopped', failed: 'Dev server stop failed' },
   read_dev_server_logs: { running: 'Reading logs', done: 'Logs read', failed: 'Log read failed' },
   read_large_result: { running: 'Reading slice', done: 'Read slice', failed: 'Slice read failed' },
   web_search: { running: 'Searching the web', done: 'Web results', failed: 'Web search failed' },

@@ -241,6 +241,13 @@ describe('ContextBuilder', () => {
       expect(prompt).toContain('resume directly')
     })
 
+    it('allows multiple serial diff-producing tools in one response', async () => {
+      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+      expect(prompt).toContain('each `write_file`/`edit_file`/`create_file` call produces a reviewable diff')
+      expect(prompt).toContain('You MAY make multiple file-change tool calls in the same assistant response')
+      expect(prompt).not.toMatch(new RegExp(['Claude', 'Code parity'].join('\\s+')))
+    })
+
     it('interpolates tool names from toolNames.ts (not hardcoded literals)', async () => {
       // Catch a regression where someone reverts a `${EXECUTE_COMMAND}`
       // back to the literal "execute_command" in a way that would
@@ -251,7 +258,14 @@ describe('ContextBuilder', () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
       expect(prompt).toMatch(/execute_command/)
       expect(prompt).toMatch(/read_dev_server_logs/)
+      expect(prompt).toMatch(/stop_dev_server/)
       expect(prompt).toMatch(/request_credentials/)
+    })
+
+    it('keeps Chat-mode preview handoff manual after dev server verification', async () => {
+      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+      expect(prompt).toContain('The Preview view does NOT open automatically')
+      expect(prompt).toContain('click the **Preview** button at the top-right of Chat')
     })
 
     it('includes terminal-style loop guidance in Chat mode', async () => {

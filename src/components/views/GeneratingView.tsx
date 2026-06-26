@@ -103,9 +103,16 @@ function GeneratingView() {
       if (remaining.length === 0 && !useChatStore.getState().isStreaming) {
         const ls = useLayoutStore.getState()
         if (ls.viewMode === 'generating') {
-          if (selectIsPreviewServerRunning(ls)) ls.setViewMode('preview')
-          else if (acceptedPathsRef.current.length > 0) { await tryStaticPreview(acceptedPathsRef.current); acceptedPathsRef.current = [] }
-          else ls.setViewMode('chat')
+          if (selectIsPreviewServerRunning(ls)) {
+            ls.reloadPreview()
+            ls.setViewMode('chat')
+          } else if (acceptedPathsRef.current.length > 0) {
+            await tryStaticPreview(acceptedPathsRef.current)
+            acceptedPathsRef.current = []
+            useLayoutStore.getState().setViewMode('chat')
+          } else {
+            ls.setViewMode('chat')
+          }
         }
       }
     }, 50)

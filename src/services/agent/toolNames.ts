@@ -42,6 +42,7 @@ export const AGENT_SHELL_WRITE = 'agent_shell_write'
 export const AGENT_SHELL_READ = 'agent_shell_read'
 export const AGENT_SHELL_STOP = 'agent_shell_stop'
 export const START_DEV_SERVER = 'start_dev_server'
+export const STOP_DEV_SERVER = 'stop_dev_server'
 
 // Web / research
 export const WEB_SEARCH = 'web_search'
@@ -86,7 +87,7 @@ export const TOOL_NAMES = [
   WRITE_FILE, CREATE_FILE, EDIT_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
   EXECUTE_COMMAND, EXECUTE_COMMAND_BACKGROUND, CHECK_BACKGROUND_COMMANDS,
   AGENT_SHELL_START, AGENT_SHELL_WRITE, AGENT_SHELL_READ, AGENT_SHELL_STOP,
-  START_DEV_SERVER,
+  START_DEV_SERVER, STOP_DEV_SERVER,
   WEB_SEARCH, WEB_FETCH,
   DELEGATE, COLLECT_RESULTS,
   UPDATE_TASKS,

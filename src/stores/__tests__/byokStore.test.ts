@@ -185,3 +185,84 @@ describe('inferLocalModelCapabilities — combined (vision + tools)', () => {
     expect(r.capabilities.tools).toBe(true)
   })
 })
+
+describe('byokStore testKey — direct provider validation', () => {
+  afterEach(() => {
+    jest.resetModules()
+    jest.clearAllMocks()
+  })
+
+  it('validates Anthropic directly against /v1/messages, not the worker validate endpoint', async () => {
+    const invokeMock = jest.fn(async (command: string) => {
+      if (command === 'byok_has_key') return true
+      if (command === 'byok_get_key') return 'sk-ant-test'
+      return null
+    })
+    const tauriFetchMock = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      text: async () => '{}',
+    }))
+
+    jest.doMock('@/utils/invokeMetrics', () => ({ invoke: invokeMock }))
+    jest.doMock('../../services/tauriFetch', () => ({ tauriFetch: tauriFetchMock }))
+
+    const { useByokStore } = await import('../byokStore')
+    await useByokStore.getState().loadProviders()
+
+    const result = await useByokStore.getState().testKey('anthropic', 'claude-sonnet-4-6')
+
+    expect(result.valid).toBe(true)
+    expect(tauriFetchMock).toHaveBeenCalledTimes(1)
+    const [url, options] = tauriFetchMock.mock.calls[0] as unknown as [string, { headers: Record<string, string>; body: string }]
+    expect(url).toBe('https://api.anthropic.com/v1/messages')
+    expect(url).not.toContain('/v1/byok/validate')
+    expect(options.headers['x-api-key']).toBe('sk-ant-test')
+    expect(options.headers['anthropic-version']).toBe('2023-06-01')
+    expect(JSON.parse(options.body)).toEqual({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 5,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'ok' }] }],
+      stream: false,
+    })
+  })
+})
+
+describe('byokStore catalog — StepFun', () => {
+  afterEach(() => {
+    jest.resetModules()
+    jest.clearAllMocks()
+  })
+
+  it('includes Step 3.7 Flash as an OpenAI-compatible cloud model', async () => {
+    jest.doMock('@/utils/invokeMetrics', () => ({
+      invoke: jest.fn(async (command: string) => {
+        if (command === 'byok_has_key') return false
+        return null
+      }),
+    }))
+    jest.doMock('../../services/tauriFetch', () => ({
+      tauriFetch: jest.fn(),
+    }))
+
+    const { useByokStore } = await import('../byokStore')
+    await useByokStore.getState().loadProviders()
+
+    const provider = useByokStore.getState().providers.find(p => p.id === 'stepfun')
+    expect(provider).toMatchObject({
+      name: 'StepFun',
+      group: 'cloud',
+      defaultBaseURL: 'https://api.stepfun.ai/v1',
+      apiShape: 'openai_compat',
+    })
+    expect(provider?.models).toContainEqual({
+      id: 'step-3.7-flash',
+      label: 'Step 3.7 Flash',
+      capabilities: { images: true, audio: false, video: false, tools: true },
+      contextWindow: 262_144,
+      supportsThinking: true,
+      thinkingShape: 'openai_reasoning_effort',
+    })
+  })
+})

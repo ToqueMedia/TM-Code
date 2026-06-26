@@ -13,10 +13,10 @@
  *
  * Design rationale:
  *
- *   The pool only handles the `toolExecutor.execute()` phase. Diff approval
- *   (the slow, user-blocking part) is intentionally NOT handled here — the
- *   caller batches all approvals via `Promise.all` in a follow-up phase to
- *   preserve the existing batch diff UX (all InlineDiffs visible at once).
+ *   The pool only handles the `toolExecutor.execute()` phase. User gates such
+ *   as permission prompts, credential requests, and diff approval are handled
+ *   by the agent bridge/store so writes remain serial and approval state stays
+ *   visible in the chat UI.
  *
  *   write_file / edit_file / create_file are intentionally classified as
  *   non-concurrency-safe even though their execute phase is read-only
@@ -511,8 +511,8 @@ export async function executeToolCalls(
 //   3. After stream ends: drain remaining results via getRemainingResults()
 //
 // The benefit: read-only tools (read_file, glob) start executing DURING the
-// stream, before the model finishes emitting all tool calls. This saves the
-// stream→dispatch latency for multi-tool turns.
+// stream, before the model finishes emitting all tool calls. This reduces
+// stream-to-dispatch latency for multi-tool responses.
 // ══════════════════════════════════════════════════════════════════════════════
 
 export class StreamingSafeToolPool {
