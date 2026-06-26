@@ -18,7 +18,7 @@
  * (a single screenshot can blow the export from 10KB to 5MB).
  */
 
-import type { ChatSession, ChatMessage, ToolCallDisplay, Attachment, ByokSessionSnapshot } from '../types/chat'
+import type { ChatSession, ChatMessage, ToolCallDisplay, Attachment, ByokSessionSnapshot, RequestUsageEntry } from '../types/chat'
 import { t } from '@/i18n'
 
 /**
@@ -118,6 +118,7 @@ export function sessionToJson(session: ChatSession, opts: ExportOptions = {}): s
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
       byokSnapshot: sanitizeByokSnapshot(session.byokSnapshot),
+      requestUsageLog: session.requestUsageLog ?? [],
       messages: session.messages.map(m => sanitizeMessage(m, stripImageData)),
     },
     environment: opts.envSnapshot ?? null,
@@ -286,6 +287,46 @@ function renderByokSnapshotMd(snap: ByokSessionSnapshot | null | undefined): str
   return lines
 }
 
+/** Per-request usage log — one row per chat.completions.create call.
+ *  Real input/output tokens + payloadInspector estimate + cache fields +
+ *  per-category breakdown. Lets you read consumption per request directly
+ *  from an exported session (eliminates inferring from compacted transcripts). */
+function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
+  if (!log || log.length === 0) return []
+  const lines: string[] = []
+  lines.push(`## Request usage log`)
+  lines.push(``)
+  lines.push(`One row per provider call. \`est.\` = payloadInspector estimate (ceil(chars/3)); \`real\` = provider usage.`)
+  lines.push(``)
+  const totalIn = log.reduce((s, e) => s + (e.inputTokens ?? 0), 0)
+  const totalOut = log.reduce((s, e) => s + (e.outputTokens ?? 0), 0)
+  const totalEst = log.reduce((s, e) => s + (e.estimatedInputTokens ?? 0), 0)
+  lines.push(`**Totals:** ${log.length} requests · IN ${totalIn.toLocaleString()} (est. ${totalEst.toLocaleString()}) · OUT ${totalOut.toLocaleString()}`)
+  lines.push(``)
+  lines.push('| # | turn | provider | model | IN (real) | OUT | est. IN | cache create | cache read |')
+  lines.push('|---|---|---|---|---|---|---|---|---|')
+  log.forEach((e, i) => {
+    lines.push(`| ${i + 1} | ${e.turn} | ${e.provider ?? '—'} | ${e.model} | ${e.inputTokens.toLocaleString()} | ${e.outputTokens.toLocaleString()} | ${e.estimatedInputTokens.toLocaleString()} | ${e.cacheCreationInputTokens?.toLocaleString() ?? '—'} | ${e.cacheReadInputTokens?.toLocaleString() ?? '—'} |`)
+  })
+  lines.push(``)
+  // Collapsible per-request breakdown — top 5 by real input tokens.
+  const top = [...log].sort((a, b) => (b.inputTokens ?? 0) - (a.inputTokens ?? 0)).slice(0, 5)
+  for (const e of top) {
+    const idx = log.indexOf(e) + 1
+    lines.push(`<details><summary>breakdown · req #${idx} · turn ${e.turn} · IN ${e.inputTokens.toLocaleString()} (est. ${e.estimatedInputTokens.toLocaleString()})</summary>`)
+    lines.push(``)
+    lines.push('| category | blocks | tokens | chars |')
+    lines.push('|---|---|---|---|')
+    for (const [cat, v] of Object.entries(e.breakdown ?? {})) {
+      lines.push(`| ${cat} | ${v.blocks} | ${v.tokens.toLocaleString()} | ${v.chars.toLocaleString()} |`)
+    }
+    lines.push(``)
+    lines.push(`</details>`)
+    lines.push(``)
+  }
+  return lines
+}
+
 function renderEnvironmentMd(env: EnvironmentSnapshot): string {
   const out: string[] = []
   out.push(`# Environment snapshot`)
@@ -337,6 +378,7 @@ export function sessionToMarkdown(session: ChatSession, opts: ExportOptions = {}
     out.push(`---`)
     out.push(``)
   }
+  out.push(...renderRequestUsageMd(session.requestUsageLog))
   if (opts.envSnapshot) {
     out.push(``)
     out.push(renderEnvironmentMd(opts.envSnapshot))

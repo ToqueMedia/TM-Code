@@ -544,6 +544,9 @@ class AgentService {
       },
       // Usage is reported via message_stop events — do NOT add onUsage
       // callback here or output tokens will be double-counted (SUM semantics).
+      // onRequestUsage is distinct: it carries the payloadInspector breakdown
+      // (not in message_stop) — pure observability, no double-counting.
+      onRequestUsage: (entry) => callbacks.onRequestUsage?.(entry),
     });
     this.queryEngine = engine;
 

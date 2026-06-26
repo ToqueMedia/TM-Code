@@ -8,7 +8,7 @@
  * breaking the circular dependency chain.
  */
 
-import type { ContentPart, ProviderState } from '../../types/chat'
+import type { ContentBlockAPI, ContentPart, ProviderState } from '../../types/chat'
 import type { OpenAIToolDefinition } from './toolExecutor'
 import type OpenAI from 'openai'
 
@@ -74,6 +74,11 @@ export interface AgentCallbacks {
    * cliente nunca faz matemática de consumo e os tokens reportados ficam raw. */
   onUsageUpdate: (inputTokens: number, outputTokens: number, speedApplied?: boolean) => void
 
+  /** Per-request usage (real tokens + payloadInspector estimate + breakdown).
+   *  Distinct from onUsageUpdate: carries the per-request breakdown that
+   *  message_stop doesn't include. Pure observability — no double-counting. */
+  onRequestUsage?: (entry: import('../../types/chat').RequestUsageEntry) => void
+
   /** Context was compressed to fit within model limits. */
   onContextCompression?: (event: import('@/types/agent').CompactProgressEvent) => void
 
@@ -86,7 +91,7 @@ export interface AgentCallbacks {
    * turn. Returns null when nothing is queued. Foreground main-agent runs only;
    * omitted for sub-agents and background auto-wakes. Must never throw.
    */
-  collectSteeringMessages?: () => Promise<string | null>
+  collectSteeringMessages?: () => Promise<string | ContentBlockAPI[] | null>
 }
 
 // ── Turn result ──

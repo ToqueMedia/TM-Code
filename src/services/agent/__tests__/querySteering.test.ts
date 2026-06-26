@@ -133,6 +133,42 @@ describe('query — queued-message steering (claude-vaz parity)', () => {
     expect(steeredInto(create, 1, 'one more thing')).toBe(true)
   })
 
+  it('preserves multimodal queued steering content for the next turn', async () => {
+    const create = jest
+      .fn()
+      .mockImplementationOnce(() => streamResponse(TOOL_TURN))
+      .mockImplementationOnce(() => streamResponse(STOP_TURN))
+
+    const collectQueuedSteering = jest
+      .fn<ReturnType<NonNullable<QueryParams['collectQueuedSteering']>>, []>()
+      .mockResolvedValueOnce([
+        { type: 'text', text: 'inspect this screenshot' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+      ])
+      .mockResolvedValue(null)
+
+    const terminal = await drain(
+      query(
+        baseParams({
+          client: makeClient(create),
+          executeTool: jest.fn().mockResolvedValue({ content: 'tool output', isError: false }),
+          collectQueuedSteering,
+        }),
+      ),
+    )
+
+    expect(terminal).toMatchObject({ reason: 'completed' })
+    const messages = create.mock.calls[1]?.[0]?.messages ?? []
+    const steeredUser = messages.find(
+      (m: { role?: string; content?: unknown }) =>
+        m.role === 'user' && JSON.stringify(m.content ?? '').includes('inspect this screenshot'),
+    )
+    expect(steeredUser?.content).toEqual([
+      { type: 'text', text: 'inspect this screenshot' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+    ])
+  })
+
   it('does not add a turn when nothing is queued', async () => {
     const create = jest.fn().mockImplementationOnce(() => streamResponse(STOP_TURN))
     const collectQueuedSteering = jest.fn<Promise<string | null>, []>().mockResolvedValue(null)

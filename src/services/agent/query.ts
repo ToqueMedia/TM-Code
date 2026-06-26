@@ -11,14 +11,13 @@
  */
 
 import type OpenAI from "openai";
-import type { ContentBlockAPI, ProviderState } from "../../types/chat";
+import type { ContentBlockAPI, ProviderState, RequestUsageEntry } from "../../types/chat";
 // formatError: Tauri/IPC rejections are often plain objects or serde-tagged
 // enums (e.g. {"PathNotFound":"…"}), and `String(err)` collapses those to the
 // literal "[object Object]" the model then sees as the tool result. formatError
 // resolves a useful message from every shape.
 import { formatError } from "../../utils/errors";
 import {
-  microcompact,
   applyToolResultBudget,
   snipCompactIfNeeded,
   autoCompact,
@@ -28,7 +27,7 @@ import {
   type AutoCompactTrackingState,
   type CompactFn,
 } from "./compact";
-import { computeMicrocompactKeepRecent } from "./contextManager";
+import { applyGlobalToolResultBudget } from "./toolResultGlobalBudget";
 import {
   applyCollapsesIfNeeded,
   recoverFromOverflow,
@@ -42,6 +41,7 @@ import {
 } from "./loopDetector";
 import { isAtBlockingLimit } from "../../utils/contextWindow";
 import { contentAsText } from "./promptValueHelpers";
+import { inspectAndLogPayload } from "./payloadInspector";
 
 // ── Constants ──
 
@@ -89,6 +89,15 @@ export interface QueryMessage {
    * instead of reconstructing from content blocks.
    */
   _native?: Record<string, unknown>;
+}
+
+export type QueuedSteeringContent = string | ContentBlockAPI[];
+
+function steeringContentToUserMessage(content: QueuedSteeringContent): QueryMessage {
+  return {
+    role: "user",
+    content: typeof content === "string" ? [{ type: "text", text: content }] : content,
+  };
 }
 
 /** Stream events yielded to the caller for UI rendering. */
@@ -156,6 +165,10 @@ export interface QueryParams {
   thinkingConfig?: Record<string, unknown>;
   /** Callback for reporting token usage. */
   onUsage?: (inputTokens: number, outputTokens: number) => void;
+  /** Callback for reporting per-request usage (real tokens + inspector
+   *  estimate + breakdown). Fires once per chat.completions.create, right
+   *  after the provider's usage chunk lands. Best-effort, never throws. */
+  onRequestUsage?: (entry: RequestUsageEntry) => void;
   /** Custom compact instructions. */
   compactInstructions?: string;
   /** Extra headers merged into every chat.completions.create request. */
@@ -185,7 +198,7 @@ export interface QueryParams {
    * a fresh bubble) as a side effect, so the run stays continuous with no
    * idle flicker. Must never throw.
    */
-  collectQueuedSteering?: () => Promise<string | null>;
+  collectQueuedSteering?: () => Promise<QueuedSteeringContent | null>;
   /**
    * Live active-model limits for the auto-compact decision. Called fresh each
    * loop iteration because the active model (and thus its context window) is
@@ -672,6 +685,7 @@ export async function* query(
     maxOutputTokensOverride,
     thinkingConfig,
     onUsage,
+    onRequestUsage,
     compactInstructions,
     extraHeaders,
     onResponseHeaders,
@@ -687,10 +701,10 @@ export async function* query(
   let lastTurnRealOccupancy: number | undefined;
 
   // Wall-clock of the previous turn's assistant message — feeds the gap-aware
-  // microcompact (computeMicrocompactKeepRecent). Loop-local: null on the first
-  // turn, then the end-of-turn timestamp, so a long mid-run stall (e.g. a
-  // permission wait past the 60-min cache TTL) triggers aggressive eviction.
-  let lastAssistantMessageAt: number | null = null;
+  // (lastAssistantMessageAt was used by microcompact's gap-aware keepRecent.
+  //  Removed when microcompact was replaced by applyGlobalToolResultBudget —
+  //  the global budget uses a fixed keepRecent=4. Restore here if gap-aware
+  //  eviction is re-added to the budget.)
 
   let state: LoopState = {
     messages: [...params.messages],
@@ -760,27 +774,36 @@ export async function* query(
 
     let messagesForQuery = [...messages];
 
-    // 1. Tool result budget — cap oversized tool-result bodies (keeps structure).
+    // 0. Global tool-result budget — cap TOTAL tool-result tokens across all
+    //    messages at ~40K, compacting older results with a structured summary
+    //    (tool name, path/range, hash, preview, re-read hint) instead of the
+    //    flat "[cleared]" string microcompact used. Replaces microcompact in
+    //    the pipeline: keepRecent=4 ensures the results the model is actively
+    //    working with stay complete; older ones are compacted, not deleted —
+    //    the model can re-read via read_file / read_large_result / search.
+    //    Token-reduction phase, 2026-06-26.
+    const budgetResult = applyGlobalToolResultBudget(messagesForQuery);
+    if (budgetResult.compactedCount > 0) {
+      messagesForQuery = budgetResult.messages;
+      console.debug(
+        `[query] global tool-result budget: compacted ${budgetResult.compactedCount} ` +
+        `results (~${budgetResult.tokensBefore}→${budgetResult.tokensAfter} tokens)`,
+      );
+    }
+
+    // 1. Per-message tool result budget — cap oversized single-message bodies.
     messagesForQuery = applyToolResultBudget(messagesForQuery);
 
     // 2. (routine snip removed — emergency-only below). No tokens pre-freed, so
     //    autoCompact reasons about the full occupancy.
     const snipTokensFreed = 0;
 
-    // 3. Microcompact — keepRecent is density- AND gap-aware now (was a fixed 8
-    //    with a dead "skip time-based for now" stub). computeMicrocompactKeepRecent
-    //    keeps more recent results in dense sessions and clears more aggressively
-    //    after a long idle gap (cold prompt cache). lastAssistantMessageAt is
-    //    loop-local so the gap branch is real code, not a no-op.
-    const microKeepRecent = computeMicrocompactKeepRecent(
-      messagesForQuery as unknown as Parameters<typeof computeMicrocompactKeepRecent>[0],
-      lastAssistantMessageAt,
-      false,
-    );
-    const microResult = microcompact(messagesForQuery, { keepRecent: microKeepRecent });
-    if (microResult.clearedCount > 0) {
-      messagesForQuery = microResult.messages;
-    }
+    // 3. (microcompact replaced by step 0 — applyGlobalToolResultBudget.
+    //    The old microcompact cleared to "[Old tool result content cleared]"
+    //    with no tool name/path/size/hash, so the model couldn't decide
+    //    whether a re-read was worth it. The global budget does the same
+    //    clearing but with a structured summary that preserves
+    //    identifiability + re-read instructions. keepRecent lowered 8→4.)
 
     // 4. Context collapse (stub for now)
     const collapseResult = applyCollapsesIfNeeded(messagesForQuery);
@@ -927,6 +950,11 @@ export async function* query(
 
     const maxTokens = maxOutputTokensOverride ?? MAX_OUTPUT_TOKENS;
     const apiMessages = toOpenAIMessages(messagesForQuery, systemPrompt, model);
+
+    // ── Payload inspection (token-cost diagnostics) ──
+    // Best-effort: sizes + hashes + top-10 blocks logged to console.debug
+    // before every provider request. Never throws, never blocks the send.
+    const payloadReport = inspectAndLogPayload(apiMessages, systemPrompt, tools, model, state.turnCount);
 
     // ── Stream from model ──
 
@@ -1548,16 +1576,31 @@ export async function* query(
       totalInputTokens += turnUsage.prompt_tokens;
       totalOutputTokens += turnUsage.completion_tokens;
       onUsage?.(turnUsage.prompt_tokens, turnUsage.completion_tokens);
+      // Per-request usage log — real tokens + payloadInspector estimate +
+      // breakdown. Best-effort: cache fields only when the adapter reports
+      // them; payloadReport null when the inspector failed (non-blocking).
+      try {
+        const tu = turnUsage as unknown as Record<string, unknown>
+        onRequestUsage?.({
+          requestId: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `${state.turnCount}-${Date.now()}`,
+          turn: state.turnCount,
+          model,
+          inputTokens: turnUsage.prompt_tokens ?? 0,
+          outputTokens: turnUsage.completion_tokens ?? 0,
+          cacheCreationInputTokens: tu.cache_creation_input_tokens as number | undefined,
+          cacheReadInputTokens: tu.cache_read_input_tokens as number | undefined,
+          estimatedInputTokens: payloadReport?.totalEstimatedTokens ?? 0,
+          breakdown: payloadReport?.byCategory ?? {},
+        })
+      } catch { /* usage logging never blocks the agent loop */ }
       // Real occupancy for the NEXT iteration's compaction decision. input
       // already includes all prior history; output rolls into the next
       // prompt — their sum is the true "how full is the window right now"
       // (matches utils/contextWindow.ts totalContextTokens + the UI pill).
       lastTurnRealOccupancy = turnUsage.prompt_tokens + turnUsage.completion_tokens;
     }
-
-    // Stamp the assistant turn's wall-clock for the next iteration's gap-aware
-    // microcompact (set every turn, independent of whether usage was reported).
-    lastAssistantMessageAt = Date.now();
 
     // ── Build provider-native state for round-trip ──
     // Reconstruct the assistant message as the provider would have
@@ -1735,7 +1778,7 @@ export async function* query(
       // making them wait for a fresh dispatch. Same steering collector as the
       // post-tool boundary; a non-empty return keeps the loop alive.
       if (params.collectQueuedSteering) {
-        let steered: string | null = null;
+        let steered: QueuedSteeringContent | null = null;
         try {
           steered = await params.collectQueuedSteering();
         } catch {
@@ -1746,7 +1789,7 @@ export async function* query(
             ...state,
             messages: [
               ...updatedMessages,
-              { role: "user", content: [{ type: "text", text: steered }] },
+              steeringContentToUserMessage(steered),
             ],
             continuationCount: 0,
           };
@@ -1856,10 +1899,7 @@ export async function* query(
       try {
         const steered = await params.collectQueuedSteering();
         if (steered) {
-          steeringMessages.push({
-            role: "user",
-            content: [{ type: "text", text: steered }],
-          });
+          steeringMessages.push(steeringContentToUserMessage(steered));
         }
       } catch {
         // Best-effort — a steering failure must never break the loop.

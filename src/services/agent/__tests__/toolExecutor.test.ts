@@ -22,9 +22,36 @@ if (!globalThis.TextEncoder) {
 // ═══════════════════════════════════════════════════════════════════════
 
 // Mock invoke from invokeMetrics (toolExecutor imports from here, not @tauri-apps/api/core directly)
-const mockInvoke = jest.fn()
+//
+// Two-layer mock: tests configure `mockInvokeImpl` (the per-test resolved
+// value); the outer `mockInvoke` wrapper converts bare strings into the
+// { content, signature } shape that read_file_with_signature / file_signature
+// now return (token-reduction phase 1 switched read_file to the
+// signature-aware Rust command — ReadFileWithSignatureResult). This keeps
+// every existing `mockInvokeImpl.mockResolvedValue('file content')` call working
+// without touching 48 test bodies.
+const mockInvokeImpl = jest.fn()
+const sigFor = (c: string) => ({ hash: 'h-' + c.length, size: c.length, modifiedMs: 1700000000000 })
+const mockInvoke = jest.fn(async (cmd: string, _args?: unknown) => {
+  let result = await mockInvokeImpl(cmd, _args)
+  // write_file/edit_file internally call the legacy 'read_file' command to
+  // fetch current content for diffing. Test mocks configure
+  // 'read_file_with_signature'; map the legacy call onto it so both paths
+  // see the same content without touching every mockImplementation.
+  if (cmd === 'read_file' && result === undefined) {
+    const sigResult = await mockInvokeImpl('read_file_with_signature', _args)
+    result = typeof sigResult === 'string' ? sigResult : (sigResult as { content?: string } | null)?.content
+  }
+  if (cmd === 'read_file_with_signature' && typeof result === 'string') {
+    return { content: result, signature: sigFor(result) }
+  }
+  if (cmd === 'file_signature' && typeof result === 'string') {
+    return sigFor(result)
+  }
+  return result
+})
 jest.mock('@/utils/invokeMetrics', () => ({
-  invoke: (...args: unknown[]) => mockInvoke(...args),
+  invoke: (cmd: unknown, ...rest: unknown[]) => mockInvoke(cmd as string, rest[0]),
 }))
 
 // Mock listen from @tauri-apps/api/event (static import in toolExecutor)
@@ -225,7 +252,7 @@ beforeEach(() => {
   // Default project root
   mockCurrentProject.path = '/projects/test-app'
   mockGetState_settings.mockReturnValue({ flaggedCommands: [] })
-  mockInvoke.mockResolvedValue('' as never)
+  mockInvokeImpl.mockResolvedValue('' as never)
 })
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -253,7 +280,7 @@ describe('A: execute() orchestration', () => {
     // utilizador pendente, NADA pode correr. Tools paralelas/auto-aprovadas
     // têm de esperar no gate de entrada até o diálogo resolver.
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue('file content' as never)
+    mockInvokeImpl.mockResolvedValue('file content' as never)
 
     const originalImpl = () => ({
       requestPermission: mockRequestPermission,
@@ -273,13 +300,13 @@ describe('A: execute() orchestration', () => {
 
       // Enquanto o diálogo está aberto, o IPC do read_file NÃO pode disparar.
       await new Promise(resolve => setTimeout(resolve, 300))
-      expect(mockInvoke).not.toHaveBeenCalledWith('read_file', expect.anything())
+      expect(mockInvoke).not.toHaveBeenCalledWith('read_file_with_signature', expect.anything())
 
       // Utilizador resolve o diálogo → o tool retoma e executa.
       dialogOpen = false
       const result = await pending
       expect(result).toContain('file content')
-      expect(mockInvoke).toHaveBeenCalledWith('read_file', expect.anything())
+      expect(mockInvoke).toHaveBeenCalledWith('read_file_with_signature', expect.anything())
     } finally {
       mockGetState_permission.mockImplementation(originalImpl)
     }
@@ -289,7 +316,7 @@ describe('A: execute() orchestration', () => {
     // Decisão do user (2026-06-11): @credentials.json em menção NÃO bypassa
     // o prompt de ficheiro sensível do read_file normal.
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue('secret content' as never)
+    mockInvokeImpl.mockResolvedValue('secret content' as never)
 
     mockRequestPermission.mockResolvedValueOnce({ approved: false, prompted: true, source: 'user' })
     await expect(
@@ -310,7 +337,7 @@ describe('A: execute() orchestration', () => {
 
   it('MENTION: non-sensitive mentions read without any prompt', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue('plain content' as never)
+    mockInvokeImpl.mockResolvedValue('plain content' as never)
     const content = await exec.executeForMention('read_file', { file_path: '/projects/test-app/app.tsx' })
     expect(content).toContain('plain content')
     expect(mockRequestPermission).not.toHaveBeenCalled()
@@ -323,7 +350,7 @@ describe('A: execute() orchestration', () => {
     // do await (não só à entrada do execute()).
     const exec = freshExecutor()
     const controller = new AbortController()
-    mockInvoke.mockResolvedValue('file content' as never)
+    mockInvokeImpl.mockResolvedValue('file content' as never)
 
     let resolveDecision: (d: unknown) => void = () => {}
     mockRequestPermission.mockReturnValueOnce(
@@ -364,7 +391,7 @@ describe('A: execute() orchestration', () => {
 
   it('calls requestPermission for non-exempt tools', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue('file content' as never)
+    mockInvokeImpl.mockResolvedValue('file content' as never)
 
     await exec.execute('read_file', { file_path: '/projects/test-app/app.tsx' })
 
@@ -377,7 +404,7 @@ describe('A: execute() orchestration', () => {
 
   it('bypasses permission for exempt tools (update_tasks)', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue(undefined as never)
+    mockInvokeImpl.mockResolvedValue(undefined as never)
 
     await exec.execute('update_tasks', { tasks: [] })
 
@@ -386,7 +413,7 @@ describe('A: execute() orchestration', () => {
 
   it('bypasses permission for collect_results', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue('[]' as never)
+    mockInvokeImpl.mockResolvedValue('[]' as never)
 
     await exec.execute('collect_results', {})
 
@@ -396,7 +423,7 @@ describe('A: execute() orchestration', () => {
   it('bypasses permission for request_credentials', async () => {
     const exec = freshExecutor()
     // request_credentials invokes Tauri; mock a successful result
-    mockInvoke.mockResolvedValue('ok' as never)
+    mockInvokeImpl.mockResolvedValue('ok' as never)
 
     await exec.execute('request_credentials', { fields: [{ id: 'TEST', label: 'Test' }] })
 
@@ -405,7 +432,7 @@ describe('A: execute() orchestration', () => {
 
   it('bypasses permission for ask_user_question', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue('answer' as never)
+    mockInvokeImpl.mockResolvedValue('answer' as never)
 
     await exec.execute('ask_user_question', { question: 'Pick one', options: ['A', 'B'] })
 
@@ -438,7 +465,7 @@ describe('A: execute() orchestration', () => {
 
   it('does not return diff for read_file results (not JSON diff)', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue('plain text content' as never)
+    mockInvokeImpl.mockResolvedValue('plain text content' as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/app.tsx' })
 
@@ -449,7 +476,7 @@ describe('A: execute() orchestration', () => {
     const exec = freshExecutor()
     // update_tasks doesn't call invoke — it uses Zustand stores directly.
     // Verify it succeeds when _toolCallId and signal are provided.
-    mockInvoke.mockResolvedValue(undefined as never)
+    mockInvokeImpl.mockResolvedValue(undefined as never)
     const signal = new AbortController().signal
 
     const result = await exec.execute(
@@ -469,7 +496,7 @@ describe('A: execute() orchestration', () => {
     // produces a result > 30000 chars, then read_large_result should get it untruncated
     // This tests the `if (toolName === 'read_large_result') return result` path
     const bigContent = 'x'.repeat(35000)
-    mockInvoke.mockResolvedValue(bigContent as never)
+    mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     // First call creates the large result
     const result1 = await exec.execute('read_file', { file_path: '/projects/test-app/big.txt' })
@@ -483,8 +510,8 @@ describe('A: execute() orchestration', () => {
     // CMD mode: write_file writes directly and returns diff JSON with alreadyApplied.
     // We need to read the file first (enforced by read-before-write).
     exec.enableCmdMode('/projects/test-app')
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') return 'old content' as never
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return 'old content' as never
       return undefined as never
     })
 
@@ -545,7 +572,7 @@ describe('B: Security blocks', () => {
 
   it('ALLOWS .env.example (the one exception)', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue('EXAMPLE_KEY=placeholder' as never)
+    mockInvokeImpl.mockResolvedValue('EXAMPLE_KEY=placeholder' as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/.env.example' })
 
@@ -563,7 +590,7 @@ describe('B: Security blocks', () => {
 
   it('does not block non-env files that happen to start with env', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue('content' as never)
+    mockInvokeImpl.mockResolvedValue('content' as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/env.ts' })
 
@@ -598,7 +625,7 @@ describe('C: Plan mode', () => {
   it('allows read_file in plan mode', async () => {
     const exec = freshExecutor()
     exec.enablePlanMode()
-    mockInvoke.mockResolvedValue('plan content' as never)
+    mockInvokeImpl.mockResolvedValue('plan content' as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/app.tsx' })
 
@@ -610,8 +637,8 @@ describe('C: Plan mode', () => {
     const exec = freshExecutor()
     exec.enablePlanMode()
     // PLAN.md write: read_file for old content (new file), then returns diff
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') throw new Error('not found')
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') throw new Error('not found')
       return '' as never
     })
 
@@ -647,7 +674,7 @@ describe('C: Plan mode', () => {
     // Simulate PLAN.md being written by calling updateReadStateAfterWrite
     // which sets planFileWritten = true when planMode is on and path is PLAN.md
     exec.updateReadStateAfterWrite('/projects/test-app/PLAN.md', '# Plan content')
-    mockInvoke.mockResolvedValue(undefined as never)
+    mockInvokeImpl.mockResolvedValue(undefined as never)
 
     const result = await exec.execute('update_tasks', { tasks: [{ id: '1', description: 'task', status: 'pending' }] })
 
@@ -659,7 +686,7 @@ describe('C: Plan mode', () => {
     exec.enablePlanMode('PLAN-chat-export.md')
 
     exec.updateReadStateAfterWrite('/projects/test-app/PLAN-chat-export.md', '# Plan content')
-    mockInvoke.mockResolvedValue(undefined as never)
+    mockInvokeImpl.mockResolvedValue(undefined as never)
 
     const result = await exec.execute('update_tasks', { tasks: [{ id: '1', description: 'task', status: 'pending' }] })
 
@@ -673,7 +700,7 @@ describe('C: Plan mode', () => {
     // 1. Write PLAN.md
     exec.updateReadStateAfterWrite('/projects/test-app/PLAN.md', '# Plan')
     // 2. Run update_tasks
-    mockInvoke.mockResolvedValue(undefined as never)
+    mockInvokeImpl.mockResolvedValue(undefined as never)
     await exec.execute('update_tasks', { tasks: [{ id: '1', description: 'task', status: 'pending' }] })
 
     // 3. Now ANY tool should be blocked
@@ -686,13 +713,13 @@ describe('C: Plan mode', () => {
     const exec = freshExecutor()
     exec.enablePlanMode()
     exec.updateReadStateAfterWrite('/projects/test-app/PLAN.md', '# Plan')
-    mockInvoke.mockResolvedValue(undefined as never)
+    mockInvokeImpl.mockResolvedValue(undefined as never)
     await exec.execute('update_tasks', { tasks: [{ id: '1', description: 'task', status: 'pending' }] })
 
     exec.disablePlanMode()
 
     // Should work normally now
-    mockInvoke.mockResolvedValue('content' as never)
+    mockInvokeImpl.mockResolvedValue('content' as never)
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/app.tsx' })
     expect(result).toBe('content')
   })
@@ -728,8 +755,8 @@ describe('D: CMD mode', () => {
   it('write_file in CMD mode writes directly to disk (no diff/approval)', async () => {
     const exec = freshExecutor()
     exec.enableCmdMode('/projects/test-app')
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') return 'old content' as never
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return 'old content' as never
       return undefined as never
     })
 
@@ -749,8 +776,8 @@ describe('D: CMD mode', () => {
     exec.enableCmdMode('/projects/test-app')
     // create_file calls invoke('read_file') to check existence — must throw
     // (file doesn't exist yet), then invoke('write_file') to write
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') throw new Error('not found')
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') throw new Error('not found')
       return undefined as never
     })
 
@@ -766,8 +793,8 @@ describe('D: CMD mode', () => {
     exec.enableCmdMode('/projects/test-app')
 
     // Path inside CMD cwd should work
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') return 'content' as never
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return 'content' as never
       return undefined as never
     })
 
@@ -788,7 +815,7 @@ describe('D: CMD mode', () => {
     exec.enableCmdMode('/projects/test-app')
     // User approves the path_access prompt → the read must succeed, not hard-fail.
     mockRequestPathAccess.mockResolvedValue({ approved: true, prompted: true, source: 'user' as const })
-    mockInvoke.mockResolvedValue('external content' as never)
+    mockInvokeImpl.mockResolvedValue('external content' as never)
 
     const result = await exec.execute('read_file', { file_path: '/other/project/file.txt' })
     expect(result).toContain('external content')
@@ -805,7 +832,7 @@ describe('D: CMD mode', () => {
     exec.disableCmdMode()
 
     // After disabling CMD mode, path is validated against project root
-    mockInvoke.mockResolvedValue('content' as never)
+    mockInvokeImpl.mockResolvedValue('content' as never)
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/app.tsx' })
     expect(result).toBe('content')
   })
@@ -815,8 +842,8 @@ describe('D: CMD mode', () => {
     exec.enableCmdMode('/projects/test-app')
 
     // read_file returns content with old_string present
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') return 'Hello World' as never
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return 'Hello World' as never
       return undefined as never
     })
 
@@ -857,8 +884,8 @@ describe('E: Read-before-write enforcement', () => {
 
   it('write_file succeeds after read_file populates readFileTimestamps', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') return 'old content' as never
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return 'old content' as never
       return undefined as never
     })
 
@@ -880,8 +907,8 @@ describe('E: Read-before-write enforcement', () => {
 
   it('edit_file succeeds after read_file', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') return 'Hello World' as never
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return 'Hello World' as never
       return undefined as never
     })
 
@@ -904,8 +931,8 @@ describe('E: Read-before-write enforcement', () => {
 
     // write_file re-reads for concurrent modification check — must return same content
     // to pass the hash check
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') return 'content' as never
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return 'content' as never
       return undefined as never
     })
 
@@ -923,8 +950,8 @@ describe('E: Read-before-write enforcement', () => {
 describe('F: Concurrent modification detection', () => {
   it('write_file detects concurrent modification via hash mismatch', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') return 'original content' as never
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return 'original content' as never
       return undefined as never
     })
 
@@ -932,8 +959,8 @@ describe('F: Concurrent modification detection', () => {
     await exec.execute('read_file', { file_path: '/projects/test-app/x.txt' })
 
     // Now simulate concurrent modification — read_file returns different content
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') return 'modified by someone else' as never
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return 'modified by someone else' as never
       return undefined as never
     })
 
@@ -945,8 +972,8 @@ describe('F: Concurrent modification detection', () => {
 
   it('edit_file detects concurrent modification via hash mismatch', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') return 'original content' as never
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return 'original content' as never
       return undefined as never
     })
 
@@ -954,8 +981,8 @@ describe('F: Concurrent modification detection', () => {
     await exec.execute('read_file', { file_path: '/projects/test-app/x.txt' })
 
     // Simulate concurrent modification
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') return 'modified by someone else' as never
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return 'modified by someone else' as never
       return undefined as never
     })
 
@@ -970,8 +997,8 @@ describe('F: Concurrent modification detection', () => {
 
   it('write_file does NOT flag concurrent modification when content hash matches', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') return 'same content' as never
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return 'same content' as never
       return undefined as never
     })
 
@@ -986,8 +1013,8 @@ describe('F: Concurrent modification detection', () => {
 
   it('updateReadStateAfterWrite resets the hash to prevent false positives', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') return 'content A' as never
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return 'content A' as never
       return undefined as never
     })
 
@@ -997,8 +1024,8 @@ describe('F: Concurrent modification detection', () => {
     exec.updateReadStateAfterWrite('/projects/test-app/x.txt', 'content B')
 
     // Now the hash should be 'content B' — a subsequent write should pass
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'read_file') return 'content B' as never
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return 'content B' as never
       return undefined as never
     })
 
@@ -1015,7 +1042,7 @@ describe('G: Truncation and large results', () => {
   it('truncates results over 30000 chars and returns system-reminder', async () => {
     const exec = freshExecutor()
     const bigContent = 'x'.repeat(35000)
-    mockInvoke.mockResolvedValue(bigContent as never)
+    mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/big.txt' })
 
@@ -1027,7 +1054,7 @@ describe('G: Truncation and large results', () => {
   it('small results pass through untruncated', async () => {
     const exec = freshExecutor()
     const smallContent = 'hello world'
-    mockInvoke.mockResolvedValue(smallContent as never)
+    mockInvokeImpl.mockResolvedValue(smallContent as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/small.txt' })
 
@@ -1038,7 +1065,7 @@ describe('G: Truncation and large results', () => {
   it('read_large_result retrieves truncated content by range', async () => {
     const exec = freshExecutor()
     const bigContent = 'A'.repeat(35000)
-    mockInvoke.mockResolvedValue(bigContent as never)
+    mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     // First call: creates the large result entry
     const truncated = await exec.execute('read_file', { file_path: '/projects/test-app/big.txt' })
@@ -1057,11 +1084,11 @@ describe('G: Truncation and large results', () => {
 
   it('cuts the preview on a line boundary (never mid-line) for multi-line output', async () => {
     const exec = freshExecutor()
-    // 50-char lines; the 2000-char budget lands inside a line. The cut must
+    // 50-char lines; the 8000-char budget lands inside a line. The cut must
     // back up to the preceding newline so the preview ends with a whole line.
     const line = 'x'.repeat(49) + '\n' // 50 chars incl newline
     const bigContent = line.repeat(800) // 40000 chars
-    mockInvoke.mockResolvedValue(bigContent as never)
+    mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/lines.txt' })
 
@@ -1071,8 +1098,8 @@ describe('G: Truncation and large results', () => {
     const previewEnd = Number(m![1])
     const preview = m![2]
     // The boundary cut keeps ≥ half the budget and lands on a line edge.
-    expect(previewEnd).toBeGreaterThanOrEqual(1000)
-    expect(previewEnd).toBeLessThanOrEqual(2000)
+    expect(previewEnd).toBeGreaterThanOrEqual(4000)
+    expect(previewEnd).toBeLessThanOrEqual(8000)
     expect(previewEnd % 50).toBe(0) // exactly on a line boundary (multiple of 50)
     // Preview body is whole lines incl. their newline — no partial trailing line.
     expect(preview.endsWith('x'.repeat(49) + '\n')).toBe(true)
@@ -1082,7 +1109,7 @@ describe('G: Truncation and large results', () => {
     const exec = freshExecutor()
     const line = 'y'.repeat(49) + '\n'
     const bigContent = line.repeat(800)
-    mockInvoke.mockResolvedValue(bigContent as never)
+    mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/lines.txt' })
     // The "first N characters" count and the read_large_result offset must agree.
@@ -1099,11 +1126,11 @@ describe('G: Truncation and large results', () => {
   it('falls back to a hard cut for single-line (newline-free) output like minified JSON', async () => {
     const exec = freshExecutor()
     const bigContent = '{' + '"k":"v",'.repeat(5000) + '}' // one giant line, no \n
-    mockInvoke.mockResolvedValue(bigContent as never)
+    mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/min.json' })
-    // No newline → hard budget of 2000.
-    expect(result).toContain('Preview (first 2000 characters)')
+    // No newline → hard budget of 8000.
+    expect(result).toContain('Preview (first 8000 characters)')
     expect(result).toContain('read_large_result')
   })
 
@@ -1117,7 +1144,7 @@ describe('G: Truncation and large results', () => {
   it('read_large_result with end_offset > stored length is clamped', async () => {
     const exec = freshExecutor()
     const bigContent = 'C'.repeat(35000)
-    mockInvoke.mockResolvedValue(bigContent as never)
+    mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     const truncated = await exec.execute('read_file', { file_path: '/projects/test-app/big2.txt' })
     const idMatch = truncated.match(/read_large_result\("(\w+)"/)
@@ -1131,7 +1158,7 @@ describe('G: Truncation and large results', () => {
   it('resetSessionState clears large results', async () => {
     const exec = freshExecutor()
     const bigContent = 'D'.repeat(35000)
-    mockInvoke.mockResolvedValue(bigContent as never)
+    mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     await exec.execute('read_file', { file_path: '/projects/test-app/big3.txt' })
 
@@ -1178,7 +1205,7 @@ describe('H: Read-only mode', () => {
   it('allows diagnostic commands in execute_command when read-only', async () => {
     const exec = freshExecutor()
     const id = exec.enterReadOnlyMode()
-    mockInvoke.mockResolvedValue(cmdResult('all tests passed'))
+    mockInvokeImpl.mockResolvedValue(cmdResult('all tests passed'))
 
     const result = await exec.execute('execute_command', { command: 'npm test' })
     expect(result).toContain('all tests passed')
@@ -1189,7 +1216,7 @@ describe('H: Read-only mode', () => {
   it('allows npx tsc in read-only mode', async () => {
     const exec = freshExecutor()
     const id = exec.enterReadOnlyMode()
-    mockInvoke.mockResolvedValue(cmdResult('no errors'))
+    mockInvokeImpl.mockResolvedValue(cmdResult('no errors'))
 
     const result = await exec.execute('execute_command', { command: 'npx tsc --noEmit' })
     expect(result).toContain('no errors')
@@ -1345,7 +1372,7 @@ describe('I: Tool definitions and metadata', () => {
 describe('J: Path validation', () => {
   it('allows paths inside the project root', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue('content' as never)
+    mockInvokeImpl.mockResolvedValue('content' as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/src/app.tsx' })
     expect(result).toBe('content')
@@ -1367,7 +1394,7 @@ describe('J: Path validation', () => {
 
   it('normalizes paths with .. segments', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue('content' as never)
+    mockInvokeImpl.mockResolvedValue('content' as never)
 
     // /projects/test-app/src/../app.tsx → /projects/test-app/app.tsx (still inside)
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/src/../app.tsx' })
@@ -1381,7 +1408,7 @@ describe('J: Path validation', () => {
     try {
       const exec = freshExecutor()
       exec.enableCmdMode('/other/root')
-      mockInvoke.mockResolvedValue('content' as never)
+      mockInvokeImpl.mockResolvedValue('content' as never)
 
       const result = await exec.execute('read_file', { file_path: '/other/root/file.txt' })
       expect(result).toBe('content')
@@ -1443,7 +1470,7 @@ describe('J: Path validation', () => {
 
   it('allows relative paths by resolving them against project root', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue('content' as never)
+    mockInvokeImpl.mockResolvedValue('content' as never)
 
     const result = await exec.execute('read_file', { file_path: 'PLAN.md' })
     expect(result).toBe('content')
@@ -1460,7 +1487,7 @@ describe('J: Path validation', () => {
 
   it('correctly resolves and normalizes Windows-style relative and backslash paths', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue('win-content' as never)
+    mockInvokeImpl.mockResolvedValue('win-content' as never)
 
     const result = await exec.execute('read_file', { file_path: 'src\\components\\Button.tsx' })
     expect(result).toBe('win-content')
@@ -1472,14 +1499,14 @@ describe('J: Path validation', () => {
   it('treats Windows drive-letter paths with forward slashes as absolute', async () => {
     mockCurrentProject.path = 'C:/Users/celso/Documents/Gestao de Tarefas'
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue('win-content' as never)
+    mockInvokeImpl.mockResolvedValue('win-content' as never)
 
     const result = await exec.execute('read_file', {
       file_path: 'C:/Users/celso/Documents/Gestao de Tarefas/src/App.tsx',
     })
 
     expect(result).toBe('win-content')
-    expect(mockInvoke).toHaveBeenCalledWith('read_file', {
+    expect(mockInvoke).toHaveBeenCalledWith('read_file_with_signature', {
       path: 'C:/Users/celso/Documents/Gestao de Tarefas/src/App.tsx',
     })
   })
@@ -1489,21 +1516,21 @@ describe('J: Path validation', () => {
     mockCurrentProject.path = root
     const exec = freshExecutor()
 
-    mockInvoke.mockResolvedValueOnce({ name: 'Gestao de Tarefas', type: 'directory', children: [] } as never)
+    mockInvokeImpl.mockResolvedValueOnce({ name: 'Gestao de Tarefas', type: 'directory', children: [] } as never)
     await exec.execute('list_directory', { file_path: root })
     expect(mockInvoke).toHaveBeenLastCalledWith('build_file_tree', {
       rootPath: root,
       filter: { showHidden: false, maxDepth: 3 },
     })
 
-    mockInvoke.mockResolvedValueOnce({ query: 'ReportsPage', total_files: 0, total_matches: 0, files: [], file_name_matches: [], duration_ms: 0, truncated: false } as never)
+    mockInvokeImpl.mockResolvedValueOnce({ query: 'ReportsPage', total_files: 0, total_matches: 0, files: [], file_name_matches: [], duration_ms: 0, truncated: false } as never)
     await exec.execute('search_files', { query: 'ReportsPage', directory: root })
     expect(mockInvoke).toHaveBeenLastCalledWith('search_in_files', expect.objectContaining({
       query: 'ReportsPage',
       directory: root,
     }))
 
-    mockInvoke.mockResolvedValueOnce([`${root}/src/App.tsx`] as never)
+    mockInvokeImpl.mockResolvedValueOnce([`${root}/src/App.tsx`] as never)
     await exec.execute('glob', { pattern: 'src/**/*.tsx', directory: root })
     expect(mockInvoke).toHaveBeenLastCalledWith('glob_files', {
       pattern: 'src/**/*.tsx',
@@ -1519,7 +1546,7 @@ describe('J: Path validation', () => {
 describe('K: Command and Background Command Sandbox & Timeout Constraints', () => {
   it('runs execute_command through the streaming command path', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0, success: true, timedOut: false })
+    mockInvokeImpl.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0, success: true, timedOut: false })
 
     await exec.execute('execute_command', { command: 'echo "hello"', timeout_secs: 1000 })
 
@@ -1531,7 +1558,7 @@ describe('K: Command and Background Command Sandbox & Timeout Constraints', () =
 
   it('returns streamed command output for execute_command', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue({ stdout: 'hello', stderr: '', exitCode: 0, success: true, timedOut: false })
+    mockInvokeImpl.mockResolvedValue({ stdout: 'hello', stderr: '', exitCode: 0, success: true, timedOut: false })
 
     const result = await exec.execute('execute_command', { command: 'echo "hello"' })
 
@@ -1541,7 +1568,7 @@ describe('K: Command and Background Command Sandbox & Timeout Constraints', () =
 
   it('allows compound shell commands (prompt guidance prevents misuse)', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue({ stdout: 'done', stderr: '', exitCode: 0, success: true, timedOut: false })
+    mockInvokeImpl.mockResolvedValue({ stdout: 'done', stderr: '', exitCode: 0, success: true, timedOut: false })
 
     const result = await exec.execute('execute_command', { command: 'apt-get update && apt-get upgrade -y' })
 
@@ -1551,7 +1578,7 @@ describe('K: Command and Background Command Sandbox & Timeout Constraints', () =
 
   it('allows compound commands inside ssh remote commands', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue({ stdout: 'done', stderr: '', exitCode: 0, success: true, timedOut: false })
+    mockInvokeImpl.mockResolvedValue({ stdout: 'done', stderr: '', exitCode: 0, success: true, timedOut: false })
 
     const result = await exec.execute('execute_command', { command: 'ssh root@72.62.38.27 "apt-get update && apt-get upgrade -y"' })
 
@@ -1561,7 +1588,7 @@ describe('K: Command and Background Command Sandbox & Timeout Constraints', () =
 
   it('allows a single ssh remote command', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue({ stdout: 'ok', stderr: '', exitCode: 0, success: true, timedOut: false })
+    mockInvokeImpl.mockResolvedValue({ stdout: 'ok', stderr: '', exitCode: 0, success: true, timedOut: false })
 
     const result = await exec.execute('execute_command', { command: 'ssh root@72.62.38.27 "apt-get update"' })
 
@@ -1578,7 +1605,7 @@ describe('K: Command and Background Command Sandbox & Timeout Constraints', () =
 
   it('allows custom cwd parameter within the project root in execute_command', async () => {
     const exec = freshExecutor()
-    mockInvoke.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0, success: true, timedOut: false })
+    mockInvokeImpl.mockResolvedValue({ stdout: '', stderr: '', exitCode: 0, success: true, timedOut: false })
 
     await exec.execute('execute_command', { command: 'echo "hello"', cwd: '/projects/test-app/src' })
 

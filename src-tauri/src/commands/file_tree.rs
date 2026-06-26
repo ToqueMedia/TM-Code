@@ -1,10 +1,12 @@
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::AsyncReadExt;
 
 use super::{canonicalize_path, normalize_path_for_frontend};
 
@@ -143,6 +145,22 @@ pub struct FileOperationResult {
     pub success: bool,
     pub message: String,
     pub path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSignature {
+    pub path: String,
+    pub size: u64,
+    pub modified_ms: Option<u64>,
+    pub sha256: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadFileWithSignatureResult {
+    pub content: String,
+    pub signature: FileSignature,
 }
 
 // Error types specific to file tree operations
@@ -835,6 +853,107 @@ pub fn path_exists(path: String) -> bool {
         Ok(canonical) => canonical.exists(),
         Err(_) => false,
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn modified_ms(metadata: &std::fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+}
+
+#[tauri::command]
+pub async fn file_signature(path: String) -> Result<FileSignature> {
+    let file_path = Path::new(&path);
+    let canonical = validate_path_safe(file_path)?;
+
+    if !canonical.exists() {
+        return Err(FileTreeError::PathNotFound(path));
+    }
+
+    if canonical.is_dir() {
+        return Err(FileTreeError::InvalidOperation(
+            "Path is a directory".to_string(),
+        ));
+    }
+
+    let metadata = tokio::fs::metadata(&canonical).await?;
+    if metadata.len() > MAX_READ_FILE_SIZE {
+        return Err(FileTreeError::InvalidOperation(format!(
+            "File too large ({:.1} MB). Maximum allowed: {:.0} MB",
+            metadata.len() as f64 / (1024.0 * 1024.0),
+            MAX_READ_FILE_SIZE as f64 / (1024.0 * 1024.0)
+        )));
+    }
+
+    let mut file = tokio::fs::File::open(&canonical).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    let digest = hasher.finalize();
+    let sha256: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+
+    Ok(FileSignature {
+        path: normalize_path_for_frontend(&canonical),
+        size: metadata.len(),
+        modified_ms: modified_ms(&metadata),
+        sha256,
+    })
+}
+
+#[tauri::command]
+pub async fn read_file_with_signature(path: String) -> Result<ReadFileWithSignatureResult> {
+    let file_path = Path::new(&path);
+    let canonical = validate_path_safe(file_path)?;
+
+    if !canonical.exists() {
+        return Err(FileTreeError::PathNotFound(path));
+    }
+
+    if canonical.is_dir() {
+        return Err(FileTreeError::InvalidOperation(
+            "Path is a directory".to_string(),
+        ));
+    }
+
+    let metadata = tokio::fs::metadata(&canonical).await?;
+    if metadata.len() > MAX_READ_FILE_SIZE {
+        return Err(FileTreeError::InvalidOperation(format!(
+            "File too large ({:.1} MB). Maximum allowed: {:.0} MB",
+            metadata.len() as f64 / (1024.0 * 1024.0),
+            MAX_READ_FILE_SIZE as f64 / (1024.0 * 1024.0)
+        )));
+    }
+
+    let bytes = tokio::fs::read(&canonical).await?;
+    let sha256 = sha256_hex(&bytes);
+    let content = String::from_utf8(bytes).map_err(|_| {
+        FileTreeError::InvalidOperation("Cannot read binary file as text".to_string())
+    })?;
+
+    Ok(ReadFileWithSignatureResult {
+        content,
+        signature: FileSignature {
+            path: normalize_path_for_frontend(&canonical),
+            size: metadata.len(),
+            modified_ms: modified_ms(&metadata),
+            sha256,
+        },
+    })
 }
 
 /// Search common subdirectories for SQLite database files (*.db, *.sqlite, *.sqlite3).

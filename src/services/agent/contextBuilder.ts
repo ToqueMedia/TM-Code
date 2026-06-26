@@ -95,7 +95,6 @@ import {
 } from './contextBuilder/sections/chatSections'
 import {
   getCmdAppliedScaffoldingSection,
-  getCmdClaudeMdSection,
   getCmdClosedLoopSection,
   getCmdCompletionContractSection,
   getCmdConstraintsSection,
@@ -660,11 +659,10 @@ class ContextBuilder {
     const normalizedHome = homeDir ? homeDir.replace(/\\/g, '/') : null
 
     // Parallel gather — language + memory files + session memory + memdir indexes
-    const [langInstruction, globalTmsContent, tmsContent, claudeMdContent, sessionMemory, userMemIdx, projectMemIdx] = await Promise.all([
+    const [langInstruction, globalTmsContent, tmsContent, sessionMemory, userMemIdx, projectMemIdx] = await Promise.all([
       getLangInstruction(),
       normalizedHome ? safeReadFile(`${normalizedHome}/.toquemedia-studio/TMS.md`) : Promise.resolve(null),
       safeReadFile(`${normalizedCwd}/TMS.md`),
-      safeReadFile(`${normalizedCwd}/CLAUDE.md`),
       (async () => {
         try {
           const { useChatStore } = await import('../../stores/chatStore')
@@ -686,7 +684,6 @@ class ContextBuilder {
       normalizedHome,
       globalTmsContent,
       tmsContent,
-      claudeMdContent,
       sessionMemory,
       userMemoryIndex: userMemIdx.content,
       projectMemoryIndex: projectMemIdx.content,
@@ -761,8 +758,6 @@ class ContextBuilder {
         'skill set depends on project-type detection'),
       dynamicSection('global_memory', () => getCmdGlobalMemorySection(ctx),
         '~/.toquemedia-studio/TMS.md is user-editable'),
-      dynamicSection('claude_md', () => getCmdClaudeMdSection(ctx),
-        'CLAUDE.md is per-project and edited by the user'),
       // TMS.md content — injects the actual project memory into the prompt.
       // Chat mode has getProjectMemorySection for this; CMD mode was missing
       // it, so the agent could see guidance to create TMS.md but never read
@@ -771,13 +766,13 @@ class ContextBuilder {
       dynamicSection('tms_content', () => getCmdTmsContentSection(ctx),
         'TMS.md content changes as the agent updates it'),
       // TMS.md guidance — instructs the agent to create or maintain the
-      // project-level persistent memory file. Placed after CLAUDE.md so
-      // the agent reads project instructions first, then gets the TMS.md
-      // creation/maintenance directive. Same ordering as chat mode.
+      // project-level persistent memory file. Placed after TMS.md content
+      // so the agent reads existing memory first, then gets the create/
+      // update directive. Same ordering as chat mode.
       dynamicSection('tms_guidance', () => getCmdTmsGuidanceSection(ctx),
         'TMS.md existence is a per-session check (file may be created mid-session)'),
       // Persistent memory — user-scope + project-scope MEMORY.md indexes.
-      // Placed after CLAUDE.md so the model reads project instructions first,
+      // Placed after TMS.md content so the model reads project memory first,
       // then cross-session memory facts. Same ordering as chat mode.
       dynamicSection('memory', () => getCmdMemorySection(ctx),
         'MEMORY.md indexes mutate as save_memory / forget_memory run'),

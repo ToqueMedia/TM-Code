@@ -12,13 +12,14 @@
  */
 
 import type OpenAI from 'openai'
-import type { ContentBlockAPI } from '../../types/chat'
+import type { ContentBlockAPI, RequestUsageEntry } from '../../types/chat'
 import {
   query,
   type QueryMessage,
   type QueryStreamEvent,
   type QueryTerminal,
   type QueryParams,
+  type QueuedSteeringContent,
   type ToolExecutorFn,
 } from './query'
 
@@ -47,6 +48,8 @@ export interface QueryEngineOptions {
   thinkingConfig?: Record<string, unknown>
   /** Usage callback. */
   onUsage?: (inputTokens: number, outputTokens: number) => void
+  /** Per-request usage callback (real tokens + inspector estimate + breakdown). */
+  onRequestUsage?: (entry: RequestUsageEntry) => void
   /** Compact instructions. */
   compactInstructions?: string
   /** Max turns (default: Infinity). */
@@ -58,7 +61,7 @@ export interface QueryEngineOptions {
   /** Inter-turn attachment collector — see QueryParams.collectInterTurnContext. */
   collectInterTurnContext?: () => Promise<string>
   /** Queued-message steering collector — see QueryParams.collectQueuedSteering. */
-  collectQueuedSteering?: () => Promise<string | null>
+  collectQueuedSteering?: () => Promise<QueuedSteeringContent | null>
   /** Live active-model limits for auto-compact — see QueryParams.getContextLimits. */
   getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null }
 }
@@ -161,6 +164,9 @@ export class QueryEngine {
         this._state.totalInputTokens += inputTokens
         this._state.totalOutputTokens += outputTokens
         this.options.onUsage?.(inputTokens, outputTokens)
+      },
+      onRequestUsage: (entry) => {
+        this.options.onRequestUsage?.(entry)
       },
       compactInstructions: this.options.compactInstructions,
       extraHeaders: this.options.extraHeaders,

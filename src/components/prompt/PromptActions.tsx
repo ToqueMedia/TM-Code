@@ -71,8 +71,22 @@ function PromptActions({
     return null
   }, [byokEnabled, byokActiveProvider, byokActiveModel, byokProviders, byokPerProviderConfig])
 
+  const byokSnapshotImages = useMemo(() => {
+    if (!byokSnapshot) return null
+    if (byokSnapshot.capabilities?.images !== undefined) return byokSnapshot.capabilities.images
+    const provider = byokProviders.find(p => p.id === byokSnapshot.providerId)
+    const config = byokPerProviderConfig[byokSnapshot.providerId]
+    const registryModel = provider?.models.find(m => m.id === byokSnapshot.modelId)
+    if (registryModel) return registryModel.capabilities.images
+    const dynamicModel = config?.dynamicCatalog?.models.find(m => m.id === byokSnapshot.modelId)
+    if (dynamicModel) return dynamicModel.capabilities.images
+    const userDefined = config?.userDefinedModel
+    if (userDefined?.id === byokSnapshot.modelId) return userDefined.capabilities.images
+    return false
+  }, [byokSnapshot, byokProviders, byokPerProviderConfig])
+
   const byokModelImages = byokSnapshot
-    ? (byokSnapshot.capabilities?.images ?? false)
+    ? byokSnapshotImages
     : (byokResolvedActive?.imagesSupported ?? null)
   const byokInUse = byokSnapshot !== null || byokResolvedActive !== null
   const isExplorer = billingPlan === 'explorer'

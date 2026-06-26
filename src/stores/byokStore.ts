@@ -91,6 +91,8 @@ export type ThinkingShape =
   | 'openrouter_reasoning'
   | 'mimo_chat_template_kwargs'
 
+export type ByokReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
 export interface ByokModel {
   id: string
   label: string
@@ -148,6 +150,10 @@ export interface ByokProviderConfig {
    *  the agent's auto-compact uses it. Empty = fall back to the catalog model's
    *  contextWindow, then FALLBACK_CONTEXT_WINDOW. Persisted. */
   contextWindow?: number
+  /** User-selected reasoning depth for BYOK providers. Not every provider
+   *  supports every level; routing maps this to the provider-native control
+   *  where possible and ignores it for boolean-only thinking APIs. */
+  reasoningEffort?: ByokReasoningEffort
   /** Last-used timestamp (ms). Updated on every chat send so the Settings
    *  UI can rank providers. */
   lastUsed?: number
@@ -423,6 +429,7 @@ interface ByokState {
    *  Drives auto-compact under BYOK (the worker is bypassed, so no
    *  X-Model-Context-Window header). Persisted. */
   setContextWindow: (providerId: string, contextWindow: number | undefined) => void
+  setReasoningEffort: (providerId: string, effort: ByokReasoningEffort | undefined) => void
   testKey: (
     providerId: string,
     modelId: string,
@@ -568,6 +575,14 @@ export const useByokStore = create<ByokState>()(
         set({ perProviderConfig: config })
         // Re-capture the active session snapshot so the new window takes effect
         // for the current conversation's auto-compact immediately.
+        syncActiveSessionSnapshot()
+      },
+
+      setReasoningEffort: (providerId, effort) => {
+        const config = { ...get().perProviderConfig }
+        const existing = config[providerId] || { hasKey: false }
+        config[providerId] = { ...existing, reasoningEffort: effort }
+        set({ perProviderConfig: config })
         syncActiveSessionSnapshot()
       },
 

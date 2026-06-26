@@ -7,6 +7,7 @@ import { describeImagesViaSidecar } from '../../services/agent/visionSidecar'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore, selectIsPreviewServerRunning } from '../../stores/layoutStore'
 import { useBillingStore } from '../../stores/billingStore'
+import { useByokStore } from '../../stores/byokStore'
 import { useAuthStore } from '../../stores/authStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
@@ -49,6 +50,7 @@ import { getQueryGuard } from '../../services/agent/queryGuard'
 import { isAtBlockingLimit, totalContextTokens } from '../../utils/contextWindow'
 import { enqueueSerializedRun } from '../../services/agent/agentRunner'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
+import type { ByokSessionSnapshot } from '../../types/chat'
 import { useQueueProcessor } from '../../hooks/useQueueProcessor'
 import { classifyPendingPlanIntent } from '../../services/agent/planResumeIntent'
 
@@ -98,6 +100,25 @@ async function detectDevCommand(projectPath: string): Promise<string | null> {
   return null
 }
 import { logger } from '../../utils/logger'
+
+function resolveByokNativeVision(snapshot: ByokSessionSnapshot | null): boolean | null {
+  if (!snapshot) return null
+  if (snapshot.capabilities?.images !== undefined) return snapshot.capabilities.images
+
+  const byokState = useByokStore.getState()
+  const provider = byokState.providers.find(p => p.id === snapshot.providerId)
+  const config = byokState.perProviderConfig[snapshot.providerId]
+  const registryModel = provider?.models.find(m => m.id === snapshot.modelId)
+  if (registryModel) return registryModel.capabilities.images
+
+  const dynamicModel = config?.dynamicCatalog?.models.find(m => m.id === snapshot.modelId)
+  if (dynamicModel) return dynamicModel.capabilities.images
+
+  const userDefined = config?.userDefinedModel
+  if (userDefined?.id === snapshot.modelId) return userDefined.capabilities.images
+
+  return false
+}
 
 export function usePromptBar() {
   // Boolean-only selector. The full string used to live here (`s.draftInput`)
@@ -697,7 +718,14 @@ export function usePromptBar() {
     // free uses DeepSeek V3.2 (text-only).
     const { useBillingStore } = await import('../../stores/billingStore')
     const billingPlan = useBillingStore.getState().plan
-    const supportsAttachments = billingPlan !== 'explorer'
+    const planAllowsImagePipeline = billingPlan !== 'explorer'
+    const byokNativeVision = resolveByokNativeVision(chatStore.getActiveSession()?.byokSnapshot ?? null)
+    const modelName = useAgentStore.getState().modelName
+    const activeProfile = modelName && MODEL_PROFILES[modelName]
+      ? MODEL_PROFILES[modelName]
+      : getProfileForPlan(billingPlan)
+    const activeModelSupportsImageParts =
+      byokNativeVision !== null ? byokNativeVision : activeProfile.supportsAttachments
 
     let userContent: string | OpenAIContentPart[] | null = null
 
@@ -708,7 +736,7 @@ export function usePromptBar() {
       resolveImageDataUri: resolveImageToDataUri,
     }
 
-    if (supportsAttachments && display.attachments.some(a => a.type === 'image')) {
+    if (planAllowsImagePipeline && display.attachments.some(a => a.type === 'image')) {
       // Build content parts (image_url). If buildContentParts returns null
       // (no images survived disk read / size limits / size budget), fall
       // through to the text path.
@@ -719,11 +747,7 @@ export function usePromptBar() {
         // active model (MiMo V2.5 Pro, GLM → supportsAttachments=false)
         // 404s with "no endpoints found that support image input". For those,
         // get an auxiliary image description and pass it to the agent as text.
-        const modelName = useAgentStore.getState().modelName
-        const activeProfile = modelName && MODEL_PROFILES[modelName]
-          ? MODEL_PROFILES[modelName]
-          : getProfileForPlan(billingPlan)
-        if (activeProfile.supportsAttachments) {
+        if (activeModelSupportsImageParts) {
           userContent = parts
         } else {
           const description = await describeImagesViaSidecar(parts)
@@ -754,7 +778,7 @@ export function usePromptBar() {
       const changedContext = await collectChangedFileContext()
       if (mentionResolution.contextText || mentionResolution.imageParts.length > 0 || changedContext) {
         const applied = applyMentionResolution(
-          userContent, mentionResolution, changedContext, supportsAttachments,
+          userContent, mentionResolution, changedContext, activeModelSupportsImageParts,
         )
         userContent = applied.userContent
         // Persist on the user bubble so rebuildConversationHistory re-emits
@@ -809,7 +833,7 @@ export function usePromptBar() {
       // The history is canonical (carries content parts when previous
       // turns had images). Downgrade to text if the active model is
       // text-only — its API cannot consume the array form.
-      const history = supportsAttachments
+      const history = activeModelSupportsImageParts
         ? rawHistory
         : downgradeHistoryToText(rawHistory)
       const agentService = AgentService.getInstance()
@@ -913,7 +937,7 @@ export function usePromptBar() {
         // per-turn drain in query.ts was a no-op. Draining here rides the
         // steered message onto the NEXT turn of the live run. This path is
         // always foreground (runAgentForPrompt), so there's no background gate.
-        collectSteeringMessages: async (): Promise<string | null> => {
+        collectSteeringMessages: async (): Promise<string | OpenAIContentPart[] | null> => {
           // Only plain prompt-mode messages steer. Slash/bash/task-notif
           // commands need executeInput's per-command handling, so they stay
           // queued for the idle drain when this run ends.
@@ -929,6 +953,7 @@ export function usePromptBar() {
               ? joinPromptValues(drained.map(c => c.value))
               : drained[0]!.value
           const display = extractDisplayFromValue(merged)
+          const blocks = typeof merged === 'string' ? undefined : merged
 
           // Transcript bookkeeping — keep the run continuous (no idle flicker)
           // while showing the steered message in the right place:
@@ -939,13 +964,27 @@ export function usePromptBar() {
           flushBufferedDeltas()
           const cs = useChatStore.getState()
           cs.finalizeAssistantMessage()
-          cs.addUserMessage(display.text, display.attachments)
+          cs.addUserMessage(display.text, display.attachments, blocks)
           cs.startAssistantMessage(agentService.isThinkingRequestedForNextTurn())
 
-          // Model-facing text. buildAugmentedPrompt resolves file/folder
-          // attachments to XML; images degrade to <attached_image> markers
-          // (steering is text-first — the transcript still shows the real
-          // attachment). @-mentions are intentionally not re-resolved here.
+          // Model-facing content. Keep the same native-vision vs sidecar split
+          // as the initial send path; otherwise a queued image sent mid-run is
+          // silently degraded to text even when the active BYOK model can see.
+          if (planAllowsImagePipeline && display.attachments.some(a => a.type === 'image')) {
+            const parts = await buildContentParts(merged, promptResolvers)
+            if (parts && activeModelSupportsImageParts) return parts
+            if (parts) {
+              const description = await describeImagesViaSidecar(parts)
+              if (description) {
+                const textOnly = await buildAugmentedPrompt(merged, promptResolvers)
+                return `${textOnly}\n\n<image_description source="image-analysis">\n${description}\n</image_description>`
+              }
+            }
+          }
+
+          // Text-only fallback. buildAugmentedPrompt resolves file/folder
+          // attachments to XML and image attachments to placeholders.
+          // @-mentions are intentionally not re-resolved here.
           const text = await buildAugmentedPrompt(merged, {
             resolveAttachmentXml: resolveAttachments,
             resolveImageDataUri: resolveImageToDataUri,

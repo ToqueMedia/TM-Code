@@ -155,6 +155,7 @@ export function toAnthropicRequest(openai: Record<string, unknown>): Record<stri
   if (systemParts.length) out.system = systemParts.join('\n\n')
   if (tools.length) out.tools = tools
   if (thinking) out.thinking = thinking
+  if (openai.output_config && typeof openai.output_config === 'object') out.output_config = openai.output_config
   return out
 }
 

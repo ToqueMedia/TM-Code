@@ -1263,6 +1263,8 @@ pub fn run() {
             delete_file_or_directory,
             rename_file_or_directory,
             read_file,
+            file_signature,
+            read_file_with_signature,
             path_exists,
             has_database_file,
             write_file,

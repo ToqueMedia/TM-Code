@@ -98,8 +98,10 @@ describe('toAnthropicRequest', () => {
       max_tokens: 1000,
       messages: [{ role: 'user', content: 'x' }],
       thinking: { type: 'enabled', budget_tokens: 8192 },
+      output_config: { effort: 'high' },
     })
     expect(out.thinking).toEqual({ type: 'enabled', budget_tokens: 8192 })
+    expect(out.output_config).toEqual({ effort: 'high' })
     expect(out.max_tokens as number).toBeGreaterThan(8192)
   })
 })

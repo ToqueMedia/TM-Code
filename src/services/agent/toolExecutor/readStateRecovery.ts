@@ -144,6 +144,7 @@ export function extractReadFilesFromMessages(
           timestamp,
           offset: readInfo.offset,
           limit: readInfo.limit,
+          source: 'read',
           hash,
           // Recovered entries use fsVersion=-1 (sentinel for "unknown") because
           // we don't know the fsVersion at the original read time. Since dedup
@@ -169,10 +170,11 @@ export function extractReadFilesFromMessages(
           timestamp,
           offset: undefined, // Write entries have offset=undefined
           limit: undefined,
+          source: 'write',
           hash,
           // Recovered write entries use fsVersion=-1 (sentinel for "unknown").
-          // Write entries are excluded from dedup anyway (offset=undefined),
-          // so this value is informational only.
+          // Write entries are excluded from dedup by source='write', so this
+          // value is informational only.
           fsVersion: -1,
         })
         readFileTimestamps.set(writeInfo.filePath, { timestamp, hash })

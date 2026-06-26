@@ -25,6 +25,34 @@ describe('isFreePlan', () => {
 })
 
 describe('buildByokThinkingConfig', () => {
+  it('uses adaptive thinking with effort for Claude Opus 4.8', () => {
+    expect(buildByokThinkingConfig({
+      providerId: 'anthropic',
+      modelId: 'claude-opus-4-8',
+      baseURL: 'https://api.anthropic.com',
+      custom: false,
+      supportsThinking: true,
+      thinkingShape: 'anthropic',
+      reasoningEffort: 'xhigh',
+    })).toEqual({
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'xhigh' },
+    })
+  })
+
+  it('keeps manual thinking budget for older Anthropic models', () => {
+    expect(buildByokThinkingConfig({
+      providerId: 'anthropic',
+      modelId: 'claude-sonnet-4-5',
+      baseURL: 'https://api.anthropic.com',
+      custom: false,
+      supportsThinking: true,
+      thinkingShape: 'anthropic',
+    })).toEqual({
+      thinking: { type: 'enabled', budget_tokens: 8192 },
+    })
+  })
+
   it('uses high reasoning effort for Step 3.7 Flash', () => {
     expect(buildByokThinkingConfig({
       providerId: 'stepfun',
@@ -45,5 +73,17 @@ describe('buildByokThinkingConfig', () => {
       supportsThinking: true,
       thinkingShape: 'openai_reasoning_effort',
     })).toEqual({ reasoning_effort: 'medium' })
+  })
+
+  it('maps xhigh/max to high for OpenAI-compatible reasoning providers', () => {
+    expect(buildByokThinkingConfig({
+      providerId: 'openai',
+      modelId: 'gpt-5.5',
+      baseURL: 'https://api.openai.com/v1',
+      custom: false,
+      supportsThinking: true,
+      thinkingShape: 'openai_reasoning_effort',
+      reasoningEffort: 'max',
+    })).toEqual({ reasoning_effort: 'high' })
   })
 })

@@ -423,6 +423,8 @@ export interface ChatSession {
    * from falling through to the default coding agent and implementing files.
    */
   planResumePending?: PlanResumePending | null
+  /** Per-request usage log — one entry per provider call. */
+  requestUsageLog?: RequestUsageEntry[]
 }
 
 export interface PlanResumePending {
@@ -467,7 +469,9 @@ export interface ByokSessionSnapshot {
    *  agent service falls back to looking up the live byokStore. */
   supportsThinking?: boolean
   /** Shape of the thinking parameter the upstream provider expects.
-   *  - `anthropic`: `thinking: { type: 'enabled' | 'disabled', budget_tokens? }`
+   *  - `anthropic`: `thinking: { type: 'adaptive' }` + `output_config.effort`
+   *    on Claude 4.6+/Fable 5; older models use
+   *    `thinking: { type: 'enabled', budget_tokens }`
    *  - `openai_reasoning_effort`: `reasoning_effort: 'minimal' | 'medium'`
    *  - `qwen_enable_thinking`: `enable_thinking: boolean`
    *  - `gemini_thinking_budget`: `thinking_budget: number` (0 = off)
@@ -475,6 +479,9 @@ export interface ByokSessionSnapshot {
    *  silently ignored by Anthropic/OpenAI/Gemini upstreams, which is why
    *  the toggle was a no-op for BYOK before this field existed. */
   thinkingShape?: 'anthropic' | 'openai_reasoning_effort' | 'qwen_enable_thinking' | 'gemini_thinking_budget' | 'openrouter_reasoning' | 'mimo_chat_template_kwargs'
+  /** User-selected BYOK reasoning depth, frozen with the session. Providers
+   *  that only support boolean thinking ignore this. */
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   /** Model context window frozen at snapshot time (from the hardcoded catalog).
    *  Under BYOK the request bypasses the worker, so the IDE can't learn the
    *  window from X-Model-Context-Window — it seeds the auto-compact limit from
@@ -499,6 +506,37 @@ export interface SessionSummary {
   status: ChatSession['status']
   createdAt: number
   updatedAt: number
+}
+
+/** Per-request usage record — one entry per `chat.completions.create` call.
+ *  Captured in query.ts right after each provider response and persisted on
+ *  the session so an exported session shows real consumption per request
+ *  (eliminates inferring from compacted transcripts or in-memory-only totals).
+ *  Best-effort: cache fields are undefined when the provider/adapter doesn't
+ *  report them; estimatedInputTokens + breakdown come from the payloadInspector. */
+export interface RequestUsageEntry {
+  /** Stable unique id for the request (crypto.randomUUID). */
+  requestId: string
+  /** Agent-loop turn number (1-based, matches state.turnCount). */
+  turn: number
+  /** Provider id (BYOK providerId, or 'tms' for data-plane-routed). */
+  provider?: string
+  /** Model id the request was sent to. */
+  model: string
+  /** Real input tokens from the provider's usage chunk. */
+  inputTokens: number
+  /** Real output tokens from the provider's usage chunk. */
+  outputTokens: number
+  /** Anthropic prompt-cache creation tokens, when reported. */
+  cacheCreationInputTokens?: number
+  /** Anthropic prompt-cache read tokens, when reported. */
+  cacheReadInputTokens?: number
+  /** payloadInspector's pre-request estimate (ceil(chars/3)). Compare
+   *  against the real inputTokens per request to gauge estimator accuracy. */
+  estimatedInputTokens: number
+  /** payloadInspector's per-category breakdown (system, tool_result,
+   *  tool_call, text, etc.) — blocks/tokens/chars each. */
+  breakdown: Record<string, { blocks: number; tokens: number; chars: number }>
 }
 
 export interface SessionTokenUsage {
@@ -537,4 +575,7 @@ export interface PersistedSession {
   byokSnapshot?: ByokSessionSnapshot | null
   sessionMemory?: string
   planResumePending?: PlanResumePending | null
+  /** Per-request usage log — persisted so an exported session shows real
+   *  consumption per request (eliminates manual inference). */
+  requestUsageLog?: RequestUsageEntry[]
 }

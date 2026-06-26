@@ -56,7 +56,6 @@ export interface CmdPromptContext {
   globalTmsContent: string | null
   /** Project-level TMS.md content (<project>/TMS.md). Null when missing. */
   tmsContent: string | null
-  claudeMdContent: string | null
   /** Session-scoped memory notes (same source as chat mode). */
   sessionMemory: string | null
   /** Pre-loaded user-scope MEMORY.md index content (cross-project facts).

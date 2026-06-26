@@ -27,6 +27,7 @@ export function captureByokSnapshot(): ByokSessionSnapshot | null {
   // Fall back to the catalog model's window, then to undefined (agentService
   // then uses FALLBACK_CONTEXT_WINDOW).
   const userCw = state.perProviderConfig[active.provider.id]?.contextWindow
+  const reasoningEffort = state.perProviderConfig[active.provider.id]?.reasoningEffort
   const contextWindow =
     userCw && userCw > 0
       ? userCw
@@ -45,6 +46,7 @@ export function captureByokSnapshot(): ByokSessionSnapshot | null {
     // (anthropic / openai / qwen / gemini), not the plan-profile shape.
     supportsThinking: active.model.supportsThinking,
     thinkingShape: active.model.thinkingShape,
+    reasoningEffort,
     contextWindow,
   }
 }
@@ -316,6 +318,7 @@ class SessionService {
         byokSnapshot: persisted.byokSnapshot ?? null,
         sessionMemory: persisted.sessionMemory,
         planResumePending: persisted.planResumePending ?? null,
+        requestUsageLog: persisted.requestUsageLog,
       } as ChatSession & { lastTurnSnapshot?: SessionTurnSnapshot }
       if (persisted.lastTurnSnapshot) out.lastTurnSnapshot = persisted.lastTurnSnapshot
       return out
@@ -356,6 +359,7 @@ class SessionService {
         byokSnapshot: session.byokSnapshot ?? null,
         sessionMemory: session.sessionMemory,
         planResumePending: session.planResumePending ?? null,
+        requestUsageLog: session.requestUsageLog,
       }
 
       if (tokenUsage) {

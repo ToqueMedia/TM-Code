@@ -82,10 +82,9 @@ export interface FileState {
   /** Full file content as returned by the read_file IPC. */
   content: string
   /**
-   * Timestamp when the file was read. In claude-vaz this stores mtime
-   * (from stat); in TM Code (Tauri IPC, no cheap stat_file) we store
-   * fsVersion at read time instead. The dedup freshness check compares
-   * fsVersion, not this timestamp.
+   * Timestamp when the file was read. Used by external-change sweeps and
+   * read-before-write bookkeeping; dedup freshness primarily uses fsVersion
+   * and can fall back to file signatures or exact content equality.
    */
   timestamp: number
   /**
@@ -100,16 +99,27 @@ export interface FileState {
    */
   limit: number | undefined
   /**
+   * Where this cache entry came from. Full-file reads and writes both have
+   * offset/limit undefined, so dedup needs this source bit to avoid confusing
+   * "the model already read this" with "the tool cache knows post-write text".
+   */
+  source?: 'read' | 'write'
+  /**
+   * Content signature from Rust. Stored only when known. Used to prove a file
+   * is unchanged before fetching its full body again.
+   */
+  signature?: FileContentSignature
+  /**
    * Simple hash of the content at read time — fast integer hash for
    * concurrent-modification detection without re-reading from disk.
    */
   hash: number
   /**
-   * Global fsVersion at the time of this read. Incremented on every
-   * observed write (see fsVersion.ts). Used by dedup as a cheap
-   * freshness check — if the current fsVersion matches, no writes
-   * have occurred since the read, so the cached content is still valid.
-   * Much cheaper than re-reading the file to compare hashes.
+   * Global fsVersion at the time of this read. Incremented on every observed
+   * write (see fsVersion.ts). Used by dedup as the cheap first freshness
+   * check. If it differs, read_file can still suppress duplicate model tokens
+   * by comparing a fresh Rust signature or freshly-read disk content against
+   * this cached state.
    */
   fsVersion: number
   /**
@@ -120,6 +130,13 @@ export interface FileState {
    * require an explicit Read first. Mirrors claude-vaz's isPartialView.
    */
   isPartialView?: boolean
+}
+
+export interface FileContentSignature {
+  path?: string
+  size: number
+  modifiedMs?: number | null
+  sha256: string
 }
 
 // ── Defaults ────────────────────────────────────────────────────────────

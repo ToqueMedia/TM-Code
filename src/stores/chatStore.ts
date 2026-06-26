@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, CompactMetadata, ContentBlock, ContentBlockAPI, ContentPart, ConversationMessage, PlanResumePending, ProviderState, PromptBlock, SessionSummary, SystemMessageLevel, ToolCallDisplay } from '../types/chat'
+import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, CompactMetadata, ContentBlock, ContentBlockAPI, ContentPart, ConversationMessage, PlanResumePending, ProviderState, PromptBlock, RequestUsageEntry, SessionSummary, SystemMessageLevel, ToolCallDisplay } from '../types/chat'
 import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService, captureByokSnapshot } from '../services/agent/sessionService'
 import CheckpointService from '../services/agent/checkpointService'
@@ -106,6 +106,8 @@ interface ChatActions {
    * in the same serialized send flow.
    */
   setMentionContextOnLastUserMessage: (context: string, mentionedPaths?: string[]) => void
+  /** Append a per-request usage entry to the active session's log. */
+  addRequestUsage: (entry: RequestUsageEntry) => void
   setAttachmentPathsOnLastUserMessage: (paths: Record<string, string>) => void
   /**
    * Insert a user message BEFORE the streaming assistant message.
@@ -1557,6 +1559,28 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
         const updatedSessions = new Map(sessions)
         updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+        return { sessions: updatedSessions }
+      })
+      debouncedSave()
+    },
+
+    addRequestUsage: (entry) => {
+      // Persist one RequestUsageEntry per provider call on the active session.
+      // Real tokens + payloadInspector estimate + breakdown — eliminates
+      // inferring consumption from compacted transcripts. Provider is enriched
+      // from the session's byokSnapshot (BYOK providerId, or 'tms'). Best-effort.
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+        const provider = entry.provider ?? session.byokSnapshot?.providerId ?? 'tms'
+        const log = [...(session.requestUsageLog ?? []), { ...entry, provider }]
+        // Cap the log to avoid unbounded growth on runaway sessions (400
+        // entries ≈ a 200-turn session with retries; oldest drop first).
+        if (log.length > 400) log.splice(0, log.length - 400)
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, requestUsageLog: log, updatedAt: Date.now() })
         return { sessions: updatedSessions }
       })
       debouncedSave()

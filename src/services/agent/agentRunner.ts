@@ -617,6 +617,13 @@ async function runAgentInternal(
         // worker — nada de matemática de consumo no cliente.
         useBillingStore.getState().addLastRequestTokens(inTok + outTok)
       },
+      onRequestUsage: (entry) => {
+        // Persist the per-request usage log on the active session — real
+        // tokens + payloadInspector estimate + breakdown. Best-effort: never
+        // blocks the agent loop. Provider is enriched in the store from the
+        // session's byokSnapshot (BYOK providerId, or 'tms' for data-plane).
+        try { useChatStore.getState().addRequestUsage(entry) } catch { /* observability never blocks */ }
+      },
       onContextCompression: (event) => {
         if (event.type === 'hooks_start') {
           agentStore.setCompactPhase(event.hookType === 'pre_compact' ? 'hooks_pre' : 'hooks_post')

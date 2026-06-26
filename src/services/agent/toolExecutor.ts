@@ -36,7 +36,7 @@ import { resolveWorkerUrl, resolveAIWorkerUrl } from '../../utils/devUrls'
 import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import { READ_FILE, WRITE_FILE, EDIT_FILE, STOP_DEV_SERVER } from './toolNames'
-import { createFileStateCacheWithSizeLimit, type FileStateCache } from './toolExecutor/fileStateCache'
+import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileStateCache } from './toolExecutor/fileStateCache'
 import { checkReadDedup } from './toolExecutor/readDedup'
 import { getSnippetForTwoFileDiff } from './toolExecutor/changedFileSnippet'
 import { extractReadFilesFromMessages } from './toolExecutor/readStateRecovery'
@@ -95,6 +95,11 @@ export interface OpenAIToolDefinition {
 interface ToolEntry {
   definition: ToolDefinition
   execute: (input: Record<string, unknown>) => Promise<string>
+}
+
+interface ReadFileWithSignatureResult {
+  content: string
+  signature: FileContentSignature
 }
 
 interface AgentShellSession {
@@ -529,20 +534,25 @@ class ToolExecutor {
 
   /**
    * Whether the model already has a fresh FULL view of this file in context.
-   * Maps claude-vaz's `already_read_file` check (attachments.ts:3077-3120 —
-   * entry timestamp matches the file mtime exactly): when true, the mention
-   * renders to NOTHING because re-sending the content would only burn
-   * cache_creation tokens. TM Code's freshness primitive is `fsVersion`
-   * (no cheap per-file stat over Tauri IPC): offset === undefined means the
-   * entry holds the whole file (full read, write_file or edit_file), and an
-   * unchanged global fsVersion guarantees no tool writes happened since.
-   * Conservative like the read dedup: external edits bump nothing, but the
-   * external-change sweep (`collectExternallyChangedFiles`) covers that side.
+   * Used by @mentions to render NOTHING instead of re-sending content the
+   * model already has. Fast path is fsVersion; when that changed because some
+   * other file was written, a Rust SHA-256 signature proves this path is still
+   * unchanged without fetching the full file body.
    */
-  isFileFreshInContext(filePath: string): boolean {
+  async isFileFreshInContext(filePath: string): Promise<boolean> {
     const abs = this.resolveToAbsolute(filePath)
     const entry = this.readFileState.get(abs)
-    return !!entry && entry.offset === undefined && entry.fsVersion === getFsVersion()
+    if (!entry || entry.offset !== undefined || entry.limit !== undefined) return false
+    if (entry.source !== 'read' || entry.isPartialView) return false
+    if (entry.fsVersion === getFsVersion()) return true
+    if (!entry.signature) return false
+
+    try {
+      const current = await invoke<FileContentSignature>('file_signature', { path: abs })
+      return current.size === entry.signature.size && current.sha256 === entry.signature.sha256
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -618,8 +628,11 @@ class ToolExecutor {
       if (mtimeMs !== null && mtimeMs <= entry.timestamp) continue
 
       let current: string
+      let signature: FileContentSignature | undefined
       try {
-        current = await invoke<string>('read_file', { path })
+        const result = await invoke<ReadFileWithSignatureResult>('read_file_with_signature', { path })
+        current = result.content
+        signature = result.signature
       } catch {
         continue
       }
@@ -637,6 +650,8 @@ class ToolExecutor {
         timestamp: now,
         offset: entry.offset,
         limit: entry.limit,
+        source: entry.source ?? 'read',
+        signature,
         hash: newHash,
         fsVersion: getFsVersion(),
       })
@@ -925,13 +940,23 @@ class ToolExecutor {
       const parsed = JSON.parse(result)
       if (parsed?.type === 'diff') return result
     } catch { /* not JSON — proceed to truncation */ }
-    // read_large_result already produced a model-bounded slice (limit ≤ 30000) +
+    // read_large_result already produced a model-bounded slice (limit ≤ 25000) +
     // a continuation suffix. Passing it through truncateResult would nest a new
-    // large_result every time the slice + suffix exceeds the 30K threshold —
+    // large_result every time the slice + suffix exceeds the threshold —
     // the model then chases pagination of pagination, doubling content in
     // context and starving the output budget before write_file lands.
     if (toolName === 'read_large_result') return result
-    return this.truncateResult(result)
+    // Token-reduction phase (2026-06-26): per-tool limits so heavy outputs
+    // (command logs, search dumps) enter the cumulative history at a fraction
+    // of their raw size. The full body is preserved in the large_result store
+    // and the model can page it via read_large_result when it actually needs
+    // the rest. read_file gets a larger head preview (8K) because file
+    // content is the most likely to be needed verbatim; execute_command gets
+    // a TAIL preview because errors and exit code live at the bottom.
+    const toolMaxChars = ToolExecutor.getToolResultMaxChars(toolName)
+    const toolPreviewBudget = toolName === 'read_file' ? 8_000 : 2_000
+    const toolPreviewFromEnd = toolName === 'execute_command' || toolName === 'execute_command_background' || toolName === 'check_background_commands'
+    return this.truncateResult(result, toolMaxChars, toolPreviewBudget, toolPreviewFromEnd)
   }
 
   /** Number of core (non-MCP) tools registered. */
@@ -1033,6 +1058,107 @@ class ToolExecutor {
   private static readonly LARGE_RESULT_MAX_ENTRIES = 20
 
   /**
+   * Per-tool max-chars limit for the result that enters the model's context
+   * (token-reduction phase, 2026-06-26). Results exceeding this go to the
+   * large_result store; the model gets a bounded preview + a read_large_result
+   * ref to page the rest on demand. Heavy-output tools (command logs, search
+   * dumps) get tighter limits than file reads, because their content is less
+   * likely to be needed verbatim on subsequent turns.
+   */
+  static getToolResultMaxChars(toolName: string): number {
+    switch (toolName) {
+      case 'execute_command':
+      case 'execute_command_background':
+      case 'check_background_commands':
+        return 8_000
+      case 'search_files':
+        return 8_000
+      case 'read_file':
+        return 12_000
+      case 'edit_file':
+      case 'write_file':
+      case 'create_file':
+        return 12_000
+      default:
+        return 12_000
+    }
+  }
+
+  /**
+   * Compact search-result formatter (token-reduction phase, 2026-06-26).
+   * Replaces the old `JSON.stringify(result, null, 2)` which was ~3-4× larger
+   * than necessary (every match carried context_before/context_after arrays,
+   * full file_path repetition, JSON braces/indentation). Output is now:
+   *
+   *   Found N matches in M files (showing up to 50)
+   *   path/to/file.ts:42:1: match_text
+   *     context line (the text field)
+   *   path/other.ts:100:5: another_match
+   *     context line
+   *
+   * Handles both the { files: [...] } and bare-array shapes the Rust side can
+   * return. Never throws — falls back to JSON on an unexpected shape.
+   */
+  private formatSearchResultsCompact(result: unknown): string {
+    try {
+      // Normalise: extract the files array from either a wrapper or bare array.
+      let files: unknown[]
+      let totalMatches: number | undefined
+      let totalFiles: number | undefined
+
+      if (Array.isArray(result)) {
+        files = result
+      } else if (result && typeof result === 'object') {
+        const obj = result as Record<string, unknown>
+        files = Array.isArray(obj.files) ? obj.files as unknown[] : []
+        totalMatches = typeof obj.total_matches === 'number' ? obj.total_matches
+          : typeof obj.totalMatches === 'number' ? obj.totalMatches : undefined
+        totalFiles = typeof obj.total_files === 'number' ? obj.total_files
+          : typeof obj.totalFiles === 'number' ? obj.totalFiles : undefined
+      } else {
+        return JSON.stringify(result, null, 2)
+      }
+
+      if (files.length === 0) {
+        return 'No matches found.'
+      }
+
+      const lines: string[] = []
+      const matchCount = totalMatches ?? files.reduce<number>((sum, f) => {
+        const m = (f as Record<string, unknown>)?.matches
+        return sum + (Array.isArray(m) ? m.length : 0)
+      }, 0)
+      const header = `Found ${matchCount} match${matchCount === 1 ? '' : 's'} in ${totalFiles ?? files.length} file${files.length === 1 ? '' : 's'}`
+      lines.push(header)
+
+      for (const file of files) {
+        const f = file as Record<string, unknown>
+        const filePath = (f.file_path ?? f.path ?? '?') as string
+        const matches = Array.isArray(f.matches) ? f.matches as Record<string, unknown>[] : []
+        for (const m of matches) {
+          const lineNum = m.line_number ?? m.lineNumber ?? '?'
+          const col = m.column ?? '?'
+          const text = (m.text as string | undefined) ?? ''
+          const matchText = (m.match_text as string | undefined) ?? ''
+          // Format: path:line:col: match_text (one line, grep-like)
+          const matchPart = matchText ? matchText.replace(/\n/g, ' ').slice(0, 120) : ''
+          lines.push(`${filePath}:${lineNum}:${col}:${matchPart}`)
+          // Include the matching line as context (indented), trimmed
+          if (text) {
+            const ctx = text.replace(/\n/g, '↵').slice(0, 200)
+            lines.push(`  ${ctx}`)
+          }
+        }
+      }
+
+      return lines.join('\n')
+    } catch {
+      // Fallback: never break the tool on a formatting error
+      return JSON.stringify(result, null, 2)
+    }
+  }
+
+  /**
    * Set the disk directory for large result persistence. Called when a
    * session is loaded so that large results survive session reloads.
    * Pass null to disable disk persistence (in-memory only).
@@ -1074,8 +1200,18 @@ class ToolExecutor {
    * stores the full output in memory and returns a reference with a preview.
    * The model can retrieve the full output via read_large_result tool.
    * This prevents information loss from truncation (like Claude Code's disk persistence).
+   *
+   * Token-reduction phase (2026-06-26): default maxChars lowered 30K→12K so
+   * fewer chars enter the cumulative history. Per-tool limits are passed by
+   * the caller via getToolResultMaxChars(). `previewFromEnd` serves command
+   * output where the useful part (errors, exit code) is at the TAIL.
    */
-  private truncateResult(result: string, maxChars: number = 30000): string {
+  private truncateResult(
+    result: string,
+    maxChars: number = 12_000,
+    previewBudget: number = 2_000,
+    previewFromEnd: boolean = false,
+  ): string {
     if (result.length <= maxChars) return result
 
     // Store full result in memory for later retrieval. Update the
@@ -1102,43 +1238,65 @@ class ToolExecutor {
     }
     const nearCap = this.largeResults.size >= ToolExecutor.LARGE_RESULT_MAX_ENTRIES - 2
 
-    const previewBudget = 2000
-    // Cut on a line boundary so the preview never ends mid-token / mid-JSON.
-    // A raw slice(0, 2000) produced syntactically-broken fragments (half a
-    // JSON object, a truncated identifier) that a model could try to parse as
-    // a complete result (context pollution audit, 2026-06-12). Honor the
-    // boundary only when it still keeps a substantial preview, so an early
-    // newline near the start doesn't collapse the preview to nothing. When the
-    // output is one giant line (e.g. minified JSON) there is no newline to cut
-    // on — fall back to the hard budget; the marker's guard still applies.
-    const lastNewline = result.lastIndexOf('\n', previewBudget)
-    // Include the newline in the preview (cut AFTER it) so the preview is
-    // whole lines and the continuation offset lands on the next line's first
-    // char — not on a leading '\n'.
-    const previewEnd = lastNewline >= previewBudget * 0.5 ? lastNewline + 1 : Math.min(previewBudget, result.length)
-    const preview = result.slice(0, previewEnd)
-    const omitted = result.length - previewEnd
     const totalSize = result.length > 1024
       ? `${(result.length / 1024).toFixed(1)}KB`
       : `${result.length} chars`
 
-    // B1: was "byte ${previewSize}" — the unit is JS string code units,
-    //     not bytes (matters for non-ASCII content like emoji / CJK).
-    // B2: explicit offset-to-continue, so the model doesn't waste a call
-    //     re-reading the preview region from offset 0. Uses previewEnd (the
-    //     ACTUAL chars shown after the line-boundary cut), not the nominal
-    //     budget — otherwise the chars between the cut and 2000 would be
-    //     silently skipped on continuation.
-    // B3: terminology now matches the read_large_result suffix.
+    // ── Build preview ──
+    // Head preview (default): first N chars, cut at a line boundary at the END
+    //   so the preview never ends mid-token. `previewFromEnd` flips to a TAIL
+    //   preview (last N chars, cut at a line boundary at the START) — used for
+    //   command output where errors and exit code live at the bottom.
+    let preview: string
+    let shownChars: number
+    let omitted: number
+    let continueOffset: number
+    let isTail: boolean
+
+    if (previewFromEnd) {
+      const start = Math.max(0, result.length - previewBudget)
+      // Cut at the START on a line boundary so the tail preview begins on a
+      // whole line (same reasoning as the head case, mirrored).
+      const nextNewline = result.indexOf('\n', start)
+      const previewStart = nextNewline >= 0 && nextNewline < start + previewBudget * 0.5
+        ? nextNewline + 1
+        : start
+      preview = result.slice(previewStart)
+      shownChars = preview.length
+      omitted = previewStart
+      continueOffset = 0
+      isTail = true
+    } else {
+      // Head: cut on a line boundary so the preview never ends mid-token.
+      const lastNewline = result.lastIndexOf('\n', previewBudget)
+      // Include the newline in the preview (cut AFTER it) so the preview is
+      // whole lines and the continuation offset lands on the next line's first
+      // char.
+      const previewEnd = lastNewline >= previewBudget * 0.5
+        ? lastNewline + 1
+        : Math.min(previewBudget, result.length)
+      preview = result.slice(0, previewEnd)
+      shownChars = previewEnd
+      omitted = result.length - previewEnd
+      continueOffset = previewEnd
+      isTail = false
+    }
+
     // B4: cap-approaching nudge.
     const capNote = nearCap
       ? ` [warning: ${this.largeResults.size}/${ToolExecutor.LARGE_RESULT_MAX_ENTRIES} cached large results — oldest will be evicted as new ones arrive; save what you need now.]`
       : ''
-    return `<system-reminder>Partial view: this tool produced ${totalSize} of output but only the first ${previewEnd} characters are shown below, cut at a line boundary. Continue from offset ${previewEnd} unless you need a specific slice — call read_large_result("${refId}", offset: ${previewEnd}). Do not reason about content past character ${previewEnd} from this preview alone — the preview ends mid-output and the remainder may change the meaning.${capNote}</system-reminder>
 
-Preview (first ${previewEnd} characters):
+    const positionLabel = isTail ? `last ${shownChars}` : `first ${shownChars}`
+    const continueHint = isTail
+      ? `Read from offset 0 for earlier output — call read_large_result("${refId}", offset: 0, limit: ${Math.min(omitted, 25000)}).`
+      : `Continue from offset ${continueOffset} — call read_large_result("${refId}", offset: ${continueOffset}).`
+
+    return `<system-reminder>Partial view: this tool produced ${totalSize} of output but only the ${positionLabel} characters are shown below, cut at a line boundary. ${continueHint} Do not reason about content outside this preview alone — it ends mid-output and the remainder may change the meaning.${capNote}</system-reminder>
+
+${isTail ? 'Preview (last characters):' : `Preview (first ${shownChars} characters):`}
 ${preview}
-<system-reminder>[end of partial view — ${omitted} more character${omitted === 1 ? '' : 's'} omitted; read_large_result("${refId}", offset: ${previewEnd}) for the rest]</system-reminder>
+<system-reminder>[end of partial view — ${omitted} more character${omitted === 1 ? '' : 's'} omitted; read_large_result("${refId}", offset: ${continueOffset}) for the rest]</system-reminder>
 `
   }
 
@@ -1429,8 +1587,22 @@ ${preview}
         return `${tail}\nExit code: 0`
       }
 
-      // Failure: return full output for model to diagnose
-      return `${fullOutput}\nExit code: ${exitCode}`
+      // Failure: return the last N lines (where errors, stack traces and
+      // test-failure summaries live) + exit code, instead of the full output.
+      // The full body is still accessible: truncateResult (in execute()) will
+      // store it in the large_result store if it exceeds the per-tool limit,
+      // and the model can page it via read_large_result. Token-reduction phase.
+      {
+        const lines = fullOutput.split('\n')
+        const MAX_FAIL_LINES = 50
+        const tail = lines.length > MAX_FAIL_LINES
+          ? lines.slice(-MAX_FAIL_LINES).join('\n')
+          : fullOutput
+        const note = lines.length > MAX_FAIL_LINES
+          ? `\n[showing last ${MAX_FAIL_LINES} of ${lines.length} lines — earlier output available via read_large_result if needed]`
+          : ''
+        return `${tail}${note}\nExit code: ${exitCode}`
+      }
     } catch (error) {
       cleanup()
       const msg = error instanceof Error ? error.message : String(error)
@@ -1851,6 +2023,7 @@ ${preview}
       timestamp: now,
       offset: undefined,
       limit: undefined,
+      source: 'write',
       hash,
       fsVersion: versionBeforeBump,
     })
@@ -2058,8 +2231,11 @@ ${preview}
         // occurred since (fsVersion unchanged), return a short stub instead
         // of re-sending the full content. The earlier tool_result is still
         // in the conversation context — two full copies waste cache_creation
-        // tokens. Uses fsVersion (O(1)) instead of re-reading the file.
-        // Mirrors claude-vaz FileReadTool.ts:523-573.
+        // tokens. First tries fsVersion (O(1)); if that misses, the signature
+        // preflight below can prove the file unchanged without reading its
+        // full body. Exact content equality remains the fallback.
+        // Mirrors claude-vaz FileReadTool.ts:523-573 with a Tauri-specific
+        // fallback for the global fsVersion false-negative case.
         const currentFsVersion = getFsVersion()
         const dedupResult = checkReadDedup(
           filePath,
@@ -2074,7 +2250,84 @@ ${preview}
 
         try {
           const MAX_FILE_BYTES = 256 * 1024
-          const fullContent = await invoke<string>('read_file', { path: filePath })
+          const requestedOffset = offsetProvided ? offset : undefined
+          const requestedLimit = limitProvided ? limit : undefined
+          const existingState = this.readFileState.get(filePath)
+          let currentSignature: FileContentSignature | undefined
+
+          // Signature preflight: when fsVersion changed because another file
+          // was written, prove this path is unchanged before fetching its full
+          // body again. SHA-256 is computed in Rust and returns only metadata.
+          if (
+            existingState?.source === 'read' &&
+            !existingState.isPartialView &&
+            existingState.signature &&
+            existingState.offset === requestedOffset &&
+            existingState.limit === requestedLimit
+          ) {
+            try {
+              currentSignature = await invoke<FileContentSignature>('file_signature', { path: filePath })
+              const signatureDedupResult = checkReadDedup(
+                filePath,
+                requestedOffset,
+                requestedLimit,
+                this.readFileState,
+                currentFsVersion,
+                undefined,
+                currentSignature,
+              )
+              if (signatureDedupResult.isDuplicate && signatureDedupResult.stub) {
+                const now = Date.now()
+                this.readFileTimestamps.set(filePath, { timestamp: now, hash: existingState.hash })
+                this.readFileState.set(filePath, {
+                  ...existingState,
+                  timestamp: now,
+                  signature: currentSignature,
+                  fsVersion: currentFsVersion,
+                })
+                return signatureDedupResult.stub
+              }
+            } catch {
+              currentSignature = undefined
+            }
+          }
+
+          const readResult = await invoke<ReadFileWithSignatureResult>('read_file_with_signature', { path: filePath })
+          const fullContent = readResult.content
+          currentSignature = readResult.signature
+          const newHash = this.simpleHash(fullContent)
+
+          // Second-stage dedup: fsVersion is intentionally global, so a write
+          // to any other file makes the cheap pre-read dedup miss. After this
+          // read, compare the exact content against the model-visible cache and
+          // return a stub if it is identical. This still costs disk/IPC, but it
+          // prevents duplicate file bodies from being billed as model tokens.
+          const exactDedupResult = checkReadDedup(
+            filePath,
+            offsetProvided ? offset : undefined,
+            limitProvided ? limit : undefined,
+            this.readFileState,
+            currentFsVersion,
+            fullContent,
+            currentSignature,
+          )
+          if (exactDedupResult.isDuplicate && exactDedupResult.stub) {
+            const now = Date.now()
+            this.readFileTimestamps.set(filePath, { timestamp: now, hash: newHash })
+            const existingStateAfterRead = this.readFileState.get(filePath)
+            this.readFileState.set(filePath, {
+              content: fullContent,
+              timestamp: now,
+              offset: requestedOffset,
+              limit: requestedLimit,
+              source: 'read',
+              signature: currentSignature,
+              hash: newHash,
+              fsVersion: currentFsVersion,
+              isPartialView: existingStateAfterRead?.isPartialView,
+            })
+            return exactDedupResult.stub
+          }
 
           // Byte-size guard (claude-vaz adoption, FileReadTool/limits.ts).
           // The cheap pre-flight stat that claude-vaz uses isn't available
@@ -2109,8 +2362,6 @@ ${preview}
               content += `\n\n[truncated at line ${end} of ${lines.length}; use offset: ${nextOffset} to continue]`
             }
           }
-          const newHash = this.simpleHash(fullContent)
-
           // Detect external modification BEFORE overwriting the stored
           // timestamp. If the file's content hash differs from what we
           // saw on the previous read — and the agent itself didn't write
@@ -2137,8 +2388,10 @@ ${preview}
           this.readFileState.set(filePath, {
             content: fullContent,
             timestamp: now,
-            offset: offsetProvided ? offset : undefined,
-            limit: limitProvided ? limit : undefined,
+            offset: requestedOffset,
+            limit: requestedLimit,
+            source: 'read',
+            signature: currentSignature,
             hash: newHash,
             fsVersion: currentFsVersion,
           })
@@ -2248,7 +2501,7 @@ ${preview}
           directory: directory,
           options
         })
-        return JSON.stringify(result, null, 2)
+        return this.formatSearchResultsCompact(result)
       }
     })
 
@@ -2329,7 +2582,7 @@ ${preview}
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content: newContent })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(newContent) })
-          this.readFileState.set(path, { content: newContent, timestamp: Date.now(), offset: undefined, limit: undefined, hash: this.simpleHash(newContent), fsVersion: getFsVersion() })
+          this.readFileState.set(path, { content: newContent, timestamp: Date.now(), offset: undefined, limit: undefined, source: 'write', hash: this.simpleHash(newContent), fsVersion: getFsVersion() })
           bumpFsVersion(`write:${path}`)
           this.refreshFileTree()
           return JSON.stringify({
@@ -2400,7 +2653,7 @@ ${preview}
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(content) })
-          this.readFileState.set(path, { content, timestamp: Date.now(), offset: undefined, limit: undefined, hash: this.simpleHash(content), fsVersion: getFsVersion() })
+          this.readFileState.set(path, { content, timestamp: Date.now(), offset: undefined, limit: undefined, source: 'write', hash: this.simpleHash(content), fsVersion: getFsVersion() })
           bumpFsVersion(`create:${path}`)
           this.refreshFileTree()
           return JSON.stringify({
@@ -2670,7 +2923,7 @@ ${preview}
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content: newContent })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(newContent) })
-          this.readFileState.set(path, { content: newContent, timestamp: Date.now(), offset: undefined, limit: undefined, hash: this.simpleHash(newContent), fsVersion: getFsVersion() })
+          this.readFileState.set(path, { content: newContent, timestamp: Date.now(), offset: undefined, limit: undefined, source: 'write', hash: this.simpleHash(newContent), fsVersion: getFsVersion() })
           bumpFsVersion(`edit:${path}`)
           this.refreshFileTree()
           return JSON.stringify({

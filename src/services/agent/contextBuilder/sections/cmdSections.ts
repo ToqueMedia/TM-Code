@@ -238,14 +238,6 @@ export function getCmdGlobalMemorySection(ctx: CmdPromptContext): string | null 
   return `# User memory (global)\nIMPORTANT: These are the user's personal global instructions. They OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nCurrent ~/.toquemedia-studio/TMS.md:\n${sanitizeProjectContent(truncated)}`
 }
 
-export function getCmdClaudeMdSection(ctx: CmdPromptContext): string | null {
-  if (!ctx.claudeMdContent) return null
-  const truncated = ctx.claudeMdContent.length > 8000
-    ? ctx.claudeMdContent.slice(0, 8000) + '\n\n[... truncated — read CLAUDE.md for full content]'
-    : ctx.claudeMdContent
-  return `# claudeMd\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of ${ctx.normalizedCwd}/CLAUDE.md (project instructions):\n${sanitizeProjectContent(truncated)}`
-}
-
 /**
  * TMS.md guidance for CMD mode — instructs the agent to create or
  * maintain the project-level TMS.md persistent memory file.
@@ -270,7 +262,7 @@ export function getCmdTmsGuidanceSection(ctx: CmdPromptContext): string | null {
 - \`# TMS — Project Memory\`
 - \`## Project Analysis\` (name, framework, package manager, key deps, directory overview)
 - \`## Memory\` with sub-sections: \`### Milestones\` (dated entries), \`### Decisions\` (with rationale), \`### Pending Tasks\`
-- \`## Custom Instructions\` (developer-specific rules from CLAUDE.md or user input)
+- \`## Custom Instructions\` (developer-specific rules from user input)
 
 Use your existing knowledge of the project (file reads, package.json, directory structure) to populate it. This file persists across sessions and is your project-level persistent memory.`
 }
@@ -291,7 +283,7 @@ export function getCmdTmsContentSection(ctx: CmdPromptContext): string | null {
 
 /**
  * CMD-mode session memory. Reads from CmdPromptContext.sessionMemory
- * (loaded in the gather phase alongside TMS.md and CLAUDE.md).
+ * (loaded in the gather phase alongside TMS.md).
  * Returns null when no session memory has been recorded yet.
  */
 export function getCmdSessionMemorySection(ctx: CmdPromptContext): string | null {

@@ -240,7 +240,7 @@ async function resolveOneMention(token: string, executor: ToolExecutor): Promise
 
     // Fresh full view already in context → render nothing
     // (claude-vaz `already_read_file` normalizes to []).
-    if (lineStart === undefined && executor.isFileFreshInContext(absolutePath)) return NO_MENTION
+    if (lineStart === undefined && await executor.isFileFreshInContext(absolutePath)) return NO_MENTION
 
     const input: Record<string, unknown> = { file_path: absolutePath }
     if (lineStart !== undefined) {

@@ -27,6 +27,7 @@ use keyring::Entry;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::error::Error as StdError;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -44,6 +45,85 @@ const KEYRING_SERVICE: &str = "tm-code-byok";
 /// user's provider for up to the 5-min timeout — real money on a BYOK key.
 #[derive(Default)]
 pub struct ByokStreamRegistry(pub Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>);
+
+fn redacted_reqwest_url(url: &reqwest::Url) -> String {
+    let mut out = format!(
+        "{}://{}",
+        url.scheme(),
+        url.host_str().unwrap_or("<missing-host>")
+    );
+    if let Some(port) = url.port() {
+        out.push_str(&format!(":{port}"));
+    }
+    out.push_str(url.path());
+    out
+}
+
+fn format_reqwest_request_error(err: &reqwest::Error) -> String {
+    let mut tags = Vec::new();
+    if err.is_timeout() {
+        tags.push("timeout");
+    }
+    if err.is_connect() {
+        tags.push("connect");
+    }
+    if err.is_request() {
+        tags.push("request");
+    }
+    if err.is_body() {
+        tags.push("body");
+    }
+    if err.is_decode() {
+        tags.push("decode");
+    }
+
+    let mut details = Vec::new();
+    if !tags.is_empty() {
+        details.push(format!("kind={}", tags.join(",")));
+    }
+    if let Some(status) = err.status() {
+        details.push(format!("status={status}"));
+    }
+    if let Some(url) = err.url() {
+        details.push(format!("url={}", redacted_reqwest_url(url)));
+    }
+
+    let mut causes = Vec::new();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !text.is_empty() && !causes.iter().any(|existing| existing == &text) {
+            causes.push(text);
+        }
+        if causes.len() >= 6 {
+            break;
+        }
+        source = cause.source();
+    }
+
+    let mut msg = format!("request failed: {err}");
+    if !details.is_empty() {
+        msg.push_str(&format!(" ({})", details.join(", ")));
+    }
+    if !causes.is_empty() {
+        msg.push_str(&format!("; cause chain: {}", causes.join(" → ")));
+    }
+    msg
+}
+
+fn is_unsafe_transport_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "host"
+            | "expect"
+            | "te"
+            | "trailer"
+            | "upgrade"
+    )
+}
 
 fn entry_for(provider: &str) -> Result<Entry, String> {
     Entry::new(KEYRING_SERVICE, provider).map_err(|e| format!("keyring init failed: {e}"))
@@ -270,6 +350,7 @@ pub async fn byok_local_chat_stream(
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
+        .http1_only()
         .danger_accept_invalid_certs(true)
         .build()
         .map_err(|e| format!("client init failed: {e}"))?;
@@ -281,6 +362,9 @@ pub async fn byok_local_chat_stream(
         .header("Accept", "text/event-stream")
         .body(input.body);
     for (k, v) in input.headers.iter() {
+        if is_unsafe_transport_header(k) {
+            continue;
+        }
         req = req.header(k, v);
     }
 
@@ -292,7 +376,7 @@ pub async fn byok_local_chat_stream(
                     &event_name,
                     serde_json::json!({
                         "type": "error",
-                        "error": format!("request failed: {e}"),
+                        "error": format_reqwest_request_error(&e),
                     }),
                 );
                 return;
@@ -424,7 +508,9 @@ pub async fn byok_chat_stream(
         if has_auth { "present" } else { "none(local)" }
     );
 
-    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(300));
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .http1_only();
     if is_local {
         // Self-signed local gateways (rare) — accept invalid certs only for
         // localhost, NEVER for cloud.
@@ -443,6 +529,9 @@ pub async fn byok_chat_stream(
     let mut has_content_type = false;
     let mut has_accept = false;
     for (k, v) in input.headers.iter() {
+        if is_unsafe_transport_header(k) {
+            continue;
+        }
         if k.eq_ignore_ascii_case("content-type") {
             has_content_type = true;
         }
@@ -479,7 +568,7 @@ pub async fn byok_chat_stream(
             Err(e) => {
                 let _ = app.emit(
                     &event_name,
-                    serde_json::json!({ "type": "error", "error": format!("request failed: {e}") }),
+                    serde_json::json!({ "type": "error", "error": format_reqwest_request_error(&e) }),
                 );
                 cleanup(&registry_arc);
                 return;

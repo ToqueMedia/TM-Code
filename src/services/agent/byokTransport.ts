@@ -61,6 +61,24 @@ function headersToObject(h: HeadersInit | undefined): Record<string, string> {
   return out
 }
 
+function dropUnsafeTransportHeaders(headers: Record<string, string>): void {
+  for (const key of Object.keys(headers)) {
+    const lower = key.toLowerCase()
+    if (
+      lower === 'content-length' ||
+      lower === 'transfer-encoding' ||
+      lower === 'connection' ||
+      lower === 'host' ||
+      lower === 'expect' ||
+      lower === 'te' ||
+      lower === 'trailer' ||
+      lower === 'upgrade'
+    ) {
+      delete headers[key]
+    }
+  }
+}
+
 /**
  * Build a `fetch` implementation bound to one BYOK provider. Pass to
  * `new OpenAI({ fetch: createByokFetch({...}) })`.
@@ -113,6 +131,10 @@ export function createByokFetch(opts: { expectedHost: string; apiShape: ByokApiS
       }
       Object.assign(headers, anthropicHeaders())
     }
+    // The body may have been rewritten after the SDK created headers
+    // (Anthropic shape translation). Let reqwest compute framing from the
+    // actual body instead of forwarding stale/hop-by-hop headers.
+    dropUnsafeTransportHeaders(headers)
 
     const signal = init?.signal ?? undefined
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')

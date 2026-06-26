@@ -101,7 +101,11 @@ describe('BYOK direct routing — Anthropic (native Messages API)', () => {
     // The SDK would POST to {baseURL}/chat/completions with Authorization: Bearer.
     await byokFetch('https://api.anthropic.com/chat/completions', {
       method: 'POST',
-      headers: { Authorization: 'Bearer sk-ant-USER_KEY', 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: 'Bearer sk-ant-USER_KEY',
+        'Content-Type': 'application/json',
+        'Content-Length': '999999',
+      },
       body: JSON.stringify({ model: 'claude-opus-4-8', max_tokens: 100, stream: true, messages: [{ role: 'user', content: 'hi' }] }),
     })
 
@@ -114,6 +118,7 @@ describe('BYOK direct routing — Anthropic (native Messages API)', () => {
     expect(sent.expectedHost).toBe('api.anthropic.com')
     expect(sent.headers['x-api-key']).toBe('sk-ant-USER_KEY')
     expect(sent.headers.Authorization).toBeUndefined()
+    expect(sent.headers['Content-Length']).toBeUndefined()
     expect(sent.headers['anthropic-version']).toBe('2023-06-01')
 
     // → body translated to Anthropic shape (proves it's the provider's own API).
