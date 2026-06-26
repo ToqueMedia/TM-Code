@@ -11,7 +11,6 @@ import { useAuthStore } from '../../stores/authStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
 import { useProblemsStore } from '../../stores/problemsStore'
-import { devServerManager } from '../../services/devServerManager'
 import { activatePreview } from '../../services/previewActivation'
 import AgentService from '../../services/agent/agentService'
 import ToolExecutor from '../../services/agent/toolExecutor'
@@ -854,39 +853,11 @@ export function usePromptBar() {
 
           const layoutStore = useLayoutStore.getState()
 
-          // If preview server is running, reload and show preview
+          // If a preview server is running, keep it fresh but do not switch
+          // views. Chat-mode completion stays in Chat; the assistant's final
+          // answer tells the user to click Preview when they want to inspect it.
           if (selectIsPreviewServerRunning(layoutStore)) {
             layoutStore.reloadPreview()
-            layoutStore.setViewMode('preview')
-            return
-          }
-
-          // If a server is already starting (e.g. postScaffoldPipeline kicked
-          // it off and waitForServerReady hasn't resolved yet), don't start a
-          // second one — the first will auto-transition when ready.
-          if (devServerManager.isActive()) return
-
-          // Otherwise, try to start preview if we have a dev command
-          if (devCommand && currentProject?.path) {
-            layoutStore.addDevServerLog(`Starting dev server (${devCommand})...`, 'info')
-            // Detect project kind so fullstack monorepos get dual-port kill
-            // and port-authoritative URL classification (not just 'frontend').
-            let projectKind: 'frontend' | 'backend' | 'fullstack' | undefined
-            try {
-              const { detectProjectCategory, categoryToServerHint } = await import('../../services/projectTypeDetector')
-              const cat = await detectProjectCategory(currentProject.path)
-              projectKind = categoryToServerHint(cat)
-            } catch { /* non-fatal */ }
-            try {
-              const { resolveFrontendPortHint } = await import('../../services/templateService')
-              const frontendPortHint = projectKind
-                ? await resolveFrontendPortHint(currentProject.path, projectKind)
-                : undefined
-              await devServerManager.start(currentProject.path, devCommand, { projectKind, frontendPortHint })
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err)
-              layoutStore.addDevServerLog(`Could not start dev server: ${msg}`, 'error')
-            }
           }
         },
         onError: (error) => {

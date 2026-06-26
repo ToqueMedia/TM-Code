@@ -35,7 +35,7 @@ import { devServerManager } from '../devServerManager'
 import { resolveWorkerUrl, resolveAIWorkerUrl } from '../../utils/devUrls'
 import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
-import { READ_FILE, WRITE_FILE, EDIT_FILE } from './toolNames'
+import { READ_FILE, WRITE_FILE, EDIT_FILE, STOP_DEV_SERVER } from './toolNames'
 import { createFileStateCacheWithSizeLimit, type FileStateCache } from './toolExecutor/fileStateCache'
 import { checkReadDedup } from './toolExecutor/readDedup'
 import { getSnippetForTwoFileDiff } from './toolExecutor/changedFileSnippet'
@@ -2933,7 +2933,7 @@ ${preview}
     this.tools.set('start_dev_server', {
       definition: {
         name: 'start_dev_server',
-        description: `Start the project's dev server as a background process. Returns immediately and the server keeps running in the background. The preview does NOT open by itself — when you finish, tell the user the app is running and to click the **Preview** button (top-right of the chat) to open it. ONE dev server per project.
+        description: `Start the project's dev server as a background process. Returns immediately and the server keeps running in the background. The preview does NOT open by itself. If the user should inspect the running app, finish by telling them to click the **Preview** button (top-right of the chat). If you only started the server for debugging, call stop_dev_server before your final answer. ONE dev server per project.
 
 Pass the command that runs the WHOLE project (e.g. "npm run dev" — even if it fans out frontend+backend via concurrently, workspaces, or turbo).
 
@@ -2997,14 +2997,40 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           const url = devServerManager.getUrl()
           const hintNote = frontendPortHint ? ` [frontend port hint: ${frontendPortHint}]` : ''
           if (url) {
-            return `Dev server started and running at ${url} (${projectKind})${hintNote}. The preview does NOT open automatically — when you're done, tell the user the app is running and to click the Preview button (top-right of the chat) to view it.`
+            return `Dev server started and running at ${url} (${projectKind})${hintNote}. The preview does NOT open automatically. If this should stay available for manual inspection, tell the user to click the Preview button (top-right of the chat). If this was only for debugging, call stop_dev_server before your final answer.`
           }
-          return `Dev server starting with command: ${command} (${projectKind})${hintNote}. It boots in the background; the preview does NOT open automatically. When you finish, tell the user to click the Preview button (top-right of the chat) to open it.`
+          return `Dev server starting with command: ${command} (${projectKind})${hintNote}. It boots in the background; the preview does NOT open automatically. If this should stay available for manual inspection, tell the user to click the Preview button (top-right of the chat). If this was only for debugging, call stop_dev_server before your final answer.`
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
           return `Error starting dev server: ${msg}. You can try a different command or check that dependencies are installed.`
         }
       }
+    })
+
+    // === stop_dev_server ===
+    this.tools.set(STOP_DEV_SERVER, {
+      definition: {
+        name: STOP_DEV_SERVER,
+        description: 'Stop the currently running project dev server started by start_dev_server. Use this after a temporary debug/smoke-test server is no longer needed, before giving the final answer. If the user needs to inspect the app manually, leave the server running and tell them to click the Preview button instead.',
+        input_schema: {
+          type: 'object',
+          properties: {},
+          required: [],
+        },
+      },
+      execute: async () => {
+        if (!devServerManager.isActive()) {
+          return 'No dev server is running.'
+        }
+
+        try {
+          await devServerManager.stop()
+          return 'Dev server stopped.'
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error)
+          return `Error stopping dev server: ${msg}`
+        }
+      },
     })
 
 

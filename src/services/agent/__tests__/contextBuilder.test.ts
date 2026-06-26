@@ -258,7 +258,14 @@ describe('ContextBuilder', () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
       expect(prompt).toMatch(/execute_command/)
       expect(prompt).toMatch(/read_dev_server_logs/)
+      expect(prompt).toMatch(/stop_dev_server/)
       expect(prompt).toMatch(/request_credentials/)
+    })
+
+    it('keeps Chat-mode preview handoff manual after dev server verification', async () => {
+      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+      expect(prompt).toContain('The Preview view does NOT open automatically')
+      expect(prompt).toContain('click the **Preview** button at the top-right of Chat')
     })
 
     it('includes terminal-style loop guidance in Chat mode', async () => {

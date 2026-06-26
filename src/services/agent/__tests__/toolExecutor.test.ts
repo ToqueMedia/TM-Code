@@ -1255,6 +1255,8 @@ describe('I: Tool definitions and metadata', () => {
     expect(names).toContain('read_file')
     expect(names).toContain('write_file')
     expect(names).toContain('execute_command')
+    expect(names).toContain('start_dev_server')
+    expect(names).toContain('stop_dev_server')
     expect(names).toContain('agent_shell_start')
     expect(names).toContain('agent_shell_write')
     expect(names).toContain('agent_shell_read')

@@ -94,6 +94,7 @@ export function humaniseToolName(toolName: string): string {
     execute_command: 'run a shell command',
     run_streaming_command: 'run a shell command',
     start_dev_server: 'start the dev server',
+    stop_dev_server: 'stop the dev server',
     kill_process: 'stop a process',
     git_commit: 'commit changes',
     git_push: 'push to git remote',

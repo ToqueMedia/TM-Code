@@ -169,7 +169,7 @@ export function buildByokThinkingConfig(
     case 'openai_reasoning_effort':
     case 'gemini_thinking_budget':
       // Gemini's OpenAI-compat endpoint maps reasoning_effort → thinkingConfig.
-      return { reasoning_effort: 'medium' }
+      return { reasoning_effort: snapshot.modelId === 'step-3.7-flash' ? 'high' : 'medium' }
     default:
       return undefined
   }

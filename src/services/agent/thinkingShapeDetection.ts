@@ -8,6 +8,7 @@
  *   - DashScope/Qwen: `enable_thinking: false`
  *   - Google Gemini: `reasoning_effort: 'low'` (via OpenAI-compat /v1beta/openai/)
  *   - OpenAI        : `reasoning_effort: 'minimal'`
+ *   - StepFun       : `reasoning_effort`
  *   - Moonshot Kimi: `thinking: { enabled: false }` (Kimi extension; only on K2.5 / K2.6)
  *
  * The catalog can ship the wrong shape (we saw Mimo-on-OpenRouter wired
@@ -49,6 +50,7 @@ const SHAPE_RULES: ReadonlyArray<{
   // maps OpenAI-style reasoning_effort to Gemini's internal thinkingConfig.
   { match: (h) => h === 'generativelanguage.googleapis.com', shape: 'openai_reasoning_effort' },
   { match: (h) => h === 'api.openai.com', shape: 'openai_reasoning_effort' },
+  { match: (h) => h === 'api.stepfun.ai' || h.endsWith('.stepfun.ai'), shape: 'openai_reasoning_effort' },
   // Moonshot Kimi — `thinking` Kimi-specific extension. The kimi-k2-thinking*
   // SKUs reason unconditionally; only k2.5 / k2.6 honor the toggle.
   { match: (h) => h === 'api.moonshot.ai' || h.endsWith('.moonshot.ai') || h === 'api.moonshot.cn' || h.endsWith('.moonshot.cn'), shape: 'moonshot_thinking' },

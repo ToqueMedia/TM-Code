@@ -2,8 +2,6 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { invoke } from '@/utils/invokeMetrics'
 import { tauriFetch } from '../services/tauriFetch'
-import { resolveWorkerUrl } from '../utils/devUrls'
-import FirebaseAuthService from '../services/auth/firebaseAuth'
 import { inferLocalModelCapabilities } from './byokModelCapabilities'
 import { cleanBaseURL } from './byokBaseURL'
 
@@ -176,6 +174,46 @@ export interface TestKeyResult {
   statusCode?: number
 }
 
+function buildDirectValidationURL(provider: ByokProvider, baseURLOverride?: string): string | null {
+  const baseURL = cleanBaseURL(baseURLOverride || provider.defaultBaseURL)
+  if (!baseURL) return null
+  const base = baseURL.replace(/\/+$/, '')
+  return provider.apiShape === 'anthropic'
+    ? `${base}/v1/messages`
+    : `${base}/chat/completions`
+}
+
+function buildDirectValidationBody(provider: ByokProvider, modelId: string): Record<string, unknown> {
+  if (provider.apiShape === 'anthropic') {
+    return {
+      model: modelId,
+      max_tokens: 5,
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'ok' }],
+        },
+      ],
+      stream: false,
+    }
+  }
+
+  return {
+    model: modelId,
+    messages: [{ role: 'user', content: 'ok' }],
+    max_tokens: 5,
+    stream: false,
+  }
+}
+
+function buildDirectValidationHeaders(provider: ByokProvider, apiKey: string): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    [provider.authHeader]: `${provider.authPrefix}${apiKey}`,
+    ...(provider.extraHeaders ?? {}),
+  }
+}
+
 // ── Local providers (hardcoded) ──
 //
 // Ollama and LM Studio are always available regardless of auth state, so the
@@ -191,8 +229,8 @@ export interface TestKeyResult {
 //
 // BYOK is IDE → SDK → provider DIRECT (never the TM worker), so the catalog is
 // owned by the IDE — there is no server `/v1/byok/providers` fetch anymore.
-// Curated set: Google Gemini + DashScope/Alibaba (both OpenAI-compat),
-// Custom (free-text OpenAI-compat), and Anthropic (native Messages API).
+// Curated set: Google Gemini + DashScope/Alibaba + StepFun (OpenAI-compat),
+// Custom (free-text OpenAI-compatible), and Anthropic (native Messages API).
 //
 // `contextWindow` here is only a DEFAULT — under BYOK the user declares the
 // real window via the Settings dropdown (perProviderConfig.contextWindow),
@@ -238,6 +276,19 @@ const CLOUD_PROVIDERS: ByokProvider[] = [
       { id: 'qwen3-coder-plus', label: 'Qwen3 Coder Plus', capabilities: { images: false, audio: false, video: false, tools: true }, contextWindow: 1_048_576, supportsThinking: false },
       { id: 'qwen-plus', label: 'Qwen Plus', capabilities: { images: false, audio: false, video: false, tools: true }, contextWindow: 131_072, supportsThinking: false },
       { id: 'qwen-max', label: 'Qwen Max', capabilities: { images: false, audio: false, video: false, tools: true }, contextWindow: 32_768, supportsThinking: false },
+    ],
+  },
+  {
+    id: 'stepfun',
+    name: 'StepFun',
+    enabled: true,
+    group: 'cloud',
+    defaultBaseURL: 'https://api.stepfun.ai/v1',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    apiShape: 'openai_compat',
+    models: [
+      { id: 'step-3.7-flash', label: 'Step 3.7 Flash', capabilities: { images: true, audio: false, video: false, tools: true }, contextWindow: 262_144, supportsThinking: true, thinkingShape: 'openai_reasoning_effort' },
     ],
   },
   {
@@ -522,6 +573,7 @@ export const useByokStore = create<ByokState>()(
 
       testKey: async (providerId, modelId, keyOverride, baseURLOverride) => {
         const provider = get().providers.find(p => p.id === providerId)
+        if (!provider) return { valid: false, error: `Unknown provider: ${providerId}` }
 
         // Local providers: the worker can't reach the user's localhost. Hit
         // the discovery endpoint directly; success means the server is up
@@ -550,9 +602,6 @@ export const useByokStore = create<ByokState>()(
         }
 
         try {
-          const token = await FirebaseAuthService.getInstance().getIdToken()
-          if (!token) return { valid: false, error: 'Not authenticated' }
-
           // Resolve the key — explicit override wins (Settings form before
           // saving), otherwise read from keychain.
           let key = keyOverride
@@ -566,28 +615,28 @@ export const useByokStore = create<ByokState>()(
             }
           }
 
-          const baseURL = baseURLOverride ?? get().perProviderConfig[providerId]?.baseURL
-
-          const res = await tauriFetch(`${resolveWorkerUrl()}/v1/byok/validate`, {
+          const url = buildDirectValidationURL(
+            provider,
+            baseURLOverride ?? get().perProviderConfig[providerId]?.baseURL,
+          )
+          if (!url) return { valid: false, error: 'Base URL is required for this provider' }
+          const startedAt = Date.now()
+          const res = await tauriFetch(url, {
             method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ provider: providerId, key, model: modelId, baseURL }),
+            headers: buildDirectValidationHeaders(provider, key),
+            body: JSON.stringify(buildDirectValidationBody(provider, modelId)),
+            timeoutSecs: 20,
           })
+          const latencyMs = Date.now() - startedAt
 
-          const data = await res.json().catch(() => ({})) as {
-            valid?: boolean
-            latencyMs?: number
-            error?: string
-            statusCode?: number
-          }
+          if (res.ok) return { valid: true, latencyMs }
+
+          const text = await res.text().catch(() => '')
           return {
-            valid: data.valid === true,
-            latencyMs: data.latencyMs,
-            error: data.error,
-            statusCode: data.statusCode,
+            valid: false,
+            latencyMs,
+            statusCode: res.status,
+            error: text.slice(0, 300) || `Provider returned ${res.status}`,
           }
         } catch (err) {
           return { valid: false, error: err instanceof Error ? err.message : String(err) }

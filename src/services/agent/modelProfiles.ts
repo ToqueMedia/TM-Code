@@ -176,6 +176,27 @@ const GEMINI_3_1_PRO: ModelProfile = {
 }
 
 // ─────────────────────────────────────────────────
+// Step 3.7 Flash — StepFun. 256K contexto, multimodal nativo,
+// tool calling e reasoning_effort no endpoint OpenAI-compatible.
+// ─────────────────────────────────────────────────
+
+const STEP_3_7_FLASH: ModelProfile = {
+  id: 'step-3.7-flash',
+  name: 'Step 3.7 Flash',
+  modelId: 'step-3.7-flash',
+  contextWindow: 262_144,
+  maxOutputTokens: 32_768,
+
+  thinkingMode: 'toggleable',
+  supportsThinking: true,
+  thinkingMandatory: false,
+
+  supportsAttachments: true,
+  supportsSearch: false,
+  counterweights: [],
+}
+
+// ─────────────────────────────────────────────────
 // Registry
 // ─────────────────────────────────────────────────
 
@@ -196,6 +217,7 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'google/gemini-3.5-flash': GEMINI_3_5_FLASH,
   'gemini-3.1-pro-preview': GEMINI_3_1_PRO,
   'google/gemini-3.1-pro-preview': GEMINI_3_1_PRO,
+  'step-3.7-flash': STEP_3_7_FLASH,
 }
 
 export const DEFAULT_MODEL_ID = 'mimo-v2.5-pro-1m'

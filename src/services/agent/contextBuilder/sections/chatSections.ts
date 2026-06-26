@@ -17,7 +17,7 @@ import {
   READ_FILE, SEARCH_FILES, LIST_DIRECTORY, GLOB,
   READ_SKILL, READ_LARGE_RESULT, READ_DEV_SERVER_LOGS,
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
-  EXECUTE_COMMAND, EXECUTE_COMMAND_BACKGROUND, CHECK_BACKGROUND_COMMANDS, START_DEV_SERVER,
+  EXECUTE_COMMAND, EXECUTE_COMMAND_BACKGROUND, CHECK_BACKGROUND_COMMANDS, START_DEV_SERVER, STOP_DEV_SERVER,
   UPDATE_TASKS, REQUEST_CREDENTIALS,
 } from '../../toolNames'
 import { extractCriticalSectionsWithStats, sanitizeProjectContent } from '../helpers'
@@ -209,6 +209,8 @@ You are the brain; the IDE is the body. **OBSERVE** every action's output before
 **After \`${START_DEV_SERVER}\`:**
  - **CALL** \`${READ_DEV_SERVER_LOGS}\` to verify the server started successfully.
  - On crash → **DIAGNOSE**: missing deps? port conflict? syntax error?
+ - The Preview view does NOT open automatically. At final handoff, tell the developer to click the **Preview** button at the top-right of Chat to inspect the running app.
+ - If you started the dev server only for temporary debugging and the developer does not need a running app to inspect, call \`${STOP_DEV_SERVER}\` before your final answer.
 
 **After installing packages:**
  - **Blocking install**: **CONFIRM** exit code 0 before writing code that depends on the package. On install failure, **fix the install first**.
@@ -223,7 +225,8 @@ export function getToolsSection(ctx: PromptContext): string {
   return `# Using your tools
 
 ${totalTools} tools available. Key behaviors not obvious from tool schemas:
- - \`${EXECUTE_COMMAND}\` blocks until the process exits. \`${START_DEV_SERVER}\` returns immediately (background process), auto-detects URLs, and feeds the preview panel. Use \`${START_DEV_SERVER}\` for dev servers — it handles host injection and URL classification. Use \`${EXECUTE_COMMAND}\` for one-off commands and verification (curl, build, test).
+ - \`${EXECUTE_COMMAND}\` blocks until the process exits. \`${START_DEV_SERVER}\` returns immediately (background process), auto-detects URLs, and feeds the preview panel without opening it. Use \`${START_DEV_SERVER}\` for dev servers — it handles host injection and URL classification. Use \`${EXECUTE_COMMAND}\` for one-off commands and verification (curl, build, test).
+ - \`${STOP_DEV_SERVER}\` stops the dev server you no longer need. Use it after temporary debug/smoke-test servers; leave the server running only when the developer should manually inspect the app, and then tell them to click Preview.
  - \`${WRITE_FILE}\` replaces the entire file — omitted code is deleted. Use \`${EDIT_FILE}\` for small changes (~20 lines).
  - \`${WRITE_FILE}\` and \`${EDIT_FILE}\` require you to \`${READ_FILE}\` first. The system will block writes to files you haven't read.
  - \`${READ_DEV_SERVER_LOGS}\` reads output from the running dev server AND runtime errors from the live preview (browser console). Entries prefixed [runtime] are from the browser. Use after file changes or when asked about preview/browser errors. The buffer is CUMULATIVE — old errors persist after a fix; pass the response's \`next_since\` cursor as \`since_timestamp\` on the follow-up call to verify whether your fix landed (otherwise you keep seeing the same stale entry).
@@ -465,7 +468,7 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
       '**What does NOT work:** the live preview iframe — there is no `npm run dev` equivalent the IDE can auto-detect.',
       '',
       '**Options for the developer:**',
-      `1. **Tell the agent your start command** — e.g. ${commands[pt] || '`./your-server`'}. The agent can call \`start_dev_server\` with any command, and the preview will load once the server is ready.`,
+      `1. **Tell the agent your start command** — e.g. ${commands[pt] || '`./your-server`'}. The agent can call \`start_dev_server\` with any command; once it is ready, the developer opens it manually with the Preview button.`,
       '2. **Stay in Chat mode** — the agent can still edit files, run tests, and use the Terminal. Start the server manually and use the HTTP Client or an external browser to verify changes.',
       '3. **Switch to Terminal mode** — full freedom to run any build/serve command without IDE constraints.',
     ].join('\n')
@@ -541,7 +544,7 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
       return [
         '# Project compatibility',
         '',
-        'This project has a `package.json` but no `dev`, `start`, or `serve` script. The IDE needs one of these to auto-start a dev server for the preview iframe.',
+        'This project has a `package.json` but no `dev`, `start`, or `serve` script. The IDE needs one of these to start a dev server for the preview iframe.',
         '',
         '**Options:**',
         '1. Add a `"dev"` script to `package.json` that starts your development server.',
@@ -1124,7 +1127,7 @@ export function getReminderSection(ctx: PromptContext): string {
 
 1. **COMPLETE** every file. Output goes to disk as-is — omitted code is deleted code.
 2. **AFTER** file changes with a dev server running: \`${READ_DEV_SERVER_LOGS}\` and fix errors before continuing. Track the \`next_since\` cursor — without it you re-read stale entries.
-3. **FINAL CHECKPOINT**: run one highest-signal verification path for the change (dev-server logs, typecheck/build, targeted test, or endpoint curl). If it passes, update \`${UPDATE_TASKS}\` and TMS.md only when the task is significant, then stop with summary + verification + next steps. **Do not run extra defensive checks after a clean pass.** If verification isn't possible, say so explicitly. When the task tracker has \`in_progress\` rows still open, never call the run "done" or mark everything completed in one \`${UPDATE_TASKS}\` jump; resume the in_progress row and flip statuses one at a time as each acceptance is verified.
+3. **FINAL CHECKPOINT**: run one highest-signal verification path for the change (dev-server logs, typecheck/build, targeted test, or endpoint curl). If it passes, update \`${UPDATE_TASKS}\` and TMS.md only when the task is significant, then stop with summary + verification + next steps. End the report with a CTA for user-visible work: tell the developer to click the **Preview** button at the top-right of Chat to see what changed. If a dev server is left running for manual inspection, include that CTA; if it was only for debugging, call \`${STOP_DEV_SERVER}\` first. **Do not run extra defensive checks after a clean pass.** If verification isn't possible, say so explicitly. When the task tracker has \`in_progress\` rows still open, never call the run "done" or mark everything completed in one \`${UPDATE_TASKS}\` jump; resume the in_progress row and flip statuses one at a time as each acceptance is verified.
 4. **AFTER** \`execute_command\`: **READ** the output. If exit code ≠ 0, **DIAGNOSE AND FIX** the actual error. **DO NOT BLINDLY RETRY** the exact same command.
 5. **For reading files**, use \`${READ_FILE}\`. **For searching**, use \`${SEARCH_FILES}\`. **For listing directories**, use \`${LIST_DIRECTORY}\`. **For finding files by pattern**, use \`${GLOB}\`. Use \`${EXECUTE_COMMAND}\` to run test runners (\`jest\`, \`vitest\`), scripts (\`ts-node\`, \`bun\`), and system commands.
 6. **DEVELOPER-OWNED env vars** (third-party services the developer integrates — LLM, payments, email, SMTP, analytics, webhooks): call \`${REQUEST_CREDENTIALS}\` in the SAME turn you write \`process.env.X\`. For **PLATFORM-MANAGED** vars (\`TM_AUTH_*\`, \`TMDB_*\`, \`TM_FILES_*\`, \`APP_ID\`) use the matching \`provision_*\` tool instead — \`request_credentials\` is the wrong path.
@@ -1158,7 +1161,7 @@ export function getReminderSection(ctx: PromptContext): string {
 export function getCriticalReinjectionReminder(): string {
   return `<system-reminder>Active constraints (recap):
 1. COMPLETE every file you write. Output goes to disk as-is — omitted code is deleted code.
-2. AFTER file changes with a dev server running: call read_dev_server_logs and fix errors before continuing. Track the next_since cursor across calls — without it you re-read stale entries.
+2. AFTER file changes with a dev server running: call read_dev_server_logs and fix errors before continuing. Track the next_since cursor across calls — without it you re-read stale entries. The Preview view does not open automatically; final handoff must point the developer to the Preview button, or stop_dev_server if the server was debug-only.
 3. DEVELOPER-OWNED env vars (LLM, payments, email, SMTP, analytics, webhooks): call request_credentials in the SAME turn you write process.env.X. For PLATFORM-MANAGED vars (TM_AUTH_*, TMDB_*, TM_FILES_*, APP_ID) use the matching provision_* tool instead.
 </system-reminder>`
 }

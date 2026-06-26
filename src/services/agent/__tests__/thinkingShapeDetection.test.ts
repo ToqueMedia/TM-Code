@@ -101,6 +101,17 @@ describe('detectThinkingShapeFromBaseURL', () => {
     })
   })
 
+  describe('StepFun', () => {
+    it('matches the canonical API host', () => {
+      expect(detectThinkingShapeFromBaseURL('https://api.stepfun.ai/v1'))
+        .toBe('openai_reasoning_effort')
+    })
+    it('matches StepFun subdomains', () => {
+      expect(detectThinkingShapeFromBaseURL('https://gateway.stepfun.ai/v1'))
+        .toBe('openai_reasoning_effort')
+    })
+  })
+
   describe('Moonshot Kimi', () => {
     it('matches the international api host', () => {
       expect(detectThinkingShapeFromBaseURL('https://api.moonshot.ai/v1'))

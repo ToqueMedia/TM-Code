@@ -52,6 +52,7 @@ const TOOL_LABELS: Record<string, string> = {
   execute_command_background: t('toolLabel.backgroundCommand'),
   check_background_commands: t('toolLabel.checkingBackgroundCommands'),
   start_dev_server: t('toolLabel.startingServer'),
+  stop_dev_server: t('toolLabel.stoppingServer'),
   read_dev_server_logs: t('toolLabel.readingLogs'),
   read_large_result: t('toolLabel.readingOutput'),
   web_fetch: t('toolLabel.fetching'),
@@ -88,7 +89,11 @@ function getToolLabel(toolName: string): string {
   return TOOL_LABELS[toolName] || toolName
 }
 
-function getInputSummary(toolName: string, input: Record<string, unknown>): string {
+function getInputSummary(
+  toolName: string,
+  input: Record<string, unknown>,
+  result?: string,
+): string {
   const fileName = (p: string) => p.split('/').pop() || p
   // Resolver: new tool calls use file_path, old sessions (pre-rename) use path.
   const fp = String(input.file_path || input.path || '')
@@ -125,6 +130,8 @@ function getInputSummary(toolName: string, input: Record<string, unknown>): stri
       const type = input.server_type === 'backend' ? 'backend' : 'frontend'
       return `${type} server`
     }
+    case 'stop_dev_server':
+      return 'dev server'
     case 'read_dev_server_logs':
       return `last ${input.lines || 50} lines`
     case 'glob':
@@ -143,14 +150,19 @@ function getInputSummary(toolName: string, input: Record<string, unknown>): stri
       return desc.length > 50 ? desc.slice(0, 47) + '...' : desc
     }
     case 'update_tasks': {
+      // update_tasks uses patch semantics: input.tasks is only the patch the
+      // agent just sent, not the full tracker. For completed calls, prefer the
+      // executor's post-merge result so this row agrees with AgentTasksPanel.
+      const mergedProgress = result?.match(/Task list updated:\s+(\d+\/\d+ completed)\./)
+      if (mergedProgress) return mergedProgress[1]
+
       // input.tasks comes from streaming JSON — during partial parse it can be
       // a truthy non-array (e.g. an empty object or a string mid-deserialization).
       // The previous `if (tasks)` guard was permissive enough to fall through
       // and call .filter on a non-array, crashing the React tree.
       const tasks = input.tasks
       if (Array.isArray(tasks)) {
-        const done = tasks.filter((t: { status?: string }) => t?.status === 'completed').length
-        return `${done}/${tasks.length} completed`
+        return `${tasks.length} ${tasks.length === 1 ? 'update' : 'updates'}`
       }
       return ''
     }
@@ -183,7 +195,7 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
   const filePath = (toolCall.input?.file_path || toolCall.input?.path || toolCall.input?.oldPath || '') as string
   const useFileIcon = FILE_TOOLS.has(toolCall.toolName) && !!filePath
   const IconComponent = TOOL_ICONS[toolCall.toolName] || FiTool
-  const inputSummary = getInputSummary(toolCall.toolName, toolCall.input)
+  const inputSummary = getInputSummary(toolCall.toolName, toolCall.input, toolCall.result)
   // A tool call streams in with status:'running', but the serial tool loop
   // starts calls one at a time and can pause on each diff approval. `started`
   // (set on onToolCallStart, i.e. the moment a call's execute() begins)
