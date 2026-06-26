@@ -158,14 +158,12 @@ export interface ToolCallDisplay {
   /**
    * True once the tool actually BEGAN executing (set on onToolCallStart, which
    * fires right before toolExecutor.execute() in the serial tool loop). Tool
-   * calls are added with status:'running' the moment they stream in
-   * (addPendingToolCall), but the loop runs them one at a time and blocks on
-   * each diff approval — so a turn that emits N edits shows the first one's
-   * approval card while edits 2..N sit QUEUED behind it. Without this flag
-   * they all render an active "editing" spinner, which reads as N parallel
-   * edits firing at once (a confusing "race"). `started !== true` while
-   * status==='running' means "queued, not yet started" → rendered as a calm
-   * queued row instead of the active spinner.
+   * calls are added with status:'running' when they stream in, but execution
+   * starts one at a time and can pause on user gates such as diff approval.
+   * Without this flag, waiting calls would render active "editing" spinners,
+   * which reads as parallel writes. `started !== true` while status==='running'
+   * means "queued, not yet started" → rendered as a calm queued row instead of
+   * the active spinner.
    */
   started?: boolean
   timestamp: number

@@ -15,6 +15,7 @@ import { useGitStatusStore } from '@/stores/gitStatusStore'
 import { useCurrentProject } from '@/hooks/useProjectState'
 import { getFileIconByExtension } from '@/utils/iconMapper'
 import { CollabShareControls } from '@/components/collab/CollabShareControls'
+import { cleanGeneratedCommitMessage, ensureTmCodeCommitSignature } from './sourceControlCommit'
 
 const statusMeta: Record<string, { color: string; label: string }> = {
   added:     { color: tokens.colors.accent.greenBright, label: 'A' },
@@ -31,40 +32,8 @@ const ROW_HEIGHT = 28
 // commit button + file list out of the overflow-hidden column (user, 2026-06-17).
 const COMMIT_TEXTAREA_MIN_HEIGHT = 48
 const COMMIT_TEXTAREA_MAX_HEIGHT = 200
-const TM_CODE_COMMIT_SIGNATURE = 'Co-Authored-By: TM Code <tm.code@toquemedia.net>'
-
-// The signature is invisible to the user (never shown in the textarea) and is
-// appended at commit time — so both AI-generated and hand-typed messages get
-// signed, and the textarea stays clean (user request, 2026-06-12).
-function ensureTmCodeCommitSignature(message: string): string {
-  const trimmed = message.trim()
-  if (!trimmed) return ''
-  if (/^Co-Authored-By:\s*TM Code\s*</im.test(trimmed)) return trimmed
-  return `${trimmed}\n\n${TM_CODE_COMMIT_SIGNATURE}`
-}
-
-/** Strip any TM Code trailer the AI may still emit, so it never reaches the textarea. */
-function stripTmCodeCommitSignature(message: string): string {
-  return message.replace(/\n*^Co-Authored-By:\s*TM Code\s*<[^>]*>\s*$/gim, '').trim()
-}
-
-/**
- * Strip chain-of-thought from the AI message. The commit-message call is
- * non-streaming, so reasoning models (notably Gemini via the data-plane) emit
- * their `<think>…</think>` block INLINE in `message.content` instead of in a
- * separate streamed reasoning channel — without this it leaks straight into the
- * commit textarea (see screenshot, 2026-06-16).
- */
-function stripReasoningBlocks(text: string): string {
-  // 1. Remove well-formed <think>…</think> blocks.
-  let out = text.replace(/<think>[\s\S]*?<\/think>/gi, '')
-  // 2. A dangling close tag means the opener arrived as a separate field (or
-  //    was trimmed upstream) — keep only what follows the last </think>.
-  const lastClose = out.toLowerCase().lastIndexOf('</think>')
-  if (lastClose !== -1) out = out.slice(lastClose + '</think>'.length)
-  // 3. Drop any stray tag left over, but keep the surrounding text.
-  return out.replace(/<\/?think>/gi, '').trim()
-}
+const COMMIT_MESSAGE_AI_TIMEOUT_MS = 90_000
+const COMMIT_MESSAGE_WORKER_TIMEOUT_SECS = Math.ceil(COMMIT_MESSAGE_AI_TIMEOUT_MS / 1000)
 
 // ── Styles (injected once) ──────────────────────────────────────────────
 
@@ -414,37 +383,37 @@ function SourceControlPanel() {
   const handleGenerateCommitMsg = useCallback(async () => {
     if (files.length === 0 || generating) return
     setGenerating(true)
+    const aiAbort = new AbortController()
+    const aiTimeout = setTimeout(() => aiAbort.abort(), COMMIT_MESSAGE_AI_TIMEOUT_MS)
     try {
       const { invoke: inv } = await import('@tauri-apps/api/core')
-      const diffBase = staged.length > 0 ? 'git diff --cached' : 'git diff HEAD'
-      const maxDiffChars = 24_000
-      const diffResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
-        'execute_command',
-        { command: `${diffBase} --stat --compact-summary`, cwd: projectPath, timeoutSecs: 8 }
-      )
-      const diffStat = diffResult.success ? diffResult.stdout.trim() : ''
-      const nameStatusResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
-        'execute_command',
-        { command: `${diffBase} --name-status`, cwd: projectPath, timeoutSecs: 8 }
-      )
-      const nameStatus = nameStatusResult.success ? nameStatusResult.stdout.trim() : ''
-      const numstatResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
-        'execute_command',
-        { command: `${diffBase} --numstat`, cwd: projectPath, timeoutSecs: 8 }
-      )
-      const numstat = numstatResult.success ? numstatResult.stdout.trim() : ''
-      const detailResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
-        'execute_command',
-        {
-          command: `${diffBase} --no-color --find-renames --find-copies --diff-algorithm=histogram -U4`,
-          cwd: projectPath,
-          timeoutSecs: 10,
+      type CommandResult = { stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }
+      const runGit = async (command: string, timeoutSecs: number): Promise<{ text: string; note: string }> => {
+        try {
+          const result = await inv<CommandResult>('execute_command', { command, cwd: projectPath, timeoutSecs })
+          if (result.success) return { text: result.stdout.trim(), note: '' }
+          const reason = result.timedOut ? `timed out after ${timeoutSecs}s` : (result.stderr || `exit ${result.exitCode}`).trim()
+          return { text: result.stdout.trim(), note: `${command}: ${reason}` }
+        } catch (err) {
+          return { text: '', note: `${command}: ${err instanceof Error ? err.message : String(err)}` }
         }
-      )
-      const rawDiffDetail = detailResult.success ? detailResult.stdout.trim() : ''
+      }
+      const diffBase = staged.length > 0 ? 'git diff --cached' : 'git diff HEAD'
+      const maxDiffChars = 12_000
+      const [diffStatResult, nameStatusResult, numstatResult, detailResult] = await Promise.all([
+        runGit(`${diffBase} --stat --compact-summary`, 20),
+        runGit(`${diffBase} --name-status`, 20),
+        runGit(`${diffBase} --numstat`, 20),
+        runGit(`${diffBase} --no-color --find-renames --find-copies --diff-algorithm=histogram -U3`, 25),
+      ])
+      const diffStat = diffStatResult.text
+      const nameStatus = nameStatusResult.text
+      const numstat = numstatResult.text
+      const rawDiffDetail = detailResult.text
+      const diffNotes = [diffStatResult.note, nameStatusResult.note, numstatResult.note, detailResult.note].filter(Boolean).join('\n')
       const diffDetail = rawDiffDetail.length > maxDiffChars
         ? `${rawDiffDetail.slice(0, maxDiffChars)}\n\n[Diff truncated: ${rawDiffDetail.length - maxDiffChars} additional characters omitted]`
-        : rawDiffDetail
+        : (rawDiffDetail || '[Detailed diff unavailable; use file list, name/status, numstat, and stat only.]')
       const targetFiles = staged.length > 0 ? staged : unstaged
       const fileList = targetFiles.map(f => `${f.status}: ${f.path}`).join('\n')
 
@@ -483,7 +452,10 @@ Diff stat:
 ${diffStat}
 
 Diff hunks:
-${diffDetail}`
+${diffDetail}
+
+Diff collection notes:
+${diffNotes || 'none'}`
 
       const commitMessages = [{ role: 'user', content: promptContent }]
       let aiMsg = ''
@@ -495,7 +467,9 @@ ${diffDetail}`
           messages: commitMessages,
           maxTokens: 1200,
           temperature: 0.2,
+          signal: aiAbort.signal,
         })) ?? '').trim()
+        if (aiAbort.signal.aborted) throw new DOMException('Request aborted', 'AbortError')
       } else {
         const FirebaseAuthService = (await import('../../services/auth/firebaseAuth')).default
         let token = await FirebaseAuthService.getInstance().getIdToken()
@@ -508,6 +482,8 @@ ${diffDetail}`
         const response = await tauriFetch(`${workerUrl}/v1/chat/completions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          timeoutSecs: COMMIT_MESSAGE_WORKER_TIMEOUT_SECS,
+          signal: aiAbort.signal,
           body: JSON.stringify({
             messages: commitMessages,
             temperature: 0.2,
@@ -522,18 +498,20 @@ ${diffDetail}`
       }
 
       if (aiMsg) {
-        const cleaned = stripReasoningBlocks(aiMsg)
-          .replace(/^["'`]+|["'`]+$/g, '')
-          .replace(/^(commit message:?\s*)/i, '')
-          .trim()
-        setCommitMsg(stripTmCodeCommitSignature(cleaned))
+        setCommitMsg(cleanGeneratedCommitMessage(aiMsg))
         requestAnimationFrame(resizeTextarea)
       } else {
         showFeedback('error', 'AI returned empty message')
       }
     } catch (e) {
-      showFeedback('error', `Generate failed: ${e instanceof Error ? e.message : e}`)
-    } finally { setGenerating(false) }
+      const message = e instanceof DOMException && e.name === 'AbortError'
+        ? `timed out after ${COMMIT_MESSAGE_WORKER_TIMEOUT_SECS}s`
+        : e instanceof Error ? e.message : String(e)
+      showFeedback('error', `Generate failed: ${message}`)
+    } finally {
+      clearTimeout(aiTimeout)
+      setGenerating(false)
+    }
   }, [files, staged, unstaged, projectPath, generating, showFeedback, resizeTextarea])
 
   // ── Keyboard ─────────────────────────────────────────────────────────

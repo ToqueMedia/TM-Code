@@ -543,7 +543,7 @@ describe('safeToolPool', () => {
       const { telemetry } = await executeToolCalls({
         toolCalls: calls([
           ['w1', 'write_file'],
-          ['r1', 'read_file'], // queued behind w1
+          ['r1', 'read_file'], // waits for w1
         ]),
         toolExecutor: executor as unknown as ToolExecutor,
         abortSignal: null,

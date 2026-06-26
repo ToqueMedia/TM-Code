@@ -184,13 +184,11 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
   const useFileIcon = FILE_TOOLS.has(toolCall.toolName) && !!filePath
   const IconComponent = TOOL_ICONS[toolCall.toolName] || FiTool
   const inputSummary = getInputSummary(toolCall.toolName, toolCall.input)
-  // A tool call streams in with status:'running' but the serial tool loop runs
-  // calls one at a time, blocking on each diff approval. So a turn that emits
-  // several edits shows the first one's approval card while the rest sit QUEUED
-  // behind it. `started` (set on onToolCallStart, i.e. the moment a call's
-  // execute() begins) separates the one actually running from those still
-  // waiting — without it every queued edit shows an active spinner and reads
-  // as parallel edits firing at once.
+  // A tool call streams in with status:'running', but the serial tool loop
+  // starts calls one at a time and can pause on each diff approval. `started`
+  // (set on onToolCallStart, i.e. the moment a call's execute() begins)
+  // separates the one actually running from those still waiting; without it
+  // every queued edit shows an active spinner and reads as parallel writes.
   const isQueued = toolCall.status === 'running' && toolCall.started !== true
   const isRunning = toolCall.status === 'running' && toolCall.started === true
   const isFailed = toolCall.status === 'failed'
@@ -340,8 +338,8 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
       >
         {/* Status indicator */}
         {isQueued ? (
-          // Queued behind a pending approval — static clock, no spinner, so it
-          // reads as "waiting its turn" rather than "actively editing now".
+          // Waiting for the serial executor — static clock, no spinner, so it
+          // reads as queued rather than actively editing now.
           <Box color={tokens.colors.text.disabled} flexShrink={0}>
             <FiClock size={12} />
           </Box>

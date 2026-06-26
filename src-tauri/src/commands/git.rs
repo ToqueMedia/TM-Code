@@ -620,8 +620,11 @@ pub async fn git_commit(project_path: String, message: String) -> Result<String,
         )
     };
 
+    // TM Code attribution is the Co-Authored-By trailer above, not a GPG
+    // signature. Do not pass `-S`: many users do not have signing configured,
+    // and the Source Control button must work in a fresh repo.
     let output = git_cmd(&project_path)
-        .args(["commit", "-S", "-m", &signed_message])
+        .args(["commit", "-m", &signed_message])
         .output()
         .map_err(|e| format!("git commit failed: {}", e))?;
     if !output.status.success() {

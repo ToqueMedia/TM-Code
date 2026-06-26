@@ -914,15 +914,12 @@ class AgentService {
       toolUseId: string,
       signal?: AbortSignal,
     ): Promise<{ content: string; isError: boolean }> => {
-      // Announce + start the tool AT EXECUTION TIME (claude-vaz parity). The
-      // query loop runs tools serially, so doing the announcement here — rather
-      // than eagerly for every streamed tool call — means that while one tool
-      // is blocked on a permission / diff / credential decision, the tools
-      // queued behind it are NOT rendered yet. That stops a multi-tool turn
-      // from stacking "Em fila" cards that shove the pending authorization
-      // prompt off-screen. onToolCallPending creates the card; onToolCallStart
-      // immediately flips it to "running". (Execution was already gated by the
-      // serial loop + waitForUserGates — this only fixes the visual pile-up.)
+      // Announce + start the tool at execution time. The query loop runs tools
+      // serially, so doing the announcement here keeps later write calls out of
+      // the UI while an earlier permission / diff / credential decision is
+      // pending. onToolCallPending creates the card; onToolCallStart immediately
+      // flips it to "running". Execution was already gated by the serial loop +
+      // waitForUserGates; this only fixes the visual pile-up.
       callbacks.onToolCallPending(toolUseId, toolName);
       callbacks.onToolCallStart(toolUseId, toolName, toolInput);
 
