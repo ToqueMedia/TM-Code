@@ -1626,6 +1626,19 @@ export async function* query(
       // them; payloadReport null when the inspector failed (non-blocking).
       try {
         const tu = turnUsage as unknown as Record<string, unknown>
+        const promptDetails = tu.prompt_tokens_details && typeof tu.prompt_tokens_details === 'object'
+          ? tu.prompt_tokens_details as Record<string, unknown>
+          : undefined
+        const dashScopeCachedTokens =
+          typeof promptDetails?.cached_tokens === 'number'
+            ? promptDetails.cached_tokens
+            : typeof tu.cached_tokens === 'number'
+              ? tu.cached_tokens
+              : undefined
+        const cacheCreationInputTokens =
+          typeof tu.cache_creation_input_tokens === 'number' ? tu.cache_creation_input_tokens : undefined
+        const cacheReadInputTokens =
+          typeof tu.cache_read_input_tokens === 'number' ? tu.cache_read_input_tokens : dashScopeCachedTokens
         onRequestUsage?.({
           requestId: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
             ? crypto.randomUUID()
@@ -1634,21 +1647,31 @@ export async function* query(
           model,
           inputTokens: turnUsage.prompt_tokens ?? 0,
           outputTokens: turnUsage.completion_tokens ?? 0,
-          cacheCreationInputTokens: tu.cache_creation_input_tokens as number | undefined,
-          cacheReadInputTokens: tu.cache_read_input_tokens as number | undefined,
+          cacheCreationInputTokens,
+          cacheReadInputTokens,
           estimatedInputTokens: payloadReport?.totalEstimatedTokens ?? 0,
           breakdown: payloadReport?.byCategory ?? {},
         })
       } catch { /* usage logging never blocks the agent loop */ }
-      // Prompt-cache observability — surfaces Anthropic cache hit/miss per
+      // Prompt-cache observability — surfaces provider cache hit/miss per
       // request so a multi-turn session shows the first turn creating the
-      // cache (cache_creation_input_tokens) and subsequent turns reading it
-      // (cache_read_input_tokens). Only present when the provider/adapter
-      // reports cache fields (BYOK+Anthropic with cache_control breakpoints).
+      // cache and subsequent turns reading it. Anthropic reports
+      // cache_read_input_tokens; DashScope reports cached_tokens under usage.
       try {
         const tu2 = turnUsage as unknown as Record<string, unknown>
-        const cRead = tu2.cache_read_input_tokens as number | undefined
-        const cCreate = tu2.cache_creation_input_tokens as number | undefined
+        const promptDetails = tu2.prompt_tokens_details && typeof tu2.prompt_tokens_details === 'object'
+          ? tu2.prompt_tokens_details as Record<string, unknown>
+          : undefined
+        const cRead = typeof tu2.cache_read_input_tokens === 'number'
+          ? tu2.cache_read_input_tokens
+          : typeof promptDetails?.cached_tokens === 'number'
+            ? promptDetails.cached_tokens
+            : typeof tu2.cached_tokens === 'number'
+              ? tu2.cached_tokens
+              : undefined
+        const cCreate = typeof tu2.cache_creation_input_tokens === 'number'
+          ? tu2.cache_creation_input_tokens
+          : undefined
         if (cRead !== undefined || cCreate !== undefined) {
           const read = cRead ?? 0
           const create = cCreate ?? 0

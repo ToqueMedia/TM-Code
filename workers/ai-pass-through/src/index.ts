@@ -19,6 +19,7 @@ import { createRequestId, logRequest } from './logging'
 import { injectStreamOptions, observeUsage } from './usage'
 import { withStreamIdleTimeout } from './streamWatchdog'
 import { ensureGeminiThoughtSummaries, ensureVertexPublisher } from './geminiThinking'
+import { applyDashScopePromptCache } from './dashscopePromptCache'
 import type { Env, Fetcher, WaitUntilContext } from './types'
 
 export interface HandlerOptions {
@@ -119,6 +120,8 @@ interface PreparedBody {
 async function bodyWithActiveModel(
   request: Request,
   model: string,
+  provider: string,
+  baseUrl: string,
   extraBody?: Record<string, unknown>,
   isGoogleOAuth = false,
 ): Promise<PreparedBody> {
@@ -157,6 +160,14 @@ async function bodyWithActiveModel(
   // devolvem o objeto `usage` no chunk final — é a fonte autoritativa da
   // contabilidade de billing (usage.ts / billing.ts).
   const withUsage = injectStreamOptions(merged)
+  const cacheStats = applyDashScopePromptCache(withUsage, { provider, baseUrl, model })
+  if (cacheStats.found) {
+    const tag = cacheStats.cacheControlApplied ? 'explicit' : 'implicit'
+    console.info(
+      `[ai-pass-through] dashscope prompt cache ${tag} ` +
+        `model=${model} static=${cacheStats.staticBytes}B dynamic=${cacheStats.dynamicBytes}B`,
+    )
+  }
 
   const body = JSON.stringify(withUsage)
   return { body, chars: body.length, streamRequested: merged.stream === true }
@@ -332,7 +343,14 @@ async function handleChatCompletions(
   const model = speedApplied && config.speedModel ? config.speedModel : config.model
 
   const upstreamUrl = buildUpstreamUrl(config)
-  const prepared = await bodyWithActiveModel(request, model, config.extraBody, config.authScheme === 'google_oauth')
+  const prepared = await bodyWithActiveModel(
+    request,
+    model,
+    config.provider,
+    config.baseUrl,
+    config.extraBody,
+    config.authScheme === 'google_oauth',
+  )
   const { headers: upstreamHeaders, providerKey } = await buildUpstreamHeaders(request, config, env, fetcher)
 
   // O signal do upstream é um controller próprio em vez de request.signal

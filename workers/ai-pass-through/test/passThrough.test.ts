@@ -10,6 +10,7 @@ import { clearPlanBudgetCache, resolveEnforcementMode, resetBillingDisabledWarni
 import { clearAccessTokenCache } from '../src/googleAuth'
 import { handleRequest } from '../src/index'
 import { clearPlanCache } from '../src/planGate'
+import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../src/dashscopePromptCache'
 import type { Env } from '../src/types'
 
 const activeConfig = {
@@ -415,6 +416,75 @@ test('body is preserved except for model injection and stream_options.include_us
     model: activeConfig.model,
     stream_options: { include_usage: true },
   })
+})
+
+test('DashScope explicit prompt cache is applied for supported models', async () => {
+  const dashscopeConfig = {
+    ...activeConfig,
+    provider: 'dashscope',
+    model: 'qwen3.6-plus',
+    baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+    authHeader: 'Authorization',
+    authScheme: 'Bearer',
+    apiKeyEnv: 'DASHSCOPE_API_KEY',
+  }
+  const staticPart = 'S'.repeat(5000)
+  const dynamicPart = 'dynamic project context'
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+
+  await handleRequest(
+    request('/v1/chat/completions', {
+      messages: [
+        {
+          role: 'system',
+          content: `${staticPart}\n\n${SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\n${dynamicPart}`,
+        },
+        { role: 'user', content: 'hi' },
+      ],
+      stream: true,
+    }),
+    env({
+      ACTIVE_AI_CONFIG_JSON: JSON.stringify(dashscopeConfig),
+      DASHSCOPE_API_KEY: 'dashscope-secret',
+    }),
+    { fetcher },
+  )
+
+  const system = fetcher.calls[0].body.messages[0]
+  assert.equal(Array.isArray(system.content), true)
+  assert.deepEqual(system.content[0].cache_control, { type: 'ephemeral' })
+  assert.equal(system.content[0].text, staticPart)
+  assert.equal(system.content[1].text, dynamicPart)
+})
+
+test('DashScope GLM-5.2 managed path uses implicit cache shape without cache_control', async () => {
+  const dashscopeConfig = {
+    ...activeConfig,
+    provider: 'dashscope',
+    model: 'glm-5.2',
+    baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+    authHeader: 'Authorization',
+    authScheme: 'Bearer',
+    apiKeyEnv: 'DASHSCOPE_API_KEY',
+  }
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+
+  await handleRequest(
+    request('/v1/chat/completions', {
+      messages: [
+        { role: 'system', content: `static${SYSTEM_PROMPT_DYNAMIC_BOUNDARY}dynamic` },
+      ],
+      stream: true,
+    }),
+    env({
+      ACTIVE_AI_CONFIG_JSON: JSON.stringify(dashscopeConfig),
+      DASHSCOPE_API_KEY: 'dashscope-secret',
+    }),
+    { fetcher },
+  )
+
+  const system = fetcher.calls[0].body.messages[0]
+  assert.equal(system.content, 'static\n\ndynamic')
 })
 
 test('non-streaming bodies do not get stream_options injected', async () => {

@@ -26,6 +26,7 @@ import {
   anthropicSSEToOpenAISSE,
   anthropicResponseToOpenAI,
 } from './anthropicAdapter'
+import { applyDashScopePromptCacheForByok } from './dashscopePromptCache'
 
 export type ByokApiShape = 'openai_compat' | 'anthropic'
 
@@ -130,6 +131,8 @@ export function createByokFetch(opts: { expectedHost: string; apiShape: ByokApiS
         delete headers['Authorization']
       }
       Object.assign(headers, anthropicHeaders())
+    } else if (applyDashScopePromptCacheForByok(parsedBody, opts.expectedHost)) {
+      body = JSON.stringify(parsedBody)
     }
     // The body may have been rewritten after the SDK created headers
     // (Anthropic shape translation). Let reqwest compute framing from the

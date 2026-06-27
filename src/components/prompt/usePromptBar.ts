@@ -913,6 +913,12 @@ export function usePromptBar() {
           // é exclusiva do worker ai-pass-through — ver billingStore.ts.
           useBillingStore.getState().addLastRequestTokens(inputTokens + outputTokens)
         },
+        onRequestUsage: (entry) => {
+          // Persist per-provider-call usage for session export. Terminal/CMD mode
+          // already wires this through agentRunner; Chat mode calls AgentService
+          // directly, so it must bridge the callback here as well.
+          try { useChatStore.getState().addRequestUsage(entry) } catch { /* observability never blocks */ }
+        },
         onContextCompression: (event) => {
           if (event.type === 'hooks_start') {
             agentStore.setCompactPhase(event.hookType === 'pre_compact' ? 'hooks_pre' : 'hooks_post')

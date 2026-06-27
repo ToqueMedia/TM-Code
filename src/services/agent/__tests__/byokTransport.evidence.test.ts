@@ -20,6 +20,7 @@ jest.mock('@tauri-apps/api/event', () => ({ listen: jest.fn() }))
 import { invoke } from '@/utils/invokeMetrics'
 import { listen } from '@tauri-apps/api/event'
 import { createByokFetch } from '../byokTransport'
+import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../dashscopePromptCache'
 
 const mockInvoke = invoke as jest.Mock
 const mockListen = listen as jest.Mock
@@ -91,6 +92,41 @@ describe('BYOK direct routing — OpenAI-compatible (Gemini)', () => {
       expect(s.url).not.toContain(TM_WORKER_HOST)
       expect(new URL(s.url).host).toBe('generativelanguage.googleapis.com')
     }
+  })
+})
+
+describe('BYOK direct routing — DashScope prompt cache', () => {
+  it('adds cache_control to the stable system prefix for supported DashScope models', async () => {
+    const byokFetch = createByokFetch({
+      expectedHost: 'dashscope-intl.aliyuncs.com',
+      apiShape: 'openai_compat',
+    })
+    const staticPart = 'S'.repeat(5000)
+    const dynamicPart = 'project context'
+
+    await byokFetch('https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer DASHSCOPE_USER_KEY', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        max_tokens: 100,
+        stream: true,
+        messages: [
+          {
+            role: 'system',
+            content: `${staticPart}\n\n${SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\n${dynamicPart}`,
+          },
+          { role: 'user', content: 'hi' },
+        ],
+      }),
+    })
+
+    const sent = capturedStreams()[0]
+    const body = JSON.parse(sent.body)
+    expect(sent.url).not.toContain(TM_WORKER_HOST)
+    expect(body.messages[0].content[0].cache_control).toEqual({ type: 'ephemeral' })
+    expect(body.messages[0].content[0].text).toBe(staticPart)
+    expect(body.messages[0].content[1].text).toBe(dynamicPart)
   })
 })
 
