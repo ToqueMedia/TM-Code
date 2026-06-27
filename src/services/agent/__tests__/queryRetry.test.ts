@@ -1,4 +1,10 @@
 import { query, type QueryParams, type QueryStreamEvent } from '../query'
+import { ToolsetSelector, REQUEST_TOOLS_NAME, CORE_TOOLS } from '../toolsetSelector'
+import {
+  SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE,
+  EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
+  WRITE_FILE, START_DEV_SERVER, PROVISION_AUTH,
+} from '../toolNames'
 import {
   resetContextCollapse,
   setContextCollapseEnabled,
@@ -32,6 +38,13 @@ function makeStreamingCreate(chunks: unknown[]) {
       response: { headers: new Headers() },
     }),
   }))
+}
+
+function makeTool(name: string) {
+  return {
+    type: 'function' as const,
+    function: { name, description: `tool ${name}`, parameters: { type: 'object' as const, properties: {} } },
+  }
 }
 
 function baseParams(overrides: Partial<QueryParams> = {}): QueryParams {
@@ -207,6 +220,93 @@ describe('query retry handling', () => {
     const firstMessages = create.mock.calls[0][0].messages
     const secondMessages = create.mock.calls[1][0].messages
     expect(secondMessages.length).toBeLessThan(firstMessages.length)
+  })
+
+  it('captures usage-only streaming chunks with empty choices', async () => {
+    const onUsage = jest.fn()
+    const onRequestUsage = jest.fn()
+    const create = makeStreamingCreate([
+      { choices: [{ delta: { content: 'done' } }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      {
+        choices: [],
+        usage: {
+          prompt_tokens: 1234,
+          completion_tokens: 56,
+          total_tokens: 1290,
+          prompt_tokens_details: { cached_tokens: 789 },
+        },
+      },
+    ])
+
+    const generator = query(baseParams({
+      client: makeClient(create),
+      onUsage,
+      onRequestUsage,
+    }))
+
+    expect(await nextEvent(generator)).toEqual({ type: 'message_start' })
+    expect(await nextEvent(generator)).toEqual({ type: 'text_delta', text: 'done' })
+
+    const stop = await nextEvent(generator)
+    expect(stop).toMatchObject({
+      type: 'message_stop',
+      usage: {
+        prompt_tokens: 1234,
+        completion_tokens: 56,
+      },
+    })
+
+    expect(onUsage).toHaveBeenCalledWith(1234, 56)
+    expect(onRequestUsage).toHaveBeenCalledWith(expect.objectContaining({
+      inputTokens: 1234,
+      outputTokens: 56,
+      usageAvailable: true,
+      cacheReadInputTokens: 789,
+    }))
+  })
+
+  it('selects tools from human-authored text, not synthetic @mention/tool_result content', async () => {
+    const names = [
+      SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE,
+      EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
+      WRITE_FILE, START_DEV_SERVER, PROVISION_AUTH,
+    ]
+    const create = makeStreamingCreate([
+      { choices: [{ delta: { content: 'done' } }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+    ])
+
+    const generator = query(baseParams({
+      client: makeClient(create),
+      tools: names.map(makeTool),
+      toolsetSelector: new ToolsetSelector(names),
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'fix a typo in this file' },
+            {
+              type: 'tool_result',
+              toolCallId: 'mention-read',
+              content: 'deploy auth create file dev server database',
+            },
+          ],
+        },
+      ],
+    }))
+
+    expect(await nextEvent(generator)).toEqual({ type: 'message_start' })
+    expect(await nextEvent(generator)).toEqual({ type: 'text_delta', text: 'done' })
+
+    const sentToolNames = create.mock.calls[0][0].tools.map((t: any) => t.function.name)
+    for (const core of CORE_TOOLS) {
+      expect(sentToolNames).toContain(core)
+    }
+    expect(sentToolNames).toContain(REQUEST_TOOLS_NAME)
+    expect(sentToolNames).not.toContain(WRITE_FILE)
+    expect(sentToolNames).not.toContain(START_DEV_SERVER)
+    expect(sentToolNames).not.toContain(PROVISION_AUTH)
   })
 
   it('retries provider credential/configuration errors 3 times with 30s backoff before failing', async () => {

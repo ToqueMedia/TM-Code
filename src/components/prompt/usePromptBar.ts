@@ -961,17 +961,8 @@ export function usePromptBar() {
           const display = extractDisplayFromValue(merged)
           const blocks = typeof merged === 'string' ? undefined : merged
 
-          // Transcript bookkeeping — keep the run continuous (no idle flicker)
-          // while showing the steered message in the right place:
-          //   [assistant so far] → [user: steered] → [fresh assistant bubble]
-          // flushBufferedDeltas first so buffered tokens land in the bubble
-          // we're finalizing, not the new one. onDone/onError still finalize
-          // the FRESH bubble opened below at the real end of the run.
-          flushBufferedDeltas()
           const cs = useChatStore.getState()
-          cs.finalizeAssistantMessage()
-          cs.addUserMessage(display.text, display.attachments, blocks)
-          cs.startAssistantMessage(agentService.isThinkingRequestedForNextTurn())
+          cs.splitForQueuedMessage(display.text, display.attachments, blocks)
 
           // Model-facing content. Keep the same native-vision vs sidecar split
           // as the initial send path; otherwise a queued image sent mid-run is

@@ -527,6 +527,8 @@ export interface RequestUsageEntry {
   inputTokens: number
   /** Real output tokens from the provider's usage chunk. */
   outputTokens: number
+  /** Whether inputTokens/outputTokens came from a provider usage chunk. */
+  usageAvailable?: boolean
   /** Anthropic prompt-cache creation tokens, when reported. */
   cacheCreationInputTokens?: number
   /** Anthropic prompt-cache read tokens, when reported. */
@@ -534,9 +536,42 @@ export interface RequestUsageEntry {
   /** payloadInspector's pre-request estimate (ceil(chars/3)). Compare
    *  against the real inputTokens per request to gauge estimator accuracy. */
   estimatedInputTokens: number
+  /** Number of messages sent to the provider in this request. */
+  totalMessages?: number
+  /** Number of tool definitions sent in this request. */
+  toolCount?: number
+  /** Number of tool definitions available before lazy selection. */
+  toolCountTotal?: number
+  /** Names of tool definitions sent in this request. */
+  toolNames?: string[]
+  /** Estimated tokens spent on tool definitions. */
+  toolDefsTokens?: number
+  /** Why this request continued past the simple-bugfix turn target, if known. */
+  continuationReason?: string
+  /** Estimated tokens from @mention synthetic context specifically. */
+  mentionContextTokens?: number
   /** payloadInspector's per-category breakdown (system, tool_result,
    *  tool_call, text, etc.) — blocks/tokens/chars each. */
   breakdown: Record<string, { blocks: number; tokens: number; chars: number }>
+  /** Largest system-prompt sections for this exact provider request. */
+  systemPromptSections?: Array<{
+    name: string
+    location: 'static' | 'dynamic'
+    tokens: number
+    chars: number
+    auxiliaryCandidate?: boolean
+    reason?: string
+  }>
+  /** Subset of systemPromptSections that look safe to investigate for
+   *  lazy/on-demand loading. Heuristic only; changing prompt behavior still
+   *  requires eval/real-session validation. */
+  auxiliaryPromptCandidates?: Array<{
+    name: string
+    location: 'static' | 'dynamic'
+    tokens: number
+    chars: number
+    reason?: string
+  }>
 }
 
 export interface SessionTokenUsage {

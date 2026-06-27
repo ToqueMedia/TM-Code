@@ -31,6 +31,8 @@
  * goes wrong it logs a one-line warning and returns.
  */
 
+import { splitOnBoundary } from './contextBuilder/helpers'
+
 // ── Token estimate (matches compact/autoCompact.ts roughTokenEstimate) ──
 // ceil(length / 3) — the project's existing heuristic. Keeping it identical
 // means the inspector's numbers line up with what autoCompact sees.
@@ -89,6 +91,12 @@ export interface PayloadReport {
   totalEstimatedTokens: number
   /** Estimated tokens contributed by the system prompt. */
   systemPromptTokens: number
+  /** Estimated tokens contributed by @mention synthetic context. */
+  mentionContextTokens: number
+  /** Largest system-prompt sections, split by static/cacheable vs dynamic. */
+  systemPromptSections: PromptSectionInfo[]
+  /** System-prompt sections that look like candidates for lazy/on-demand loading. */
+  auxiliaryPromptCandidates: PromptSectionInfo[]
   /** Estimated tokens contributed by the tool definitions (schemas). */
   toolDefsTokens: number
   /** Number of tool definitions sent in THIS request (after dynamic selection). */
@@ -110,6 +118,15 @@ export interface PayloadReport {
   duplicates: Array<{ hash: string; count: number; tokens: number; preview: string }>
   /** One entry per tool_result block in the payload, in order. */
   toolResults: Array<{ messageIndex: number; toolCallId: string; tokens: number; chars: number; hash: string; preview: string }>
+}
+
+export interface PromptSectionInfo {
+  name: string
+  location: 'static' | 'dynamic'
+  tokens: number
+  chars: number
+  auxiliaryCandidate?: boolean
+  reason?: string
 }
 
 // ── Ring buffer (last 50 reports) ──
@@ -163,6 +180,131 @@ function blockContent(block: AnyMessage): { text: string; kind: string; toolCall
   }
   // Unknown block type — serialize minimally
   return { text: JSON.stringify(block), kind: type ?? 'unknown' }
+}
+
+function sectionName(text: string, fallback: string): string {
+  const heading = text.match(/^#{1,3}\s+(.+?)$/m)
+  return (heading?.[1] ?? fallback).replace(/\s+/g, ' ').trim().slice(0, 80)
+}
+
+function splitPromptSections(text: string, location: PromptSectionInfo['location']): PromptSectionInfo[] {
+  const starts: number[] = []
+  const headingRe = /^#{1,2}\s+.+$/gm
+  let match: RegExpExecArray | null
+  while ((match = headingRe.exec(text)) !== null) starts.push(match.index)
+  if (starts.length === 0) {
+    const trimmed = text.trim()
+    return trimmed
+      ? [{ name: sectionName(trimmed, '(system prelude)'), location, chars: trimmed.length, tokens: roughTokenEstimate(trimmed) }]
+      : []
+  }
+
+  const sections: PromptSectionInfo[] = []
+  if (starts[0] > 0) {
+    const prelude = text.slice(0, starts[0]).trim()
+    if (prelude) {
+      sections.push({
+        name: sectionName(prelude, '(system prelude)'),
+        location,
+        chars: prelude.length,
+        tokens: roughTokenEstimate(prelude),
+      })
+    }
+  }
+
+  for (let i = 0; i < starts.length; i++) {
+    const chunk = text.slice(starts[i], starts[i + 1] ?? text.length).trim()
+    if (!chunk) continue
+    sections.push({
+      name: sectionName(chunk, `(section ${i + 1})`),
+      location,
+      chars: chunk.length,
+      tokens: roughTokenEstimate(chunk),
+    })
+  }
+  return sections
+}
+
+function auxiliaryReason(name: string): string | undefined {
+  const n = name.toLowerCase()
+  if (n.includes('scaffolding workflow') || n.includes('installing dependencies')) {
+    return 'Only needed for new-project scaffolding or multi-package installs; bugfix/read-only turns can fetch this protocol on demand.'
+  }
+  if (n.includes('publishing') || n.includes('database') || n.includes('file uploads')) {
+    return 'Publish/platform guidance is domain-specific; load when deploy, DB, file upload, auth, or platform provisioning is requested.'
+  }
+  if (n.includes('ui baseline') || n.includes('taste defaults')) {
+    return 'Frontend/visual guidance is valuable for UI work but unnecessary for backend, git, config, or analysis-only tasks.'
+  }
+  if (n.includes('vision')) {
+    return 'Image handling rules only matter when the request includes image/vision input.'
+  }
+  if (n.includes('authentication')) {
+    return 'Auth rules can be loaded when auth hashtags, auth files, or auth-related user intent are present.'
+  }
+  if (n.includes('mcp tools')) {
+    return 'MCP routing can stay as a compact index; detailed usage can be fetched when a matching MCP is selected.'
+  }
+  if (n.includes('skills')) {
+    return 'Skills are already intended as on-demand content; keep only names/descriptions until read_skill is called.'
+  }
+  if (n.includes('project structure') || n.includes('recently modified files')) {
+    return 'Project orientation can often be summarized; full detail is recoverable through list/search/read tools.'
+  }
+  if (n.includes('readme') || n.includes('project memory') || n.includes('task list')) {
+    return 'Project documents are mutable context; consider indexing/summarizing and loading full bodies only when task-relevant.'
+  }
+  if (n.includes('background commands') || n.includes('active team')) {
+    return 'Live auxiliary state is useful only when active; omit or keep as a one-line index otherwise.'
+  }
+  return undefined
+}
+
+function analyzeSystemPrompt(systemPrompt: string | undefined): {
+  systemPromptSections: PromptSectionInfo[]
+  auxiliaryPromptCandidates: PromptSectionInfo[]
+} {
+  if (!systemPrompt) return { systemPromptSections: [], auxiliaryPromptCandidates: [] }
+  const split = splitOnBoundary(systemPrompt)
+  const sections = [
+    ...splitPromptSections(split.staticPrefix, 'static'),
+    ...splitPromptSections(split.dynamicSuffix, 'dynamic'),
+  ].map(section => {
+    const reason = auxiliaryReason(section.name)
+    return reason
+      ? { ...section, auxiliaryCandidate: true, reason }
+      : section
+  })
+
+  const bySize = [...sections].sort((a, b) => b.tokens - a.tokens)
+  return {
+    systemPromptSections: bySize.slice(0, 30),
+    auxiliaryPromptCandidates: bySize.filter(s => s.auxiliaryCandidate).slice(0, 15),
+  }
+}
+
+function isMentionContextReminder(text: string): boolean {
+  return (
+    /Called the (read_file|list_directory) tool with the following input:/.test(text) ||
+    /Result of calling the (read_file|list_directory) tool:/.test(text) ||
+    /Mentioned file summary \(@mention compacted; full content was NOT injected\)/.test(text) ||
+    /via @-mention/.test(text)
+  )
+}
+
+function splitMentionContext(text: string): Array<{ text: string; kind: 'mention_context' | 'text' }> {
+  const out: Array<{ text: string; kind: 'mention_context' | 'text' }> = []
+  const re = /<system-reminder>[\s\S]*?<\/system-reminder>/g
+  let last = 0
+  let match: RegExpExecArray | null
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > last) out.push({ text: text.slice(last, match.index), kind: 'text' })
+    const reminder = match[0]
+    out.push({ text: reminder, kind: isMentionContextReminder(reminder) ? 'mention_context' : 'text' })
+    last = match.index + reminder.length
+  }
+  if (last < text.length) out.push({ text: text.slice(last), kind: 'text' })
+  return out.filter(part => part.text.length > 0)
 }
 
 /**
@@ -242,23 +384,45 @@ export function inspectPayload(
     if (typeof content === 'string' || content === null || content === undefined) {
       const text = (content as string) ?? ''
       const kind = role === 'assistant' ? 'assistant-text' : 'user-text'
-      blocks.push({
-        messageIndex: i,
-        role,
-        kind,
-        tokens: roughTokenEstimate(text),
-        chars: text.length,
-        hash: fnv1aHex(text),
-        preview: previewOf(text),
-      })
-      tally(kind, text.length)
+      const parts = role === 'user' ? splitMentionContext(text) : [{ text, kind: 'text' as const }]
+      for (const part of parts) {
+        const blockKind = part.kind === 'mention_context' ? 'mention_context' : kind
+        blocks.push({
+          messageIndex: i,
+          role,
+          kind: blockKind,
+          tokens: roughTokenEstimate(part.text),
+          chars: part.text.length,
+          hash: fnv1aHex(part.text),
+          preview: previewOf(part.text),
+        })
+        tally(blockKind, part.text.length)
+      }
       continue
     }
 
     if (Array.isArray(content)) {
       for (const block of content as AnyMessage[]) {
         const { text, kind, toolCallId, toolName } = blockContent(block)
-        const category = role === 'assistant'
+        if (role === 'user' && kind === 'text') {
+          for (const part of splitMentionContext(text)) {
+            const category = part.kind === 'mention_context' ? 'mention_context' : 'user-text'
+            blocks.push({
+              messageIndex: i,
+              role,
+              kind: category,
+              tokens: roughTokenEstimate(part.text),
+              chars: part.text.length,
+              hash: fnv1aHex(part.text),
+              preview: previewOf(part.text),
+            })
+            tally(category, part.text.length)
+          }
+          continue
+        }
+        const category = role === 'user' && kind === 'text' && isMentionContextReminder(text)
+          ? 'mention_context'
+          : role === 'assistant'
           ? (kind === 'tool_call' ? 'tool_call' : kind === 'thinking' ? 'thinking' : 'assistant-text')
           : (kind === 'tool_result' ? 'tool_result' : kind === 'image_url' ? 'image_url' : 'user-text')
         blocks.push({
@@ -302,6 +466,8 @@ export function inspectPayload(
   }
 
   const systemPromptTokens = systemPrompt ? roughTokenEstimate(systemPrompt) : 0
+  const { systemPromptSections, auxiliaryPromptCandidates } = analyzeSystemPrompt(systemPrompt)
+  const mentionContextTokens = byCategory.mention_context?.tokens ?? 0
   const totalEstimatedTokens =
     systemPromptTokens +
     toolDefsTokens +
@@ -349,6 +515,9 @@ export function inspectPayload(
     totalMessages: messages.length,
     totalEstimatedTokens,
     systemPromptTokens,
+    mentionContextTokens,
+    systemPromptSections,
+    auxiliaryPromptCandidates,
     toolDefsTokens,
     toolCount: tools?.length ?? 0,
     toolCountTotal: totalToolCount ?? tools?.length ?? 0,
@@ -394,6 +563,14 @@ export function formatReportForConsole(report: PayloadReport): string {
     .map(([k, v]) => `${k}:${v.tokens.toLocaleString()}t(${v.blocks}b/${(v.chars / 1024).toFixed(1)}KB)`)
     .join('  ')
   lines.push(`  categories: ${catRow}`)
+
+  if (report.systemPromptSections.length > 0) {
+    const systemRow = report.systemPromptSections
+      .slice(0, 8)
+      .map(s => `${s.location}:${s.name}${s.auxiliaryCandidate ? '*' : ''}:${s.tokens.toLocaleString()}t`)
+      .join('  ')
+    lines.push(`  system_sections: ${systemRow}`)
+  }
 
   // Top 10 blocks
   if (report.topBlocks.length > 0) {

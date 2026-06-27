@@ -40,6 +40,25 @@ export interface SubAgentRunOptions {
   filteredTools: import('../toolExecutor').OpenAIToolDefinition[]
 }
 
+function buildPartialSubAgentResult(runId: string, reason: string, partialText = ''): string {
+  const run = useSubAgentStore.getState().runs.get(runId)
+  const lines: string[] = [`Partial ${run?.definition.agentType ?? 'sub-agent'} result (${reason}).`]
+  const trimmedText = partialText.trim()
+  if (trimmedText) {
+    lines.push('', trimmedText)
+  }
+  if (run?.toolCalls.length) {
+    lines.push('', 'Observed tool calls:')
+    for (const tc of run.toolCalls.slice(-12)) {
+      const preview = tc.resultPreview ? `: ${tc.resultPreview}` : ''
+      lines.push(`- ${tc.toolName} (${tc.status})${preview}`)
+    }
+  } else {
+    lines.push('', 'No tool calls completed before the run stopped.')
+  }
+  return lines.join('\n')
+}
+
 /**
  * Run a sub-agent in background. Returns immediately.
  * The sub-agent's events flow to subAgentStore — NOT chatStore.
@@ -148,7 +167,10 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   const wallClockTimer = setTimeout(() => {
     const run = useSubAgentStore.getState().runs.get(runId)
     if (run && run.status === 'running') {
-      useSubAgentStore.getState().timeoutRun(runId, run.finalText || '')
+      useSubAgentStore.getState().timeoutRun(
+        runId,
+        buildPartialSubAgentResult(runId, 'wall-clock timeout', resultText || run.finalText || ''),
+      )
       engine.cancel()
       abortController.abort()
       import('@/services/notificationService').then(({ notify }) => {
@@ -171,7 +193,10 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
     if (elapsed > STALE_TIMEOUT_MS) {
       const run = useSubAgentStore.getState().runs.get(runId)
       if (run && run.status === 'running') {
-        useSubAgentStore.getState().timeoutRun(runId, run.finalText || '')
+        useSubAgentStore.getState().timeoutRun(
+          runId,
+          buildPartialSubAgentResult(runId, `stalled for ${Math.round(elapsed / 1000)}s`, resultText || run.finalText || ''),
+        )
         engine.cancel()
         abortController.abort()
         import('@/services/notificationService').then(({ notify }) => {
@@ -278,7 +303,9 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
         return
       }
 
-      if (!resultText) resultText = 'No results found.'
+      if (!resultText) {
+        resultText = buildPartialSubAgentResult(runId, 'model stopped without a final summary')
+      }
       useSubAgentStore.getState().finalizeRun(runId, resultText, {
         input: inputTokens,
         output: outputTokens,

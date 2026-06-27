@@ -665,18 +665,12 @@ async function runAgentInternal(
                 : drained[0]!.value
             const display = extractDisplayFromValue(merged)
 
-            // Transcript bookkeeping — keep the run continuous (no idle
-            // flicker) while showing the steered message in the right place:
-            //   [assistant so far] → [user: steered] → [fresh assistant bubble]
-            // flushBufferedDeltas first so buffered tokens land in the bubble
-            // we're about to finalize, not the new one. We intentionally do NOT
-            // touch the run-level `finalized` flag: onDone/onError still finalize
-            // the FRESH bubble opened below at the real end of the run.
-            flushBufferedDeltas()
             const cs = useChatStore.getState()
-            cs.finalizeAssistantMessage()
-            cs.addUserMessage(display.text, display.attachments)
-            cs.startAssistantMessage(agentService.isThinkingRequestedForNextTurn())
+            cs.splitForQueuedMessage(
+              display.text,
+              display.attachments,
+              typeof merged === 'string' ? undefined : merged,
+            )
 
             // Model-facing text. buildAugmentedPrompt resolves file/folder
             // attachments to XML; images degrade to <attached_image> markers

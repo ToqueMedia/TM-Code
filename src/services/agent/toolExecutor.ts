@@ -40,6 +40,7 @@ import { createFileStateCacheWithSizeLimit, type FileContentSignature, type File
 import { checkReadDedup } from './toolExecutor/readDedup'
 import { getSnippetForTwoFileDiff } from './toolExecutor/changedFileSnippet'
 import { extractReadFilesFromMessages } from './toolExecutor/readStateRecovery'
+import { getLegacyProjectStateDir, getProjectStateDir } from '../projectStatePaths'
 import { getFsVersion, bumpFsVersion } from '../fsVersion'
 import CheckpointService from './checkpointService'
 import type { MCPTool } from '../mcp/mcpService'
@@ -588,6 +589,19 @@ class ToolExecutor {
       }
     }
     return tool.execute(input)
+  }
+
+  /**
+   * Large @mentions intentionally show only a compact outline/preview to the
+   * model. The underlying read_file call still refreshes signatures and hashes,
+   * but the model did NOT see the full file, so write/edit tools must require
+   * an explicit read_file before mutating it.
+   */
+  markMentionPathAsPartialView(filePath: string): void {
+    const abs = this.resolveToAbsolute(filePath)
+    const entry = this.readFileState.get(abs)
+    if (!entry) return
+    this.readFileState.set(abs, { ...entry, isPartialView: true })
   }
 
   /**
@@ -2463,6 +2477,33 @@ ${preview}
       }
     })
 
+    // === get_project_state_dir ===
+    this.tools.set('get_project_state_dir', {
+      definition: {
+        name: 'get_project_state_dir',
+        description: 'Return TM Code app-managed state directories for the current project. Use this when looking for sessions, checkpoints, saved agent state, permissions, queues, or project metadata. The active location is the global per-project store under ~/.toquemedia-studio/projects/{projectId}; do not search ${project}/.toquemedia unless explicitly investigating legacy migration.',
+        input_schema: {
+          type: 'object',
+          properties: {},
+          required: []
+        },
+        concurrencySafe: true,
+      },
+      execute: async () => {
+        const projectRoot = this.getProjectRoot()
+        if (!projectRoot) {
+          return 'No project root is active, so there is no project state directory to report.'
+        }
+        const stateDir = await getProjectStateDir(projectRoot)
+        return [
+          `project_root: ${projectRoot}`,
+          `project_state_dir: ${stateDir}`,
+          `sessions_dir: ${stateDir}/sessions`,
+          `legacy_project_state_dir: ${getLegacyProjectStateDir(projectRoot)} (legacy only; do not use for current sessions unless checking migration)`,
+        ].join('\n')
+      }
+    })
+
     // === search_files ===
     this.tools.set('search_files', {
       definition: {
@@ -3540,7 +3581,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('collect_results', {
       definition: {
         name: 'collect_results',
-        description: 'Collect results from team members. Returns immediately with all finished results. If some members are still running, their status is shown but results are not yet available — call collect_results again later to get them. This is non-blocking by design.',
+        description: 'Collect results from team members. Returns immediately with all finished results. If some members are still running, their status is shown but results are not yet available. Do not poll repeatedly; the system auto-wakes you when new results arrive. After seeing running tasks, end your turn unless you have independent work to do.',
         input_schema: {
           type: 'object',
           properties: {},
@@ -3593,7 +3634,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         }
 
         if (runningCount > 0) {
-          lines.push(`${runningCount} team member${runningCount > 1 ? 's' : ''} still working. Results will be available when they finish.`)
+          lines.push(`${runningCount} team member${runningCount > 1 ? 's are' : ' is'} still working. Do not call collect_results again in this turn; end your turn and wait for the auto-wake unless you have independent work to do.`)
         }
 
         // Only clear completed runs when ALL runs are done (no running left).

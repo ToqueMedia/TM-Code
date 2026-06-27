@@ -296,28 +296,40 @@ function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
   const lines: string[] = []
   lines.push(`## Request usage log`)
   lines.push(``)
-  lines.push(`One row per provider call. \`est.\` = payloadInspector estimate (ceil(chars/3)); \`real\` = provider usage.`)
+  lines.push(`One row per provider call. \`est.\` = payloadInspector estimate (ceil(chars/3)); \`real\` = provider usage; \`usage\` shows whether real provider counters were available.`)
   lines.push(``)
   const totalIn = log.reduce((s, e) => s + (e.inputTokens ?? 0), 0)
   const totalOut = log.reduce((s, e) => s + (e.outputTokens ?? 0), 0)
   const totalEst = log.reduce((s, e) => s + (e.estimatedInputTokens ?? 0), 0)
+  const totalMentionContext = log.reduce((s, e) => s + (e.mentionContextTokens ?? 0), 0)
+  const totalToolDefs = log.reduce((s, e) => s + (e.toolDefsTokens ?? 0), 0)
   const totalCacheRead = log.reduce((s, e) => s + (e.cacheReadInputTokens ?? 0), 0)
   const totalCacheCreate = log.reduce((s, e) => s + (e.cacheCreationInputTokens ?? 0), 0)
   // uncached = input tokens that were neither read from cache nor written to it.
   const totalUncached = Math.max(0, totalIn - totalCacheRead - totalCacheCreate)
   const cachedPct = totalIn > 0 ? Math.round(((totalCacheRead + totalCacheCreate) / totalIn) * 100) : 0
   lines.push(`**Totals:** ${log.length} requests · IN ${totalIn.toLocaleString()} (est. ${totalEst.toLocaleString()}) · OUT ${totalOut.toLocaleString()}`)
+  if (totalMentionContext > 0) {
+    lines.push(`**@mention context:** est. ${totalMentionContext.toLocaleString()} input tokens`)
+  }
+  if (totalToolDefs > 0) {
+    lines.push(`**Tool definitions:** est. ${totalToolDefs.toLocaleString()} input tokens`)
+  }
   if (totalCacheRead > 0 || totalCacheCreate > 0) {
     lines.push(`**Prompt cache:** read ${totalCacheRead.toLocaleString()} · create ${totalCacheCreate.toLocaleString()} · uncached ${totalUncached.toLocaleString()} · ${cachedPct}% of input cached`)
   }
   lines.push(``)
-  lines.push('| # | turn | provider | model | IN (real) | OUT | est. IN | cache read | cache create | uncached IN |')
-  lines.push('|---|---|---|---|---|---|---|---|---|---|')
+  lines.push('| # | turn | provider | model | usage | msgs | tools | tool defs | IN (real) | OUT | est. IN | @mention ctx | cache read | cache create | uncached IN |')
+  lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|')
   log.forEach((e, i) => {
     const cRead = e.cacheReadInputTokens ?? 0
     const cCreate = e.cacheCreationInputTokens ?? 0
     const uncached = Math.max(0, (e.inputTokens ?? 0) - cRead - cCreate)
-    lines.push(`| ${i + 1} | ${e.turn} | ${e.provider ?? '—'} | ${e.model} | ${e.inputTokens.toLocaleString()} | ${e.outputTokens.toLocaleString()} | ${e.estimatedInputTokens.toLocaleString()} | ${e.cacheReadInputTokens?.toLocaleString() ?? '—'} | ${e.cacheCreationInputTokens?.toLocaleString() ?? '—'} | ${uncached.toLocaleString()} |`)
+    const usageState = e.usageAvailable === false ? 'missing' : 'provider'
+    const tools = e.toolCount != null
+      ? `${e.toolCount}${e.toolCountTotal != null ? `/${e.toolCountTotal}` : ''}`
+      : '—'
+    lines.push(`| ${i + 1} | ${e.turn} | ${e.provider ?? '—'} | ${e.model} | ${usageState} | ${e.totalMessages?.toLocaleString() ?? '—'} | ${tools} | ${e.toolDefsTokens?.toLocaleString() ?? '—'} | ${e.inputTokens.toLocaleString()} | ${e.outputTokens.toLocaleString()} | ${e.estimatedInputTokens.toLocaleString()} | ${e.mentionContextTokens?.toLocaleString() ?? '—'} | ${e.cacheReadInputTokens?.toLocaleString() ?? '—'} | ${e.cacheCreationInputTokens?.toLocaleString() ?? '—'} | ${uncached.toLocaleString()} |`)
   })
   lines.push(``)
   // Collapsible per-request breakdown — top 5 by real input tokens.
@@ -332,10 +344,40 @@ function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
       lines.push(`| ${cat} | ${v.blocks} | ${v.tokens.toLocaleString()} | ${v.chars.toLocaleString()} |`)
     }
     lines.push(``)
+    if (e.systemPromptSections?.length) {
+      lines.push(`**System prompt sections**`)
+      lines.push(``)
+      lines.push('| section | location | tokens | chars | on-demand candidate |')
+      lines.push('|---|---|---|---|---|')
+      for (const s of e.systemPromptSections.slice(0, 12)) {
+        lines.push(`| ${escapeTableCell(s.name)} | ${s.location} | ${s.tokens.toLocaleString()} | ${s.chars.toLocaleString()} | ${s.auxiliaryCandidate ? 'yes' : '—'} |`)
+      }
+      lines.push(``)
+    }
+    if (e.toolNames?.length) {
+      lines.push(`**Toolset**`)
+      lines.push(``)
+      lines.push(e.toolNames.map(name => `\`${name}\``).join(', '))
+      lines.push(``)
+    }
+    if (e.auxiliaryPromptCandidates?.length) {
+      lines.push(`**Auxiliary/on-demand candidates**`)
+      lines.push(``)
+      lines.push('| section | location | tokens | reason |')
+      lines.push('|---|---|---|---|')
+      for (const s of e.auxiliaryPromptCandidates.slice(0, 8)) {
+        lines.push(`| ${escapeTableCell(s.name)} | ${s.location} | ${s.tokens.toLocaleString()} | ${escapeTableCell(s.reason ?? '')} |`)
+      }
+      lines.push(``)
+    }
     lines.push(`</details>`)
     lines.push(``)
   }
   return lines
+}
+
+function escapeTableCell(value: string): string {
+  return value.replace(/\|/g, '\\|').replace(/\n/g, ' ')
 }
 
 function renderEnvironmentMd(env: EnvironmentSnapshot): string {

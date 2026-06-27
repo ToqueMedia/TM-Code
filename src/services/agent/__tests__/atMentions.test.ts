@@ -16,6 +16,7 @@ const mockExecutor = {
   isMentionPathAllowed: jest.fn(() => true),
   isFileFreshInContext: jest.fn(() => false),
   executeForMention: jest.fn<Promise<string>, [string, Record<string, unknown>]>(async () => 'file contents'),
+  markMentionPathAsPartialView: jest.fn(),
   collectExternallyChangedFiles: jest.fn(async () => [] as Array<{ path: string; snippet: string }>),
 }
 
@@ -52,6 +53,7 @@ beforeEach(() => {
   mockExecutor.isMentionPathAllowed.mockReturnValue(true)
   mockExecutor.isFileFreshInContext.mockReturnValue(false)
   mockExecutor.executeForMention.mockResolvedValue('file contents')
+  mockExecutor.markMentionPathAsPartialView.mockReset()
   mockExecutor.collectExternallyChangedFiles.mockResolvedValue([])
   mockStat.mockResolvedValue({ isDirectory: false })
 })
@@ -185,6 +187,30 @@ describe('resolveMentionContext', () => {
     expect(r.contextText).toContain(`truncated to the first ${MAX_LINES_TO_READ} lines`)
     expect(r.contextText).toContain("Don't tell the user about this truncation")
     expect(r.contextText).toContain('Result of calling the read_file tool:\nline1\nline2')
+  })
+
+  it('compacts large mentioned files instead of injecting the full body', async () => {
+    const large = [
+      'import React from "react"',
+      'export interface AccountCodeProps { id: string }',
+      'export function AccountCode(props: AccountCodeProps) {',
+      '  return <div>{props.id}</div>',
+      '}',
+      'const AccountCodeHelper = () => null',
+      'x'.repeat(20_000),
+    ].join('\n')
+    mockExecutor.executeForMention.mockResolvedValue(large)
+
+    const r = await resolveMentionContext('fix @packages/web/src/screens/account/AccountCode.tsx')
+
+    expect(r.contextText.length).toBeLessThan(8_000)
+    expect(r.contextText).toContain('Mentioned file summary (@mention compacted; full content was NOT injected)')
+    expect(r.contextText).toContain('path: /proj/packages/web/src/screens/account/AccountCode.tsx')
+    expect(r.contextText).toContain('language: TypeScript React')
+    expect(r.contextText).toContain('on-demand ref: call read_file')
+    expect(r.contextText).toContain('AccountCodeProps')
+    expect(r.contextText).not.toContain('x'.repeat(10_000))
+    expect(mockExecutor.markMentionPathAsPartialView).toHaveBeenCalledWith('/proj/packages/web/src/screens/account/AccountCode.tsx')
   })
 
   it('renders directories as a synthetic list_directory pair', async () => {

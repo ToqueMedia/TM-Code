@@ -82,6 +82,32 @@ function retryAfterMs(error: unknown): number | null {
   return Math.min(seconds, 60) * 1000;
 }
 
+function sanitizeToolResultForModel(content: string): string {
+  try {
+    const parsed = JSON.parse(content) as Record<string, unknown>
+    if (parsed?.type === 'diff') {
+      const path = typeof parsed.path === 'string' ? parsed.path : '(unknown path)'
+      return `File ${parsed.isNewFile ? 'created' : 'updated'}: ${path}`
+    }
+  } catch {
+    // Non-JSON tool result.
+  }
+  return content
+}
+
+function userAuthoredTextForToolset(content: string | ContentBlockAPI[] | null): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  // @mentions and prior tool calls are represented as synthetic tool_call /
+  // tool_result blocks inside user turns. Toolset selection must not expand
+  // from file contents or command output; only the human-authored text should
+  // influence which tool schemas are sent.
+  return content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+}
+
 // ── Types ──
 
 /** Message shape used throughout the query loop. */
@@ -980,11 +1006,7 @@ export async function* query(
     // task needs. When the selector is absent, send all tools (legacy).
     const userText = messagesForQuery
       .filter((m) => m.role === "user")
-      .map((m) =>
-        typeof m.content === "string"
-          ? m.content
-          : contentAsText(m.content as ContentBlockAPI[]),
-      )
+      .map((m) => userAuthoredTextForToolset(m.content))
       .join("\n");
     const toolSelection = toolsetSelector
       ? toolsetSelector.selectForTurn(tools, userText)
@@ -1062,6 +1084,7 @@ export async function* query(
         max_tokens: maxTokens,
         messages: apiMessages,
         stream: true,
+        stream_options: { include_usage: true },
       };
 
       if (activeTools.length > 0) {
@@ -1110,6 +1133,15 @@ export async function* query(
           !Array.isArray(chunk.choices)
         ) {
           continue;
+        }
+
+        // Usage-only chunks from OpenAI-compatible streaming providers
+        // commonly arrive as `{ choices: [], usage: ... }` when
+        // `stream_options.include_usage` is enabled. Capture usage before
+        // reading `choices[0]`, otherwise the final accounting chunk is
+        // skipped and BYOK sessions look unmetered.
+        if (chunk.usage) {
+          turnUsage = chunk.usage;
         }
 
         const choice = chunk.choices[0];
@@ -1350,10 +1382,6 @@ export async function* query(
           }
         }
 
-        // Usage
-        if (chunk.usage) {
-          turnUsage = chunk.usage;
-        }
       }
 
       // Some OpenAI-compatible providers close the stream after tool-call
@@ -1621,38 +1649,6 @@ export async function* query(
       totalInputTokens += turnUsage.prompt_tokens;
       totalOutputTokens += turnUsage.completion_tokens;
       onUsage?.(turnUsage.prompt_tokens, turnUsage.completion_tokens);
-      // Per-request usage log — real tokens + payloadInspector estimate +
-      // breakdown. Best-effort: cache fields only when the adapter reports
-      // them; payloadReport null when the inspector failed (non-blocking).
-      try {
-        const tu = turnUsage as unknown as Record<string, unknown>
-        const promptDetails = tu.prompt_tokens_details && typeof tu.prompt_tokens_details === 'object'
-          ? tu.prompt_tokens_details as Record<string, unknown>
-          : undefined
-        const dashScopeCachedTokens =
-          typeof promptDetails?.cached_tokens === 'number'
-            ? promptDetails.cached_tokens
-            : typeof tu.cached_tokens === 'number'
-              ? tu.cached_tokens
-              : undefined
-        const cacheCreationInputTokens =
-          typeof tu.cache_creation_input_tokens === 'number' ? tu.cache_creation_input_tokens : undefined
-        const cacheReadInputTokens =
-          typeof tu.cache_read_input_tokens === 'number' ? tu.cache_read_input_tokens : dashScopeCachedTokens
-        onRequestUsage?.({
-          requestId: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-            ? crypto.randomUUID()
-            : `${state.turnCount}-${Date.now()}`,
-          turn: state.turnCount,
-          model,
-          inputTokens: turnUsage.prompt_tokens ?? 0,
-          outputTokens: turnUsage.completion_tokens ?? 0,
-          cacheCreationInputTokens,
-          cacheReadInputTokens,
-          estimatedInputTokens: payloadReport?.totalEstimatedTokens ?? 0,
-          breakdown: payloadReport?.byCategory ?? {},
-        })
-      } catch { /* usage logging never blocks the agent loop */ }
       // Prompt-cache observability — surfaces provider cache hit/miss per
       // request so a multi-turn session shows the first turn creating the
       // cache and subsequent turns reading it. Anthropic reports
@@ -1690,6 +1686,51 @@ export async function* query(
       // prompt — their sum is the true "how full is the window right now"
       // (matches utils/contextWindow.ts totalContextTokens + the UI pill).
       lastTurnRealOccupancy = turnUsage.prompt_tokens + turnUsage.completion_tokens;
+    }
+
+    // Per-request usage log — real tokens + payloadInspector estimate +
+    // breakdown. Persist an inspector-only row even if a streaming provider
+    // omits usage, otherwise exports lose the request entirely.
+    if (turnUsage || payloadReport) {
+      try {
+        const tu = (turnUsage ?? {}) as unknown as Record<string, unknown>
+        const promptDetails = tu.prompt_tokens_details && typeof tu.prompt_tokens_details === 'object'
+          ? tu.prompt_tokens_details as Record<string, unknown>
+          : undefined
+        const dashScopeCachedTokens =
+          typeof promptDetails?.cached_tokens === 'number'
+            ? promptDetails.cached_tokens
+            : typeof tu.cached_tokens === 'number'
+              ? tu.cached_tokens
+              : undefined
+        const cacheCreationInputTokens =
+          typeof tu.cache_creation_input_tokens === 'number' ? tu.cache_creation_input_tokens : undefined
+        const cacheReadInputTokens =
+          typeof tu.cache_read_input_tokens === 'number' ? tu.cache_read_input_tokens : dashScopeCachedTokens
+        onRequestUsage?.({
+          requestId: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `${state.turnCount}-${Date.now()}`,
+          turn: state.turnCount,
+          model,
+          inputTokens: turnUsage?.prompt_tokens ?? 0,
+          outputTokens: turnUsage?.completion_tokens ?? 0,
+          usageAvailable: !!turnUsage,
+          cacheCreationInputTokens,
+          cacheReadInputTokens,
+          estimatedInputTokens: payloadReport?.totalEstimatedTokens ?? 0,
+          totalMessages: payloadReport?.totalMessages,
+          toolCount: payloadReport?.toolCount,
+          toolCountTotal: payloadReport?.toolCountTotal,
+          toolNames: activeTools.map((tool: any) => tool?.function?.name).filter((name: unknown): name is string => typeof name === 'string'),
+          toolDefsTokens: payloadReport?.toolDefsTokens,
+          continuationReason: payloadReport?.continuationReason,
+          mentionContextTokens: payloadReport?.mentionContextTokens ?? 0,
+          breakdown: payloadReport?.byCategory ?? {},
+          systemPromptSections: payloadReport?.systemPromptSections ?? [],
+          auxiliaryPromptCandidates: payloadReport?.auxiliaryPromptCandidates ?? [],
+        })
+      } catch { /* usage logging never blocks the agent loop */ }
     }
 
     // ── Build provider-native state for round-trip ──
@@ -1925,6 +1966,7 @@ export async function* query(
 
       try {
         const result = await executeTool(tc.name, toolInput, tc.id, signal);
+        const modelContent = sanitizeToolResultForModel(result.content)
         yield {
           type: "tool_result",
           toolUseId: tc.id,
@@ -1934,7 +1976,7 @@ export async function* query(
         toolResultBlocks.push({
           type: "tool_result",
           toolCallId: tc.id,
-          content: result.content,
+          content: modelContent,
           isError: result.isError,
         });
       } catch (err) {
