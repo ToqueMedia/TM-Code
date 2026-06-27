@@ -42,6 +42,11 @@ import {
 import { isAtBlockingLimit } from "../../utils/contextWindow";
 import { contentAsText } from "./promptValueHelpers";
 import { inspectAndLogPayload } from "./payloadInspector";
+import {
+  inferContinuationReason,
+  isLegitimateContinuationReason,
+  EFFICIENCY_TARGET_TURNS,
+} from "./turnEfficiency";
 
 // ── Constants ──
 
@@ -710,6 +715,12 @@ export async function* query(
   // Undefined until the first response is recorded.
   let lastTurnRealOccupancy: number | undefined;
 
+  // Turn-efficiency tracking — the continuation reason inferred at the END of
+  // the previous turn (why the loop kept going past the 3-4-request target).
+  // Surfaced in the payload-inspector log of the NEXT turn so the forensic
+  // trail travels with the request diagnostics. Undefined until turn ≥ target.
+  let lastContinuationReason: string | undefined;
+
   // Wall-clock of the previous turn's assistant message — feeds the gap-aware
   // (lastAssistantMessageAt was used by microcompact's gap-aware keepRecent.
   //  Removed when microcompact was replaced by applyGlobalToolResultBudget —
@@ -988,7 +999,7 @@ export async function* query(
     // ── Payload inspection (token-cost diagnostics) ──
     // Best-effort: sizes + hashes + top-10 blocks logged to console.debug
     // before every provider request. Never throws, never blocks the send.
-    const payloadReport = inspectAndLogPayload(apiMessages, systemPrompt, activeTools, model, state.turnCount, toolSelection.totalCount);
+    const payloadReport = inspectAndLogPayload(apiMessages, systemPrompt, activeTools, model, state.turnCount, toolSelection.totalCount, lastContinuationReason);
 
     // ── Stream from model ──
 
@@ -1869,7 +1880,7 @@ export async function* query(
 
     // ── Execute tools ──
 
-    const toolResultBlocks: ContentBlockAPI[] = [];
+    const toolResultBlocks: Array<ContentBlockAPI & { isError?: boolean }> = [];
 
     for (const tc of collectedToolCalls) {
       if (signal.aborted) {
@@ -1901,6 +1912,7 @@ export async function* query(
           type: "tool_result",
           toolCallId: tc.id,
           content: result.content,
+          isError: result.isError,
         });
       } catch (err) {
         const errMsg = formatError(err);
@@ -1914,7 +1926,38 @@ export async function* query(
           type: "tool_result",
           toolCallId: tc.id,
           content: `Tool execution error: ${errMsg}`,
+          isError: true,
         });
+      }
+    }
+
+    // ── Turn-efficiency measurement ──
+    // When the loop exceeds the 3-4-request target for localized fixes,
+    // infer WHY it continued from what the turn actually did (tool calls +
+    // results). Never blocks — pure observability so a 7-turn bugfix leaves
+    // a forensic trail of the technical reason (or the lack of one).
+    if (state.turnCount >= EFFICIENCY_TARGET_TURNS) {
+      try {
+        const reason = inferContinuationReason({
+          toolCalls: collectedToolCalls.map((tc) => ({ name: tc.name })),
+          toolResults: toolResultBlocks
+            .filter((b): b is ContentBlockAPI & { type: "tool_result"; content: string; isError?: boolean } =>
+              b.type === "tool_result")
+            .map((b) => ({
+              content: b.content ?? "",
+              isError: !!b.isError,
+            })),
+        });
+        lastContinuationReason = reason;
+        const legit = isLegitimateContinuationReason(reason);
+        // eslint-disable-next-line no-console
+        console.debug(
+          `[query] turn efficiency · turn ${state.turnCount} · ` +
+          (legit ? `continuing: ${reason}` : `WARNING — ${reason}`) +
+          (legit ? "" : " — consider wrapping up if the task is simple"),
+        );
+      } catch {
+        /* measurement never blocks the loop */
       }
     }
 

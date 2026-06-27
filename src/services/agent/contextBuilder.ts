@@ -58,6 +58,7 @@ import {
   sharedOutputEfficiency,
   sharedTerminalAgentLoop,
   sharedToneAndStyle,
+  sharedTurnEfficiency,
   sharedUiBaseline,
 } from './contextBuilder/sections/sharedSections'
 import {
@@ -531,6 +532,7 @@ class ContextBuilder {
       sharedToneAndStyle(),
       sharedOutputEfficiency(),
       sharedContextPreservation(),
+      sharedTurnEfficiency(),
       // Memory taxonomy + save/forget discipline. The rules of the
       // memory system are stable across sessions (the data on disk
       // mutates, but the schema/contract is fixed), so this guidance
@@ -732,6 +734,7 @@ class ContextBuilder {
       sharedToneAndStyle(),
       sharedOutputEfficiency(),
       sharedContextPreservation(),
+      sharedTurnEfficiency(),
       // Memory taxonomy + save/forget discipline — same static block
       // position as chat mode. The rules are stable across sessions.
       getCmdMemoryToolsGuidanceSection(),

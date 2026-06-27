@@ -1115,11 +1115,11 @@ export function getReminderSection(ctx: PromptContext): string {
   // sections; this restates only what models routinely drop after a long
   // prompt.
   const mcpReminder = ctx.mcpTools.length > 0
-    ? `\n13. **MCP available**: ${ctx.mcpTools.map(t => `\`mcp__${t.serverName}__${t.name}\``).slice(0, 8).join(', ')}${ctx.mcpTools.length > 8 ? `, +${ctx.mcpTools.length - 8} more` : ''}. Before writing code against a library/service covered by an MCP, or when the task needs live external data or a side-effect in an external system, call the matching MCP — your training data is stale and these tools are the authoritative path.`
+    ? `\n14. **MCP available**: ${ctx.mcpTools.map(t => `\`mcp__${t.serverName}__${t.name}\``).slice(0, 8).join(', ')}${ctx.mcpTools.length > 8 ? `, +${ctx.mcpTools.length - 8} more` : ''}. Before writing code against a library/service covered by an MCP, or when the task needs live external data or a side-effect in an external system, call the matching MCP — your training data is stale and these tools are the authoritative path.`
     : ''
-  // Skills bullet is 13 when no MCP, 14 when MCP block is present. Numbering
+  // Skills bullet is 14 when no MCP, 15 when MCP block is present. Numbering
   // stays sequential so the model reads it as a list, not a digest.
-  const skillIndex = ctx.mcpTools.length > 0 ? 14 : 13
+  const skillIndex = ctx.mcpTools.length > 0 ? 15 : 14
   const skillReminder = ctx.loadedSkillNames.length > 0
     ? `\n${skillIndex}. Skills loaded: ${ctx.loadedSkillNames.map(n => `\`${n}\``).join(', ')}. Read each skill's \`## CRITICAL:\` blocks before writing code in its domain. Improvising violates the invariants the CRITICAL blocks describe.`
     : ''
@@ -1136,7 +1136,8 @@ export function getReminderSection(ctx: PromptContext): string {
 9. ${sharedIdentityReminder()}
 10. **SHORT MESSAGES** are context-dependent. If you just proposed a fix/action and the developer replies briefly, that's approval — execute it. If you just asked a question, the brief reply answers it. Read your own previous turn, not the word itself.
 11. **MENTIONED FILES** (\`@path\`): already read for you — the result appears as synthetic \`read_file\` context in \`<system-reminder>\` blocks. Don't re-read unless a truncation note says so; if no block appears, you already have a fresh copy in context. Mentions hint at the developer's focus, not necessarily where the fix belongs.
-12. ${sharedThinkingEfficiencyReminder()}${mcpReminder}${skillReminder}`
+12. ${sharedThinkingEfficiencyReminder()}
+13. **TURN EFFICIENCY**: group edits in the same file into one \`${EDIT_FILE}\` (sequential old→new pairs); read one larger range instead of multiple small reads; aim for 3-4 requests on localized fixes. Past 4 is fine with a technical reason (build error, tool failure, insufficient context, edit failed) — the loop logs it. Don't burn 7 turns on a one-line fix without reason. Skip expensive verification for purely visual/low-risk changes; always verify when types/logic are involved.${mcpReminder}${skillReminder}`
 }
 
 // ── 15a. Critical reminder (mid-conversation re-injection) ─────────────────

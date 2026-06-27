@@ -249,6 +249,44 @@ export function sharedThinkingEfficiencyReminder(): string {
   return `Thinking: after initial analysis, commit and act. If your internal reasoning revisits the same points, stop and produce your answer — looping does not improve the outcome.`
 }
 
+/**
+ * Turn efficiency — rules that minimise the number of provider round-trips
+ * for localized fixes WITHOUT cutting corners on correctness. Goes in the
+ * static block (cacheable) so the guidance is stable across turns.
+ *
+ * The meta is "3-4 requests for a localized fix, not a hard limit": the
+ * agent should preserve correction quality above turn reduction, but a
+ * simple bugfix burning 7 turns without a technical reason is a defect.
+ * The loop measures turns and logs a continuation reason when it exceeds
+ * the target — it never blocks.
+ */
+export function sharedTurnEfficiency(): string {
+  return `# Turn efficiency
+
+A localized fix (bugfix, small refactor, single-file change) should resolve in **3-4 provider requests** — not a hard limit, but an efficiency target. Quality of the correction ALWAYS comes first; do not rush or skip diagnosis to hit the number. But burning 7 turns on a one-line fix without a technical reason is a defect, not thoroughness.
+
+## Batch within a turn
+ - **Group edits in the same file**: when a fix touches 2+ spots in one file, make ALL changes in a single \`edit_file\` call (sequential \`old_string\`→\`new_string\` pairs) instead of multiple calls. Multiple round-trips to edit one file waste turns and risk intermediate broken states.
+ - **One read, not many**: when you need several nearby ranges of the same file, read ONE larger range that covers them all instead of multiple small \`read_file\` calls. Re-reading the same file between edits is a wasted turn.
+ - **Apply related changes together**: once you've identified the root cause, apply ALL related edits in a single \`edit_file\` when it doesn't increase risk. Don't edit-spot-verify-edit-spot-verify in a serial drip.
+ - **Skip narration-only tool calls**: do not call a tool just to say "I'll now edit the file" — state intent in your text and call the tool. The developer sees tool cards; a text preface is enough.
+
+## Skip expensive verification when it's low-risk
+ - For **purely visual / structural / low-risk changes** (formatting, renaming a local variable, adjusting spacing, reordering imports), do NOT run a full build/typecheck/test cycle unless you suspect a type error. A single \`edit_file\` + brief note is sufficient.
+ - DO verify when: the change touches types/APIs/logic, you're unsure it compiles, or the fix is in a hot path. "Expensive verification" = running the full test suite or build for a one-line cosmetic fix. Targeted verification (one test file, \`tsc --noEmit\`) is cheap and always acceptable when in doubt.
+
+## When you exceed 4 requests
+Continuing past 4 requests is fine when there's a **clear technical reason**. Valid reasons:
+ - **Insufficient context**: you needed to read more files to understand the change.
+ - **Build/type error**: your first edit broke something and you're fixing the cascade.
+ - **Tool failure**: a tool call errored and you're recovering.
+ - **Real ambiguity**: the task had multiple valid interpretations and you needed \`ask_user_question\`.
+ - **Dependency discovered**: the fix required touching a file you didn't initially know about.
+ - **Edit failed**: the \`old_string\` didn't match (file changed) and you're retrying with corrected content.
+
+If you're past 4 requests and NONE of these apply, you're likely over-working a simple task — wrap up and hand off. The loop logs your continuation reason automatically; you don't need to justify each turn, just make sure there IS a reason.`
+}
+
 export function sharedDoingTasksCore(actor: 'developer' | 'user', scopeDescription: string): string {
   const subject = actor === 'developer' ? 'The developer' : 'The user'
   // Trimmed: rules covered by the always-loaded `general-coding` skill (no

@@ -95,6 +95,13 @@ export interface PayloadReport {
   toolCount: number
   /** Total tools available (before dynamic selection). Equal to toolCount when no selector is active. */
   toolCountTotal: number
+  /**
+   * When the loop continued past the 3-4-request efficiency target, this
+   * carries the inferred technical reason (e.g. "build/test error — fixing
+   * cascade"). Surfaced so the session export + inspector log show WHY a
+   * 7-turn bugfix kept going. Undefined when the turn is within target.
+   */
+  continuationReason?: string
   /** Breakdown by category. */
   byCategory: Record<string, { blocks: number; tokens: number; chars: number }>
   /** The 10 largest blocks, sorted desc. */
@@ -170,6 +177,7 @@ function blockContent(block: AnyMessage): { text: string; kind: string; toolCall
  * @param model        The model id.
  * @param turn         The agent loop turn number (1-based).
  * @param totalToolCount  Total tools available before dynamic selection (for the N/total log).
+ * @param continuationReason  When the loop is past the efficiency target, the inferred reason.
  */
 export function inspectPayload(
   apiMessages: readonly unknown[],
@@ -178,6 +186,7 @@ export function inspectPayload(
   model: string,
   turn: number,
   totalToolCount?: number,
+  continuationReason?: string,
 ): PayloadReport {
   const messages = apiMessages as AnyMessage[]
   const blocks: BlockInfo[] = []
@@ -343,6 +352,7 @@ export function inspectPayload(
     toolDefsTokens,
     toolCount: tools?.length ?? 0,
     toolCountTotal: totalToolCount ?? tools?.length ?? 0,
+    continuationReason,
     byCategory,
     topBlocks,
     duplicates,
@@ -372,6 +382,11 @@ export function formatReportForConsole(report: PayloadReport): string {
     `(system=${report.systemPromptTokens.toLocaleString()}, tools=${report.toolCount}/${report.toolCountTotal}=${report.toolDefsTokens.toLocaleString()}t)` +
     (report.toolCount < report.toolCountTotal ? ' ↓' : ''),
   )
+  // Continuation reason — surfaced when the loop is past the 3-4-request
+  // efficiency target so a 7-turn bugfix leaves a forensic trail of WHY.
+  if (report.continuationReason) {
+    lines.push(`  turn-efficiency: ${report.continuationReason}`)
+  }
 
   // Category breakdown
   const catEntries = Object.entries(report.byCategory).sort((a, b) => b[1].tokens - a[1].tokens)
@@ -434,9 +449,10 @@ export function inspectAndLogPayload(
   model: string,
   turn: number,
   totalToolCount?: number,
+  continuationReason?: string,
 ): PayloadReport | null {
   try {
-    const report = inspectPayload(apiMessages, systemPrompt, tools, model, turn, totalToolCount)
+    const report = inspectPayload(apiMessages, systemPrompt, tools, model, turn, totalToolCount, continuationReason)
     // eslint-disable-next-line no-console
     console.debug(formatReportForConsole(report))
     // Return the report so the caller (query.ts) can persist the per-request
