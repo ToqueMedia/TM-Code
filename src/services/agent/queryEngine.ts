@@ -64,6 +64,8 @@ export interface QueryEngineOptions {
   collectQueuedSteering?: () => Promise<QueuedSteeringContent | null>
   /** Live active-model limits for auto-compact — see QueryParams.getContextLimits. */
   getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null }
+  /** Dynamic toolset selector — when present, the loop filters tools per turn. */
+  toolsetSelector?: import('./toolsetSelector').ToolsetSelector
 }
 
 export interface QueryEngineState {
@@ -174,6 +176,7 @@ export class QueryEngine {
       collectInterTurnContext: this.options.collectInterTurnContext,
       collectQueuedSteering: this.options.collectQueuedSteering,
       getContextLimits: this.options.getContextLimits,
+      toolsetSelector: this.options.toolsetSelector,
     }
 
     try {

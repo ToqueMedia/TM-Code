@@ -208,6 +208,15 @@ export interface QueryParams {
    * (utils/contextWindow via autoCompact), never a 1M assumption.
    */
   getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null };
+  /**
+   * Dynamic toolset selector — when present, the loop filters the tool
+   * definitions to the active subset each turn (starting from a CORE minimal
+   * set and expanding monotonically based on user-message keywords + the
+   * `request_tools` meta-tool). Reduces tool-schema overhead from ~36 tools
+   * to the few the current task needs. Null/undefined → send all tools
+   * (legacy behaviour).
+   */
+  toolsetSelector?: import('./toolsetSelector').ToolsetSelector;
 }
 
 /** Terminal return value. */
@@ -690,6 +699,7 @@ export async function* query(
     extraHeaders,
     onResponseHeaders,
     getContextLimits,
+    toolsetSelector,
   } = params;
   let client = params.client;
   const refreshClient = params.refreshClient;
@@ -951,10 +961,34 @@ export async function* query(
     const maxTokens = maxOutputTokensOverride ?? MAX_OUTPUT_TOKENS;
     const apiMessages = toOpenAIMessages(messagesForQuery, systemPrompt, model);
 
+    // ── Dynamic toolset selection ──
+    // Filter the tool definitions to the active subset for this turn. The
+    // selector starts with a CORE minimal set and expands monotonically
+    // based on user-message keywords + the request_tools meta-tool. Reduces
+    // tool-schema overhead (~10K tokens for 36 tools) to the few the current
+    // task needs. When the selector is absent, send all tools (legacy).
+    const userText = messagesForQuery
+      .filter((m) => m.role === "user")
+      .map((m) =>
+        typeof m.content === "string"
+          ? m.content
+          : contentAsText(m.content as ContentBlockAPI[]),
+      )
+      .join("\n");
+    const toolSelection = toolsetSelector
+      ? toolsetSelector.selectForTurn(tools, userText)
+      : {
+          tools,
+          activeCount: tools.length,
+          totalCount: tools.length,
+          allActive: true,
+        };
+    const activeTools = toolSelection.tools;
+
     // ── Payload inspection (token-cost diagnostics) ──
     // Best-effort: sizes + hashes + top-10 blocks logged to console.debug
     // before every provider request. Never throws, never blocks the send.
-    const payloadReport = inspectAndLogPayload(apiMessages, systemPrompt, tools, model, state.turnCount);
+    const payloadReport = inspectAndLogPayload(apiMessages, systemPrompt, activeTools, model, state.turnCount, toolSelection.totalCount);
 
     // ── Stream from model ──
 
@@ -1019,8 +1053,8 @@ export async function* query(
         stream: true,
       };
 
-      if (tools.length > 0) {
-        streamParams.tools = tools;
+      if (activeTools.length > 0) {
+        streamParams.tools = activeTools;
       }
 
       if (thinkingConfig) {
@@ -1595,6 +1629,28 @@ export async function* query(
           breakdown: payloadReport?.byCategory ?? {},
         })
       } catch { /* usage logging never blocks the agent loop */ }
+      // Prompt-cache observability — surfaces Anthropic cache hit/miss per
+      // request so a multi-turn session shows the first turn creating the
+      // cache (cache_creation_input_tokens) and subsequent turns reading it
+      // (cache_read_input_tokens). Only present when the provider/adapter
+      // reports cache fields (BYOK+Anthropic with cache_control breakpoints).
+      try {
+        const tu2 = turnUsage as unknown as Record<string, unknown>
+        const cRead = tu2.cache_read_input_tokens as number | undefined
+        const cCreate = tu2.cache_creation_input_tokens as number | undefined
+        if (cRead !== undefined || cCreate !== undefined) {
+          const read = cRead ?? 0
+          const create = cCreate ?? 0
+          const input = turnUsage.prompt_tokens ?? 0
+          const uncached = Math.max(0, input - read - create)
+          // eslint-disable-next-line no-console
+          console.debug(
+            `[query] prompt cache · turn ${state.turnCount} · ` +
+            `read=${read} create=${create} uncached=${uncached} input=${input} ` +
+            `${read > 0 ? '(HIT)' : '(MISS — creating)'}`,
+          )
+        }
+      } catch { /* cache log never blocks the agent loop */ }
       // Real occupancy for the NEXT iteration's compaction decision. input
       // already includes all prior history; output rolls into the next
       // prompt — their sum is the true "how full is the window right now"

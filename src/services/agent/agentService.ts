@@ -40,6 +40,7 @@ import { useByokStore } from "../../stores/byokStore";
 import { buildByokClientFromSnapshot, buildByokThinkingConfig } from "./byokRouting";
 import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
+import { ToolsetSelector, REQUEST_TOOLS_NAME } from "./toolsetSelector";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 
 // ── Extracted services ──
@@ -89,6 +90,11 @@ class AgentService {
 
   private lightweightOptions: LightweightAgentOptions | null = null;
   private queryEngine: QueryEngine | null = null;
+  // Dynamic toolset selector for the current run. Null for sub-agents
+  // (lightweight) which use their own restricted tool set. Set per run in
+  // runQueryEngineLoop; the createToolExecutorBridge reads it to intercept
+  // the request_tools meta-tool.
+  private currentToolsetSelector: ToolsetSelector | null = null;
 
   // Última resposta HTTP confirmou TM Speed (`X-TM-Speed-Applied: true`)?
   // Os headers chegam no início de cada resposta e o `message_stop` desse
@@ -473,6 +479,16 @@ class AgentService {
     // 4. Build thinking config
     const thinkingConfig = this.buildThinkingConfig();
 
+    // 4.5. Dynamic toolset selector — starts with a CORE minimal toolset and
+    // expands monotonically based on user-message keywords + the request_tools
+    // meta-tool. Reduces tool-schema overhead (~10K tokens for 36 tools) to
+    // the few the current task needs. Sub-agents (lightweight) skip selection
+    // — they already receive a restricted tool set from the subAgentRunner.
+    const toolsetSelector = this.lightweightOptions
+      ? null
+      : new ToolsetSelector(openaiTools.map((t) => t.function.name));
+    this.currentToolsetSelector = toolsetSelector;
+
     // 5. Create tool executor bridge
     const executeTool = this.createToolExecutorBridge(callbacks);
 
@@ -547,6 +563,8 @@ class AgentService {
       // onRequestUsage is distinct: it carries the payloadInspector breakdown
       // (not in message_stop) — pure observability, no double-counting.
       onRequestUsage: (entry) => callbacks.onRequestUsage?.(entry),
+      // Dynamic toolset selector (null for sub-agents).
+      toolsetSelector: toolsetSelector ?? undefined,
     });
     this.queryEngine = engine;
 
@@ -917,6 +935,28 @@ class AgentService {
       toolUseId: string,
       signal?: AbortSignal,
     ): Promise<{ content: string; isError: boolean }> => {
+      // Intercept the request_tools meta-tool — it's not in the toolExecutor
+      // registry. The agent calls it to ask for capabilities that aren't in the
+      // current active toolset; we expand the selector so they're available on
+      // the next turn. Never reaches the toolExecutor.
+      if (toolName === REQUEST_TOOLS_NAME) {
+        const requested = Array.isArray(toolInput.tools) ? (toolInput.tools as string[]) : [];
+        const selector = this.currentToolsetSelector;
+        if (!selector) {
+          return {
+            content: 'All tools are already available (no dynamic selection active).',
+            isError: false,
+          };
+        }
+        const result = selector.requestTools(requested);
+        const parts: string[] = [];
+        if (result.added.length) parts.push(`Activated for next turn: ${result.added.join(', ')}.`);
+        if (result.alreadyActive.length) parts.push(`Already active: ${result.alreadyActive.join(', ')}.`);
+        if (result.unknown.length) parts.push(`Unknown (not in registry): ${result.unknown.join(', ')}.`);
+        if (parts.length === 0) parts.push('No tools requested.');
+        return { content: parts.join(' '), isError: false };
+      }
+
       // Announce + start the tool at execution time. The query loop runs tools
       // serially, so doing the announcement here keeps later write calls out of
       // the UI while an earlier permission / diff / credential decision is

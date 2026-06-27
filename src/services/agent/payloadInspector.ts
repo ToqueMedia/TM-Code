@@ -91,6 +91,10 @@ export interface PayloadReport {
   systemPromptTokens: number
   /** Estimated tokens contributed by the tool definitions (schemas). */
   toolDefsTokens: number
+  /** Number of tool definitions sent in THIS request (after dynamic selection). */
+  toolCount: number
+  /** Total tools available (before dynamic selection). Equal to toolCount when no selector is active. */
+  toolCountTotal: number
   /** Breakdown by category. */
   byCategory: Record<string, { blocks: number; tokens: number; chars: number }>
   /** The 10 largest blocks, sorted desc. */
@@ -165,6 +169,7 @@ function blockContent(block: AnyMessage): { text: string; kind: string; toolCall
  * @param tools        The tool definitions array (for sizing the schemas).
  * @param model        The model id.
  * @param turn         The agent loop turn number (1-based).
+ * @param totalToolCount  Total tools available before dynamic selection (for the N/total log).
  */
 export function inspectPayload(
   apiMessages: readonly unknown[],
@@ -172,6 +177,7 @@ export function inspectPayload(
   tools: { type?: string; function?: unknown }[] | undefined,
   model: string,
   turn: number,
+  totalToolCount?: number,
 ): PayloadReport {
   const messages = apiMessages as AnyMessage[]
   const blocks: BlockInfo[] = []
@@ -335,6 +341,8 @@ export function inspectPayload(
     totalEstimatedTokens,
     systemPromptTokens,
     toolDefsTokens,
+    toolCount: tools?.length ?? 0,
+    toolCountTotal: totalToolCount ?? tools?.length ?? 0,
     byCategory,
     topBlocks,
     duplicates,
@@ -361,7 +369,8 @@ export function formatReportForConsole(report: PayloadReport): string {
   lines.push(
     `[payload-inspector] turn ${turn} | model=${report.model} | ` +
     `${report.totalMessages} msgs | ~${report.totalEstimatedTokens.toLocaleString()} input tokens ` +
-    `(system=${report.systemPromptTokens.toLocaleString()}, toolDefs=${report.toolDefsTokens.toLocaleString()})`,
+    `(system=${report.systemPromptTokens.toLocaleString()}, tools=${report.toolCount}/${report.toolCountTotal}=${report.toolDefsTokens.toLocaleString()}t)` +
+    (report.toolCount < report.toolCountTotal ? ' ↓' : ''),
   )
 
   // Category breakdown
@@ -424,9 +433,10 @@ export function inspectAndLogPayload(
   tools: { type?: string; function?: unknown }[] | undefined,
   model: string,
   turn: number,
+  totalToolCount?: number,
 ): PayloadReport | null {
   try {
-    const report = inspectPayload(apiMessages, systemPrompt, tools, model, turn)
+    const report = inspectPayload(apiMessages, systemPrompt, tools, model, turn, totalToolCount)
     // eslint-disable-next-line no-console
     console.debug(formatReportForConsole(report))
     // Return the report so the caller (query.ts) can persist the per-request

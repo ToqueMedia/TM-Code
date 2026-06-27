@@ -19,6 +19,7 @@ import {
   anthropicResponseToOpenAI,
   anthropicSSEToOpenAISSE,
 } from '../anthropicAdapter'
+import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../contextBuilder/helpers'
 
 describe('toAnthropicRequest', () => {
   it('extracts the system message into the top-level system field', () => {
@@ -78,17 +79,19 @@ describe('toAnthropicRequest', () => {
     expect((messages[1].content as unknown[]).length).toBe(2)
   })
 
-  it('converts tool definitions to input_schema', () => {
+  it('converts tool definitions to input_schema and marks the last with a cache breakpoint', () => {
     const out = toAnthropicRequest({
       model: 'm',
       max_tokens: 100,
       messages: [{ role: 'user', content: 'x' }],
       tools: [
         { type: 'function', function: { name: 'read_file', description: 'reads', parameters: { type: 'object', properties: { path: { type: 'string' } } } } },
+        { type: 'function', function: { name: 'write_file', description: 'writes', parameters: { type: 'object', properties: { path: { type: 'string' } } } } },
       ],
     })
     expect(out.tools).toEqual([
       { name: 'read_file', description: 'reads', input_schema: { type: 'object', properties: { path: { type: 'string' } } } },
+      { name: 'write_file', description: 'writes', input_schema: { type: 'object', properties: { path: { type: 'string' } } }, cache_control: { type: 'ephemeral' } },
     ])
   })
 
@@ -103,6 +106,35 @@ describe('toAnthropicRequest', () => {
     expect(out.thinking).toEqual({ type: 'enabled', budget_tokens: 8192 })
     expect(out.output_config).toEqual({ effort: 'high' })
     expect(out.max_tokens as number).toBeGreaterThan(8192)
+  })
+
+  it('splits the system on the dynamic boundary into a cached static block + uncached dynamic block', () => {
+    const staticPart = 'You are a helpful agent. Stable rules here.'
+    const dynamicPart = 'Current file tree and git status.'
+    const out = toAnthropicRequest({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1000,
+      messages: [
+        { role: 'system', content: `${staticPart}\n\n${SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\n${dynamicPart}` },
+        { role: 'user', content: 'Hi' },
+      ],
+    })
+    expect(out.system).toEqual([
+      { type: 'text', text: staticPart, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: dynamicPart },
+    ])
+  })
+
+  it('leaves a boundary-less system as a plain string (no cache breakpoint)', () => {
+    const out = toAnthropicRequest({
+      model: 'm',
+      max_tokens: 1000,
+      messages: [
+        { role: 'system', content: 'You are helpful.' },
+        { role: 'user', content: 'Hi' },
+      ],
+    })
+    expect(out.system).toBe('You are helpful.')
   })
 })
 
@@ -119,6 +151,27 @@ describe('anthropicResponseToOpenAI (non-stream)', () => {
     expect(message.content).toBe('done')
     expect(choice.finish_reason).toBe('stop')
     expect(out.usage).toEqual({ prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 })
+  })
+
+  it('propagates Anthropic prompt-cache usage fields when present', () => {
+    const out = anthropicResponseToOpenAI({
+      id: 'msg_2',
+      content: [{ type: 'text', text: 'cached' }],
+      stop_reason: 'end_turn',
+      usage: {
+        input_tokens: 1200,
+        output_tokens: 50,
+        cache_creation_input_tokens: 47000,
+        cache_read_input_tokens: 0,
+      },
+    })
+    expect(out.usage).toEqual({
+      prompt_tokens: 1200,
+      completion_tokens: 50,
+      total_tokens: 1250,
+      cache_creation_input_tokens: 47000,
+      cache_read_input_tokens: 0,
+    })
   })
 })
 
@@ -213,5 +266,57 @@ describe('anthropicSSEToOpenAISSE (streaming)', () => {
     expect(finishChunk!.usage).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 })
 
     expect(sawDone).toBe(true)
+  })
+
+  it('propagates prompt-cache usage from message_start to the final usage chunk (cache create on first turn)', async () => {
+    const sse = [
+      'event: message_start',
+      'data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":1200,"output_tokens":0,"cache_creation_input_tokens":47000,"cache_read_input_tokens":0}}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}',
+      '',
+      'event: message_delta',
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}',
+      '',
+      'event: message_stop',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join('\n')
+    const { chunks } = await drive(sse)
+    const finishChunk = chunks.find((c) => (c.choices as any[])?.[0]?.finish_reason)
+    expect(finishChunk!.usage).toEqual({
+      prompt_tokens: 1200,
+      completion_tokens: 5,
+      total_tokens: 1205,
+      cache_creation_input_tokens: 47000,
+      cache_read_input_tokens: 0,
+    })
+  })
+
+  it('reports cache_read_input_tokens on a cache HIT (subsequent turn)', async () => {
+    const sse = [
+      'event: message_start',
+      'data: {"type":"message_start","message":{"id":"msg_2","usage":{"input_tokens":1200,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":47000}}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi again"}}',
+      '',
+      'event: message_delta',
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}',
+      '',
+      'event: message_stop',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join('\n')
+    const { chunks } = await drive(sse)
+    const finishChunk = chunks.find((c) => (c.choices as any[])?.[0]?.finish_reason)
+    expect(finishChunk!.usage).toEqual({
+      prompt_tokens: 1200,
+      completion_tokens: 3,
+      total_tokens: 1203,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 47000,
+    })
   })
 })

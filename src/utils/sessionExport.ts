@@ -301,12 +301,23 @@ function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
   const totalIn = log.reduce((s, e) => s + (e.inputTokens ?? 0), 0)
   const totalOut = log.reduce((s, e) => s + (e.outputTokens ?? 0), 0)
   const totalEst = log.reduce((s, e) => s + (e.estimatedInputTokens ?? 0), 0)
+  const totalCacheRead = log.reduce((s, e) => s + (e.cacheReadInputTokens ?? 0), 0)
+  const totalCacheCreate = log.reduce((s, e) => s + (e.cacheCreationInputTokens ?? 0), 0)
+  // uncached = input tokens that were neither read from cache nor written to it.
+  const totalUncached = Math.max(0, totalIn - totalCacheRead - totalCacheCreate)
+  const cachedPct = totalIn > 0 ? Math.round(((totalCacheRead + totalCacheCreate) / totalIn) * 100) : 0
   lines.push(`**Totals:** ${log.length} requests · IN ${totalIn.toLocaleString()} (est. ${totalEst.toLocaleString()}) · OUT ${totalOut.toLocaleString()}`)
+  if (totalCacheRead > 0 || totalCacheCreate > 0) {
+    lines.push(`**Prompt cache:** read ${totalCacheRead.toLocaleString()} · create ${totalCacheCreate.toLocaleString()} · uncached ${totalUncached.toLocaleString()} · ${cachedPct}% of input cached`)
+  }
   lines.push(``)
-  lines.push('| # | turn | provider | model | IN (real) | OUT | est. IN | cache create | cache read |')
-  lines.push('|---|---|---|---|---|---|---|---|---|')
+  lines.push('| # | turn | provider | model | IN (real) | OUT | est. IN | cache read | cache create | uncached IN |')
+  lines.push('|---|---|---|---|---|---|---|---|---|---|')
   log.forEach((e, i) => {
-    lines.push(`| ${i + 1} | ${e.turn} | ${e.provider ?? '—'} | ${e.model} | ${e.inputTokens.toLocaleString()} | ${e.outputTokens.toLocaleString()} | ${e.estimatedInputTokens.toLocaleString()} | ${e.cacheCreationInputTokens?.toLocaleString() ?? '—'} | ${e.cacheReadInputTokens?.toLocaleString() ?? '—'} |`)
+    const cRead = e.cacheReadInputTokens ?? 0
+    const cCreate = e.cacheCreationInputTokens ?? 0
+    const uncached = Math.max(0, (e.inputTokens ?? 0) - cRead - cCreate)
+    lines.push(`| ${i + 1} | ${e.turn} | ${e.provider ?? '—'} | ${e.model} | ${e.inputTokens.toLocaleString()} | ${e.outputTokens.toLocaleString()} | ${e.estimatedInputTokens.toLocaleString()} | ${e.cacheReadInputTokens?.toLocaleString() ?? '—'} | ${e.cacheCreationInputTokens?.toLocaleString() ?? '—'} | ${uncached.toLocaleString()} |`)
   })
   lines.push(``)
   // Collapsible per-request breakdown — top 5 by real input tokens.
