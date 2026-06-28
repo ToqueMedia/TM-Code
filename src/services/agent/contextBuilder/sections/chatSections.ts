@@ -730,6 +730,20 @@ export function getProjectStructureSection(ctx: PromptContext): string {
   return `# Project structure\n(snapshot at turn start — files you create, move or delete with tools THIS turn won't show here; trust your tool results)\n${ctx.treeString}`
 }
 
+export function getProjectStructureIndexSection(ctx: PromptContext): string | null {
+  if (!ctx.treeString) return null
+  const lines = ctx.treeString.split('\n').filter(Boolean)
+  const top = lines.slice(0, 24).join('\n')
+  const more = lines.length > 24 ? `\n... ${lines.length - 24} more entries omitted` : ''
+  return [
+    '# Project structure (compact index)',
+    '(Snapshot at turn start. Full tree omitted from core to save tokens.)',
+    top + more,
+    '',
+    'Use `glob`, `list_directory`, `search_files`, or `request_context({ auxiliary: "project_structure_full" })` if you need the full tree.',
+  ].join('\n')
+}
+
 // ── Git orientation ────────────────────────────────────────────
 // Branch + sync state + changed files, so the model doesn't burn a turn on
 // `git status` / `git diff` to figure out where it is. Snapshot per turn (the
@@ -756,14 +770,24 @@ export function getGitStatusSection(ctx: PromptContext): string | null {
   return `${header}\nchanged files (${git.files.length}${git.truncatedFiles ? '+' : ''}):\n${fileLines}${more}`
 }
 
+export function getGitStatusIndexSection(ctx: PromptContext): string | null {
+  const git = ctx.gitContext
+  if (!git) return null
+  return `# Git (compact index)\nrepo branch: ${git.branch}${git.files.length ? `; ${git.files.length}${git.truncatedFiles ? '+' : ''} changed files` : '; working tree clean'}\nFull git status is on-demand: request_context({ auxiliary: "git_status_detail" }) when the task mentions git/commit/branch/diff/push/pull/merge/tag.`
+}
+
 // ── Recently-modified files ────────────────────────────────────
 // Points the model at the working set (newest first) so it doesn't grep around
 // for "where the recent work is". Paths are project-relative; .gitignore'd and
 // build-output paths are already excluded by the walker.
 export function getRecentFilesSection(ctx: PromptContext): string | null {
   if (!ctx.recentFiles.length) return null
-  const lines = ctx.recentFiles.map(f => `  ${f.path}`).join('\n')
-  return `# Recently modified files\n(most recent first — likely the active working set)\n${lines}`
+  const visible = ctx.recentFiles.slice(0, 3)
+  const lines = visible.map(f => `  ${f.path}`).join('\n')
+  const more = ctx.recentFiles.length > visible.length
+    ? `\n  ... ${ctx.recentFiles.length - visible.length} more omitted`
+    : ''
+  return `# Recently modified files\n(most recent first — top 3 only)\n${lines}${more}\nUse search/list tools if the working set is not enough.`
 }
 
 export function getReadmeSection(ctx: PromptContext): string | null {
@@ -774,10 +798,10 @@ export function getReadmeSection(ctx: PromptContext): string | null {
 // ── 12. Project memory: TMS / PLAN / TODO ──────────────────────
 export function getProjectMemorySection(ctx: PromptContext): string | null {
   if (!ctx.tmsContent) return null
-  const truncated = ctx.tmsContent.length > 6000
-    ? ctx.tmsContent.slice(0, 6000) + '\n\n[... truncated — read TMS.md for full content]'
+  const truncated = ctx.tmsContent.length > 900
+    ? ctx.tmsContent.slice(0, 900) + '\n\n[... project memory body omitted — request project_docs_full or read TMS.md]'
     : ctx.tmsContent
-  return `# Project memory\n${sanitizeProjectContent(truncated)}`
+  return `# Project memory (compact index)\n${sanitizeProjectContent(truncated)}`
 }
 
 /**
@@ -879,16 +903,16 @@ export function getSessionMemorySection(ctx: PromptContext): string | null {
 
 export function getActivePlanSection(ctx: PromptContext): string | null {
   if (!ctx.planContent) return null
-  const truncated = ctx.planContent.length > 4000
-    ? ctx.planContent.slice(0, 4000) + '\n\n[... plan truncated — read PLAN.md]'
+  const truncated = ctx.planContent.length > 900
+    ? ctx.planContent.slice(0, 900) + '\n\n[... plan body omitted — request project_docs_full or read PLAN.md]'
     : ctx.planContent
-  return `# Active plan\n${sanitizeProjectContent(truncated)}`
+  return `# Active plan (compact index)\n${sanitizeProjectContent(truncated)}`
 }
 
 export function getTaskListSection(ctx: PromptContext): string | null {
   if (!ctx.todoContent) return null
-  const truncated = ctx.todoContent.length > 2000
-    ? ctx.todoContent.slice(0, 2000) + '\n\n[... task list truncated — read TODO.md]'
+  const truncated = ctx.todoContent.length > 1000
+    ? ctx.todoContent.slice(0, 1000) + '\n\n[... task list body omitted — request project_docs_full or read TODO.md]'
     : ctx.todoContent
   return `# Task list (TODO.md — the project backlog you MUST drive to completion)
 ${sanitizeProjectContent(truncated)}
@@ -1068,25 +1092,8 @@ export function getAuthSection(): string {
  - **REQUIRED smoke test after touching \`/api/auth/*\`**: run \`execute_command: curl -s -o /dev/null -w '%{http_code} %{content_type}\\n' http://localhost:5173/api/auth/me\`. Expected: \`401 application/json\`. \`404 text/html\` = Vite proxy not wired. \`500\` = backend crashed at boot (read_dev_server_logs). Anything else is a regression — fix before claiming the phase complete.`
 }
 
-// ── 14c. Constraints ────────────────────────────────────────────
-// `publishing` / `vision` / `auth` are auxiliary blocks injected only when the
-// task profile calls for them. When null/absent the Constraints section stays
-// lean — a localised bugfix doesn't need publishing/deploy rules, vision, or
-// auth smoke-test guidance. See contextBuilder/auxiliaryRegistry.ts.
-export function getConstraintsSection(
-  ctx: PromptContext,
-  opts?: { publishing?: string | null; vision?: string | null; auth?: string | null },
-): string {
-  const vanillaWebRule = ctx.isVanillaWeb
-    ? `\n**Vanilla web projects**: **USE** \`index.html\` as entry point. **LINK** CSS/JS via relative paths — the IDE inlines them for preview.\n`
-    : ''
-  return `# Constraints
-
-## Files
- - The IDE blocks operations outside the project directory.
- - \`create_file\` is for new files ONLY. **USE** \`write_file\` to overwrite existing files.
-
-## Dev servers
+export function getDevServerRulesSection(): string {
+  return `## Dev servers
  - **PICK** framework default ports (Vite=5173, Next=3000, Express=whatever your scripts bind). Do NOT prescribe custom ports — the IDE detects URLs from log output and classifies them by HTTP content-type (HTML → iframe preview; JSON/other → HTTP Client).
  - **CRITICAL — Frontend dev servers MUST bind to \`0.0.0.0\`**, not just localhost. Node 18+ resolves \`localhost\` to \`::1\` (IPv6) only; the IDE preview connects via \`127.0.0.1\` (IPv4). Without explicit host binding, preview shows "Connection refused".
    - Top-level frontend commands: the IDE auto-injects \`--host 0.0.0.0\` for vite, next dev, nuxt dev, astro dev, svelte-kit dev, ng serve.
@@ -1096,7 +1103,26 @@ export function getConstraintsSection(
  - **CRITICAL — Build-time env vars + bundler config layout**: \`.env\` lives at the project root; Vite/Next/etc. read \`.env\` from the directory containing their own config. **Decide based on where \`vite.config.ts\` lives RELATIVE to \`.env\`:**
    - **FLAT layout** (\`vite.config.ts\` and \`.env\` in the SAME directory): **DO NOT** set \`envDir\`. Vite finds \`.env\` next to its config by default. Setting \`envDir: path.resolve(__dirname, '..')\` here points at the parent (no \`.env\` there) and breaks every \`VITE_*\` var.
    - **MONOREPO layout** (\`vite.config.ts\` inside \`client/\`, \`.env\` at the parent project root): **SET** \`envDir: path.resolve(__dirname, '..')\` so Vite climbs into the root. Same logic for Next.js (\`NEXT_PUBLIC_*\`), Astro, SvelteKit.
-   - **Verify**: in the running app's browser console, \`import.meta.env.VITE_GOOGLE_CLIENT_ID\` must print the client ID. \`undefined\` = misconfigured.
+   - **Verify**: in the running app's browser console, \`import.meta.env.VITE_GOOGLE_CLIENT_ID\` must print the client ID. \`undefined\` = misconfigured.`
+}
+
+// ── 14c. Constraints ────────────────────────────────────────────
+// `publishing` / `vision` / `auth` are auxiliary blocks injected only when the
+// task profile calls for them. When null/absent the Constraints section stays
+// lean — a localised bugfix doesn't need publishing/deploy rules, vision, or
+// auth smoke-test guidance. See contextBuilder/auxiliaryRegistry.ts.
+export function getConstraintsSection(
+  ctx: PromptContext,
+  opts?: { publishing?: string | null; vision?: string | null; auth?: string | null; devServer?: string | null },
+): string {
+  const vanillaWebRule = ctx.isVanillaWeb
+    ? `\n**Vanilla web projects**: **USE** \`index.html\` as entry point. **LINK** CSS/JS via relative paths — the IDE inlines them for preview.\n`
+    : ''
+  return `# Constraints
+
+## Files
+ - The IDE blocks operations outside the project directory.
+ - \`create_file\` is for new files ONLY. **USE** \`write_file\` to overwrite existing files.
 
 ## Safety
  - \`.env\` files are mechanically blocked — you CANNOT read, write, edit, or delete them. The developer also cannot edit \`.env\` directly through the IDE. The ONLY write path is the secure form rendered by \`request_credentials\`. (In Terminal mode, \`.env\` reads are allowed with explicit user authorization — but \`request_credentials\` is still preferred for project-integrated vars.)
@@ -1116,6 +1142,8 @@ export function getConstraintsSection(
 ${opts?.vision ?? ''}
 
 ${opts?.auth ?? ''}
+
+${opts?.devServer ?? ''}
 
 ${opts?.publishing ?? ''}
 

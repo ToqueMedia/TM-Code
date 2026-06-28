@@ -18,6 +18,12 @@ interface MentionContextStats {
   /** Token saving this turn = (full body tokens) − (stub tokens actually
    *  sent). 0 when the full body was sent (first turn) or no mention. */
   mentionContextRepeatedTokens: number
+  /** Cumulative saving across this session since the tracker was cleared. */
+  mentionContextRepeatedTokensCumulative: number
+  /** Estimated tokens of the full mention context this request refers to. */
+  mentionContextFullTokens: number
+  /** Estimated tokens of the stub actually sent in this request. */
+  mentionContextStubTokens: number
   /** True when the FULL outline was sent this turn; false when only the
    *  short reference stub was sent (follow-up turns). */
   mentionContextSentFullThisTurn: boolean
@@ -28,9 +34,14 @@ interface MentionContextStats {
 
 let stats: MentionContextStats = {
   mentionContextRepeatedTokens: 0,
+  mentionContextRepeatedTokensCumulative: 0,
+  mentionContextFullTokens: 0,
+  mentionContextStubTokens: 0,
   mentionContextSentFullThisTurn: false,
   mentionContextRefId: undefined,
 }
+
+let cumulativeRepeatedTokens = 0
 
 /** Rough token estimate matching payloadInspector's chars/3 heuristic. */
 function roughTokens(text: string): number {
@@ -43,11 +54,11 @@ function roughTokens(text: string): number {
  * body was sent.
  */
 export function recordMentionContextFull(refId: string, fullBody: string): void {
+  const fullTokens = roughTokens(fullBody)
   stats.mentionContextSentFullThisTurn = true
   stats.mentionContextRefId = stats.mentionContextRefId ?? refId
-  // Touch fullBody so the roughTokens helper is referenced (keeps the
-  // estimator consistent if we later want to log full-body token count).
-  void roughTokens(fullBody)
+  stats.mentionContextFullTokens += fullTokens
+  stats.mentionContextRepeatedTokensCumulative = cumulativeRepeatedTokens
 }
 
 /**
@@ -60,29 +71,46 @@ export function recordMentionContextStub(
   fullBody: string,
   stub: string,
 ): void {
-  stats.mentionContextRepeatedTokens += Math.max(
-    0,
-    roughTokens(fullBody) - roughTokens(stub),
-  )
+  const fullTokens = roughTokens(fullBody)
+  const stubTokens = roughTokens(stub)
+  const saved = Math.max(0, fullTokens - stubTokens)
+  stats.mentionContextRepeatedTokens += saved
+  stats.mentionContextFullTokens += fullTokens
+  stats.mentionContextStubTokens += stubTokens
+  cumulativeRepeatedTokens += saved
+  stats.mentionContextRepeatedTokensCumulative = cumulativeRepeatedTokens
+  stats.mentionContextSentFullThisTurn = false
   stats.mentionContextRefId = stats.mentionContextRefId ?? refId
 }
 
 /** Read + reset the mention-context stats for this turn's export. */
 export function getAndResetMentionContextStats(): MentionContextStats {
   const out = stats
+  resetMentionContextTurnStats()
+  return out
+}
+
+/** Clear only per-request fields, preserving the session cumulative counter. */
+export function resetMentionContextTurnStats(): void {
   stats = {
     mentionContextRepeatedTokens: 0,
+    mentionContextRepeatedTokensCumulative: cumulativeRepeatedTokens,
+    mentionContextFullTokens: 0,
+    mentionContextStubTokens: 0,
     mentionContextSentFullThisTurn: false,
     mentionContextRefId: undefined,
   }
-  return out
 }
 
 /** Clear all stats. Called on session reset. */
 export function clearMentionContextTracker(): void {
   stats = {
     mentionContextRepeatedTokens: 0,
+    mentionContextRepeatedTokensCumulative: 0,
+    mentionContextFullTokens: 0,
+    mentionContextStubTokens: 0,
     mentionContextSentFullThisTurn: false,
     mentionContextRefId: undefined,
   }
+  cumulativeRepeatedTokens = 0
 }

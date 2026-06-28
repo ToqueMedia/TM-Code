@@ -569,6 +569,12 @@ export interface RequestUsageEntry {
    *  the full outline (turns > 1), this is the token SAVING vs the full body.
    *  0 on the first turn (full outline sent) and whenever there's no mention. */
   mentionContextRepeatedTokens?: number
+  /** Cumulative token saving from mention-context stubbing. */
+  mentionContextRepeatedTokensCumulative?: number
+  /** Full mention-context tokens used as baseline for the saving. */
+  mentionContextFullTokens?: number
+  /** Stub mention-context tokens actually sent in this request. */
+  mentionContextStubTokens?: number
   /** True when the FULL mention outline was sent this turn; false when only a
    *  short reference stub was sent (follow-up turns). Lets an export prove the
    *  stub-path actually kicked in. */
@@ -621,14 +627,28 @@ export interface RequestUsageEntry {
   selectedToolProfile?: string
   /** System-prompt tokens attributed to the always-loaded core context. */
   coreContextTokens?: number
+  /** Alias for coreContextTokens in newer exports. */
+  coreSystemTokens?: number
+  /** Tokens spent on the on-demand index itself. */
+  onDemandIndexTokens?: number
   /** System-prompt tokens attributed to the on-demand auxiliaries loaded inline. */
   auxiliaryContextTokens?: number
   /** Auxiliary ids LOADED inline in the system prompt. */
   auxiliaryLoaded?: string[]
+  /** Alias for auxiliaryLoaded in newer exports. */
+  loadedSystemSections?: string[]
   /** Auxiliary ids OMITTED (available via request_context). */
   auxiliaryOmitted?: string[]
+  /** Alias for auxiliaryOmitted in newer exports. */
+  omittedSystemSections?: string[]
+  /** Auxiliary ids fetched during this run through request_context. */
+  requestedContextSections?: string[]
   /** Tokens saved by omitting the auxiliaries (vs loading everything). */
   auxiliarySavingsTokens?: number
+  /** Alias for auxiliarySavingsTokens in newer exports. */
+  systemPromptSavingsTokens?: number
+  /** Human-readable reason for the selected prompt/system profile. */
+  systemPromptProfileReason?: string
   /** Whether the run is read-only (no file edits) per the Intent Router. */
   readOnlyRun?: boolean
   /** Why the Intent Router chose this profile (for audit). */

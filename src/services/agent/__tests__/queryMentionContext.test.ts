@@ -27,6 +27,9 @@ describe('query payload @mention compaction', () => {
     const stats = getAndResetMentionContextStats()
     expect(stats.mentionContextSentFullThisTurn).toBe(true)
     expect(stats.mentionContextRepeatedTokens).toBe(0)
+    expect(stats.mentionContextFullTokens).toBeGreaterThan(0)
+    expect(stats.mentionContextStubTokens).toBe(0)
+    expect(stats.mentionContextRepeatedTokensCumulative).toBe(0)
     expect(stats.mentionContextRefId).toBe('mc-0')
   })
 
@@ -44,6 +47,27 @@ describe('query payload @mention compaction', () => {
     const stats = getAndResetMentionContextStats()
     expect(stats.mentionContextSentFullThisTurn).toBe(false)
     expect(stats.mentionContextRepeatedTokens).toBeGreaterThan(0)
+    expect(stats.mentionContextFullTokens).toBeGreaterThan(stats.mentionContextStubTokens)
+    expect(stats.mentionContextStubTokens).toBeGreaterThan(0)
+    expect(stats.mentionContextRepeatedTokensCumulative).toBe(stats.mentionContextRepeatedTokens)
     expect(stats.mentionContextRefId).toBe('mc-0')
+  })
+
+  it('reports the same per-turn saving when the full internal history is compacted again', () => {
+    const history = [
+      { role: 'user' as const, content: `fix this\n${fullMention}` },
+      { role: 'assistant' as const, content: 'turn 1' },
+    ]
+
+    compactHistoricalMentionContextForPayload(history)
+    const turn2 = getAndResetMentionContextStats()
+    compactHistoricalMentionContextForPayload([...history, { role: 'assistant', content: 'turn 2' }])
+    const turn3 = getAndResetMentionContextStats()
+
+    expect(turn2.mentionContextRepeatedTokens).toBeGreaterThan(0)
+    expect(turn3.mentionContextRepeatedTokens).toBe(turn2.mentionContextRepeatedTokens)
+    expect(turn3.mentionContextRepeatedTokensCumulative).toBe(
+      turn2.mentionContextRepeatedTokens + turn3.mentionContextRepeatedTokens,
+    )
   })
 })

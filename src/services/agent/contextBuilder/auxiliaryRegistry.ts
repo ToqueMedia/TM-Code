@@ -114,6 +114,8 @@ export interface AuxiliarySelection {
   totalAvailableTokens: number
   /** Savings vs loading everything (totalAvailable - loaded). */
   savingsTokens: number
+  /** Auxiliary ids fetched mid-run through request_context. */
+  requestedContextSections?: string[]
   /**
    * True when the user wants a read-only run (no file edits). Set by the
    * Intent Router (`readOnly` flag) — never derived from free-text phrasing.
@@ -270,15 +272,25 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     triggers: [/\bauth\b|login|sign.?in|firebase|database|\bsql\b|sqlite|turso|libsql|provision/i],
     phase: 1,
   },
-  // ── Phase 2: registered but not yet gated (loaders are no-ops) ──
   {
     id: 'ui_baseline_full',
     name: 'UI baseline (full)',
-    description: 'State-first design constraints + taste defaults. A short version stays in core; this is the full block.',
-    estTokens: 900,
+    description: 'Full state-first UI design baseline. Load for frontend/design/visual work.',
+    estTokens: 650,
     type: 'static',
     profiles: ['frontend_ui'],
-    phase: 2,
+    triggers: [/\bui\b|design|component|layout|style|\bcss\b|tailwind|chakra|modal|dialog|\btela\b|screen|interface visual/i],
+    phase: 1,
+  },
+  {
+    id: 'taste_defaults',
+    name: 'Taste defaults',
+    description: 'Visual restraint defaults for creating or improving UI.',
+    estTokens: 350,
+    type: 'static',
+    profiles: ['frontend_ui'],
+    triggers: [/visual|design|style|polish|beautiful|bonito|melhorar.*ui|criar.*ui|landing|hero|layout/i],
+    phase: 1,
   },
   {
     id: 'project_structure_full',
@@ -287,7 +299,8 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     estTokens: 1500,
     type: 'dynamic',
     profiles: ['scaffold_project', 'deploy_publish'],
-    phase: 2,
+    triggers: [/project structure|file tree|estrutura|scan.*project|map.*project|where.*file|onde.*ficheiro/i],
+    phase: 1,
   },
   {
     id: 'mcp_routing_detail',
@@ -296,7 +309,8 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     estTokens: 600,
     type: 'dynamic',
     profiles: [],
-    phase: 2,
+    triggers: [/\bmcp\b|figma|canva|notion|linear|jira|github issue|google sheets|calendar/i],
+    phase: 1,
   },
   {
     id: 'skills_detail',
@@ -314,7 +328,28 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     estTokens: 2000,
     type: 'project-doc',
     profiles: [],
-    phase: 2,
+    triggers: [/readme|tms\.md|plan\.md|todo\.md|project docs|documenta[çc][ãa]o|memory|mem[oó]ria/i],
+    phase: 1,
+  },
+  {
+    id: 'dev_server_status_detail',
+    name: 'Dev server status (detail)',
+    description: 'Live dev-server status and preview/runtime guidance.',
+    estTokens: 350,
+    type: 'dynamic',
+    profiles: [],
+    triggers: [/dev.*server|preview|browser|runtime|vite|run|build|terminal|servidor|deploy|erro.*runtime/i],
+    phase: 1,
+  },
+  {
+    id: 'git_status_detail',
+    name: 'Git status (detail)',
+    description: 'Branch, upstream, and working-tree changes.',
+    estTokens: 450,
+    type: 'dynamic',
+    profiles: [],
+    triggers: [/\bgit\b|commit|branch|pull|push|diff|merge|tag|rebase|stash/i],
+    phase: 1,
   },
 ]
 
@@ -347,7 +382,9 @@ export function selectAuxiliaries(
   for (const meta of phase1) {
     totalAvailableTokens += meta.estTokens
     const profileMatch = meta.profiles.includes(profile)
-    const triggerMatch = meta.triggers?.some((re) => re.test(msg)) ?? false
+    const triggerMatch = meta.id === 'dev_server_status_detail' && profile === 'analysis_readonly'
+      ? false
+      : meta.triggers?.some((re) => re.test(msg)) ?? false
 
     if (profileMatch || triggerMatch) {
       const reason = profileMatch
@@ -373,6 +410,7 @@ export function selectAuxiliaries(
     loadedTokens,
     totalAvailableTokens,
     savingsTokens: totalAvailableTokens - loadedTokens,
+    requestedContextSections: [],
     // analysis_readonly is inherently read-only; otherwise honour the hint.
     readOnly: profile === 'analysis_readonly' ? true : readOnlyHint === true,
     reason: reason ?? `keyword classifier (profile=${profile})`,

@@ -44,10 +44,10 @@ import { contentAsText } from "./promptValueHelpers";
 import { inspectAndLogPayload } from "./payloadInspector";
 import { getReadRanges, getAndResetOverlapStats } from "./toolExecutor/readRangeTracker";
 import {
-  clearMentionContextTracker,
   getAndResetMentionContextStats,
   recordMentionContextFull,
   recordMentionContextStub,
+  resetMentionContextTurnStats,
 } from "./mentionContextTracker";
 import {
   inferContinuationReason,
@@ -1111,12 +1111,12 @@ export async function* query(
     // Filter incomplete tool calls (orphaned tool_use without tool_result)
     messagesForQuery = filterIncompleteToolCalls(messagesForQuery);
 
-    // Compact historical @-mention context in the exact payload about to be
-    // sent. The first turn keeps the full body; subsequent internal turns send
-    // a short ref stub. Reset telemetry here so exports reflect this final
-    // provider payload, not earlier persisted-history reconstruction.
-    clearMentionContextTracker();
-    messagesForQuery = compactHistoricalMentionContextForPayload(messagesForQuery);
+    // Compact historical @-mention context only in the exact payload about to
+    // be sent. Keep messagesForQuery itself unmodified so turn 3+ can still
+    // compute the same full-vs-stub saving instead of seeing only turn 2's
+    // stub in loop state.
+    resetMentionContextTurnStats();
+    const providerMessagesForQuery = compactHistoricalMentionContextForPayload(messagesForQuery);
 
     // Ensure message alternation: Anthropic requires user/assistant/user/...
     // NOTE: This synthetic assistant message was removed — it caused the model
@@ -1130,7 +1130,7 @@ export async function* query(
     // ── Build API request (convert internal format → OpenAI) ──
 
     const maxTokens = maxOutputTokensOverride ?? MAX_OUTPUT_TOKENS;
-    const apiMessages = toOpenAIMessages(messagesForQuery, systemPrompt, model);
+    const apiMessages = toOpenAIMessages(providerMessagesForQuery, systemPrompt, model);
 
     // ── Dynamic toolset selection ──
     // Filter the tool definitions to the active subset for this turn. The
@@ -1138,7 +1138,7 @@ export async function* query(
     // based on user-message keywords + the request_tools meta-tool. Reduces
     // tool-schema overhead (~10K tokens for 36 tools) to the few the current
     // task needs. When the selector is absent, send all tools (legacy).
-    const userText = messagesForQuery
+    const userText = providerMessagesForQuery
       .filter((m) => m.role === "user")
       .map((m) => userAuthoredTextForToolset(m.content))
       .join("\n");
@@ -1871,10 +1871,17 @@ export async function* query(
           selectedPromptProfile: auxiliarySelection?.profile,
           selectedToolProfile: auxiliarySelection?.profile,
           coreContextTokens: payloadReport?.coreContextTokens,
+          coreSystemTokens: payloadReport?.coreSystemTokens,
+          onDemandIndexTokens: payloadReport?.onDemandIndexTokens,
           auxiliaryContextTokens: payloadReport?.auxiliaryContextTokens,
           auxiliaryLoaded: payloadReport?.auxiliaryLoaded?.map((a: { id: string }) => a.id),
+          loadedSystemSections: payloadReport?.loadedSystemSections,
           auxiliaryOmitted: payloadReport?.auxiliaryOmitted?.map((a: { id: string }) => a.id),
+          omittedSystemSections: payloadReport?.omittedSystemSections,
+          requestedContextSections: payloadReport?.requestedContextSections,
           auxiliarySavingsTokens: payloadReport?.auxiliarySavingsTokens,
+          systemPromptSavingsTokens: payloadReport?.systemPromptSavingsTokens,
+          systemPromptProfileReason: payloadReport?.systemPromptProfileReason,
           readOnlyRun: auxiliarySelection?.readOnly,
           toolsetReason: auxiliarySelection?.reason,
           routerSource: auxiliarySelection?.routerSource,

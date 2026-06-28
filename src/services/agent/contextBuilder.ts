@@ -55,11 +55,13 @@ import {
   sharedContextPreservation,
   sharedIdentity,
   sharedMcpBlock,
+  sharedMcpIndexBlock,
   sharedOutputEfficiency,
   sharedTerminalAgentLoop,
   sharedToneAndStyle,
   sharedTurnEfficiency,
-  sharedUiBaseline,
+  sharedTasteDefaults,
+  sharedUiBaselineCore,
 } from './contextBuilder/sections/sharedSections'
 import {
   getActivePlanSection,
@@ -73,6 +75,7 @@ import {
   getScaffoldingInstallSection,
   getVisionSection,
   getAuthSection,
+  getDevServerRulesSection,
   getDevServerStatusSection,
   getEnvironmentSection,
   getExecutingActionsSection,
@@ -86,6 +89,7 @@ import {
   getPreviewCompatibilitySection,
   getProjectMemorySection,
   getProjectStructureSection,
+  getProjectStructureIndexSection,
   getReadmeSection,
   getReminderSection,
   getSessionMemorySection,
@@ -179,7 +183,12 @@ class ContextBuilder {
   // the value is overwritten on each build. Safe because the loop is single-
   // threaded per session.
   private lastAuxiliarySelection: AuxiliarySelection | null = null
-  private lastAuxiliaryCtx: { pmDetected: string; isVanillaWeb: boolean } | null = null
+  private lastAuxiliaryCtx: {
+    pmDetected: string
+    isVanillaWeb: boolean
+    promptCtx?: PromptContext
+    loadedSkills?: import('./skillService').Skill[]
+  } | null = null
 
   /** The auxiliary selection from the most recent prompt build (or null). */
   getLastAuxiliarySelection(): AuxiliarySelection | null {
@@ -215,11 +224,43 @@ class ContextBuilder {
       case 'auth_database_provision':
         content = getAuthSection()
         break
+      case 'ui_baseline_full':
+        content = sharedUiBaselineCore()
+        break
+      case 'taste_defaults':
+        content = sharedTasteDefaults()
+        break
+      case 'project_structure_full':
+        content = ctx?.promptCtx ? getProjectStructureSection(ctx.promptCtx) : null
+        break
+      case 'mcp_routing_detail':
+        content = ctx?.promptCtx ? sharedMcpBlock(ctx.promptCtx.mcpTools, 'developer') : null
+        break
+      case 'project_docs_full':
+        if (ctx?.promptCtx) {
+          const parts = [
+            ctx.promptCtx.readme ? `# README.md\n${ctx.promptCtx.readme}` : null,
+            ctx.promptCtx.tmsContent ? `# TMS.md\n${ctx.promptCtx.tmsContent}` : null,
+            ctx.promptCtx.planContent ? `# PLAN.md\n${ctx.promptCtx.planContent}` : null,
+            ctx.promptCtx.todoContent ? `# TODO.md\n${ctx.promptCtx.todoContent}` : null,
+          ].filter(Boolean) as string[]
+          content = parts.length ? parts.join('\n\n') : null
+        }
+        break
+      case 'dev_server_status_detail':
+        content = [getDevServerRulesSection(), getDevServerStatusSection()].filter(Boolean).join('\n\n')
+        break
+      case 'git_status_detail':
+        content = ctx?.promptCtx ? getGitStatusSection(ctx.promptCtx) : null
+        break
       default:
-        // Phase-2 entries have no loader yet.
         content = null
     }
     const meta = sel.omitted.find((o) => o.id === id)
+    if (content) {
+      sel.requestedContextSections ??= []
+      if (!sel.requestedContextSections.includes(id)) sel.requestedContextSections.push(id)
+    }
     return { content, name: meta?.name ?? id }
   }
 
@@ -608,7 +649,7 @@ class ContextBuilder {
     // ctx.pmDetected (only available after the parallel gather). Auxiliaries
     // that are omitted stay unloaded — their ids appear in the on-demand
     // index below, and the agent can fetch them via `request_context`.
-    this.lastAuxiliaryCtx = { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb }
+    this.lastAuxiliaryCtx = { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb, promptCtx: ctx, loadedSkills }
     const auxLoadedContent: Record<string, string> = {}
     for (const l of auxSelection.loaded) {
       let body: string | null = null
@@ -617,6 +658,22 @@ class ContextBuilder {
         case 'scaffolding_install': body = getScaffoldingInstallSection({ pmDetected: ctx.pmDetected }); break
         case 'vision_rules': body = getVisionSection(); break
         case 'auth_database_provision': body = getAuthSection(); break
+        case 'ui_baseline_full': body = sharedUiBaselineCore(); break
+        case 'taste_defaults': body = sharedTasteDefaults(); break
+        case 'project_structure_full': body = getProjectStructureSection(ctx); break
+        case 'mcp_routing_detail': body = sharedMcpBlock(ctx.mcpTools, 'developer'); break
+        case 'project_docs_full': {
+          const parts = [
+            ctx.readme ? `# README.md\n${ctx.readme}` : null,
+            ctx.tmsContent ? `# TMS.md\n${ctx.tmsContent}` : null,
+            ctx.planContent ? `# PLAN.md\n${ctx.planContent}` : null,
+            ctx.todoContent ? `# TODO.md\n${ctx.todoContent}` : null,
+          ].filter(Boolean) as string[]
+          body = parts.length ? parts.join('\n\n') : null
+          break
+        }
+        case 'dev_server_status_detail': body = [getDevServerRulesSection(), getDevServerStatusSection()].filter(Boolean).join('\n\n'); break
+        case 'git_status_detail': body = getGitStatusSection(ctx); break
       }
       if (body) auxLoadedContent[l.id] = body
     }
@@ -640,8 +697,10 @@ class ContextBuilder {
         publishing: auxLoadedContent['publishing_fullstack'] ?? null,
         vision: auxLoadedContent['vision_rules'] ?? null,
         auth: auxLoadedContent['auth_database_provision'] ?? null,
+        devServer: auxLoadedContent['dev_server_status_detail'] ?? null,
       }),
-      sharedUiBaseline(),
+      auxLoadedContent['ui_baseline_full'] ?? '',
+      auxLoadedContent['taste_defaults'] ?? '',
       sharedToneAndStyle(),
       sharedOutputEfficiency(),
       sharedContextPreservation(),
@@ -683,7 +742,7 @@ class ContextBuilder {
       // reason — cache invalidation is a deliberate architectural choice,
       // not a default. Adding a new section here without a real reason is
       // a regression; if it can be static, move it above the boundary.
-      dynamicSection('mcp', () => sharedMcpBlock(ctx.mcpTools, 'developer'),
+      dynamicSection('mcp', () => auxLoadedContent['mcp_routing_detail'] ?? sharedMcpIndexBlock(ctx.mcpTools),
         'MCP server list changes when developer connects/disconnects servers'),
       dynamicSection('team', () => teamSection,
         'in-flight background agent list changes per turn'),
@@ -695,16 +754,16 @@ class ContextBuilder {
         'project path / package manager / language detected per session'),
       dynamicSection('preview_compatibility', () => getPreviewCompatibilitySection(ctx),
         'framework/deploy compatibility detected per project — null for compatible projects'),
-      dynamicSection('dev_server_status', () => getDevServerStatusSection(),
+      dynamicSection('dev_server_status', () => auxLoadedContent['dev_server_status_detail'] ?? null,
         'dev server status flips null→starting→running→stopped per session'),
       dynamicSection('applied_scaffolding', () => getAppliedScaffoldingSection(ctx),
         'one-shot flow markers (auth, payments) appear after scaffold writes'),
       // Git orientation BEFORE the file tree: branch + changed files is the
       // first thing the model wants to know ("where am I, what's dirty"),
       // and pre-empts a reflexive `git status` / `git diff` tool call.
-      dynamicSection('git_status', () => getGitStatusSection(ctx),
+      dynamicSection('git_status', () => auxLoadedContent['git_status_detail'] ?? null,
         'branch + working-tree changes shift every turn — null when not a git repo'),
-      dynamicSection('project_structure', () => getProjectStructureSection(ctx),
+      dynamicSection('project_structure', () => auxLoadedContent['project_structure_full'] ?? getProjectStructureIndexSection(ctx),
         'file tree shifts on every write — fsVersion drives cache key'),
       // Recently-modified files AFTER the tree: the tree says what exists, this
       // says what was touched last — the likely working set.
@@ -751,7 +810,7 @@ class ContextBuilder {
       .slice(0, 15)
 
     const full = sections.join('\n\n')
-    this.promptCache.set(cacheKey, { key: cacheKey, prompt: full, expiresAt: now + PROMPT_CACHE_TTL_MS, auxiliaryCtx: { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb } })
+    this.promptCache.set(cacheKey, { key: cacheKey, prompt: full, expiresAt: now + PROMPT_CACHE_TTL_MS, auxiliaryCtx: { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb, promptCtx: ctx, loadedSkills } })
     // Cache-miss telemetry — includes the boundary split bytes so we can
     // see the prompt shape over time (regressions in cache discipline
     // surface as the static byte share shrinking).
@@ -848,7 +907,7 @@ class ContextBuilder {
       getCmdSessionGuidanceSection(),
       getCmdSecuritySection(),
       getCmdConstraintsSection(ctx),
-      sharedUiBaseline(),
+      `${sharedUiBaselineCore()}\n\n${sharedTasteDefaults()}`,
       sharedToneAndStyle(),
       sharedOutputEfficiency(),
       sharedContextPreservation(),

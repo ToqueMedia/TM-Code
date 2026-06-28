@@ -360,6 +360,23 @@ function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
       lines.push(e.toolNames.map(name => `\`${name}\``).join(', '))
       lines.push(``)
     }
+    if (
+      e.mentionContextRepeatedTokens != null
+      || e.mentionContextFullTokens != null
+      || e.mentionContextStubTokens != null
+      || e.mentionContextRepeatedTokensCumulative != null
+    ) {
+      lines.push(`**Mention context savings**`)
+      lines.push(``)
+      lines.push(`| field | tokens |`)
+      lines.push(`|---|---:|`)
+      if (e.mentionContextFullTokens != null) lines.push(`| full mention context | ${e.mentionContextFullTokens.toLocaleString()} |`)
+      if (e.mentionContextStubTokens != null) lines.push(`| stub sent | ${e.mentionContextStubTokens.toLocaleString()} |`)
+      if (e.mentionContextRepeatedTokens != null) lines.push(`| saved this request | ${e.mentionContextRepeatedTokens.toLocaleString()} |`)
+      if (e.mentionContextRepeatedTokensCumulative != null) lines.push(`| saved cumulative | ${e.mentionContextRepeatedTokensCumulative.toLocaleString()} |`)
+      if (e.mentionContextRefId) lines.push(`| ref id | ${escapeTableCell(e.mentionContextRefId)} |`)
+      lines.push(``)
+    }
     // ── Lazy System Prompt + Tighter Toolset (Phase 1) ──
     // Proves the tighter toolset reached the provider: which profile the
     // Intent Router chose, the core/auxiliary token split, the savings, and
@@ -377,6 +394,7 @@ function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
       lines.push(`| prompt profile | ${e.selectedPromptProfile ?? '—'}${e.readOnlyRun ? ' (read-only)' : ''} |`)
       if (e.routerSource) lines.push(`| router | ${e.routerSource}${e.routerConfidence && e.routerConfidence !== 'none' ? ` (${e.routerConfidence})` : ''}${e.routerError ? ` — ERROR: ${escapeTableCell(e.routerError)}` : ''} |`)
       if (e.toolsetReason) lines.push(`| reason | ${escapeTableCell(e.toolsetReason)} |`)
+      if (e.systemPromptProfileReason && e.systemPromptProfileReason !== e.toolsetReason) lines.push(`| system profile reason | ${escapeTableCell(e.systemPromptProfileReason)} |`)
       // Full router diagnostics — shown when the router ran (model or fallback)
       // so a failed run is diagnosable from the export alone.
       const d = e.routerDiagnostics
@@ -407,10 +425,16 @@ function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
         }
       }
       if (e.coreContextTokens != null) lines.push(`| core context tokens | ${e.coreContextTokens.toLocaleString()} |`)
+      if (e.coreSystemTokens != null) lines.push(`| core system tokens | ${e.coreSystemTokens.toLocaleString()} |`)
+      if (e.onDemandIndexTokens != null) lines.push(`| on-demand index tokens | ${e.onDemandIndexTokens.toLocaleString()} |`)
       if (e.auxiliaryContextTokens != null) lines.push(`| auxiliary context tokens | ${e.auxiliaryContextTokens.toLocaleString()} |`)
       if (e.auxiliarySavingsTokens != null) lines.push(`| auxiliary savings tokens | ${e.auxiliarySavingsTokens.toLocaleString()} |`)
+      if (e.systemPromptSavingsTokens != null) lines.push(`| system prompt savings tokens | ${e.systemPromptSavingsTokens.toLocaleString()} |`)
       if (e.auxiliaryLoaded?.length) lines.push(`| auxiliary loaded | ${e.auxiliaryLoaded.map(id => `\`${id}\``).join(', ')} |`)
       if (e.auxiliaryOmitted?.length) lines.push(`| auxiliary omitted | ${e.auxiliaryOmitted.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.loadedSystemSections?.length) lines.push(`| loaded system sections | ${e.loadedSystemSections.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.omittedSystemSections?.length) lines.push(`| omitted system sections | ${e.omittedSystemSections.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.requestedContextSections?.length) lines.push(`| requested context sections | ${e.requestedContextSections.map(id => `\`${id}\``).join(', ')} |`)
       if (e.expandedToolNames?.length) lines.push(`| expanded via request_tools | ${e.expandedToolNames.map(name => `\`${name}\``).join(', ')} |`)
       if (e.deniedToolNames?.length) lines.push(`| DENIED by profile bound | ${e.deniedToolNames.map(name => `\`${name}\``).join(', ')} |`)
       lines.push(``)

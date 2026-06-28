@@ -131,14 +131,28 @@ export interface PayloadReport {
   continuationReason?: string
   /** On-demand context architecture: estimated core-context tokens (system prompt minus loaded auxiliaries). */
   coreContextTokens: number
+  /** Alias/export field for core system prompt tokens. */
+  coreSystemTokens: number
+  /** Tokens spent on the rendered on-demand index. */
+  onDemandIndexTokens: number
   /** On-demand context architecture: estimated tokens of auxiliaries loaded inline. */
   auxiliaryContextTokens: number
   /** On-demand context architecture: auxiliaries loaded inline (id + name + reason). */
   auxiliaryLoaded: Array<{ id: string; name: string; reason: string; tokens: number }>
+  /** Alias/export field for loaded inline system sections. */
+  loadedSystemSections: string[]
   /** On-demand context architecture: auxiliaries omitted, available on-demand (id + name + reason + est tokens). */
   auxiliaryOmitted: Array<{ id: string; name: string; reason: string; estTokens: number }>
+  /** Alias/export field for omitted system sections. */
+  omittedSystemSections: string[]
+  /** Auxiliary sections fetched through request_context in this run. */
+  requestedContextSections: string[]
   /** On-demand context architecture: estimated savings vs loading all phase-1 auxiliaries. */
   auxiliarySavingsTokens: number
+  /** Alias/export field for system prompt savings. */
+  systemPromptSavingsTokens: number
+  /** Human-readable reason for the selected prompt/system profile. */
+  systemPromptProfileReason?: string
   /** Breakdown by category. */
   byCategory: Record<string, { blocks: number; tokens: number; chars: number }>
   /** The 10 largest blocks, sorted desc. */
@@ -574,6 +588,15 @@ export function inspectPayload(
   const auxiliaryContextTokens = auxiliarySelection?.loadedTokens ?? 0
   const auxiliarySavingsTokens = auxiliarySelection?.savingsTokens ?? 0
   const coreContextTokens = Math.max(0, systemPromptTokens - auxiliaryContextTokens)
+  const onDemandIndexMatch = systemPrompt?.match(
+    /# Auxiliary context \(on-demand\)[\s\S]*?(?=\n# |\n__TM_SYSTEM_PROMPT_DYNAMIC_BOUNDARY__|$)/,
+  )
+  const onDemandIndexTokens = onDemandIndexMatch
+    ? roughTokenEstimate(onDemandIndexMatch[0])
+    : 0
+  const loadedSystemSections = auxiliaryLoaded.map((a) => a.id)
+  const omittedSystemSections = auxiliaryOmitted.map((a) => a.id)
+  const requestedContextSections = auxiliarySelection?.requestedContextSections ?? []
 
   const report: PayloadReport = {
     timestamp: Date.now(),
@@ -591,10 +614,17 @@ export function inspectPayload(
     toolCountTotal: totalToolCount ?? tools?.length ?? 0,
     continuationReason,
     coreContextTokens,
+    coreSystemTokens: coreContextTokens,
+    onDemandIndexTokens,
     auxiliaryContextTokens,
     auxiliaryLoaded,
+    loadedSystemSections,
     auxiliaryOmitted,
+    omittedSystemSections,
+    requestedContextSections,
     auxiliarySavingsTokens,
+    systemPromptSavingsTokens: auxiliarySavingsTokens,
+    systemPromptProfileReason: auxiliarySelection?.reason,
     byCategory,
     topBlocks,
     duplicates,

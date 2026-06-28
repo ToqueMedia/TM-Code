@@ -57,7 +57,7 @@ import {
  *     negative-space that specifically names what to avoid — but it
  *     lives INSIDE a positive framing ("restraint over decoration").
  */
-export function sharedUiBaseline(): string {
+export function sharedUiBaselineCore(): string {
   return `# UI baseline (when generating frontend or visual artifacts)
 
 Design **state-first**. Before writing components, walk every state the page must render: empty, loading, error, populated, partially-populated. A polished-looking UI that breaks on empty data is not modern — it is auto-generated. Components render only as well as the worst state they ship.
@@ -68,13 +68,19 @@ Design **state-first**. Before writing components, walk every state the page mus
  - **Decoration anchors to structure**: emoji, icons, illustrations attach to a labeled element (footer line, brand mark, section header). Floating decoration in dead space reads as a leftover artifact.
  - **Primary action is signposted**: the user lands on the page and sees what to click. The empty state names the next action explicitly even when the affordance (e.g. a \`+\` button) is technically visible.
  - **Design tokens over ad-hoc values**: use the project's CSS variables, Tailwind tokens, theme objects, or design-system primitives consistently. Avoid one-off hex codes picked at random — they read as inconsistent on second glance.
- - **Canvas use is intentional**: a centered fixed-width card with huge empty margins on a desktop wastes the surface. Either fill meaningfully, anchor to a side, or use the breathing room as deliberate structure (not absence).
+ - **Canvas use is intentional**: a centered fixed-width card with huge empty margins on a desktop wastes the surface. Either fill meaningfully, anchor to a side, or use the breathing room as deliberate structure (not absence).`
+}
 
-## Taste defaults (always — even without the design skill)
+export function sharedTasteDefaults(): string {
+  return `# Taste defaults (frontend/UI work)
 
 Default to **restraint over decoration**. When the developer hasn't named a visual style or invoked the \`frontend-design\` skill, lean toward a calm, neutral system — limited palette (one or two neutrals + one accent), intentional whitespace, single visual focus per surface, typographic hierarchy that reads as deliberate. The bar is "a paid product would ship this", not "looks like a demo". Avoid the auto-generated giveaways that brand a UI as AI-built on first glance: rainbow gradients, oversized hero \`<h1>\` floating over an empty card, three identical fake stat tiles, emoji used as decoration rather than meaning, leftover lorem-ipsum, drop shadows on everything. A boring well-spaced layout reads as confident; a flashy crowded one reads as a generator. Reach for the \`frontend-design\` skill only when the task explicitly calls for motion, micro-interactions, or distinctive typography — the taste defaults already cover the day-to-day case.
 
 This is the FLOOR. The \`frontend-design\` skill, when invoked, layers more on top — motion, micro-interactions, advanced typography. These rules apply regardless: with or without the skill, a generated UI must clear this baseline AND the taste defaults above.`
+}
+
+export function sharedUiBaseline(): string {
+  return `${sharedUiBaselineCore()}\n\n${sharedTasteDefaults()}`
 }
 
 /**
@@ -146,6 +152,27 @@ When to call:
  - **Side-effects in external systems** (create ticket, post message, comment, generate design): use the MCP instead of telling the ${actor} what to click. Confirm intent first when destructive or publishing.
 
 Calls require ${actor} approval. If denied, fall back and note the limitation.${canvaGuidance}`
+}
+
+export function sharedMcpIndexBlock(mcpTools: MCPToolSummary[]): string | null {
+  if (!mcpTools || mcpTools.length === 0) return null
+  const byServer = new Map<string, number>()
+  for (const tool of mcpTools) {
+    byServer.set(tool.serverName, (byServer.get(tool.serverName) ?? 0) + 1)
+  }
+  const servers = Array.from(byServer.entries())
+    .map(([server, count]) => `${server} (${count})`)
+    .join(', ')
+  const examples = mcpTools
+    .slice(0, 8)
+    .map(t => `mcp__${t.serverName}__${t.name}`)
+    .join(', ')
+  return [
+    '# MCP tools (index)',
+    `Connected MCP servers/tools: ${servers}.`,
+    `Examples: ${examples}${mcpTools.length > 8 ? `, +${mcpTools.length - 8} more` : ''}.`,
+    'Use `request_context({ auxiliary: "mcp_routing_detail" })` when the task explicitly involves MCPs, live external state, external side effects, or API/docs that should be read from an MCP.',
+  ].join('\n')
 }
 
 // Verbatim from claude-vaz (SUMMARIZE_TOOL_RESULTS_SECTION).
