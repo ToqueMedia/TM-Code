@@ -158,4 +158,8 @@ export interface PromptCacheEntry {
   key: string
   prompt: string
   expiresAt: number
+  /** Auxiliary-context ctx captured at build time, restored on cache hit so
+   *  the `request_context` on-demand loader (which needs pmDetected for the
+   *  scaffolding/install block) works even when the prompt itself is cached. */
+  auxiliaryCtx?: { pmDetected: string; isVanillaWeb: boolean }
 }

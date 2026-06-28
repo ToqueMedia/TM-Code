@@ -70,6 +70,9 @@ import {
   getCompletionContractSection,
   getConstraintsSection,
   getDoingTasksSection,
+  getScaffoldingInstallSection,
+  getVisionSection,
+  getAuthSection,
   getDevServerStatusSection,
   getEnvironmentSection,
   getExecutingActionsSection,
@@ -118,6 +121,16 @@ import {
   getCmdToolsSection,
 } from './contextBuilder/sections/cmdSections'
 
+import { getPublishingSection } from './contextBuilder/sections/chatPublishing'
+import {
+  classifyPromptIntent,
+  selectAuxiliaries,
+  buildOnDemandIndex,
+  type AuxiliarySelection,
+  type PromptProfile,
+  type RouterDiagnostics,
+} from './contextBuilder/auxiliaryRegistry'
+
 // ── Re-exports — keep the legacy import surface so external callers (tests,
 // other services) don't have to update their import paths after the slice. ──
 
@@ -156,6 +169,59 @@ async function loadCmdMemoryIndex(
 class ContextBuilder {
   private static instance: ContextBuilder
   private promptCache = new Map<string, PromptCacheEntry>()
+
+  // ── Auxiliary context selection (on-demand architecture) ──
+  // Set during buildSystemPrompt / buildCmdModeSystemPrompt. Read by:
+  //   - payloadInspector (core/auxiliary token split + loaded/omitted)
+  //   - the `request_context` meta-tool handler in agentService (loads an
+  //     omitted auxiliary's content on demand mid-run).
+  // Single-active-run assumption: one agent loop per session drives the build;
+  // the value is overwritten on each build. Safe because the loop is single-
+  // threaded per session.
+  private lastAuxiliarySelection: AuxiliarySelection | null = null
+  private lastAuxiliaryCtx: { pmDetected: string; isVanillaWeb: boolean } | null = null
+
+  /** The auxiliary selection from the most recent prompt build (or null). */
+  getLastAuxiliarySelection(): AuxiliarySelection | null {
+    return this.lastAuxiliarySelection
+  }
+
+  /**
+   * Load an omitted auxiliary's full content on demand. Called by the
+   * `request_context` tool handler when the agent asks for a section that was
+   * omitted from the system prompt. Returns null for unknown ids or
+   * already-loaded auxiliaries (no-op — the content is already inline).
+   */
+  loadAuxiliaryOnDemand(id: string): { content: string | null; name: string } {
+    const sel = this.lastAuxiliarySelection
+    if (!sel) return { content: null, name: id }
+    // Already loaded inline → nothing to fetch.
+    if (sel.loaded.some((l) => l.id === id)) {
+      return { content: null, name: id }
+    }
+    let content: string | null = null
+    const ctx = this.lastAuxiliaryCtx
+    switch (id) {
+      case 'publishing_fullstack':
+        content = getPublishingSection()
+        break
+      case 'scaffolding_install':
+        // Loader needs pmDetected from the build ctx.
+        content = ctx ? getScaffoldingInstallSection({ pmDetected: ctx.pmDetected }) : null
+        break
+      case 'vision_rules':
+        content = getVisionSection()
+        break
+      case 'auth_database_provision':
+        content = getAuthSection()
+        break
+      default:
+        // Phase-2 entries have no loader yet.
+        content = null
+    }
+    const meta = sel.omitted.find((o) => o.id === id)
+    return { content, name: meta?.name ?? id }
+  }
 
   static getInstance(): ContextBuilder {
     if (!ContextBuilder.instance) {
@@ -306,7 +372,7 @@ class ContextBuilder {
     }
   }
 
-  async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[], coreToolCount?: number, userMessage?: string, accessedPaths?: string[]): Promise<string> {
+  async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[], coreToolCount?: number, userMessage?: string, accessedPaths?: string[], intentOverride?: { profile: PromptProfile; readOnly: boolean; reason?: string; source?: 'model' | 'fallback'; confidence?: 'high' | 'medium' | 'low' | 'none'; error?: string; diagnostics?: RouterDiagnostics }): Promise<string> {
     // Cache key must include everything that affects the prompt shape.
     // Plan is read below; include it in the key so plan switches bypass the cache.
     let planKey = 'unknown'
@@ -343,7 +409,24 @@ class ContextBuilder {
     // memory filtering is stale when only reads (not writes) occur between
     // turns, since reads don't increment fsVersion.
     const accessedCount = accessedPaths?.length ?? 0
-    const cacheKey = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|${mcpSig}|${stickyHashtagSig}|fs${fsVersion}|ac${accessedCount}`
+    // ── Auxiliary context selection (on-demand architecture) ──
+    // Classify the task intent from the user's first message and select which
+    // auxiliary blocks (publishing, scaffolding/install, vision, auth/db)
+    // load inline vs. stay available on-demand via `request_context`. Pure
+    // (no ctx needed) so it can run before the parallel gather. The profile
+    // enters the cache key so different intents get separate cache entries.
+    //
+    // Intent Router: when an LLM-based classification is supplied via
+    // `intentOverride` (profile + readOnly from qwen3.7-plus), it takes
+    // precedence over the deterministic keyword classifier — the latter is
+    // kept only as a fallback when the router was unavailable. This replaces
+    // free-text regex inference per the `no-regex-for-inference` rule.
+    const auxProfile = intentOverride?.profile ?? classifyPromptIntent(userMessage, {
+      mentionedFiles: accessedPaths,
+    })
+    const auxSelection = selectAuxiliaries(auxProfile, userMessage, intentOverride?.readOnly, intentOverride?.reason, intentOverride?.source ? { source: intentOverride.source, confidence: intentOverride.confidence, error: intentOverride.error, diagnostics: intentOverride.diagnostics } : undefined)
+    this.lastAuxiliarySelection = auxSelection
+    const cacheKey = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|${mcpSig}|${stickyHashtagSig}|fs${fsVersion}|ac${accessedCount}|p${auxProfile}|ro${auxSelection.readOnly ? 1 : 0}`
 
     const now = Date.now()
     const cached = this.promptCache.get(cacheKey)
@@ -362,6 +445,10 @@ class ContextBuilder {
         mcpToolCount: (mcpTools ?? []).length,
         loadedSkillNames: [],
       })
+      // Restore the auxiliary ctx from the cache entry so the on-demand
+      // `request_context` loader (needs pmDetected for scaffolding/install)
+      // works even when the prompt itself is served from cache.
+      this.lastAuxiliaryCtx = cached.auxiliaryCtx ?? null
       return cached.prompt
     }
     // Kick off memory work IMMEDIATELY so its network call (selector
@@ -515,6 +602,26 @@ class ContextBuilder {
     const teamSection = await getTeamSection()
     const bgCommandsSection = await getBackgroundCommandsSection()
 
+    // ── Load auxiliary content for the selected auxiliaries ──
+    // The selection (metadata) was computed before the cache key; the actual
+    // CONTENT is loaded here because the scaffolding/install loader needs
+    // ctx.pmDetected (only available after the parallel gather). Auxiliaries
+    // that are omitted stay unloaded — their ids appear in the on-demand
+    // index below, and the agent can fetch them via `request_context`.
+    this.lastAuxiliaryCtx = { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb }
+    const auxLoadedContent: Record<string, string> = {}
+    for (const l of auxSelection.loaded) {
+      let body: string | null = null
+      switch (l.id) {
+        case 'publishing_fullstack': body = getPublishingSection(); break
+        case 'scaffolding_install': body = getScaffoldingInstallSection({ pmDetected: ctx.pmDetected }); break
+        case 'vision_rules': body = getVisionSection(); break
+        case 'auth_database_provision': body = getAuthSection(); break
+      }
+      if (body) auxLoadedContent[l.id] = body
+    }
+    const onDemandIndex = buildOnDemandIndex(auxSelection)
+
     const sections = [
       // ── Static block (cacheable cross-session) ──────────────────
       getCompletionContractSection(),
@@ -522,12 +629,18 @@ class ContextBuilder {
       sharedIdentity(),
       getModelSpecificSection(ctx),
       getSystemSection(),
-      getDoingTasksSection(ctx),
+      getDoingTasksSection(ctx, {
+        scaffoldingInstall: auxLoadedContent['scaffolding_install'] ?? null,
+      }),
       getExecutingActionsSection(),
       sharedTerminalAgentLoop('chat'),
       getClosedLoopSection(),
       getToolsSection(ctx),
-      getConstraintsSection(ctx),
+      getConstraintsSection(ctx, {
+        publishing: auxLoadedContent['publishing_fullstack'] ?? null,
+        vision: auxLoadedContent['vision_rules'] ?? null,
+        auth: auxLoadedContent['auth_database_provision'] ?? null,
+      }),
       sharedUiBaseline(),
       sharedToneAndStyle(),
       sharedOutputEfficiency(),
@@ -539,6 +652,11 @@ class ContextBuilder {
       // lives in the static block. The actual memory CONTENT is injected
       // below the boundary via getMemorySection.
       getMemoryToolsGuidanceSection(),
+      // On-demand auxiliary index — lists context blocks omitted from this
+      // prompt so the agent can fetch them via `request_context`. Null when
+      // nothing is omitted (no index rendered). Stable per-intent-profile
+      // so it's safe in the cacheable static block.
+      onDemandIndex ?? '',
       // ── Boundary: everything below varies per session / per turn ──
       SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
       // Persistent memory — placed first in the dynamic block because it's
@@ -633,7 +751,7 @@ class ContextBuilder {
       .slice(0, 15)
 
     const full = sections.join('\n\n')
-    this.promptCache.set(cacheKey, { key: cacheKey, prompt: full, expiresAt: now + PROMPT_CACHE_TTL_MS })
+    this.promptCache.set(cacheKey, { key: cacheKey, prompt: full, expiresAt: now + PROMPT_CACHE_TTL_MS, auxiliaryCtx: { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb } })
     // Cache-miss telemetry — includes the boundary split bytes so we can
     // see the prompt shape over time (regressions in cache discipline
     // surface as the static byte share shrinking).

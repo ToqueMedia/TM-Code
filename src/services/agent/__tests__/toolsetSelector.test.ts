@@ -1,14 +1,21 @@
 /**
- * Tests for the dynamic toolset selector.
+ * Tests for the dynamic toolset selector (profile-bound, Phase 1).
  *
- * Covers: CORE starting set, keyword expansion, request_tools meta-tool,
- * monotonic expansion (never retracts), and the request_tools bridge result.
+ * The selector now seeds its active set from the Intent Router's PromptProfile
+ * (bugfix_local/analysis_readonly/deploy_publish/…) and BOUNDS request_tools +
+ * keyword expansion to the profile's `allowed` set. These tests prove:
+ *   - bugfix_local starts at ~6 tools and refuses destructive/provision/shell
+ *   - analysis_readonly is hard read-only (no edit_file even via request_tools)
+ *   - deploy_publish expands provision/shell on "deploy"
+ *   - request_tools reports `denied` for tools outside the bound
+ *   - monotonic expansion (once active, never retracts)
  */
 
 import {
   ToolsetSelector,
   REQUEST_TOOLS_NAME,
-  CORE_TOOLS,
+  BUGFIX_BASE,
+  READONLY_BASE,
 } from '../toolsetSelector'
 import {
   SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE,
@@ -42,7 +49,6 @@ const ALL_NAMES = [
   REQUEST_CREDENTIALS,
 ]
 
-/** Build a minimal OpenAI tool definition array for the given names. */
 function makeTools(names: string[]): OpenAI.ChatCompletionTool[] {
   return names.map((name) => ({
     type: 'function' as const,
@@ -52,118 +58,166 @@ function makeTools(names: string[]): OpenAI.ChatCompletionTool[] {
 
 const ALL_TOOLS = makeTools(ALL_NAMES)
 
-describe('ToolsetSelector', () => {
-  it('starts with the CORE minimal toolset', () => {
-    const selector = new ToolsetSelector(ALL_NAMES)
-    const { tools, activeCount, totalCount, allActive } = selector.selectForTurn(ALL_TOOLS, 'fix a typo')
-    // CORE tools only (+ request_tools meta-tool since not all are active).
-    const toolNames = tools.map((t) => t.function.name)
-    for (const core of CORE_TOOLS) {
-      expect(toolNames).toContain(core)
-    }
-    expect(activeCount).toBe(CORE_TOOLS.length)
-    expect(totalCount).toBe(ALL_NAMES.length)
-    expect(allActive).toBe(false)
-    // request_tools meta-tool is injected when not all tools are active.
-    expect(toolNames).toContain(REQUEST_TOOLS_NAME)
+describe('ToolsetSelector (profile-bound)', () => {
+  describe('bugfix_local (default)', () => {
+    it('starts with the BUGFIX_BASE toolset (~6 tools), not all 36', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')
+      const { tools, activeCount, totalCount, allActive } = selector.selectForTurn(ALL_TOOLS, 'fix a typo')
+      const toolNames = tools.map((t) => t.function.name)
+      for (const base of BUGFIX_BASE) {
+        expect(toolNames).toContain(base)
+      }
+      expect(activeCount).toBe(BUGFIX_BASE.length)
+      expect(totalCount).toBe(ALL_NAMES.length)
+      expect(allActive).toBe(false)
+      // request_tools meta-tool is injected (not all allowed tools active).
+      expect(toolNames).toContain(REQUEST_TOOLS_NAME)
+    })
+
+    it('does NOT activate EDIT_FILE or WRITE_FILE by default (must be requested)', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')
+      const { tools } = selector.selectForTurn(ALL_TOOLS, 'fix a typo')
+      const toolNames = tools.map((t) => t.function.name)
+      expect(toolNames).not.toContain(EDIT_FILE)
+      expect(toolNames).not.toContain(WRITE_FILE)
+    })
+
+    it('does NOT expand to provision/shell/destructive on keyword (bound)', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')
+      selector.selectForTurn(ALL_TOOLS, 'deploy auth create file git commit')
+      // These groups are outside bugfix_local's allowed set.
+      expect(selector.isActive(PROVISION_DEPLOY)).toBe(false)
+      expect(selector.isActive(START_DEV_SERVER)).toBe(false)
+      expect(selector.isActive(WRITE_FILE)).toBe(false)
+      expect(selector.isActive(CREATE_FILE)).toBe(false)
+    })
+
+    it('activates EDIT_FILE via request_tools (inside the allowed bound)', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')
+      const result = selector.requestTools([EDIT_FILE])
+      expect(result.added).toEqual([EDIT_FILE])
+      expect(result.denied).toEqual([])
+      expect(selector.isActive(EDIT_FILE)).toBe(true)
+    })
+
+    it('DENIES destructive create/write via request_tools (outside bound)', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')
+      const result = selector.requestTools([WRITE_FILE, CREATE_FILE, DELETE_FILE])
+      expect(result.added).toEqual([])
+      expect(result.denied).toEqual(expect.arrayContaining([WRITE_FILE, CREATE_FILE, DELETE_FILE]))
+      expect(selector.isActive(WRITE_FILE)).toBe(false)
+      // Denied names are tracked for the usage log.
+      expect(selector.getDeniedNames()).toEqual(expect.arrayContaining([WRITE_FILE, CREATE_FILE, DELETE_FILE]))
+    })
+
+    it('reports expanded + denied names for the usage log', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')
+      selector.requestTools([EDIT_FILE, WRITE_FILE])
+      expect(selector.getExpandedNames()).toEqual([EDIT_FILE])
+      expect(selector.getDeniedNames()).toEqual([WRITE_FILE])
+    })
   })
 
-  it('reduces a simple bugfix from 36 tools to CORE + request_tools', () => {
-    const selector = new ToolsetSelector(ALL_NAMES)
-    const { tools, activeCount } = selector.selectForTurn(ALL_TOOLS, 'fix a typo in utils.ts')
-    // CORE (7) + request_tools (1) = 8 tool definitions sent.
-    expect(tools.length).toBe(CORE_TOOLS.length + 1)
-    expect(activeCount).toBe(CORE_TOOLS.length)
-    // ~28 tools NOT sent — that's the savings.
-    expect(ALL_NAMES.length - activeCount).toBe(ALL_NAMES.length - CORE_TOOLS.length)
+  describe('analysis_readonly (hard read-only)', () => {
+    it('starts with the READONLY_BASE set (no execute_command, no edit_file)', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'analysis_readonly', true)
+      const { tools, activeCount } = selector.selectForTurn(ALL_TOOLS, 'check the dialogs')
+      const toolNames = tools.map((t) => t.function.name)
+      for (const base of READONLY_BASE) {
+        expect(toolNames).toContain(base)
+      }
+      expect(activeCount).toBe(READONLY_BASE.length)
+      // No destructive or execute tools.
+      expect(toolNames).not.toContain(EDIT_FILE)
+      expect(toolNames).not.toContain(WRITE_FILE)
+      expect(toolNames).not.toContain(EXECUTE_COMMAND)
+    })
+
+    it('DENIES edit_file even when the model requests it via request_tools', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'analysis_readonly', true)
+      const result = selector.requestTools([EDIT_FILE, EXECUTE_COMMAND])
+      expect(result.added).toEqual([])
+      expect(result.denied).toEqual(expect.arrayContaining([EDIT_FILE, EXECUTE_COMMAND]))
+      expect(selector.isActive(EDIT_FILE)).toBe(false)
+    })
+
+    it('is allActive within its read-only ceiling (no request_tools injected)', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'analysis_readonly', true)
+      const { tools, allActive } = selector.selectForTurn(ALL_TOOLS, 'verify the config')
+      // allActive is measured against the ALLOWED ceiling, not all 36.
+      expect(allActive).toBe(true)
+      expect(tools.map((t) => t.function.name)).not.toContain(REQUEST_TOOLS_NAME)
+    })
   })
 
-  it('expands FILE_OPS on "create new file" keyword', () => {
-    const selector = new ToolsetSelector(ALL_NAMES)
-    const { activeCount } = selector.selectForTurn(ALL_TOOLS, 'create a new file called config.ts')
-    // CORE + FILE_OPS group activated.
-    expect(activeCount).toBeGreaterThan(CORE_TOOLS.length)
-    expect(selector.isActive(WRITE_FILE)).toBe(true)
-    expect(selector.isActive(CREATE_FILE)).toBe(true)
+  describe('deploy_publish', () => {
+    it('expands PROVISION + SHELL on "deploy" keyword (allowed=null, unbounded)', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'deploy_publish')
+      selector.selectForTurn(ALL_TOOLS, 'deploy the app to production')
+      expect(selector.isActive(PROVISION_DEPLOY)).toBe(true)
+      expect(selector.isActive(START_DEV_SERVER)).toBe(true)
+    })
+
+    it('with readOnly=true, strips ALL mutating tools (destructive + provision + shell)', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'deploy_publish', true)
+      selector.selectForTurn(ALL_TOOLS, 'deploy without editing files')
+      // readOnly removes destructive file tools…
+      expect(selector.isActive(EDIT_FILE)).toBe(false)
+      expect(selector.isActive(WRITE_FILE)).toBe(false)
+      // …AND provision (creates cloud resources)…
+      expect(selector.isActive(PROVISION_DEPLOY)).toBe(false)
+      expect(selector.isActive(PROVISION_AUTH)).toBe(false)
+      // …AND shell/dev-server/background (can mutate via commands).
+      expect(selector.isActive(START_DEV_SERVER)).toBe(false)
+      expect(selector.isActive(AGENT_SHELL_START)).toBe(false)
+      expect(selector.isActive(EXECUTE_COMMAND_BACKGROUND)).toBe(false)
+      // execute_command (synchronous) is NOT blocked — useful for read-only
+      // inspection like `git log` / `ls`.
+      expect(selector.isActive(EXECUTE_COMMAND)).toBe(true)
+      // And can't be requested back.
+      const result = selector.requestTools([EDIT_FILE, PROVISION_DEPLOY])
+      expect(result.denied).toEqual(expect.arrayContaining([EDIT_FILE, PROVISION_DEPLOY]))
+    })
   })
 
-  it('expands PROVISION + SHELL on "deploy" keyword', () => {
-    const selector = new ToolsetSelector(ALL_NAMES)
-    selector.selectForTurn(ALL_TOOLS, 'deploy the app to production')
-    expect(selector.isActive(PROVISION_DEPLOY)).toBe(true)
-    expect(selector.isActive(START_DEV_SERVER)).toBe(true)
+  describe('monotonic + meta-tool', () => {
+    it('expands monotonically — once active, a tool never leaves', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'deploy_publish')
+      selector.selectForTurn(ALL_TOOLS, 'deploy the app')
+      expect(selector.isActive(PROVISION_DEPLOY)).toBe(true)
+      selector.selectForTurn(ALL_TOOLS, 'now fix a typo')
+      expect(selector.isActive(PROVISION_DEPLOY)).toBe(true)
+    })
+
+    it('omits request_tools meta-tool when all ALLOWED tools are active', () => {
+      // bugfix_local allowed = BUGFIX_BASE + edit/update/list/read_skill.
+      const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')
+      selector.requestTools([EDIT_FILE, UPDATE_TASKS, LIST_DIRECTORY, READ_SKILL])
+      const { tools, allActive } = selector.selectForTurn(ALL_TOOLS, 'do something')
+      expect(allActive).toBe(true)
+      expect(tools.map((t) => t.function.name)).not.toContain(REQUEST_TOOLS_NAME)
+    })
+
+    it('expandForToolName() respects the bound (false for denied tools)', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')
+      expect(selector.expandForToolName(EDIT_FILE)).toBe(true)
+      expect(selector.expandForToolName(WRITE_FILE)).toBe(false)
+      expect(selector.expandForToolName('nonexistent')).toBe(false)
+    })
+
+    it('only activates tools that exist in the registry', () => {
+      const selector = new ToolsetSelector([...BUGFIX_BASE], 'bugfix_local')
+      selector.selectForTurn(ALL_TOOLS, 'create a new file')
+      // WRITE_FILE is outside both the registry and the bound.
+      expect(selector.isActive(WRITE_FILE)).toBe(false)
+    })
   })
 
-  it('expands MEMORY on "remember" keyword', () => {
-    const selector = new ToolsetSelector(ALL_NAMES)
-    selector.selectForTurn(ALL_TOOLS, 'remember that the user prefers tabs')
-    expect(selector.isActive(SAVE_MEMORY)).toBe(true)
-  })
-
-  it('expands PROVISION on "auth" / "login" keyword', () => {
-    const selector = new ToolsetSelector(ALL_NAMES)
-    selector.selectForTurn(ALL_TOOLS, 'add login with google')
-    expect(selector.isActive(PROVISION_AUTH)).toBe(true)
-  })
-
-  it('expands WEB + SUBAGENT on "research web" keyword', () => {
-    const selector = new ToolsetSelector(ALL_NAMES)
-    selector.selectForTurn(ALL_TOOLS, 'research the API docs online')
-    expect(selector.isActive(WEB_FETCH)).toBe(true)
-    expect(selector.isActive(DELEGATE)).toBe(true)
-  })
-
-  it('requestTools() activates named tools and reports unknowns', () => {
-    const selector = new ToolsetSelector(ALL_NAMES)
-    const result = selector.requestTools([WRITE_FILE, CREATE_FILE, 'nonexistent_tool'])
-    expect(result.added).toEqual(expect.arrayContaining([WRITE_FILE, CREATE_FILE]))
-    expect(result.unknown).toEqual(['nonexistent_tool'])
-    expect(selector.isActive(WRITE_FILE)).toBe(true)
-  })
-
-  it('requestTools() reports already-active tools', () => {
-    const selector = new ToolsetSelector(ALL_NAMES)
-    const result = selector.requestTools([SEARCH_FILES]) // already in CORE
-    expect(result.alreadyActive).toEqual([SEARCH_FILES])
-    expect(result.added).toEqual([])
-  })
-
-  it('expands monotonically — once active, a tool never leaves', () => {
-    const selector = new ToolsetSelector(ALL_NAMES)
-    // Turn 1: expand with "deploy".
-    selector.selectForTurn(ALL_TOOLS, 'deploy the app')
-    expect(selector.isActive(PROVISION_DEPLOY)).toBe(true)
-    // Turn 2: a simple message with no triggers — PROVISION_DEPLOY stays.
-    selector.selectForTurn(ALL_TOOLS, 'now fix a typo')
-    expect(selector.isActive(PROVISION_DEPLOY)).toBe(true)
-  })
-
-  it('omits request_tools meta-tool when ALL tools are active', () => {
-    const selector = new ToolsetSelector(ALL_NAMES)
-    // Activate everything.
-    selector.requestTools(ALL_NAMES)
-    const { tools, allActive } = selector.selectForTurn(ALL_TOOLS, 'do something')
-    expect(allActive).toBe(true)
-    expect(tools.map((t) => t.function.name)).not.toContain(REQUEST_TOOLS_NAME)
-    expect(tools.length).toBe(ALL_NAMES.length)
-  })
-
-  it('expandForToolName() activates a single tool defensively', () => {
-    const selector = new ToolsetSelector(ALL_NAMES)
-    const added = selector.expandForToolName(WRITE_FILE)
-    expect(added).toBe(true)
-    expect(selector.isActive(WRITE_FILE)).toBe(true)
-    // Second call is a no-op.
-    expect(selector.expandForToolName(WRITE_FILE)).toBe(false)
-    // Unknown tool name is a no-op.
-    expect(selector.expandForToolName('nonexistent')).toBe(false)
-  })
-
-  it('only activates tools that exist in the registry', () => {
-    // Registry with only CORE tools — FILE_OPS names shouldn't activate.
-    const selector = new ToolsetSelector([...CORE_TOOLS])
-    selector.selectForTurn(ALL_TOOLS, 'create a new file')
-    // WRITE_FILE is not in this limited registry, so it can't be active.
-    expect(selector.isActive(WRITE_FILE)).toBe(false)
+  describe('profile/readOnly accessors', () => {
+    it('exposes the profile and readOnly flag for the usage log', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'analysis_readonly', true)
+      expect(selector.getProfile()).toBe('analysis_readonly')
+      expect(selector.isReadOnly()).toBe(true)
+    })
   })
 })

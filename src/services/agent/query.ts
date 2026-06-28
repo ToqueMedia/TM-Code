@@ -248,6 +248,8 @@ export interface QueryParams {
    * (legacy behaviour).
    */
   toolsetSelector?: import('./toolsetSelector').ToolsetSelector;
+  /** Auxiliary-context selection — core/auxiliary breakdown for the inspector. */
+  auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection;
 }
 
 /** Terminal return value. */
@@ -731,6 +733,7 @@ export async function* query(
     onResponseHeaders,
     getContextLimits,
     toolsetSelector,
+    auxiliarySelection,
   } = params;
   let client = params.client;
   const refreshClient = params.refreshClient;
@@ -1021,7 +1024,7 @@ export async function* query(
     // ── Payload inspection (token-cost diagnostics) ──
     // Best-effort: sizes + hashes + top-10 blocks logged to console.debug
     // before every provider request. Never throws, never blocks the send.
-    const payloadReport = inspectAndLogPayload(apiMessages, systemPrompt, activeTools, model, state.turnCount, toolSelection.totalCount, lastContinuationReason);
+    const payloadReport = inspectAndLogPayload(apiMessages, systemPrompt, activeTools, model, state.turnCount, toolSelection.totalCount, lastContinuationReason, auxiliarySelection);
 
     // ── Stream from model ──
 
@@ -1729,6 +1732,25 @@ export async function* query(
           breakdown: payloadReport?.byCategory ?? {},
           systemPromptSections: payloadReport?.systemPromptSections ?? [],
           auxiliaryPromptCandidates: payloadReport?.auxiliaryPromptCandidates ?? [],
+          // ── Lazy System Prompt + Tighter Toolset telemetry (Phase 1) ──
+          // The tighter toolset only "counts" if the export can prove it:
+          // which profile the Intent Router chose, the core/auxiliary token
+          // split, the savings, and which tools were expanded vs denied.
+          selectedPromptProfile: auxiliarySelection?.profile,
+          selectedToolProfile: auxiliarySelection?.profile,
+          coreContextTokens: payloadReport?.coreContextTokens,
+          auxiliaryContextTokens: payloadReport?.auxiliaryContextTokens,
+          auxiliaryLoaded: payloadReport?.auxiliaryLoaded?.map((a: { id: string }) => a.id),
+          auxiliaryOmitted: payloadReport?.auxiliaryOmitted?.map((a: { id: string }) => a.id),
+          auxiliarySavingsTokens: payloadReport?.auxiliarySavingsTokens,
+          readOnlyRun: auxiliarySelection?.readOnly,
+          toolsetReason: auxiliarySelection?.reason,
+          routerSource: auxiliarySelection?.routerSource,
+          routerConfidence: auxiliarySelection?.routerConfidence,
+          routerError: auxiliarySelection?.routerError,
+          routerDiagnostics: auxiliarySelection?.routerDiagnostics,
+          expandedToolNames: toolsetSelector?.getExpandedNames(),
+          deniedToolNames: toolsetSelector?.getDeniedNames(),
         })
       } catch { /* usage logging never blocks the agent loop */ }
     }

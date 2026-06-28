@@ -66,6 +66,8 @@ export interface QueryEngineOptions {
   getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null }
   /** Dynamic toolset selector — when present, the loop filters tools per turn. */
   toolsetSelector?: import('./toolsetSelector').ToolsetSelector
+  /** Auxiliary-context selection — core/auxiliary breakdown for the inspector. */
+  auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection
 }
 
 export interface QueryEngineState {
@@ -177,6 +179,7 @@ export class QueryEngine {
       collectQueuedSteering: this.options.collectQueuedSteering,
       getContextLimits: this.options.getContextLimits,
       toolsetSelector: this.options.toolsetSelector,
+      auxiliarySelection: this.options.auxiliarySelection,
     }
 
     try {

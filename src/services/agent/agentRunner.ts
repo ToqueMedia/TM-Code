@@ -10,6 +10,7 @@ import { t } from '../../i18n/useTranslation'
 import AgentService from './agentService'
 import type { OpenAIContentPart } from './types'
 import ContextBuilder from './contextBuilder'
+import { classifyIntent } from './intentRouter'
 import ToolExecutor from './toolExecutor'
 import MCPService from '../mcp/mcpService'
 import { browserSession } from '../browserSessionManager'
@@ -318,7 +319,22 @@ async function runAgentInternal(
     // userMessageText carries the raw user input so contextBuilder can detect
     // skill-trigger hashtags (#auth-google etc.) and inline the corresponding
     // CRITICAL rules at turn 1.
-    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText, AgentService.getInstance().getAccessedFilePaths())
+    //
+    // Intent Router: a lightweight model call (qwen3.7-plus, no tools,
+    // non-streaming) classifies the user's intent into a PromptProfile + a
+    // readOnly flag BEFORE the system prompt is assembled. The result feeds
+    // the context builder (prompt profile + on-demand auxiliaries) and — via
+    // lastAuxiliarySelection — the ToolsetSelector (bound toolset). Replaces
+    // regex/keyword intent inference per the `no-regex-for-inference` rule.
+    // Never throws; on failure it falls back to { bugfix_local, readOnly:false }
+    // and buildSystemPrompt then uses the deterministic keyword classifier.
+    const intentStart = Date.now()
+    const intent = await classifyIntent(userMessageText ?? '')
+    logger.info(
+      'agent',
+      `→ Intent router: profile=${intent.profile} readOnly=${intent.readOnly} (${intent.source}, ${Date.now() - intentStart}ms) — ${intent.reason}`,
+    )
+    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText, AgentService.getInstance().getAccessedFilePaths(), { profile: intent.profile, readOnly: intent.readOnly, reason: intent.reason, source: intent.source, confidence: intent.confidence, error: intent.error, diagnostics: intent.diagnostics })
   }
   logger.info('agent', `✓ System prompt built (${systemPrompt.length} chars, ${Date.now() - promptBuildStart}ms)`)
 

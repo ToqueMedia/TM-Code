@@ -1,7 +1,7 @@
 import { query, type QueryParams, type QueryStreamEvent } from '../query'
-import { ToolsetSelector, REQUEST_TOOLS_NAME, CORE_TOOLS } from '../toolsetSelector'
+import { ToolsetSelector, REQUEST_TOOLS_NAME, BUGFIX_BASE } from '../toolsetSelector'
 import {
-  SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE,
+  SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE, GLOB,
   EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
   WRITE_FILE, START_DEV_SERVER, PROVISION_AUTH,
 } from '../toolNames'
@@ -268,7 +268,7 @@ describe('query retry handling', () => {
 
   it('selects tools from human-authored text, not synthetic @mention/tool_result content', async () => {
     const names = [
-      SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE,
+      SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE, GLOB,
       EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
       WRITE_FILE, START_DEV_SERVER, PROVISION_AUTH,
     ]
@@ -299,8 +299,8 @@ describe('query retry handling', () => {
     expect(await nextEvent(generator)).toEqual({ type: 'message_start' })
     expect(await nextEvent(generator)).toEqual({ type: 'text_delta', text: 'done' })
 
-    const sentToolNames = create.mock.calls[0][0].tools.map((t: any) => t.function.name)
-    for (const core of CORE_TOOLS) {
+    const sentToolNames = (create.mock.calls as any)[0][0].tools.map((t: any) => t.function.name)
+    for (const core of BUGFIX_BASE) {
       expect(sentToolNames).toContain(core)
     }
     expect(sentToolNames).toContain(REQUEST_TOOLS_NAME)

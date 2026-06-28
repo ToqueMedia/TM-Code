@@ -40,7 +40,7 @@ import { useByokStore } from "../../stores/byokStore";
 import { buildByokClientFromSnapshot, buildByokThinkingConfig } from "./byokRouting";
 import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
-import { ToolsetSelector, REQUEST_TOOLS_NAME } from "./toolsetSelector";
+import { ToolsetSelector, REQUEST_TOOLS_NAME, REQUEST_CONTEXT_NAME } from "./toolsetSelector";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 
 // ── Extracted services ──
@@ -483,11 +483,33 @@ class AgentService {
     // expands monotonically based on user-message keywords + the request_tools
     // meta-tool. Reduces tool-schema overhead (~10K tokens for 36 tools) to
     // the few the current task needs. Sub-agents (lightweight) skip selection
-    // — they already receive a restricted tool set from the subAgentRunner.
+    // Wire auxiliary-context omissions + the Intent Router's profile/readOnly
+    // into the selector. The selection was computed during buildSystemPrompt
+    // (stored on the ContextBuilder singleton) — the profile + readOnly come
+    // from the Intent Router (qwen3.7-plus) via the agentRunner call. We read
+    // it BEFORE constructing the selector so the constructor can seed the
+    // active set with the profile's base toolset (bugfix_local/analysis_readonly/…)
+    // and bound request_tools/keywords to the profile's allowed set. Sub-agents
+    // skip this (they already receive a restricted tool set from the subAgentRunner).
+    let auxiliarySelection: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection | null = null;
+    if (!this.lightweightOptions) {
+      const ContextBuilder = (await import('./contextBuilder')).default;
+      auxiliarySelection = ContextBuilder.getInstance().getLastAuxiliarySelection();
+    }
+
     const toolsetSelector = this.lightweightOptions
       ? null
-      : new ToolsetSelector(openaiTools.map((t) => t.function.name));
+      : new ToolsetSelector(
+          openaiTools.map((t) => t.function.name),
+          auxiliarySelection?.profile ?? 'bugfix_local',
+          auxiliarySelection?.readOnly ?? false,
+        );
     this.currentToolsetSelector = toolsetSelector;
+
+    if (toolsetSelector && auxiliarySelection) {
+      toolsetSelector.setOmittedAuxiliaries(auxiliarySelection.omitted.length);
+      toolsetSelector.setOmittedAuxiliaryIds(auxiliarySelection.omitted.map((o) => o.id));
+    }
 
     // 5. Create tool executor bridge
     const executeTool = this.createToolExecutorBridge(callbacks);
@@ -565,6 +587,9 @@ class AgentService {
       onRequestUsage: (entry) => callbacks.onRequestUsage?.(entry),
       // Dynamic toolset selector (null for sub-agents).
       toolsetSelector: toolsetSelector ?? undefined,
+      // Auxiliary-context selection (core/auxiliary breakdown for the
+      // payloadInspector; null for sub-agents).
+      auxiliarySelection: auxiliarySelection ?? undefined,
     });
     this.queryEngine = engine;
 
@@ -953,8 +978,35 @@ class AgentService {
         if (result.added.length) parts.push(`Activated for next turn: ${result.added.join(', ')}.`);
         if (result.alreadyActive.length) parts.push(`Already active: ${result.alreadyActive.join(', ')}.`);
         if (result.unknown.length) parts.push(`Unknown (not in registry): ${result.unknown.join(', ')}.`);
+        if (result.denied.length) parts.push(`Denied (outside the current task profile — not available for this run): ${result.denied.join(', ')}.`);
         if (parts.length === 0) parts.push('No tools requested.');
         return { content: parts.join(' '), isError: false };
+      }
+
+      // Intercept the request_context meta-tool — fetches an auxiliary context
+      // block that was omitted from the system prompt (publishing, scaffolding,
+      // vision, auth/db — see auxiliaryRegistry). The content is returned as a
+      // tool_result so the agent can use it this turn. Never reaches the
+      // toolExecutor.
+      if (toolName === REQUEST_CONTEXT_NAME) {
+        const auxiliaryId = typeof toolInput.auxiliary === 'string' ? toolInput.auxiliary : '';
+        if (!auxiliaryId) {
+          return { content: 'No auxiliary id provided. Call request_context with an auxiliary id from the on-demand index.', isError: false };
+        }
+        const ContextBuilder = (await import('./contextBuilder')).default;
+        const { content, name } = ContextBuilder.getInstance().loadAuxiliaryOnDemand(auxiliaryId);
+        if (content === null) {
+          const sel = ContextBuilder.getInstance().getLastAuxiliarySelection();
+          const available = sel ? sel.omitted.map(o => o.id).join(', ') : '(none)';
+          return {
+            content: `Auxiliary "${auxiliaryId}" is not available on-demand. It may already be loaded inline, or be a phase-2 entry without a loader yet. Available: ${available}.`,
+            isError: false,
+          };
+        }
+        return {
+          content: `# Auxiliary context: ${name}\n\n${content}`,
+          isError: false,
+        };
       }
 
       // Announce + start the tool at execution time. The query loop runs tools

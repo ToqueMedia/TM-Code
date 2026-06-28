@@ -1536,7 +1536,7 @@ test('sidecar: X-Request-Type web_search routes to the published sidecar config'
 })
 
 test('sidecar: memory-* and summarize share the utility sidecar', async () => {
-  for (const type of ['memory-extractor', 'memory-selector', 'memory-distiller', 'summarize']) {
+  for (const type of ['memory-extractor', 'memory-selector', 'memory-distiller', 'summarize', 'intent-router']) {
     clearActiveConfigCache()
     const fetcher = fakeFetcher(Response.json({ ok: true }))
     const res = await handleRequest(

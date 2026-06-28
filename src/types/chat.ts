@@ -572,6 +572,56 @@ export interface RequestUsageEntry {
     chars: number
     reason?: string
   }>
+  /** ── Lazy System Prompt + Tighter Toolset (Phase 1) ──
+   *  Populated from payloadReport + the Intent Router classification + the
+   *  ToolsetSelector state. Lets an exported session prove the tighter
+   *  toolset actually reached the provider (toolCount, toolNames) AND show
+   *  the auxiliary/on-demand savings (core/auxiliary split, savings). */
+  /** Prompt profile selected by the Intent Router (bugfix_local, deploy_publish, …). */
+  selectedPromptProfile?: string
+  /** Tool profile applied by the selector (= profile; kept separate so the
+   *  export can later distinguish prompt-profile from tool-profile). */
+  selectedToolProfile?: string
+  /** System-prompt tokens attributed to the always-loaded core context. */
+  coreContextTokens?: number
+  /** System-prompt tokens attributed to the on-demand auxiliaries loaded inline. */
+  auxiliaryContextTokens?: number
+  /** Auxiliary ids LOADED inline in the system prompt. */
+  auxiliaryLoaded?: string[]
+  /** Auxiliary ids OMITTED (available via request_context). */
+  auxiliaryOmitted?: string[]
+  /** Tokens saved by omitting the auxiliaries (vs loading everything). */
+  auxiliarySavingsTokens?: number
+  /** Whether the run is read-only (no file edits) per the Intent Router. */
+  readOnlyRun?: boolean
+  /** Why the Intent Router chose this profile (for audit). */
+  toolsetReason?: string
+  /** ── Intent Router diagnostics ── */
+  /** 'model' = LLM router classified; 'fallback' = router failed; 'keyword' = no router. */
+  routerSource?: 'model' | 'fallback' | 'keyword'
+  /** Router self-reported confidence; 'none' on fallback/keyword. */
+  routerConfidence?: 'high' | 'medium' | 'low' | 'none'
+  /** When the router failed, the failure reason (token/HTTP/timeout/…). */
+  routerError?: string
+  /** Full diagnostics (raw body, headers, parse error) — exported so a failed
+   *  router run is diagnosable from the session export alone. */
+  routerDiagnostics?: {
+    url: string
+    appCheckPresent: boolean
+    httpStatus: number
+    servedModel?: string
+    configKey?: string
+    contentType?: string
+    rawBodyPreview?: string
+    contentPreview?: string
+    parseError?: string
+  }
+  /** Tool names in the active set that were expanded via request_tools (empty
+   *  on turn 1; grows monotonically). */
+  expandedToolNames?: string[]
+  /** Tools the model requested via request_tools but were DENIED by the
+   *  profile bound — proves the bound is enforcing the tighter toolset. */
+  deniedToolNames?: string[]
 }
 
 export interface SessionTokenUsage {

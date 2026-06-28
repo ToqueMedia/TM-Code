@@ -360,6 +360,61 @@ function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
       lines.push(e.toolNames.map(name => `\`${name}\``).join(', '))
       lines.push(``)
     }
+    // ── Lazy System Prompt + Tighter Toolset (Phase 1) ──
+    // Proves the tighter toolset reached the provider: which profile the
+    // Intent Router chose, the core/auxiliary token split, the savings, and
+    // which tools were expanded via request_tools vs denied by the bound.
+    const hasLazyInfo = e.selectedPromptProfile != null
+      || e.coreContextTokens != null
+      || e.auxiliarySavingsTokens != null
+      || (e.expandedToolNames?.length ?? 0) > 0
+      || (e.deniedToolNames?.length ?? 0) > 0
+    if (hasLazyInfo) {
+      lines.push(`**Lazy system prompt + tighter toolset**`)
+      lines.push(``)
+      lines.push(`| field | value |`)
+      lines.push(`|---|---|`)
+      lines.push(`| prompt profile | ${e.selectedPromptProfile ?? '—'}${e.readOnlyRun ? ' (read-only)' : ''} |`)
+      if (e.routerSource) lines.push(`| router | ${e.routerSource}${e.routerConfidence && e.routerConfidence !== 'none' ? ` (${e.routerConfidence})` : ''}${e.routerError ? ` — ERROR: ${escapeTableCell(e.routerError)}` : ''} |`)
+      if (e.toolsetReason) lines.push(`| reason | ${escapeTableCell(e.toolsetReason)} |`)
+      // Full router diagnostics — shown when the router ran (model or fallback)
+      // so a failed run is diagnosable from the export alone.
+      const d = e.routerDiagnostics
+      if (d) {
+        lines.push(`| router URL | ${escapeTableCell(d.url)} |`)
+        lines.push(`| router HTTP | ${d.httpStatus} |`)
+        if (d.servedModel) lines.push(`| router served model | ${escapeTableCell(d.servedModel)} |`)
+        if (d.configKey) lines.push(`| router config key | ${escapeTableCell(d.configKey)} |`)
+        if (d.contentType) lines.push(`| router content-type | ${escapeTableCell(d.contentType)} |`)
+        lines.push(`| router appcheck | ${d.appCheckPresent ? 'present' : 'absent'} |`)
+        if (d.parseError) lines.push(`| router parse error | ${escapeTableCell(d.parseError)} |`)
+        if (d.rawBodyPreview) {
+          lines.push(``)
+          lines.push(`**router raw body (first 500 chars):**`)
+          lines.push(``)
+          lines.push('```')
+          lines.push(d.rawBodyPreview)
+          lines.push('```')
+          lines.push(``)
+        }
+        if (d.contentPreview) {
+          lines.push(`**router model content (first 500 chars):**`)
+          lines.push(``)
+          lines.push('```')
+          lines.push(d.contentPreview)
+          lines.push('```')
+          lines.push(``)
+        }
+      }
+      if (e.coreContextTokens != null) lines.push(`| core context tokens | ${e.coreContextTokens.toLocaleString()} |`)
+      if (e.auxiliaryContextTokens != null) lines.push(`| auxiliary context tokens | ${e.auxiliaryContextTokens.toLocaleString()} |`)
+      if (e.auxiliarySavingsTokens != null) lines.push(`| auxiliary savings tokens | ${e.auxiliarySavingsTokens.toLocaleString()} |`)
+      if (e.auxiliaryLoaded?.length) lines.push(`| auxiliary loaded | ${e.auxiliaryLoaded.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.auxiliaryOmitted?.length) lines.push(`| auxiliary omitted | ${e.auxiliaryOmitted.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.expandedToolNames?.length) lines.push(`| expanded via request_tools | ${e.expandedToolNames.map(name => `\`${name}\``).join(', ')} |`)
+      if (e.deniedToolNames?.length) lines.push(`| DENIED by profile bound | ${e.deniedToolNames.map(name => `\`${name}\``).join(', ')} |`)
+      lines.push(``)
+    }
     if (e.auxiliaryPromptCandidates?.length) {
       lines.push(`**Auxiliary/on-demand candidates**`)
       lines.push(``)

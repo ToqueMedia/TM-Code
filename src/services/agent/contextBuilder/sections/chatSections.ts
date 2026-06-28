@@ -23,7 +23,6 @@ import {
 import { extractCriticalSectionsWithStats, sanitizeProjectContent } from '../helpers'
 import { renderCounterweights } from '../../modelProfiles'
 import type { PromptContext } from '../types'
-import { getPublishingSection } from './chatPublishing'
 import {
   sharedDoingTasksCore,
   sharedIdentityReminder,
@@ -95,7 +94,15 @@ export function getSystemSection(): string {
 }
 
 // ── 4. Doing tasks ─────────────────────────────────────────────
-export function getDoingTasksSection(ctx: PromptContext): string {
+// `scaffoldingInstall` is the auxiliary "Installing dependencies + Scaffolding
+// workflow" block, injected only when the task profile calls for it
+// (scaffold_project) or a trigger matched. When null/absent the Doing-tasks
+// section stays lean — a localised bugfix doesn't need the new-project
+// scaffolding sequence. See contextBuilder/auxiliaryRegistry.ts.
+export function getDoingTasksSection(
+  ctx: PromptContext,
+  opts?: { scaffoldingInstall?: string | null },
+): string {
   return `# Doing tasks
 
 ${sharedDoingTasksCore('developer', 'software engineering tasks: solving bugs, adding features, refactoring, explaining code')}
@@ -119,7 +126,37 @@ Every import **MUST** point to a package already listed in the dependency manife
  - **STEP 2b (missing, new project / scaffolding)**: Do NOT use \`${EXECUTE_COMMAND}\` — use the background pattern below instead.
  - When the IDE blocks a write with "package imported but not installed", **DO NOT** retry the same write. **DO** install the package first, then retry. Repeating without installing repeats the block.
 
-## Installing dependencies — background pattern
+${opts?.scaffoldingInstall ?? ''}
+
+## Verification — required before declaring done
+
+ - Follow the closed-loop protocol below. For endpoints you create: **curl** them via \`${EXECUTE_COMMAND}\` before moving on.
+ - When verification is impossible (no dev server, no test), **SAY SO EXPLICITLY**. Do NOT claim success without evidence.
+ - **REPORT** outcomes as they are — success or failure, with evidence.
+
+## Collaborative debugging — console.log as a shared lens
+
+When debugging, the developer sees log output in real-time — browser console for web apps, terminal stdout for backend/CLI projects. Use \`console.log\` strategically to create a feedback loop:
+
+1. **Add descriptive logs** with prefixes: \`console.log('[AuthFlow] user:', user)\` — makes filtering easier.
+2. **Read the output** via \`read_dev_server_logs\` (entries prefixed \`[runtime]\` are from the browser) or by checking command results.
+3. **Remove debug logs** once the issue is resolved — clean code ships.
+
+This pattern is especially useful when:
+ - The bug only appears at runtime (errors, race conditions, state issues).
+ - You need to trace data flow through components, API calls, or server logic.
+ - The developer reports "it doesn't work" and you need visibility into what's happening.
+
+The developer is your co-pilot — they see what you log. Use this to diagnose together.`
+}
+
+// ── 4a. Scaffolding/install workflow (AUXILIARY — gated by auxiliaryRegistry)
+// Extracted from getDoingTasksSection so it can be omitted for localised
+// bugfix tasks and loaded on-demand via `request_context({ auxiliary:
+// 'scaffolding_install' })`. Returns the "Installing dependencies — background
+// pattern" + "Scaffolding workflow" blocks. See auxiliaryRegistry.ts.
+export function getScaffoldingInstallSection(ctx: { pmDetected: string }): string {
+  return `## Installing dependencies — background pattern
 
 When installing dependencies for a new project (scaffolding) or adding multiple packages, **ALWAYS** use \`execute_command_background\`:
 
@@ -152,28 +189,7 @@ When the developer asks you to **create a new project from scratch** (e.g. "crea
 9. If exit code ≠ 0: fix the error, re-run \`${EXECUTE_COMMAND_BACKGROUND}\` for the install, and then wait for the next auto-wake or do other useful work.
 10. Once install succeeds: call \`start_dev_server\`.
 
-**NEVER** use \`execute_command\` for the initial \`npm install\` of a new project — it blocks your turn for 15-60 seconds while the developer waits with nothing happening. The background pattern lets you write files in parallel, cutting total time roughly in half.
-
-## Verification — required before declaring done
-
- - Follow the closed-loop protocol below. For endpoints you create: **curl** them via \`${EXECUTE_COMMAND}\` before moving on.
- - When verification is impossible (no dev server, no test), **SAY SO EXPLICITLY**. Do NOT claim success without evidence.
- - **REPORT** outcomes as they are — success or failure, with evidence.
-
-## Collaborative debugging — console.log as a shared lens
-
-When debugging, the developer sees log output in real-time — browser console for web apps, terminal stdout for backend/CLI projects. Use \`console.log\` strategically to create a feedback loop:
-
-1. **Add descriptive logs** with prefixes: \`console.log('[AuthFlow] user:', user)\` — makes filtering easier.
-2. **Read the output** via \`read_dev_server_logs\` (entries prefixed \`[runtime]\` are from the browser) or by checking command results.
-3. **Remove debug logs** once the issue is resolved — clean code ships.
-
-This pattern is especially useful when:
- - The bug only appears at runtime (errors, race conditions, state issues).
- - You need to trace data flow through components, API calls, or server logic.
- - The developer reports "it doesn't work" and you need visibility into what's happening.
-
-The developer is your co-pilot — they see what you log. Use this to diagnose together.`
+**NEVER** use \`execute_command\` for the initial \`npm install\` of a new project — it blocks your turn for 15-60 seconds while the developer waits with nothing happening. The background pattern lets you write files in parallel, cutting total time roughly in half.`
 }
 
 // ── 5. Executing actions ───────────────────────────────────────
@@ -1031,7 +1047,36 @@ export function getSkillsSection(loadedSkills: Skill[]): string | null {
 }
 
 // ── 14. Constraints ────────────────────────────────────────────
-export function getConstraintsSection(ctx: PromptContext): string {
+// ── 14a. Vision rules (AUXILIARY — gated by auxiliaryRegistry)
+// Extracted from getConstraintsSection. Loaded only when an image/visual is
+// present (vision profile) or on-demand via request_context.
+export function getVisionSection(): string {
+  return `## Vision (images)
+ - When the developer sends an image (screenshot, photo, diagram), a vision pipeline analyzes it and inserts a detailed description into the message as a text block.
+ - **TREAT** that description as what you SEE. Describe the image contents directly — "I can see..." / "The screenshot shows..." — never say "I can't see images" or "my toolset doesn't include image processing".
+ - The description is thorough: UI layout, error messages, code snippets, colors, element positions. Trust it and act on it.
+ - If the image is unclear or the description seems incomplete, say so — but never disclaim vision capability entirely.`
+}
+
+// ── 14b. Authentication rules (AUXILIARY — gated by auxiliaryRegistry)
+// Extracted from getConstraintsSection. Loaded only for auth/database tasks
+// or on-demand via request_context.
+export function getAuthSection(): string {
+  return `## Authentication
+ - The IDE may inject \`#auth-email-password\` or \`#auth-google\` hashtag triggers into the prompt — when present, **TREAT** them as an explicit signal to implement auth and **CONSULT** the auth skills.
+ - For free-form auth requests (no hashtag): when an auth skill is listed in "Skills available", **READ** it before improvising.
+ - **REQUIRED smoke test after touching \`/api/auth/*\`**: run \`execute_command: curl -s -o /dev/null -w '%{http_code} %{content_type}\\n' http://localhost:5173/api/auth/me\`. Expected: \`401 application/json\`. \`404 text/html\` = Vite proxy not wired. \`500\` = backend crashed at boot (read_dev_server_logs). Anything else is a regression — fix before claiming the phase complete.`
+}
+
+// ── 14c. Constraints ────────────────────────────────────────────
+// `publishing` / `vision` / `auth` are auxiliary blocks injected only when the
+// task profile calls for them. When null/absent the Constraints section stays
+// lean — a localised bugfix doesn't need publishing/deploy rules, vision, or
+// auth smoke-test guidance. See contextBuilder/auxiliaryRegistry.ts.
+export function getConstraintsSection(
+  ctx: PromptContext,
+  opts?: { publishing?: string | null; vision?: string | null; auth?: string | null },
+): string {
   const vanillaWebRule = ctx.isVanillaWeb
     ? `\n**Vanilla web projects**: **USE** \`index.html\` as entry point. **LINK** CSS/JS via relative paths — the IDE inlines them for preview.\n`
     : ''
@@ -1068,18 +1113,11 @@ export function getConstraintsSection(ctx: PromptContext): string {
  - \`.pem\`, \`.key\`, \`credentials.json\`, \`.npmrc\`, \`*_secret*\` files require explicit developer authorization.
  - **KEEP** secrets out of text output and tool arguments.
 
-## Vision (images)
- - When the developer sends an image (screenshot, photo, diagram), a vision pipeline analyzes it and inserts a detailed description into the message as a text block.
- - **TREAT** that description as what you SEE. Describe the image contents directly — "I can see..." / "The screenshot shows..." — never say "I can't see images" or "my toolset doesn't include image processing".
- - The description is thorough: UI layout, error messages, code snippets, colors, element positions. Trust it and act on it.
- - If the image is unclear or the description seems incomplete, say so — but never disclaim vision capability entirely.
+${opts?.vision ?? ''}
 
-## Authentication
- - The IDE may inject \`#auth-email-password\` or \`#auth-google\` hashtag triggers into the prompt — when present, **TREAT** them as an explicit signal to implement auth and **CONSULT** the auth skills.
- - For free-form auth requests (no hashtag): when an auth skill is listed in "Skills available", **READ** it before improvising.
- - **REQUIRED smoke test after touching \`/api/auth/*\`**: run \`execute_command: curl -s -o /dev/null -w '%{http_code} %{content_type}\\n' http://localhost:5173/api/auth/me\`. Expected: \`401 application/json\`. \`404 text/html\` = Vite proxy not wired. \`500\` = backend crashed at boot (read_dev_server_logs). Anything else is a regression — fix before claiming the phase complete.
+${opts?.auth ?? ''}
 
-${getPublishingSection()}
+${opts?.publishing ?? ''}
 
 ## Commands
  - **USE** \`${ctx.pmDetected}\` for all install/run/add commands.

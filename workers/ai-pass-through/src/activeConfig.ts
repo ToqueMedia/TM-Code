@@ -30,6 +30,12 @@ const REQUEST_TYPE_TO_SIDECAR_KEY: Record<string, string> = {
   'memory-selector': 'sidecar:utility',
   'memory-distiller': 'sidecar:utility',
   'summarize': 'sidecar:utility',
+  // Intent Router — classifies the user's request into a PromptProfile +
+  // readOnly flag BEFORE the main agent loop. Same utility sidecar (MiMo
+  // V2.5): a cheap, JSON-capable model. Without this mapping the worker
+  // degrades to the active (flagship) model, which may not honour
+  // response_format:json_object and returns unparseable content.
+  'intent-router': 'sidecar:utility',
 }
 
 export function sidecarKeyForRequestType(requestType: string | null): string | null {

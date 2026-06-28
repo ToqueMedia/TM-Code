@@ -110,6 +110,16 @@ export interface PayloadReport {
    * 7-turn bugfix kept going. Undefined when the turn is within target.
    */
   continuationReason?: string
+  /** On-demand context architecture: estimated core-context tokens (system prompt minus loaded auxiliaries). */
+  coreContextTokens: number
+  /** On-demand context architecture: estimated tokens of auxiliaries loaded inline. */
+  auxiliaryContextTokens: number
+  /** On-demand context architecture: auxiliaries loaded inline (id + name + reason). */
+  auxiliaryLoaded: Array<{ id: string; name: string; reason: string; tokens: number }>
+  /** On-demand context architecture: auxiliaries omitted, available on-demand (id + name + reason + est tokens). */
+  auxiliaryOmitted: Array<{ id: string; name: string; reason: string; estTokens: number }>
+  /** On-demand context architecture: estimated savings vs loading all phase-1 auxiliaries. */
+  auxiliarySavingsTokens: number
   /** Breakdown by category. */
   byCategory: Record<string, { blocks: number; tokens: number; chars: number }>
   /** The 10 largest blocks, sorted desc. */
@@ -329,6 +339,7 @@ export function inspectPayload(
   turn: number,
   totalToolCount?: number,
   continuationReason?: string,
+  auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection,
 ): PayloadReport {
   const messages = apiMessages as AnyMessage[]
   const blocks: BlockInfo[] = []
@@ -508,6 +519,16 @@ export function inspectPayload(
       preview: b.preview,
     }))
 
+  // On-demand context architecture breakdown. The system prompt INCLUDES the
+  // loaded auxiliaries inline, so core = systemPromptTokens − loaded auxiliary
+  // tokens. auxiliaryContextTokens is the inline-loaded auxiliary cost;
+  // auxiliarySavingsTokens is what was saved vs loading ALL phase-1 auxiliaries.
+  const auxiliaryLoaded = auxiliarySelection?.loaded ?? []
+  const auxiliaryOmitted = auxiliarySelection?.omitted ?? []
+  const auxiliaryContextTokens = auxiliarySelection?.loadedTokens ?? 0
+  const auxiliarySavingsTokens = auxiliarySelection?.savingsTokens ?? 0
+  const coreContextTokens = Math.max(0, systemPromptTokens - auxiliaryContextTokens)
+
   const report: PayloadReport = {
     timestamp: Date.now(),
     turn,
@@ -522,6 +543,11 @@ export function inspectPayload(
     toolCount: tools?.length ?? 0,
     toolCountTotal: totalToolCount ?? tools?.length ?? 0,
     continuationReason,
+    coreContextTokens,
+    auxiliaryContextTokens,
+    auxiliaryLoaded,
+    auxiliaryOmitted,
+    auxiliarySavingsTokens,
     byCategory,
     topBlocks,
     duplicates,
@@ -570,6 +596,18 @@ export function formatReportForConsole(report: PayloadReport): string {
       .map(s => `${s.location}:${s.name}${s.auxiliaryCandidate ? '*' : ''}:${s.tokens.toLocaleString()}t`)
       .join('  ')
     lines.push(`  system_sections: ${systemRow}`)
+  }
+
+  // On-demand context architecture: which auxiliaries loaded inline vs.
+  // omitted (available via request_context). Lets you see the savings per
+  // turn in DevTools without opening the full export.
+  if (report.auxiliaryLoaded.length > 0 || report.auxiliaryOmitted.length > 0) {
+    const loadedIds = report.auxiliaryLoaded.map((l) => l.id).join(',') || '(none)'
+    const omittedIds = report.auxiliaryOmitted.map((o) => o.id).join(',') || '(none)'
+    lines.push(
+      `  auxiliary: core=${report.coreContextTokens.toLocaleString()}t aux=${report.auxiliaryContextTokens.toLocaleString()}t ` +
+      `loaded=[${loadedIds}] omitted=[${omittedIds}] savings=${report.auxiliarySavingsTokens.toLocaleString()}t`,
+    )
   }
 
   // Top 10 blocks
@@ -627,9 +665,10 @@ export function inspectAndLogPayload(
   turn: number,
   totalToolCount?: number,
   continuationReason?: string,
+  auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection,
 ): PayloadReport | null {
   try {
-    const report = inspectPayload(apiMessages, systemPrompt, tools, model, turn, totalToolCount, continuationReason)
+    const report = inspectPayload(apiMessages, systemPrompt, tools, model, turn, totalToolCount, continuationReason, auxiliarySelection)
     // eslint-disable-next-line no-console
     console.debug(formatReportForConsole(report))
     // Return the report so the caller (query.ts) can persist the per-request
