@@ -97,6 +97,9 @@ export interface ContextPlan {
   minimumContextNeeded: ContextGranularity
   candidateContexts: string[]
   selectedContexts: string[]
+  /** Contexts the planner considered but did NOT select (audit). Derived
+   *  from candidateContexts minus selectedContexts when the model omits it. */
+  rejectedContexts?: string[]
   toolGroups?: Array<'FILE_OPS' | 'SHELL' | 'WEB' | 'SUBAGENT' | 'MEMORY' | 'PROVISION'>
   fallbackRisk: ContextFallbackRisk
   reason: string
@@ -127,6 +130,17 @@ export interface AuxiliarySelection {
   routerConfidence: 'high' | 'medium' | 'low' | 'none'
   routerError?: string
   routerDiagnostics?: RouterDiagnostics
+  // ── Context Planner telemetry (auditable status) ──
+  // Mirrors the ContextPlanClassification so the export can prove whether
+  // the utility-model planner produced a valid plan ('parsed') or fell back
+  // ('fallback'), and surface the raw output / error for diagnosis. The
+  // taskDomain / requiredCapabilities / selectedContexts ride on
+  // `contextPlan`; rejectedContexts and selectionReason are surfaced here.
+  contextPlannerStatus?: 'parsed' | 'fallback'
+  contextPlannerError?: string
+  contextPlannerRawOutput?: string
+  contextPlannerRejectedContexts?: string[]
+  contextPlannerSelectionReason?: string
 }
 
 export interface RouterDiagnostics {
@@ -817,6 +831,7 @@ export function selectAuxiliaries(
   reason?: string,
   routerInfo?: { source: 'model' | 'fallback'; confidence?: 'high' | 'medium' | 'low' | 'none'; error?: string; diagnostics?: RouterDiagnostics },
   contextPlanOverride?: ContextPlan,
+  plannerInfo?: { status: 'parsed' | 'fallback'; error?: string; rawOutput?: string; selectionReason?: string },
 ): AuxiliarySelection {
   void userMessage
   const phase1 = AUXILIARY_METAS.filter((m) => m.phase === 1)
@@ -893,6 +908,16 @@ export function selectAuxiliaries(
     routerConfidence: routerInfo?.confidence ?? 'none',
     routerError: routerInfo?.error,
     routerDiagnostics: routerInfo?.diagnostics,
+    contextPlannerStatus:
+      plannerInfo?.status ?? (contextPlanOverride ? 'parsed' : 'fallback'),
+    contextPlannerError: plannerInfo?.error,
+    contextPlannerRawOutput: plannerInfo?.rawOutput,
+    // Authoritative audit set: every candidate the planner exposed that was
+    // NOT selected. Derived from candidateIds/selectedIds (the actual gating
+    // decision) rather than the model's declared rejectedContexts, so the
+    // audit reflects what the selector truly loaded vs. held back.
+    contextPlannerRejectedContexts: candidateIds.filter((id) => !selectedIds.has(id)),
+    contextPlannerSelectionReason: plannerInfo?.selectionReason ?? contextPlan.reason,
   }
 }
 

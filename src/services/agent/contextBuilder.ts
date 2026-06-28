@@ -587,6 +587,12 @@ class ContextBuilder {
       intentOverride?.reason ? `${intentOverride.reason}; ${plannerReason}` : plannerReason,
       intentOverride?.source ? { source: intentOverride.source, confidence: intentOverride.confidence, error: intentOverride.error, diagnostics: intentOverride.diagnostics } : undefined,
       contextPlan.plan,
+      {
+        status: contextPlan.source === 'model' ? 'parsed' : 'fallback',
+        error: contextPlan.error,
+        rawOutput: contextPlan.diagnostics?.contentPreview ?? contextPlan.diagnostics?.rawBodyPreview,
+        selectionReason: contextPlan.reason,
+      },
     )
     this.lastAuxiliarySelection = auxSelection
     const contextPlanSig = [

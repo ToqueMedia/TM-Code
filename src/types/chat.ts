@@ -695,6 +695,27 @@ export interface RequestUsageEntry {
     contentPreview?: string
     parseError?: string
   }
+  /** ── Context Planner telemetry ──
+   *  Mirrors the ContextPlanClassification so the session export proves
+   *  whether the utility-model planner produced a valid plan ('parsed') or
+   *  fell back ('fallback'), with the raw output / error for diagnosis. */
+  /** 'parsed' = planner returned valid JSON; 'fallback' = invalid/missing and
+   *  a deterministic per-profile plan was used instead. */
+  contextPlannerStatus?: 'parsed' | 'fallback'
+  /** When status === 'fallback', the failure reason (schema/parse/HTTP/…). */
+  contextPlannerError?: string
+  /** The raw planner output (model JSON or HTTP body preview) for audit. */
+  contextPlannerRawOutput?: string
+  /** Task domain the planner assigned (e.g. 'design_system_ui'). */
+  contextPlannerTaskDomain?: string
+  /** Capabilities the planner declared as required. */
+  contextPlannerRequiredCapabilities?: string[]
+  /** Contexts the planner selected to load inline. */
+  contextPlannerSelectedContexts?: string[]
+  /** Contexts considered but NOT selected (candidates minus selected). */
+  contextPlannerRejectedContexts?: string[]
+  /** The planner's selection rationale. */
+  contextPlannerSelectionReason?: string
   /** Tool names in the active set that were expanded via request_tools (empty
    *  on turn 1; grows monotonically). */
   expandedToolNames?: string[]

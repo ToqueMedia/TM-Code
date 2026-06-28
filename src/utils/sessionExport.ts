@@ -447,6 +447,14 @@ function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
       if (e.requestedButNotLoadedSections?.length) lines.push(`| requested but not loaded sections | ${e.requestedButNotLoadedSections.map(id => `\`${id}\``).join(', ')} |`)
       if (e.expandedToolNames?.length) lines.push(`| expanded via request_tools | ${e.expandedToolNames.map(name => `\`${name}\``).join(', ')} |`)
       if (e.deniedToolNames?.length) lines.push(`| DENIED by profile bound | ${e.deniedToolNames.map(name => `\`${name}\``).join(', ')} |`)
+      if (e.contextPlannerStatus) lines.push(`| context planner status | ${e.contextPlannerStatus} |`)
+      if (e.contextPlannerError) lines.push(`| context planner error | ${escapeTableCell(e.contextPlannerError)} |`)
+      if (e.contextPlannerRawOutput) lines.push(`| context planner raw output | ${escapeTableCell(e.contextPlannerRawOutput)} |`)
+      if (e.contextPlannerTaskDomain) lines.push(`| planner task domain | ${e.contextPlannerTaskDomain} |`)
+      if (e.contextPlannerRequiredCapabilities?.length) lines.push(`| required capabilities | ${e.contextPlannerRequiredCapabilities.map(c => `\`${c}\``).join(', ')} |`)
+      if (e.contextPlannerSelectedContexts?.length) lines.push(`| planner selected contexts | ${e.contextPlannerSelectedContexts.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.contextPlannerRejectedContexts?.length) lines.push(`| planner rejected contexts | ${e.contextPlannerRejectedContexts.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.contextPlannerSelectionReason) lines.push(`| planner selection reason | ${escapeTableCell(e.contextPlannerSelectionReason)} |`)
       lines.push(``)
     }
     if (e.auxiliaryPromptCandidates?.length) {

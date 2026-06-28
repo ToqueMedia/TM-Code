@@ -1881,6 +1881,15 @@ export async function* query(
           routerConfidence: auxiliarySelection?.routerConfidence,
           routerError: auxiliarySelection?.routerError,
           routerDiagnostics: auxiliarySelection?.routerDiagnostics,
+          // ── Context Planner telemetry (audit) ──
+          contextPlannerStatus: auxiliarySelection?.contextPlannerStatus,
+          contextPlannerError: auxiliarySelection?.contextPlannerError,
+          contextPlannerRawOutput: auxiliarySelection?.contextPlannerRawOutput,
+          contextPlannerTaskDomain: auxiliarySelection?.contextPlan?.taskDomain,
+          contextPlannerRequiredCapabilities: auxiliarySelection?.contextPlan?.requiredCapabilities,
+          contextPlannerSelectedContexts: auxiliarySelection?.contextPlan?.selectedContexts,
+          contextPlannerRejectedContexts: auxiliarySelection?.contextPlannerRejectedContexts,
+          contextPlannerSelectionReason: auxiliarySelection?.contextPlannerSelectionReason,
           expandedToolNames: toolsetSelector?.getExpandedNames(),
           deniedToolNames: toolsetSelector?.getDeniedNames(),
           // ── Read Range Tracker telemetry (overlap dedup) ──

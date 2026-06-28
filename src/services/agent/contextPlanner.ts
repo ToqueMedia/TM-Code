@@ -59,18 +59,23 @@ const CONTEXT_PLANNER_SYSTEM = [
   'You are a context planner for a coding agent.',
   'Choose the smallest sufficient on-demand context domains and initial tool groups for the user request.',
   '',
-  'Return ONLY JSON with this shape:',
-  '{"taskDomain":"...","requiredCapabilities":["..."],"minimumContextNeeded":"index|summary|full","candidateContexts":["context.id"],"selectedContexts":["context.id"],"toolGroups":["FILE_OPS|SHELL|WEB|SUBAGENT|MEMORY|PROVISION"],"fallbackRisk":"low|medium|high","reason":"short reason","confidence":"high|medium|low"}',
+  'Return ONLY a single JSON object. No prose, no markdown fences, no code blocks, nothing before or after the JSON object.',
+  'Shape:',
+  '{"taskDomain":"...","requiredCapabilities":["..."],"minimumContextNeeded":"index|summary|full","candidateContexts":["context.id"],"selectedContexts":["context.id"],"rejectedContexts":["context.id"],"toolGroups":["FILE_OPS|SHELL|WEB|SUBAGENT|MEMORY|PROVISION"],"fallbackRisk":"low|medium|high","reason":"short reason","confidence":"high|medium|low"}',
   '',
   'Rules:',
+  '- taskDomain must be a non-empty string and selectedContexts must be an array (empty is allowed). Missing or non-array selectedContexts is invalid.',
   '- Choose specific capability contexts before domain/project contexts.',
   '- Do not select project.structure_full unless files are unknown, architecture is broad, multiple modules/packages are involved, specific contexts failed, or dependency mapping spans areas.',
   '- For semantic tokens/theme work, prefer design_system.semantic_tokens and design_system.theme_config before any project structure.',
+  '- For refactoring UI components that involve semantic tokens, spacing, or relative time/date formatting, select design_system.semantic_tokens and design_system.component_patterns. relative_time_formatting is a capability handled in code — do not load a context for it.',
+  '- Add project.entrypoints (or project.structure_*) to selectedContexts ONLY when the target component file cannot be located from the request. Otherwise keep it out of selectedContexts; it may stay in candidateContexts as a fallback.',
   '- For MCP audits, prefer agent_runtime.mcp_routing; project structure is fallback only if implementation files must be located.',
   '- For dev server/preview/browser runtime issues, prefer delivery.dev_server and optionally delivery.build_scripts/project.package_map.',
   '- For git/commit/diff/branch tasks, prefer delivery.git_status and delivery.changed_files.',
   '- For visual UI polish, prefer design_system.component_patterns, design_system.semantic_tokens, and ui_patterns.',
   '- Keep selectedContexts minimal. Put fallback candidates in candidateContexts instead of selectedContexts.',
+  '- rejectedContexts lists candidate contexts you considered but did NOT select. It must never overlap with selectedContexts.',
   '- Use toolGroups only when the first turn needs those tool categories. readOnly runs should avoid mutating groups.',
   '',
   'Available contexts:',
@@ -158,10 +163,37 @@ export async function planContextWithModel(
   }
 }
 
-function parseContextPlanJson(
+export function parseContextPlanJson(
   text: string,
   diagnostics?: RouterDiagnostics,
 ): ContextPlanClassification | null {
+  const raw = text.trim()
+  const extracted = extractJsonObject(raw)
+  if (!extracted) {
+    if (diagnostics) diagnostics.parseError = `no JSON object found in content (len=${raw.length})`
+    return null
+  }
+
+  // Attempt 1 — strict parse + schema validation.
+  const first = tryParseAndValidate(extracted, diagnostics)
+  if (first) return first
+
+  // Attempt 2 (single repair) — fix common LLM JSON mistakes, then re-parse.
+  // Only runs when the repair actually changed the text, so a schema failure
+  // (not a syntax failure) does not waste a second identical parse.
+  const repaired = repairJson(extracted)
+  if (repaired !== extracted) {
+    const second = tryParseAndValidate(repaired, diagnostics)
+    if (second) return second
+    if (diagnostics) diagnostics.parseError = `repair attempt also failed: ${diagnostics.parseError ?? 'unknown'}`
+  }
+
+  return null
+}
+
+/** Strip markdown fences (if any) and return the substring from the first
+ *  `{` to the last `}`, or null when no JSON object can be located. */
+function extractJsonObject(text: string): string | null {
   let cleaned = text.trim()
   if (cleaned.startsWith('```')) {
     const firstNewline = cleaned.indexOf('\n')
@@ -171,63 +203,130 @@ function parseContextPlanJson(
       if (closeIdx !== -1) cleaned = inner.slice(0, closeIdx).trim()
     }
   }
-
   const start = cleaned.indexOf('{')
   const end = cleaned.lastIndexOf('}')
-  if (start === -1 || end === -1 || end <= start) {
-    if (diagnostics) diagnostics.parseError = `no JSON object found in content (len=${cleaned.length})`
-    return null
-  }
+  if (start === -1 || end === -1 || end <= start) return null
+  return cleaned.slice(start, end + 1)
+}
 
+/** Parse + schema-validate. Returns null (and sets diagnostics.parseError)
+ *  on either a JSON syntax error or a schema violation. */
+function tryParseAndValidate(
+  jsonStr: string,
+  diagnostics?: RouterDiagnostics,
+): ContextPlanClassification | null {
+  let obj: Record<string, unknown>
   try {
-    const obj = JSON.parse(cleaned.slice(start, end + 1)) as {
-      taskDomain?: string
-      requiredCapabilities?: unknown
-      minimumContextNeeded?: string
-      candidateContexts?: unknown
-      selectedContexts?: unknown
-      toolGroups?: unknown
-      fallbackRisk?: string
-      reason?: string
-      confidence?: string
-    }
-
-    const selectedContexts = normalizeContextIds(obj.selectedContexts)
-    const candidateContexts = normalizeContextIds(obj.candidateContexts)
-    const minimumContextNeeded = VALID_GRANULARITY.has(obj.minimumContextNeeded as ContextGranularity)
-      ? obj.minimumContextNeeded as ContextGranularity
-      : 'summary'
-    const fallbackRisk = VALID_RISK.has(obj.fallbackRisk as ContextFallbackRisk)
-      ? obj.fallbackRisk as ContextFallbackRisk
-      : 'medium'
-    const toolGroups = normalizeToolGroups(obj.toolGroups)
-    const requiredCapabilities = Array.isArray(obj.requiredCapabilities)
-      ? obj.requiredCapabilities.filter((v): v is string => typeof v === 'string').slice(0, 8)
-      : []
-    const rawConfidence = typeof obj.confidence === 'string' ? obj.confidence.toLowerCase() : ''
-    const confidence: 'high' | 'medium' | 'low' =
-      rawConfidence === 'high' ? 'high' : rawConfidence === 'low' ? 'low' : 'medium'
-
-    return {
-      plan: {
-        taskDomain: typeof obj.taskDomain === 'string' && obj.taskDomain ? obj.taskDomain : 'bugfix_local',
-        requiredCapabilities,
-        minimumContextNeeded,
-        candidateContexts: includeSelectedCandidates(candidateContexts, selectedContexts),
-        selectedContexts,
-        toolGroups,
-        fallbackRisk,
-        reason: typeof obj.reason === 'string' && obj.reason ? obj.reason : 'model context planning',
-      },
-      source: 'model',
-      confidence,
-      reason: typeof obj.reason === 'string' && obj.reason ? obj.reason : 'model context planning',
-      diagnostics,
-    }
+    obj = JSON.parse(jsonStr) as Record<string, unknown>
   } catch (parseErr) {
     if (diagnostics) diagnostics.parseError = `JSON.parse failed: ${String(parseErr)}`
     return null
   }
+  const shape = validateContextPlanShape(obj)
+  if (!shape.ok) {
+    if (diagnostics) diagnostics.parseError = `schema validation failed: ${shape.error}`
+    return null
+  }
+  // Success — clear any stale parseError left by an earlier failed attempt
+  // (e.g. the strict parse failed, then the repair attempt succeeded).
+  if (diagnostics) diagnostics.parseError = undefined
+  return buildClassificationFromObject(obj, diagnostics)
+}
+
+/** Schema gate applied BEFORE the plan is trusted. A plan missing
+ *  taskDomain or carrying a non-array selectedContexts is rejected — the
+ *  previous behaviour silently defaulted taskDomain to 'bugfix_local',
+ *  which masked planner failures as success. */
+function validateContextPlanShape(
+  obj: Record<string, unknown>,
+): { ok: true } | { ok: false; error: string } {
+  if (typeof obj.taskDomain !== 'string' || obj.taskDomain.trim() === '') {
+    return { ok: false, error: 'taskDomain must be a non-empty string' }
+  }
+  if (!Array.isArray(obj.selectedContexts)) {
+    return { ok: false, error: 'selectedContexts must be an array' }
+  }
+  if (obj.requiredCapabilities !== undefined && !Array.isArray(obj.requiredCapabilities)) {
+    return { ok: false, error: 'requiredCapabilities must be an array when present' }
+  }
+  return { ok: true }
+}
+
+/** Single, conservative repair pass: strip non-printable control chars and
+ *  remove trailing commas before } or ]. Intentionally narrow — we do not
+ *  touch quotes or keys, which would risk corrupting string values. */
+function repairJson(text: string): string {
+  let out = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+  out = out.replace(/,(\s*[}\]])/g, '$1')
+  return out
+}
+
+function buildClassificationFromObject(
+  obj: Record<string, unknown>,
+  diagnostics?: RouterDiagnostics,
+): ContextPlanClassification {
+  const selectedContexts = normalizeContextIds(obj.selectedContexts)
+  const candidateContexts = includeSelectedCandidates(
+    normalizeContextIds(obj.candidateContexts),
+    selectedContexts,
+  )
+  const minimumContextNeeded = VALID_GRANULARITY.has(obj.minimumContextNeeded as ContextGranularity)
+    ? obj.minimumContextNeeded as ContextGranularity
+    : 'summary'
+  const fallbackRisk = VALID_RISK.has(obj.fallbackRisk as ContextFallbackRisk)
+    ? obj.fallbackRisk as ContextFallbackRisk
+    : 'medium'
+  const toolGroups = normalizeToolGroups(obj.toolGroups)
+  const requiredCapabilities = Array.isArray(obj.requiredCapabilities)
+    ? obj.requiredCapabilities.filter((v): v is string => typeof v === 'string').slice(0, 8)
+    : []
+  const rawConfidence = typeof obj.confidence === 'string' ? obj.confidence.toLowerCase() : ''
+  const confidence: 'high' | 'medium' | 'low' =
+    rawConfidence === 'high' ? 'high' : rawConfidence === 'low' ? 'low' : 'medium'
+  const reason = typeof obj.reason === 'string' && obj.reason ? obj.reason : 'model context planning'
+  const rejectedContexts = deriveRejectedContexts(
+    normalizeContextIds(obj.rejectedContexts),
+    candidateContexts,
+    selectedContexts,
+  )
+
+  return {
+    plan: {
+      taskDomain: obj.taskDomain as string,
+      requiredCapabilities,
+      minimumContextNeeded,
+      candidateContexts,
+      selectedContexts,
+      rejectedContexts,
+      toolGroups,
+      fallbackRisk,
+      reason,
+    },
+    source: 'model',
+    confidence,
+    reason,
+    diagnostics,
+  }
+}
+
+/** Contexts considered but not selected. Merges any explicit
+ *  rejectedContexts the model supplied with the derived set
+ *  (candidateContexts minus selectedContexts); selected ids are never
+ *  reported as rejected. */
+function deriveRejectedContexts(
+  explicit: string[],
+  candidateContexts: string[],
+  selectedContexts: string[],
+): string[] {
+  const selectedSet = new Set(selectedContexts)
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const id of [...explicit, ...candidateContexts]) {
+    if (selectedSet.has(id) || seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
 }
 
 function normalizeContextIds(value: unknown): string[] {

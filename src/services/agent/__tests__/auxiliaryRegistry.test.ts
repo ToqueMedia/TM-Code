@@ -233,6 +233,95 @@ describe('auxiliaryRegistry', () => {
         expect(o.reason.length).toBeGreaterThan(5)
       }
     })
+
+    // ── Context Planner telemetry ──────────────────────────────
+    it('marks a bare profile call (no plan, no telemetry) as planner fallback', () => {
+      const sel = selectAuxiliaries('bugfix_local', 'fix the retry bug')
+      expect(sel.contextPlannerStatus).toBe('fallback')
+      expect(sel.contextPlannerSelectionReason).toBeTruthy()
+    })
+
+    it('infers parsed status when a model plan is provided without telemetry', () => {
+      const sel = selectAuxiliaries(
+        'frontend_ui',
+        'audit the MCP routing',
+        false,
+        'test',
+        undefined,
+        plan({
+          taskDomain: 'agent_runtime',
+          requiredCapabilities: ['mcp_routing'],
+          candidateContexts: ['agent_runtime.mcp_routing', 'project.structure_overview'],
+          selectedContexts: ['agent_runtime.mcp_routing'],
+          reason: 'model selected MCP routing',
+        }),
+      )
+      expect(sel.contextPlannerStatus).toBe('parsed')
+    })
+
+    it('threads planner fallback telemetry (error + rawOutput) through plannerInfo', () => {
+      const sel = selectAuxiliaries(
+        'bugfix_local',
+        'fix the retry bug',
+        false,
+        'context planner fallback: invalid context plan JSON',
+        undefined,
+        undefined,
+        {
+          status: 'fallback',
+          error: 'schema validation failed: taskDomain must be a non-empty string',
+          rawOutput: '{"selectedContexts":[]}',
+          selectionReason: 'invalid context plan JSON',
+        },
+      )
+      expect(sel.contextPlannerStatus).toBe('fallback')
+      expect(sel.contextPlannerError).toMatch(/schema validation failed/)
+      expect(sel.contextPlannerRawOutput).toBe('{"selectedContexts":[]}')
+      expect(sel.contextPlannerSelectionReason).toBe('invalid context plan JSON')
+    })
+
+    it('golden: design-system refactor surfaces parsed status + rejected entrypoints', () => {
+      const sel = selectAuxiliaries(
+        'frontend_ui',
+        'Refatora a lista de sessões com semantic tokens e data relativa.',
+        false,
+        'test',
+        undefined,
+        plan({
+          taskDomain: 'design_system_ui',
+          requiredCapabilities: ['semantic_tokens', 'component_patterns', 'relative_time_formatting'],
+          minimumContextNeeded: 'summary',
+          candidateContexts: [
+            'design_system.semantic_tokens',
+            'design_system.component_patterns',
+            'project.entrypoints',
+            'project.structure_overview',
+          ],
+          selectedContexts: ['design_system.semantic_tokens', 'design_system.component_patterns'],
+          rejectedContexts: ['project.entrypoints'],
+          fallbackRisk: 'low',
+          reason: 'refactor session list with semantic tokens and relative dates',
+        }),
+        { status: 'parsed', selectionReason: 'model context planning' },
+      )
+      expect(sel.contextPlannerStatus).toBe('parsed')
+      expect(sel.contextPlan.taskDomain).toBe('design_system_ui')
+      expect(sel.contextPlan.requiredCapabilities).toEqual([
+        'semantic_tokens',
+        'component_patterns',
+        'relative_time_formatting',
+      ])
+      expect(sel.contextPlan.selectedContexts).toEqual([
+        'design_system.semantic_tokens',
+        'design_system.component_patterns',
+      ])
+      // project.entrypoints (explicit) + project.structure_overview (derived)
+      // are rejected — entrypoints only loads if the component cannot be located.
+      expect(sel.contextPlannerRejectedContexts).toEqual([
+        'project.entrypoints',
+        'project.structure_overview',
+      ])
+    })
   })
 
   // ── buildOnDemandIndex ────────────────────────────────────────

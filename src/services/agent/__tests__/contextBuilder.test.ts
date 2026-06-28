@@ -1,6 +1,19 @@
 import { invoke } from '@tauri-apps/api/core'
 import ContextBuilder from '../contextBuilder'
 
+// contextBuilder → contextPlanner → firebaseAuth, which reads
+// import.meta.env at module load (Jest cannot parse import.meta). Stub it
+// with the repo's established mock shape (see agentServiceRequestType.test.ts).
+jest.mock('../../auth/firebaseAuth', () => ({
+  __esModule: true,
+  default: {
+    getInstance: () => ({
+      getIdToken: jest.fn().mockResolvedValue('mock-firebase-token'),
+    }),
+  },
+  getAppCheckHeader: jest.fn().mockResolvedValue({ 'X-Firebase-AppCheck': 'mock-appcheck' }),
+}))
+
 // invoke is already mocked in setupTests.ts
 const mockedInvoke = invoke as jest.MockedFunction<typeof invoke>
 
