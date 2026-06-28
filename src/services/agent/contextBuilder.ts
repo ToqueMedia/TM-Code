@@ -126,10 +126,13 @@ import {
 } from './contextBuilder/sections/cmdSections'
 
 import { getPublishingSection } from './contextBuilder/sections/chatPublishing'
+import { planContextWithModel } from './contextPlanner'
 import {
   classifyPromptIntent,
   selectAuxiliaries,
   buildOnDemandIndex,
+  getAuxiliaryMeta,
+  resolveAuxiliaryId,
   type AuxiliarySelection,
   type PromptProfile,
   type RouterDiagnostics,
@@ -198,17 +201,160 @@ class ContextBuilder {
   private recordRequestContextAttempt(id: string, loaded: boolean): void {
     const sel = this.lastAuxiliarySelection
     if (!sel) return
+    const resolvedId = resolveAuxiliaryId(id)
+    const meta = getAuxiliaryMeta(resolvedId)
 
     sel.requestContextToolCalls = (sel.requestContextToolCalls ?? 0) + 1
     sel.modelRequestedContextSections ??= []
-    if (!sel.modelRequestedContextSections.includes(id)) {
-      sel.modelRequestedContextSections.push(id)
+    if (!sel.modelRequestedContextSections.includes(resolvedId)) {
+      sel.modelRequestedContextSections.push(resolvedId)
     }
 
     const target = loaded ? 'requestContextSectionsLoaded' : 'requestedButNotLoadedSections'
     sel[target] ??= []
-    if (!sel[target]!.includes(id)) {
-      sel[target]!.push(id)
+    if (!sel[target]!.includes(resolvedId)) {
+      sel[target]!.push(resolvedId)
+    }
+
+    sel.requestContextSelectionReason ??= {}
+    sel.requestContextSelectionReason[resolvedId] = meta
+      ? `${loaded ? 'loaded' : 'not loaded'} ${meta.domain}/${meta.capability}; ${meta.whenToUse}`
+      : `${loaded ? 'loaded' : 'not loaded'} unknown context`
+    sel.requestContextCostTier ??= {}
+    if (meta) sel.requestContextCostTier[resolvedId] = meta.costTier
+
+    const selected = new Set(sel.contextPlan.selectedContexts.map(resolveAuxiliaryId))
+    const isFallback = Boolean(meta && !selected.has(resolvedId) && (
+      meta.granularity === 'full' ||
+      meta.costTier === 'high' ||
+      meta.id === 'project.structure_overview' ||
+      meta.id === 'project.structure_full'
+    ))
+    if (loaded && isFallback) {
+      sel.requestContextFallbackUsed = true
+      sel.requestContextFallbackFrom ??= []
+      sel.requestContextFallbackTo ??= []
+      const from = sel.contextPlan.selectedContexts.map(resolveAuxiliaryId)
+      for (const source of from) {
+        if (!sel.requestContextFallbackFrom.includes(source)) sel.requestContextFallbackFrom.push(source)
+      }
+      if (!sel.requestContextFallbackTo.includes(resolvedId)) sel.requestContextFallbackTo.push(resolvedId)
+    }
+  }
+
+  private renderAuxiliaryContent(id: string): string | null {
+    const ctx = this.lastAuxiliaryCtx
+    const resolvedId = resolveAuxiliaryId(id)
+    switch (resolvedId) {
+      case 'delivery.deploy':
+        return getPublishingSection()
+      case 'scaffold.workflow':
+        return ctx ? getScaffoldingInstallSection({ pmDetected: ctx.pmDetected }) : null
+      case 'vision.image_rules':
+        return getVisionSection()
+      case 'auth_database.provision':
+        return getAuthSection()
+      case 'design_system.semantic_tokens':
+        return [
+          '# Design system: semantic tokens',
+          'Use for token/theme work only. Start by locating existing semantic token/theme files before editing.',
+          'Expected files: src/theme/**/semantic*, src/theme/**/tokens*, src/themes/**, src/theme/index.ts.',
+          'Prefer adding the smallest semantic alias that matches existing naming. Do not load project.structure_full for token work unless the expected files cannot be located with search/list/read tools.',
+        ].join('\n')
+      case 'design_system.theme_config':
+        return [
+          '# Design system: theme configuration',
+          'Use for theme entrypoints, Chakra/System config, provider wiring, and semantic token registration.',
+          'Expected files: src/theme/index.ts, src/theme/**, src/themes/**, src/components/ui/provider.tsx.',
+          'Read the theme entrypoint and the specific token file before editing.',
+        ].join('\n')
+      case 'design_system.brand_palette':
+        return [
+          '# Design system: brand palette',
+          'Use for palette/color token naming, semantic color aliases, and contrast-aware palette decisions.',
+          'Expected files: src/theme/**/colors*, src/theme/**/tokens*, src/themes/**.',
+        ].join('\n')
+      case 'design_system.chakra_recipes':
+        return [
+          '# Design system: Chakra recipes',
+          'Use for Chakra recipes, slot recipes, variants, and reusable component styling.',
+          'Expected files: src/theme/**/recipes*, src/theme/**/slot-recipes*, src/components/ui/**.',
+        ].join('\n')
+      case 'design_system.component_patterns':
+        return sharedUiBaselineCore()
+      case 'ui_patterns':
+        return sharedTasteDefaults()
+      case 'project.structure_overview':
+        return ctx?.promptCtx ? getProjectStructureIndexSection(ctx.promptCtx) : null
+      case 'project.package_map':
+        if (!ctx?.promptCtx) return null
+        return [
+          '# Project package map',
+          `project type: ${ctx.promptCtx.projectType}`,
+          `package manager: ${ctx.promptCtx.pmDetected}`,
+          ctx.promptCtx.pkgSummary ? `package summary:\n${ctx.promptCtx.pkgSummary}` : 'package summary: unavailable',
+          ctx.promptCtx.pathAliases.length ? `path aliases:\n${ctx.promptCtx.pathAliases.map(a => `- ${a}`).join('\n')}` : null,
+        ].filter(Boolean).join('\n')
+      case 'project.entrypoints':
+        if (!ctx?.promptCtx) return null
+        return [
+          '# Project entrypoints',
+          'Expected entrypoint candidates: src/main.tsx, src/App.tsx, src/index.ts, src/routes/**, vite.config.*, tauri command modules.',
+          ctx.promptCtx.pathAliases.length ? `path aliases:\n${ctx.promptCtx.pathAliases.map(a => `- ${a}`).join('\n')}` : null,
+          'Use search/list/read tools to confirm the exact entrypoint before editing.',
+        ].filter(Boolean).join('\n')
+      case 'project.structure_full':
+        return ctx?.promptCtx ? getProjectStructureSection(ctx.promptCtx) : null
+      case 'agent_runtime.mcp_routing':
+        return ctx?.promptCtx ? sharedMcpBlock(ctx.promptCtx.mcpTools, 'developer') : null
+      case 'agent_runtime.tool_profiles':
+        return [
+          '# Agent runtime: tool profiles',
+          'Tool profiles bound available tools to the current task profile. Use request_tools only when the current active set lacks a required capability.',
+          'Expected files: src/services/agent/toolsetSelector.ts and callers that pass selectedPromptProfile.',
+        ].join('\n')
+      case 'agent_runtime.request_context_policy':
+        return [
+          '# Agent runtime: request_context policy',
+          'Choose the smallest sufficient context: capability-specific > domain summary > project overview > full project tree.',
+          'Use project.structure_full only after specific contexts fail, files are unknown, architecture is broad, or dependency mapping spans areas.',
+          'Expected files: src/services/agent/contextBuilder/auxiliaryRegistry.ts, src/services/agent/contextBuilder.ts, src/services/agent/payloadInspector.ts.',
+        ].join('\n')
+      case 'agent_runtime.memory_context':
+        if (!ctx?.promptCtx) return null
+        return [
+          getMemorySection(ctx.promptCtx),
+          getProjectMemorySection(ctx.promptCtx),
+          getSessionMemorySection(ctx.promptCtx),
+          getMemoryToolsGuidanceSection(),
+        ].filter(Boolean).join('\n\n') || null
+      case 'delivery.dev_server':
+        return [getDevServerRulesSection(), getDevServerStatusSection()].filter(Boolean).join('\n\n')
+      case 'delivery.build_scripts':
+        if (!ctx?.promptCtx) return null
+        return [
+          '# Delivery: build scripts',
+          `package manager: ${ctx.promptCtx.pmDetected}`,
+          ctx.promptCtx.pkgSummary ? `package summary:\n${ctx.promptCtx.pkgSummary}` : 'package summary: unavailable',
+          'Use for build/test/dev command discovery before broader project structure.',
+        ].join('\n')
+      case 'delivery.git_status':
+        return ctx?.promptCtx ? getGitStatusSection(ctx.promptCtx) : null
+      case 'delivery.changed_files':
+        return ctx?.promptCtx ? getRecentFilesSection(ctx.promptCtx) : null
+      case 'project.docs_full':
+        if (ctx?.promptCtx) {
+          const parts = [
+            ctx.promptCtx.readme ? `# README.md\n${ctx.promptCtx.readme}` : null,
+            ctx.promptCtx.tmsContent ? `# TMS.md\n${ctx.promptCtx.tmsContent}` : null,
+            ctx.promptCtx.planContent ? `# PLAN.md\n${ctx.promptCtx.planContent}` : null,
+            ctx.promptCtx.todoContent ? `# TODO.md\n${ctx.promptCtx.todoContent}` : null,
+          ].filter(Boolean) as string[]
+          return parts.length ? parts.join('\n\n') : null
+        }
+        return null
+      default:
+        return null
     }
   }
 
@@ -221,66 +367,20 @@ class ContextBuilder {
   loadAuxiliaryOnDemand(id: string): { content: string | null; name: string } {
     const sel = this.lastAuxiliarySelection
     if (!sel) return { content: null, name: id }
+    const resolvedId = resolveAuxiliaryId(id)
     // Already loaded inline → nothing to fetch.
-    if (sel.loaded.some((l) => l.id === id)) {
-      this.recordRequestContextAttempt(id, false)
-      return { content: null, name: id }
+    if (sel.loaded.some((l) => l.id === resolvedId)) {
+      this.recordRequestContextAttempt(resolvedId, false)
+      return { content: null, name: resolvedId }
     }
-    let content: string | null = null
-    const ctx = this.lastAuxiliaryCtx
-    switch (id) {
-      case 'publishing_fullstack':
-        content = getPublishingSection()
-        break
-      case 'scaffolding_install':
-        // Loader needs pmDetected from the build ctx.
-        content = ctx ? getScaffoldingInstallSection({ pmDetected: ctx.pmDetected }) : null
-        break
-      case 'vision_rules':
-        content = getVisionSection()
-        break
-      case 'auth_database_provision':
-        content = getAuthSection()
-        break
-      case 'ui_baseline_full':
-        content = sharedUiBaselineCore()
-        break
-      case 'taste_defaults':
-        content = sharedTasteDefaults()
-        break
-      case 'project_structure_full':
-        content = ctx?.promptCtx ? getProjectStructureSection(ctx.promptCtx) : null
-        break
-      case 'mcp_routing_detail':
-        content = ctx?.promptCtx ? sharedMcpBlock(ctx.promptCtx.mcpTools, 'developer') : null
-        break
-      case 'project_docs_full':
-        if (ctx?.promptCtx) {
-          const parts = [
-            ctx.promptCtx.readme ? `# README.md\n${ctx.promptCtx.readme}` : null,
-            ctx.promptCtx.tmsContent ? `# TMS.md\n${ctx.promptCtx.tmsContent}` : null,
-            ctx.promptCtx.planContent ? `# PLAN.md\n${ctx.promptCtx.planContent}` : null,
-            ctx.promptCtx.todoContent ? `# TODO.md\n${ctx.promptCtx.todoContent}` : null,
-          ].filter(Boolean) as string[]
-          content = parts.length ? parts.join('\n\n') : null
-        }
-        break
-      case 'dev_server_status_detail':
-        content = [getDevServerRulesSection(), getDevServerStatusSection()].filter(Boolean).join('\n\n')
-        break
-      case 'git_status_detail':
-        content = ctx?.promptCtx ? getGitStatusSection(ctx.promptCtx) : null
-        break
-      default:
-        content = null
-    }
-    const meta = sel.omitted.find((o) => o.id === id)
+    const content = this.renderAuxiliaryContent(resolvedId)
+    const meta = sel.omitted.find((o) => o.id === resolvedId) ?? getAuxiliaryMeta(resolvedId)
     if (content) {
-      this.recordRequestContextAttempt(id, true)
+      this.recordRequestContextAttempt(resolvedId, true)
     } else {
-      this.recordRequestContextAttempt(id, false)
+      this.recordRequestContextAttempt(resolvedId, false)
     }
-    return { content, name: meta?.name ?? id }
+    return { content, name: meta?.name ?? resolvedId }
   }
 
   static getInstance(): ContextBuilder {
@@ -470,23 +570,32 @@ class ContextBuilder {
     // turns, since reads don't increment fsVersion.
     const accessedCount = accessedPaths?.length ?? 0
     // ── Auxiliary context selection (on-demand architecture) ──
-    // Classify the task intent from the user's first message and select which
-    // auxiliary blocks (publishing, scaffolding/install, vision, auth/db)
-    // load inline vs. stay available on-demand via `request_context`. Pure
-    // (no ctx needed) so it can run before the parallel gather. The profile
-    // enters the cache key so different intents get separate cache entries.
-    //
-    // Intent Router: when an LLM-based classification is supplied via
-    // `intentOverride` (profile + readOnly from qwen3.7-plus), it takes
-    // precedence over the deterministic keyword classifier — the latter is
-    // kept only as a fallback when the router was unavailable. This replaces
-    // free-text regex inference per the `no-regex-for-inference` rule.
+    // Intent Router supplies profile/readOnly. Context Planner (utility model)
+    // supplies the actual domain/capability plan and initial tool groups. If
+    // either model path is unavailable, fallback is conservative and does not
+    // infer task meaning from user text.
     const auxProfile = intentOverride?.profile ?? classifyPromptIntent(userMessage, {
       mentionedFiles: accessedPaths,
     })
-    const auxSelection = selectAuxiliaries(auxProfile, userMessage, intentOverride?.readOnly, intentOverride?.reason, intentOverride?.source ? { source: intentOverride.source, confidence: intentOverride.confidence, error: intentOverride.error, diagnostics: intentOverride.diagnostics } : undefined)
+    const readOnly = intentOverride?.readOnly ?? false
+    const contextPlan = await planContextWithModel(userMessage ?? '', auxProfile, readOnly)
+    const plannerReason = `${contextPlan.source === 'model' ? 'model context planner' : 'context planner fallback'}: ${contextPlan.reason}`
+    const auxSelection = selectAuxiliaries(
+      auxProfile,
+      userMessage,
+      readOnly,
+      intentOverride?.reason ? `${intentOverride.reason}; ${plannerReason}` : plannerReason,
+      intentOverride?.source ? { source: intentOverride.source, confidence: intentOverride.confidence, error: intentOverride.error, diagnostics: intentOverride.diagnostics } : undefined,
+      contextPlan.plan,
+    )
     this.lastAuxiliarySelection = auxSelection
-    const cacheKey = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|${mcpSig}|${stickyHashtagSig}|fs${fsVersion}|ac${accessedCount}|p${auxProfile}|ro${auxSelection.readOnly ? 1 : 0}`
+    const contextPlanSig = [
+      auxSelection.contextPlan.taskDomain,
+      auxSelection.contextPlan.selectedContexts.join(','),
+      auxSelection.contextPlan.candidateContexts.join(','),
+      auxSelection.contextPlan.toolGroups?.join(',') ?? '',
+    ].join('|')
+    const cacheKey = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|${mcpSig}|${stickyHashtagSig}|fs${fsVersion}|ac${accessedCount}|p${auxProfile}|ro${auxSelection.readOnly ? 1 : 0}|cp${contextPlanSig}`
 
     const now = Date.now()
     const cached = this.promptCache.get(cacheKey)
@@ -671,29 +780,7 @@ class ContextBuilder {
     this.lastAuxiliaryCtx = { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb, promptCtx: ctx, loadedSkills }
     const auxLoadedContent: Record<string, string> = {}
     for (const l of auxSelection.loaded) {
-      let body: string | null = null
-      switch (l.id) {
-        case 'publishing_fullstack': body = getPublishingSection(); break
-        case 'scaffolding_install': body = getScaffoldingInstallSection({ pmDetected: ctx.pmDetected }); break
-        case 'vision_rules': body = getVisionSection(); break
-        case 'auth_database_provision': body = getAuthSection(); break
-        case 'ui_baseline_full': body = sharedUiBaselineCore(); break
-        case 'taste_defaults': body = sharedTasteDefaults(); break
-        case 'project_structure_full': body = getProjectStructureSection(ctx); break
-        case 'mcp_routing_detail': body = sharedMcpBlock(ctx.mcpTools, 'developer'); break
-        case 'project_docs_full': {
-          const parts = [
-            ctx.readme ? `# README.md\n${ctx.readme}` : null,
-            ctx.tmsContent ? `# TMS.md\n${ctx.tmsContent}` : null,
-            ctx.planContent ? `# PLAN.md\n${ctx.planContent}` : null,
-            ctx.todoContent ? `# TODO.md\n${ctx.todoContent}` : null,
-          ].filter(Boolean) as string[]
-          body = parts.length ? parts.join('\n\n') : null
-          break
-        }
-        case 'dev_server_status_detail': body = [getDevServerRulesSection(), getDevServerStatusSection()].filter(Boolean).join('\n\n'); break
-        case 'git_status_detail': body = getGitStatusSection(ctx); break
-      }
+      const body = this.renderAuxiliaryContent(l.id)
       if (body) auxLoadedContent[l.id] = body
     }
     const onDemandIndex = buildOnDemandIndex(auxSelection)
@@ -706,20 +793,24 @@ class ContextBuilder {
       getModelSpecificSection(ctx),
       getSystemSection(),
       getDoingTasksSection(ctx, {
-        scaffoldingInstall: auxLoadedContent['scaffolding_install'] ?? null,
+        scaffoldingInstall: auxLoadedContent['scaffold.workflow'] ?? null,
       }),
       getExecutingActionsSection(),
       sharedTerminalAgentLoop('chat'),
       getClosedLoopSection(),
       getToolsSection(ctx),
       getConstraintsSection(ctx, {
-        publishing: auxLoadedContent['publishing_fullstack'] ?? null,
-        vision: auxLoadedContent['vision_rules'] ?? null,
-        auth: auxLoadedContent['auth_database_provision'] ?? null,
-        devServer: auxLoadedContent['dev_server_status_detail'] ?? null,
+        publishing: auxLoadedContent['delivery.deploy'] ?? null,
+        vision: auxLoadedContent['vision.image_rules'] ?? null,
+        auth: auxLoadedContent['auth_database.provision'] ?? null,
+        devServer: auxLoadedContent['delivery.dev_server'] ?? null,
       }),
-      auxLoadedContent['ui_baseline_full'] ?? '',
-      auxLoadedContent['taste_defaults'] ?? '',
+      auxLoadedContent['design_system.semantic_tokens'] ?? '',
+      auxLoadedContent['design_system.theme_config'] ?? '',
+      auxLoadedContent['design_system.brand_palette'] ?? '',
+      auxLoadedContent['design_system.chakra_recipes'] ?? '',
+      auxLoadedContent['design_system.component_patterns'] ?? '',
+      auxLoadedContent['ui_patterns'] ?? '',
       sharedToneAndStyle(),
       sharedOutputEfficiency(),
       sharedContextPreservation(),
@@ -761,7 +852,7 @@ class ContextBuilder {
       // reason — cache invalidation is a deliberate architectural choice,
       // not a default. Adding a new section here without a real reason is
       // a regression; if it can be static, move it above the boundary.
-      dynamicSection('mcp', () => auxLoadedContent['mcp_routing_detail'] ?? sharedMcpIndexBlock(ctx.mcpTools),
+      dynamicSection('mcp', () => auxLoadedContent['agent_runtime.mcp_routing'] ?? sharedMcpIndexBlock(ctx.mcpTools),
         'MCP server list changes when developer connects/disconnects servers'),
       dynamicSection('team', () => teamSection,
         'in-flight background agent list changes per turn'),
@@ -773,17 +864,33 @@ class ContextBuilder {
         'project path / package manager / language detected per session'),
       dynamicSection('preview_compatibility', () => getPreviewCompatibilitySection(ctx),
         'framework/deploy compatibility detected per project — null for compatible projects'),
-      dynamicSection('dev_server_status', () => auxLoadedContent['dev_server_status_detail'] ?? null,
+      dynamicSection('dev_server_status', () => auxLoadedContent['delivery.dev_server'] ?? null,
         'dev server status flips null→starting→running→stopped per session'),
       dynamicSection('applied_scaffolding', () => getAppliedScaffoldingSection(ctx),
         'one-shot flow markers (auth, payments) appear after scaffold writes'),
       // Git orientation BEFORE the file tree: branch + changed files is the
       // first thing the model wants to know ("where am I, what's dirty"),
       // and pre-empts a reflexive `git status` / `git diff` tool call.
-      dynamicSection('git_status', () => auxLoadedContent['git_status_detail'] ?? null,
+      dynamicSection('git_status', () => auxLoadedContent['delivery.git_status'] ?? null,
         'branch + working-tree changes shift every turn — null when not a git repo'),
-      dynamicSection('project_structure', () => auxLoadedContent['project_structure_full'] ?? getProjectStructureIndexSection(ctx),
+      dynamicSection('project_structure', () => auxLoadedContent['project.structure_full'] ?? auxLoadedContent['project.structure_overview'] ?? getProjectStructureIndexSection(ctx),
         'file tree shifts on every write — fsVersion drives cache key'),
+      dynamicSection('project_package_map', () => auxLoadedContent['project.package_map'] ?? null,
+        'package summary loaded only for package/build/project planning tasks'),
+      dynamicSection('project_entrypoints', () => auxLoadedContent['project.entrypoints'] ?? null,
+        'entrypoint summary loaded only for architecture/routing tasks'),
+      dynamicSection('agent_runtime_policy', () => [
+        auxLoadedContent['agent_runtime.tool_profiles'] ?? '',
+        auxLoadedContent['agent_runtime.request_context_policy'] ?? '',
+        auxLoadedContent['agent_runtime.memory_context'] ?? '',
+      ].filter(Boolean).join('\n\n') || null,
+        'agent runtime context loaded only for tool/context/memory tasks'),
+      dynamicSection('delivery_build_scripts', () => auxLoadedContent['delivery.build_scripts'] ?? null,
+        'build scripts loaded only for build/test/runtime tasks'),
+      dynamicSection('delivery_changed_files', () => auxLoadedContent['delivery.changed_files'] ?? null,
+        'changed-file context loaded only for git/changed-file tasks'),
+      dynamicSection('project_docs', () => auxLoadedContent['project.docs_full'] ?? null,
+        'full project documents loaded only when explicitly requested'),
       // Recently-modified files AFTER the tree: the tree says what exists, this
       // says what was touched last — the likely working set.
       dynamicSection('recent_files', () => getRecentFilesSection(ctx),

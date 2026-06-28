@@ -102,19 +102,6 @@ function sanitizeToolResultForModel(content: string): string {
   return content
 }
 
-function userAuthoredTextForToolset(content: string | ContentBlockAPI[] | null): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  // @mentions and prior tool calls are represented as synthetic tool_call /
-  // tool_result blocks inside user turns. Toolset selection must not expand
-  // from file contents or command output; only the human-authored text should
-  // influence which tool schemas are sent.
-  return content
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
-    .join("\n");
-}
-
 // ── Types ──
 
 /** Message shape used throughout the query loop. */
@@ -365,10 +352,9 @@ export interface QueryParams {
   getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null };
   /**
    * Dynamic toolset selector — when present, the loop filters the tool
-   * definitions to the active subset each turn (starting from a CORE minimal
-   * set and expanding monotonically based on user-message keywords + the
-   * `request_tools` meta-tool). Reduces tool-schema overhead from ~36 tools
-   * to the few the current task needs. Null/undefined → send all tools
+   * definitions to the active subset each turn. It starts from the
+   * model-selected profile base plus model-planned groups, then expands
+   * monotonically through `request_tools`. Null/undefined → send all tools
    * (legacy behaviour).
    */
   toolsetSelector?: import('./toolsetSelector').ToolsetSelector;
@@ -1134,16 +1120,12 @@ export async function* query(
 
     // ── Dynamic toolset selection ──
     // Filter the tool definitions to the active subset for this turn. The
-    // selector starts with a CORE minimal set and expands monotonically
-    // based on user-message keywords + the request_tools meta-tool. Reduces
+    // selector starts with the model-selected profile base plus any
+    // model-planned groups, then expands through request_tools. Reduces
     // tool-schema overhead (~10K tokens for 36 tools) to the few the current
     // task needs. When the selector is absent, send all tools (legacy).
-    const userText = providerMessagesForQuery
-      .filter((m) => m.role === "user")
-      .map((m) => userAuthoredTextForToolset(m.content))
-      .join("\n");
     const toolSelection = toolsetSelector
-      ? toolsetSelector.selectForTurn(tools, userText)
+      ? toolsetSelector.selectForTurn(tools)
       : {
           tools,
           activeCount: tools.length,
@@ -1879,9 +1861,15 @@ export async function* query(
           auxiliaryOmitted: payloadReport?.auxiliaryOmitted?.map((a: { id: string }) => a.id),
           omittedSystemSections: payloadReport?.omittedSystemSections,
           autoLoadedSystemSections: payloadReport?.autoLoadedSystemSections,
+          contextPlanCandidateSections: payloadReport?.contextPlanCandidateSections,
           modelRequestedContextSections: payloadReport?.modelRequestedContextSections,
           requestContextToolCalls: payloadReport?.requestContextToolCalls,
           requestContextSectionsLoaded: payloadReport?.requestContextSectionsLoaded,
+          requestContextSelectionReason: payloadReport?.requestContextSelectionReason,
+          requestContextCostTier: payloadReport?.requestContextCostTier,
+          requestContextFallbackUsed: payloadReport?.requestContextFallbackUsed,
+          requestContextFallbackFrom: payloadReport?.requestContextFallbackFrom,
+          requestContextFallbackTo: payloadReport?.requestContextFallbackTo,
           requestedButNotLoadedSections: payloadReport?.requestedButNotLoadedSections,
           requestedContextSections: payloadReport?.requestedContextSections,
           auxiliarySavingsTokens: payloadReport?.auxiliarySavingsTokens,

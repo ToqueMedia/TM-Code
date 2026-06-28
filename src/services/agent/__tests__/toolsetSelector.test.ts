@@ -3,10 +3,10 @@
  *
  * The selector now seeds its active set from the Intent Router's PromptProfile
  * (bugfix_local/analysis_readonly/deploy_publish/…) and BOUNDS request_tools +
- * keyword expansion to the profile's `allowed` set. These tests prove:
+ * model-planned groups to the profile's `allowed` set. These tests prove:
  *   - bugfix_local starts at ~6 tools and refuses destructive/provision/shell
  *   - analysis_readonly is hard read-only (no edit_file even via request_tools)
- *   - deploy_publish expands provision/shell on "deploy"
+ *   - deploy_publish starts with provision/shell from the model-selected profile
  *   - request_tools reports `denied` for tools outside the bound
  *   - monotonic expansion (once active, never retracts)
  */
@@ -82,7 +82,7 @@ describe('ToolsetSelector (profile-bound)', () => {
       expect(toolNames).not.toContain(WRITE_FILE)
     })
 
-    it('does NOT expand to provision/shell/destructive on keyword (bound)', () => {
+    it('does NOT expand to provision/shell/destructive from user text', () => {
       const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')
       selector.selectForTurn(ALL_TOOLS, 'deploy auth create file git commit')
       // These groups are outside bugfix_local's allowed set.
@@ -115,6 +115,14 @@ describe('ToolsetSelector (profile-bound)', () => {
       selector.requestTools([EDIT_FILE, WRITE_FILE])
       expect(selector.getExpandedNames()).toEqual([EDIT_FILE])
       expect(selector.getDeniedNames()).toEqual([WRITE_FILE])
+    })
+
+    it('activates model-planned groups without reading user text', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local', false, ['FILE_OPS'])
+      selector.selectForTurn(ALL_TOOLS)
+      expect(selector.isActive(LIST_DIRECTORY)).toBe(true)
+      expect(selector.isActive(READ_SKILL)).toBe(true)
+      expect(selector.isActive(WRITE_FILE)).toBe(false)
     })
   })
 
@@ -151,9 +159,9 @@ describe('ToolsetSelector (profile-bound)', () => {
   })
 
   describe('deploy_publish', () => {
-    it('expands PROVISION + SHELL on "deploy" keyword (allowed=null, unbounded)', () => {
+    it('starts with PROVISION + SHELL for deploy_publish profile', () => {
       const selector = new ToolsetSelector(ALL_NAMES, 'deploy_publish')
-      selector.selectForTurn(ALL_TOOLS, 'deploy the app to production')
+      selector.selectForTurn(ALL_TOOLS)
       expect(selector.isActive(PROVISION_DEPLOY)).toBe(true)
       expect(selector.isActive(START_DEV_SERVER)).toBe(true)
     })
@@ -183,7 +191,7 @@ describe('ToolsetSelector (profile-bound)', () => {
   describe('monotonic + meta-tool', () => {
     it('expands monotonically — once active, a tool never leaves', () => {
       const selector = new ToolsetSelector(ALL_NAMES, 'deploy_publish')
-      selector.selectForTurn(ALL_TOOLS, 'deploy the app')
+      selector.selectForTurn(ALL_TOOLS)
       expect(selector.isActive(PROVISION_DEPLOY)).toBe(true)
       selector.selectForTurn(ALL_TOOLS, 'now fix a typo')
       expect(selector.isActive(PROVISION_DEPLOY)).toBe(true)

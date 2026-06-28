@@ -147,12 +147,24 @@ export interface PayloadReport {
   omittedSystemSections: string[]
   /** Sections loaded inline automatically by profile/trigger. */
   autoLoadedSystemSections: string[]
+  /** Context planner candidate sections for this task. */
+  contextPlanCandidateSections: string[]
   /** Auxiliary ids the model requested through request_context. */
   modelRequestedContextSections: string[]
   /** Number of request_context tool calls intercepted in this run. */
   requestContextToolCalls: number
   /** Auxiliary ids that request_context returned with content. */
   requestContextSectionsLoaded: string[]
+  /** request_context selection reasons keyed by auxiliary id. */
+  requestContextSelectionReason: Record<string, string>
+  /** request_context cost tiers keyed by auxiliary id. */
+  requestContextCostTier: Record<string, string>
+  /** Whether request_context loaded a broader fallback context. */
+  requestContextFallbackUsed: boolean
+  /** Contexts the fallback moved away from. */
+  requestContextFallbackFrom: string[]
+  /** Contexts loaded as fallback. */
+  requestContextFallbackTo: string[]
   /** Auxiliary ids requested but not loaded (unknown/already inline/no content). */
   requestedButNotLoadedSections: string[]
   /** Legacy alias: auxiliary sections actually fetched through request_context in this run. */
@@ -607,9 +619,15 @@ export function inspectPayload(
   const loadedSystemSections = auxiliaryLoaded.map((a) => a.id)
   const omittedSystemSections = auxiliaryOmitted.map((a) => a.id)
   const autoLoadedSystemSections = auxiliarySelection?.autoLoadedSystemSections ?? loadedSystemSections
+  const contextPlanCandidateSections = auxiliarySelection?.contextPlanCandidateSections ?? []
   const modelRequestedContextSections = auxiliarySelection?.modelRequestedContextSections ?? []
   const requestContextToolCalls = auxiliarySelection?.requestContextToolCalls ?? 0
   const requestContextSectionsLoaded = auxiliarySelection?.requestContextSectionsLoaded ?? []
+  const requestContextSelectionReason = auxiliarySelection?.requestContextSelectionReason ?? {}
+  const requestContextCostTier = auxiliarySelection?.requestContextCostTier ?? {}
+  const requestContextFallbackUsed = auxiliarySelection?.requestContextFallbackUsed ?? false
+  const requestContextFallbackFrom = auxiliarySelection?.requestContextFallbackFrom ?? []
+  const requestContextFallbackTo = auxiliarySelection?.requestContextFallbackTo ?? []
   const requestedButNotLoadedSections = auxiliarySelection?.requestedButNotLoadedSections ?? []
   const requestedContextSections = requestContextSectionsLoaded
 
@@ -637,9 +655,15 @@ export function inspectPayload(
     auxiliaryOmitted,
     omittedSystemSections,
     autoLoadedSystemSections,
+    contextPlanCandidateSections,
     modelRequestedContextSections,
     requestContextToolCalls,
     requestContextSectionsLoaded,
+    requestContextSelectionReason,
+    requestContextCostTier,
+    requestContextFallbackUsed,
+    requestContextFallbackFrom,
+    requestContextFallbackTo,
     requestedButNotLoadedSections,
     requestedContextSections,
     auxiliarySavingsTokens,

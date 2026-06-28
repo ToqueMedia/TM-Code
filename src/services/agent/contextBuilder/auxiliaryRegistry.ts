@@ -1,155 +1,134 @@
 /**
- * Auxiliary Context Registry — on-demand context architecture for the agent
- * system prompt.
+ * Strategic Context Registry for on-demand system context.
  *
- * WHY THIS EXISTS
- * ─────────────
- * The system prompt shipped ~28K tokens of *fixed* prefix on every request —
- * even a one-line bugfix that only needs read_file + edit_file. Big blocks
- * (Publishing fullstack, Scaffolding/install workflow, Vision, Auth/DB
- * provisioning) are domain-specific: they matter for scaffolding/deploy/auth
- * tasks but are dead weight on a localised bugfix. Loading them unconditionally
- * inflates input-token cost and context pressure on every turn.
- *
- * This module implements the *architecture* (not blind cuts): a registry of
- * auxiliary context blocks, a deterministic intent classifier that picks a
- * prompt profile, and a selector that decides which auxiliaries load inline
- * vs. stay available on-demand. The agent can request an omitted auxiliary
- * mid-run via the `request_context` meta-tool — the content is then injected
- * as a tool_result (the system prompt itself is fixed per run).
- *
- * WHAT LIVES WHERE
- * ────────────────
- *   - This file           → types + classifier + selection algorithm + metadata.
- *                           PURE: no import of chatSections (keeps it unit-testable
- *                           without mocking the heavy section-builder import chain).
- *   - contextBuilder.ts   → owns the LOADER implementations (calls the section
- *                           builders) + wires the selection into buildSystemPrompt.
- *   - toolsetSelector.ts  → injects the `request_context` meta-tool when
- *                           auxiliaries are omitted.
- *   - agentService.ts     → intercepts `request_context` calls (parallel to
- *                           `request_tools`) and returns the auxiliary content.
- *   - payloadInspector.ts → reports core/auxiliary token split + loaded/omitted.
- *
- * PHASING
- * ───────
- * Phase 1 (this implementation) gates the 3 highest-impact, lowest-risk groups:
- *   1. publishing_fullstack      (~5K tokens — the single biggest block)
- *   2. scaffolding_install       (~1.2K tokens — only for new-project scaffolding)
- *   3. vision_rules + auth_database_provision  (~0.5K tokens — image/auth/DB only)
- * Later phases gate UI baseline, project structure, README/TMS, MCP, skills —
- * those entries are registered here (phase: 2) so the architecture is complete,
- * but their loaders are no-ops until wired.
+ * Context is organised by knowledge domain and capability, not by one-off
+ * local text matching. Selection follows the smallest-sufficient-context rule:
+ * specific capability > domain summary > broad project context.
  */
-
-// ── Types ───────────────────────────────────────────────────────────────
 
 export type PromptProfile =
-  | 'core'              // bare minimum (not used as a top-level default)
-  | 'bugfix_local'      // localised edit in existing files — DEFAULT
-  | 'analysis_readonly' // verification/audit without editing files (explicit signal)
-  | 'frontend_ui'       // UI/design/visual work
-  | 'scaffold_project'  // new project, install deps, setup
-  | 'deploy_publish'    // deploy, publish, domain, cloud
-  | 'auth_database'     // login, auth, DB, storage
-  | 'vision'            // image/attachment present
+  | 'core'
+  | 'bugfix_local'
+  | 'analysis_readonly'
+  | 'frontend_ui'
+  | 'scaffold_project'
+  | 'deploy_publish'
+  | 'auth_database'
+  | 'vision'
 
 export type AuxiliaryType =
-  | 'static'            // static text block (publishing rules, etc.)
-  | 'dynamic'           // depends on session/project state
-  | 'skill'             // skill content (loaded via read_skill)
-  | 'project-doc'       // README / TMS / PLAN
-  | 'toolset'           // tool definitions
-  | 'provider-specific' // model/provider-specific guidance
+  | 'static'
+  | 'dynamic'
+  | 'skill'
+  | 'project-doc'
+  | 'toolset'
+  | 'provider-specific'
 
-/**
- * Metadata for one auxiliary context block. The actual content loader lives in
- * contextBuilder.ts (keeps this module pure). `phase` marks which auxiliaries
- * are actively gated in the current implementation.
- */
+export type ContextCostTier = 'low' | 'medium' | 'high'
+export type ContextGranularity = 'index' | 'summary' | 'full'
+export type ContextFallbackRisk = 'low' | 'medium' | 'high'
+
 export interface AuxiliaryMeta {
   /** Stable id used by `request_context({ auxiliary: id })`. */
   id: string
-  /** Human-readable name (shown in the on-demand index). */
+  /** Domain-qualified knowledge area. */
+  domain: string
+  /** Capability inside the domain. */
+  capability: string
+  /** Human-readable name shown in the on-demand index. */
   name: string
-  /** One-line description (shown in the on-demand index). */
+  /** One-line description shown in the on-demand index. */
   description: string
+  /** Scope of the context: capability, domain, project, runtime, etc. */
+  scope: string
+  costTier: ContextCostTier
+  granularity: ContextGranularity
+  whenToUse: string
+  whenNotToUse: string
+  dependencies: string[]
+  fallbackTo: string[]
+  sourceResolver: string
+  freshnessPolicy: string
+  expectedFiles: string[]
+  summaryAvailable: boolean
+  fullAvailable: boolean
   /** Rough token cost when loaded (ceil(chars/3) of the typical body). */
   estTokens: number
   type: AuxiliaryType
-  /** Profiles that auto-include this auxiliary inline. */
+  /** Profiles that may auto-include this auxiliary inline. */
   profiles: PromptProfile[]
-  /** Keyword triggers that auto-activate regardless of profile. */
-  triggers?: RegExp[]
-  /** 1 = gated now; 2 = registered for a later phase (loader is a no-op). */
+  /** Compatibility aliases accepted by request_context. */
+  aliases?: string[]
+  /** 1 = loadable now; 2 = registered for later/no loader. */
   phase: 1 | 2
 }
 
 export interface AuxiliaryLoadResult {
   id: string
   name: string
-  /** Why this auxiliary was loaded (profile match / trigger match). */
   reason: string
   tokens: number
+  domain: string
+  capability: string
+  scope: string
+  costTier: ContextCostTier
+  granularity: ContextGranularity
 }
 
 export interface AuxiliaryOmitResult {
   id: string
   name: string
   description: string
-  /** Why it was omitted (no matching profile/trigger). */
   reason: string
   estTokens: number
+  domain: string
+  capability: string
+  scope: string
+  costTier: ContextCostTier
+  granularity: ContextGranularity
+  whenToUse: string
+  whenNotToUse: string
+  fallbackTo: string[]
+}
+
+export interface ContextPlan {
+  taskDomain: string
+  requiredCapabilities: string[]
+  minimumContextNeeded: ContextGranularity
+  candidateContexts: string[]
+  selectedContexts: string[]
+  toolGroups?: Array<'FILE_OPS' | 'SHELL' | 'WEB' | 'SUBAGENT' | 'MEMORY' | 'PROVISION'>
+  fallbackRisk: ContextFallbackRisk
+  reason: string
 }
 
 export interface AuxiliarySelection {
   profile: PromptProfile
-  /** Auxiliaries loaded inline into the system prompt. */
+  contextPlan: ContextPlan
   loaded: AuxiliaryLoadResult[]
-  /** Auxiliaries available on-demand but omitted from the prompt. */
   omitted: AuxiliaryOmitResult[]
-  /** Total estimated tokens of loaded auxiliaries. */
   loadedTokens: number
-  /** Total estimated tokens if ALL phase-1 auxiliaries were loaded. */
   totalAvailableTokens: number
-  /** Savings vs loading everything (totalAvailable - loaded). */
   savingsTokens: number
-  /** Sections loaded inline automatically by profile/trigger. */
   autoLoadedSystemSections?: string[]
-  /** Auxiliary ids the model requested through request_context. */
+  contextPlanCandidateSections?: string[]
   modelRequestedContextSections?: string[]
-  /** Number of request_context tool calls intercepted in this run. */
   requestContextToolCalls?: number
-  /** Auxiliary ids that request_context returned with content. */
   requestContextSectionsLoaded?: string[]
-  /** Auxiliary ids requested but not loaded (unknown/already inline/no content). */
+  requestContextSelectionReason?: Record<string, string>
+  requestContextCostTier?: Record<string, ContextCostTier>
+  requestContextFallbackUsed?: boolean
+  requestContextFallbackFrom?: string[]
+  requestContextFallbackTo?: string[]
   requestedButNotLoadedSections?: string[]
-  /**
-   * True when the user wants a read-only run (no file edits). Set by the
-   * Intent Router (`readOnly` flag) — never derived from free-text phrasing.
-   * `analysis_readonly` always implies readOnly=true. The ToolsetSelector
-   * reads this to bound the toolset to read-only tools.
-   */
   readOnly: boolean
-/** Why this profile was chosen (Intent Router reason, or 'keyword classifier'
- *  when the fallback classifier was used). Surfaced in the usage log export. */
   reason: string
-  /** ── Intent Router diagnostics (exported so a run proves the router ran) ── */
-  /** 'model' when the LLM router classified; 'fallback' when it fell back;
-   *  'keyword' when no router ran (legacy classifier only). */
   routerSource: 'model' | 'fallback' | 'keyword'
-  /** Router self-reported confidence; 'none' on fallback/keyword. */
   routerConfidence: 'high' | 'medium' | 'low' | 'none'
-  /** When the router failed, the failure reason (token/HTTP/timeout/…). */
   routerError?: string
-  /** Full diagnostics (raw body, headers, parse error) — exported so a failed
-   *  run shows exactly what the worker returned. */
   routerDiagnostics?: RouterDiagnostics
 }
 
-/** Diagnostics captured on every Intent Router HTTP call. Exported to the
- *  usage log so a failed router run is diagnosable from the session export
- *  alone (no DevTools needed). */
 export interface RouterDiagnostics {
   url: string
   appCheckPresent: boolean
@@ -162,225 +141,688 @@ export interface RouterDiagnostics {
   parseError?: string
 }
 
-// ── Intent classifier ───────────────────────────────────────────────────
-
 export interface IntentSignals {
-  /** True when the user message carries an image/screenshot attachment. */
   hasImage?: boolean
-  /** File paths the user @-mentioned (extension can hint task type). */
   mentionedFiles?: string[]
 }
 
-/**
- * Deterministic, keyword-based intent classifier. No model call — cheap and
- * reproducible. Starts from the smallest safe profile and only escalates when
- * a signal matches. Misclassifications are recoverable: the agent requests the
- * missing auxiliary via `request_context`.
- *
- * `analysis_readonly` is NOT derived here from free-text phrasing (regex/keyword
- * inference of intent is unreliable — see the `no-regex-for-inference` rule).
- * It is activated by an explicit structural signal (slash command / mode flag)
- * supplied alongside the user message; see `selectAuxiliaries`'s `readOnlyHint`.
- *
- * Order matters: vision → scaffold → deploy → auth/db → frontend → bugfix.
- * A prompt that mentions both "image" and "deploy" resolves to vision (the
- * more specific/less-common case wins).
- */
 export function classifyPromptIntent(
-  userMessage: string | undefined,
+  _userMessage: string | undefined,
   signals?: IntentSignals,
 ): PromptProfile {
-  const msg = (userMessage ?? '').toLowerCase()
   const hasImage = signals?.hasImage ?? false
 
-  // Vision — image/screenshot/mockup present. Most specific; wins first.
-  if (
-    hasImage ||
-    /\bimage\b|screenshot|foto|imagem|diagram|mockup|wireframe|canvas|html2canvas/i.test(msg)
-  ) {
+  if (hasImage) {
     return 'vision'
   }
-
-  // Scaffold / new project from scratch.
-  if (
-    /scaffold|create.*project|new.*project|novo.*projeto|criar.*projeto|from scratch|novo.*app|create.*app|build me.*app|make.*app|gerar.*projeto/i.test(msg)
-  ) {
-    return 'scaffold_project'
-  }
-
-  // Deploy / publish / domain / cloud.
-  if (/deploy|publish|release|\bship\b|dom[ií]nio|domain|cloud|publicar|publica[çc][ãa]o/i.test(msg)) {
-    return 'deploy_publish'
-  }
-
-  // Auth / database / storage / uploads.
-  if (
-    /\bauth\b|login|sign.?up|sign.?in|log.?in|registo|registro|permiss[ãa]o|firebase|database|\bsql\b|sqlite|turso|libsql|\bschema\b|storage|upload|avatar|ficheiro.*upload/i.test(msg)
-  ) {
-    return 'auth_database'
-  }
-
-  // Frontend / UI / design. "dialog", "button", "layout", "style", "tela"…
-  if (
-    /\bui\b|design|component|bot[ãa]o|button|layout|style|\bcss\b|tailwind|chakra|\btema\b|\btheme\b|\bcor\b|\bcolor\b|modal|dialog|\btela\b|screen|interface visual/i.test(msg)
-  ) {
-    return 'frontend_ui'
-  }
-
-  // Default: smallest safe profile. A localised edit in existing files.
+  // Intent routing is model-owned. This function is a conservative fallback
+  // for paths that cannot call the router; do not infer from free text here.
   return 'bugfix_local'
 }
 
-// ── Registry metadata ───────────────────────────────────────────────────
+const cx = (meta: AuxiliaryMeta): AuxiliaryMeta => meta
 
-/**
- * Phase-1 auxiliaries (actively gated) + phase-2 entries (registered for
- * later, loaders are no-ops until wired). The on-demand index only lists
- * phase-1 omitted auxiliaries — phase-2 entries aren't yet extractable.
- */
 export const AUXILIARY_METAS: AuxiliaryMeta[] = [
-  {
-    id: 'publishing_fullstack',
-    name: 'Publishing (fullstack projects)',
-    description: 'Publish-ready defaults: TM Code Database, Drizzle, Dockerfile, provision_database/files/deploy, brand vocabulary.',
-    estTokens: 5000,
+  cx({
+    id: 'design_system.index',
+    domain: 'design_system',
+    capability: 'index',
+    name: 'Design system index',
+    description: 'Compact design-system map: theme files, tokens, recipes, and component pattern locations.',
+    scope: 'domain',
+    costTier: 'low',
+    granularity: 'index',
+    whenToUse: 'Use first when the task is visual/theme related but the exact design-system file is unknown.',
+    whenNotToUse: 'Do not use for MCP, git, dev-server, backend, or already-localized edits.',
+    dependencies: [],
+    fallbackTo: ['project.structure_overview'],
+    sourceResolver: 'static_expected_files',
+    freshnessPolicy: 'stable guidance plus expected file locations',
+    expectedFiles: ['src/theme/**', 'src/themes/**', 'src/components/**'],
+    summaryAvailable: true,
+    fullAvailable: false,
+    estTokens: 160,
     type: 'static',
-    // Loaded for scaffold/deploy/auth profiles (backend code shape + provisioning).
-    profiles: ['scaffold_project', 'deploy_publish', 'auth_database'],
-    triggers: [/publish|provision|fullstack|drizzle|libsql|dockerfile|turso|tmdb/i],
+    profiles: [],
     phase: 1,
-  },
-  {
-    id: 'scaffolding_install',
-    name: 'Scaffolding & install workflow',
-    description: 'Background install pattern + new-project scaffolding sequence (config → code → verify → dev server).',
-    estTokens: 1200,
+  }),
+  cx({
+    id: 'design_system.semantic_tokens',
+    domain: 'design_system',
+    capability: 'semantic_tokens',
+    name: 'Semantic tokens',
+    description: 'How to add or update semantic tokens without loading the whole project tree.',
+    scope: 'capability',
+    costTier: 'low',
+    granularity: 'summary',
+    whenToUse: 'Use for semantic tokens, theme token names, state tokens, palette aliases, or Chakra semantic token work.',
+    whenNotToUse: 'Do not use for routing, MCP, git, dev server, or broad architecture discovery.',
+    dependencies: ['design_system.theme_config'],
+    fallbackTo: ['design_system.index', 'project.structure_overview'],
+    sourceResolver: 'design_system_semantic_tokens',
+    freshnessPolicy: 'read expected token/theme files before editing',
+    expectedFiles: ['src/theme/**/semantic*', 'src/theme/**/tokens*', 'src/themes/**', 'src/theme/index.ts'],
+    summaryAvailable: true,
+    fullAvailable: true,
+    estTokens: 220,
     type: 'static',
-    profiles: ['scaffold_project'],
-    triggers: [/scaffold|new.*project|novo.*projeto|criar.*projeto|from scratch|install.*dependenc|npm install|yarn install/],
+    profiles: [],
     phase: 1,
-  },
-  {
-    id: 'vision_rules',
-    name: 'Vision (images)',
-    description: 'How to treat image/screenshot descriptions inserted by the vision pipeline.',
-    estTokens: 200,
+  }),
+  cx({
+    id: 'design_system.theme_config',
+    domain: 'design_system',
+    capability: 'theme_config',
+    name: 'Theme configuration',
+    description: 'Theme entrypoints, provider/config expectations, and token wiring guidance.',
+    scope: 'capability',
+    costTier: 'low',
+    granularity: 'summary',
+    whenToUse: 'Use for theme configuration, Chakra theme setup, semantic token wiring, or provider-level theme changes.',
+    whenNotToUse: 'Do not use for ordinary component edits that do not touch theme configuration.',
+    dependencies: [],
+    fallbackTo: ['design_system.index', 'project.structure_overview'],
+    sourceResolver: 'design_system_theme_config',
+    freshnessPolicy: 'read theme entrypoint before editing',
+    expectedFiles: ['src/theme/index.ts', 'src/theme/**', 'src/themes/**', 'src/components/ui/provider.tsx'],
+    summaryAvailable: true,
+    fullAvailable: true,
+    estTokens: 220,
     type: 'static',
-    profiles: ['vision'],
-    triggers: [/image|screenshot|foto|imagem|diagram|mockup|wireframe/i],
+    profiles: [],
     phase: 1,
-  },
-  {
-    id: 'auth_database_provision',
-    name: 'Authentication & database rules',
-    description: 'Auth hashtag triggers, auth skill reads, /api/auth/* smoke test, provision workflow.',
-    estTokens: 350,
+  }),
+  cx({
+    id: 'design_system.brand_palette',
+    domain: 'design_system',
+    capability: 'brand_palette',
+    name: 'Brand palette',
+    description: 'Brand color/palette guidance and likely files.',
+    scope: 'capability',
+    costTier: 'low',
+    granularity: 'summary',
+    whenToUse: 'Use for palette, color, brand color, contrast color, or semantic color naming tasks.',
+    whenNotToUse: 'Do not use when the task is not visual or token-related.',
+    dependencies: ['design_system.semantic_tokens'],
+    fallbackTo: ['design_system.theme_config'],
+    sourceResolver: 'design_system_brand_palette',
+    freshnessPolicy: 'read palette/token files before editing',
+    expectedFiles: ['src/theme/**/colors*', 'src/theme/**/tokens*', 'src/themes/**'],
+    summaryAvailable: true,
+    fullAvailable: true,
+    estTokens: 160,
     type: 'static',
-    profiles: ['auth_database', 'scaffold_project', 'deploy_publish'],
-    triggers: [/\bauth\b|login|sign.?in|firebase|database|\bsql\b|sqlite|turso|libsql|provision/i],
+    profiles: [],
     phase: 1,
-  },
-  {
-    id: 'ui_baseline_full',
-    name: 'UI baseline (full)',
-    description: 'Full state-first UI design baseline. Load for frontend/design/visual work.',
+  }),
+  cx({
+    id: 'design_system.chakra_recipes',
+    domain: 'design_system',
+    capability: 'chakra_recipes',
+    name: 'Chakra recipes',
+    description: 'Chakra recipe/slot recipe guidance and likely files.',
+    scope: 'capability',
+    costTier: 'low',
+    granularity: 'summary',
+    whenToUse: 'Use for Chakra recipes, slot recipes, component recipes, variants, or reusable component styling.',
+    whenNotToUse: 'Do not use for unrelated React logic or backend changes.',
+    dependencies: ['design_system.theme_config'],
+    fallbackTo: ['design_system.component_patterns'],
+    sourceResolver: 'design_system_chakra_recipes',
+    freshnessPolicy: 'read recipe/theme files before editing',
+    expectedFiles: ['src/theme/**/recipes*', 'src/theme/**/slot-recipes*', 'src/components/ui/**'],
+    summaryAvailable: true,
+    fullAvailable: true,
+    estTokens: 180,
+    type: 'static',
+    profiles: [],
+    phase: 1,
+  }),
+  cx({
+    id: 'design_system.component_patterns',
+    domain: 'design_system',
+    capability: 'component_patterns',
+    name: 'Component patterns',
+    description: 'Compact UI/component design baseline for visual improvements.',
+    scope: 'domain',
+    costTier: 'medium',
+    granularity: 'summary',
+    whenToUse: 'Use for explicit UI/design/layout/visual polish/component styling work.',
+    whenNotToUse: 'Do not use just because a file is .tsx or under screens/account.',
+    dependencies: ['design_system.semantic_tokens'],
+    fallbackTo: ['project.structure_overview'],
+    sourceResolver: 'shared_ui_baseline_core',
+    freshnessPolicy: 'stable design guidance',
+    expectedFiles: ['src/components/**', 'src/screens/**', 'src/theme/**'],
+    summaryAvailable: true,
+    fullAvailable: true,
     estTokens: 650,
     type: 'static',
     profiles: [],
-    triggers: [/\b(ui|design|visual|layout|styling|polish|frontend proposal|component styling|screen design|interface visual|redesign)\b|melhorar.*\b(ui|visual|layout)\b|proposta.*frontend/i],
+    aliases: ['ui_baseline_full'],
     phase: 1,
-  },
-  {
-    id: 'taste_defaults',
-    name: 'Taste defaults',
-    description: 'Visual restraint defaults for creating or improving UI.',
+  }),
+  cx({
+    id: 'ui_patterns',
+    domain: 'design_system/ui',
+    capability: 'spacing_typography',
+    name: 'UI patterns',
+    description: 'Taste defaults, spacing, typography, density, and visual restraint guidance.',
+    scope: 'domain',
+    costTier: 'low',
+    granularity: 'summary',
+    whenToUse: 'Use for visual polish, spacing, typography, density, and UI refinement.',
+    whenNotToUse: 'Do not use for MCP audits, git, dev server, backend, or pure config tasks.',
+    dependencies: ['design_system.semantic_tokens'],
+    fallbackTo: ['design_system.component_patterns'],
+    sourceResolver: 'shared_taste_defaults',
+    freshnessPolicy: 'stable design guidance',
+    expectedFiles: ['src/components/**', 'src/screens/**', 'src/theme/**'],
+    summaryAvailable: true,
+    fullAvailable: true,
     estTokens: 350,
     type: 'static',
     profiles: [],
-    triggers: [/\b(visual|design|styling|polish|beautiful|redesign|landing|hero|layout|ui)\b|bonito|melhorar.*\b(ui|visual|layout)\b|criar.*ui/i],
+    aliases: ['taste_defaults'],
     phase: 1,
-  },
-  {
-    id: 'project_structure_full',
-    name: 'Project structure (full)',
-    description: 'Full file-tree + package summary. A compact outline stays in core.',
+  }),
+  cx({
+    id: 'project.structure_overview',
+    domain: 'project',
+    capability: 'structure_overview',
+    name: 'Project structure overview',
+    description: 'Compact project/file-tree index, not the full tree.',
+    scope: 'project',
+    costTier: 'low',
+    granularity: 'index',
+    whenToUse: 'Use when broad architecture or locating an unknown file is required.',
+    whenNotToUse: 'Do not use for semantic tokens, localized theme edits, MCP routing, git, or dev-server status.',
+    dependencies: [],
+    fallbackTo: ['project.structure_full'],
+    sourceResolver: 'project_structure_index',
+    freshnessPolicy: 'snapshot at turn start',
+    expectedFiles: [],
+    summaryAvailable: true,
+    fullAvailable: true,
+    estTokens: 300,
+    type: 'dynamic',
+    profiles: [],
+    phase: 1,
+  }),
+  cx({
+    id: 'project.package_map',
+    domain: 'project',
+    capability: 'package_map',
+    name: 'Package map',
+    description: 'Package manager, scripts, dependencies, aliases, and package shape.',
+    scope: 'project',
+    costTier: 'low',
+    granularity: 'summary',
+    whenToUse: 'Use for package scripts, dependency map, build command discovery, or project package shape.',
+    whenNotToUse: 'Do not use when git/dev-server/theme-specific context is sufficient.',
+    dependencies: [],
+    fallbackTo: ['project.structure_overview'],
+    sourceResolver: 'package_summary',
+    freshnessPolicy: 'snapshot at turn start',
+    expectedFiles: ['package.json', 'vite.config.*', 'tsconfig.json'],
+    summaryAvailable: true,
+    fullAvailable: false,
+    estTokens: 220,
+    type: 'dynamic',
+    profiles: [],
+    phase: 1,
+  }),
+  cx({
+    id: 'project.entrypoints',
+    domain: 'project',
+    capability: 'entrypoints',
+    name: 'Project entrypoints',
+    description: 'Likely app entrypoints, aliases, and routing/config entry files.',
+    scope: 'project',
+    costTier: 'low',
+    granularity: 'summary',
+    whenToUse: 'Use for architecture mapping or when the task needs app entrypoints.',
+    whenNotToUse: 'Do not use for already-localized file edits.',
+    dependencies: ['project.structure_overview'],
+    fallbackTo: ['project.structure_full'],
+    sourceResolver: 'project_entrypoints',
+    freshnessPolicy: 'snapshot at turn start',
+    expectedFiles: ['src/main.tsx', 'src/App.tsx', 'src/index.ts', 'src/routes/**'],
+    summaryAvailable: true,
+    fullAvailable: false,
+    estTokens: 220,
+    type: 'dynamic',
+    profiles: [],
+    phase: 1,
+  }),
+  cx({
+    id: 'project.structure_full',
+    domain: 'project',
+    capability: 'structure_full',
+    name: 'Project structure full',
+    description: 'Full file-tree + package summary. Fallback only.',
+    scope: 'project',
+    costTier: 'high',
+    granularity: 'full',
+    whenToUse: 'Use only when specific contexts fail, files are unknown, architecture is broad, multiple modules are involved, or dependency mapping spans areas.',
+    whenNotToUse: 'Do not use for semantic tokens, localized theme edits, MCP routing, git status, dev-server status, or UI polish with design-system context.',
+    dependencies: ['project.structure_overview'],
+    fallbackTo: [],
+    sourceResolver: 'project_structure_full',
+    freshnessPolicy: 'snapshot at turn start',
+    expectedFiles: [],
+    summaryAvailable: true,
+    fullAvailable: true,
     estTokens: 1500,
     type: 'dynamic',
-    profiles: ['scaffold_project', 'deploy_publish'],
-    triggers: [/project structure|file tree|estrutura|scan.*project|map.*project|where.*file|onde.*ficheiro/i],
+    profiles: [],
+    aliases: ['project_structure_full'],
     phase: 1,
-  },
-  {
-    id: 'mcp_routing_detail',
-    name: 'MCP routing (detail)',
-    description: 'Detailed MCP tool usage. A compact index stays in core.',
+  }),
+  cx({
+    id: 'agent_runtime.mcp_routing',
+    domain: 'agent_runtime',
+    capability: 'mcp_routing',
+    name: 'MCP routing',
+    description: 'Detailed MCP usage and routing policy.',
+    scope: 'runtime',
+    costTier: 'medium',
+    granularity: 'summary',
+    whenToUse: 'Use for MCP audits, MCP tool routing, external state/side effects, or connector questions.',
+    whenNotToUse: 'Do not use for design tokens, git, dev server, or project architecture unless MCP files must be located.',
+    dependencies: [],
+    fallbackTo: ['project.structure_overview'],
+    sourceResolver: 'mcp_routing_detail',
+    freshnessPolicy: 'snapshot of connected tools at turn start',
+    expectedFiles: ['src/services/mcp/**', 'src/services/agent/toolsetSelector.ts'],
+    summaryAvailable: true,
+    fullAvailable: true,
     estTokens: 600,
     type: 'dynamic',
     profiles: [],
-    triggers: [/\bmcp\b|figma|canva|notion|linear|jira|github issue|google sheets|calendar/i],
+    aliases: ['mcp_routing_detail'],
     phase: 1,
-  },
-  {
-    id: 'skills_detail',
-    name: 'Skills (detail)',
-    description: 'Full skill bodies. Loaded on-demand via read_skill, not inline.',
-    estTokens: 2000,
-    type: 'skill',
+  }),
+  cx({
+    id: 'agent_runtime.tool_profiles',
+    domain: 'agent_runtime',
+    capability: 'tool_profiles',
+    name: 'Tool profiles',
+    description: 'Compact dynamic-toolset profile guidance.',
+    scope: 'runtime',
+    costTier: 'low',
+    granularity: 'summary',
+    whenToUse: 'Use when auditing or changing tool profiles, request_tools policy, or profile bounds.',
+    whenNotToUse: 'Do not use for external MCP routing unless tool profile behavior is the subject.',
+    dependencies: [],
+    fallbackTo: ['agent_runtime.request_context_policy'],
+    sourceResolver: 'tool_profiles_summary',
+    freshnessPolicy: 'stable code policy',
+    expectedFiles: ['src/services/agent/toolsetSelector.ts'],
+    summaryAvailable: true,
+    fullAvailable: false,
+    estTokens: 180,
+    type: 'static',
     profiles: [],
-    phase: 2,
-  },
-  {
-    id: 'project_docs_full',
-    name: 'Project docs (README/TMS/PLAN)',
-    description: 'Full README + TMS.md + PLAN.md content. Index stays in core.',
-    estTokens: 2000,
-    type: 'project-doc',
-    profiles: [],
-    triggers: [/readme|tms\.md|plan\.md|todo\.md|project docs|documenta[çc][ãa]o|memory|mem[oó]ria/i],
     phase: 1,
-  },
-  {
-    id: 'dev_server_status_detail',
-    name: 'Dev server status (detail)',
-    description: 'Live dev-server status and preview/runtime guidance.',
+  }),
+  cx({
+    id: 'agent_runtime.request_context_policy',
+    domain: 'agent_runtime',
+    capability: 'request_context_policy',
+    name: 'Request context policy',
+    description: 'Policy for choosing on-demand context and avoiding broad fallbacks.',
+    scope: 'runtime',
+    costTier: 'low',
+    granularity: 'summary',
+    whenToUse: 'Use when modifying or auditing the on-demand context system itself.',
+    whenNotToUse: 'Do not use for ordinary product bugfixes.',
+    dependencies: [],
+    fallbackTo: ['project.structure_overview'],
+    sourceResolver: 'request_context_policy',
+    freshnessPolicy: 'stable code policy',
+    expectedFiles: ['src/services/agent/contextBuilder/auxiliaryRegistry.ts', 'src/services/agent/contextBuilder.ts'],
+    summaryAvailable: true,
+    fullAvailable: false,
+    estTokens: 220,
+    type: 'static',
+    profiles: [],
+    phase: 1,
+  }),
+  cx({
+    id: 'agent_runtime.memory_context',
+    domain: 'agent_runtime',
+    capability: 'memory_context',
+    name: 'Memory context',
+    description: 'Memory indexes and stale-memory policy.',
+    scope: 'runtime',
+    costTier: 'medium',
+    granularity: 'summary',
+    whenToUse: 'Use when the task is about agent memory, memories, or project/user memory indexes.',
+    whenNotToUse: 'Do not use for project docs unless memory is explicitly involved.',
+    dependencies: [],
+    fallbackTo: ['project.docs_full'],
+    sourceResolver: 'memory_context',
+    freshnessPolicy: 'snapshot at turn start',
+    expectedFiles: ['MEMORY.md', '.codex/**', '.agents/**'],
+    summaryAvailable: true,
+    fullAvailable: true,
+    estTokens: 500,
+    type: 'dynamic',
+    profiles: [],
+    phase: 1,
+  }),
+  cx({
+    id: 'delivery.dev_server',
+    domain: 'delivery/runtime',
+    capability: 'dev_server',
+    name: 'Dev server',
+    description: 'Dev-server rules, preview/browser runtime status, and server troubleshooting.',
+    scope: 'runtime',
+    costTier: 'medium',
+    granularity: 'summary',
+    whenToUse: 'Use for preview/browser/runtime/dev-server/Vite server failures.',
+    whenNotToUse: 'Do not use for git, design tokens, MCP, or static code-only changes.',
+    dependencies: ['delivery.build_scripts'],
+    fallbackTo: ['project.package_map'],
+    sourceResolver: 'dev_server_status_detail',
+    freshnessPolicy: 'live snapshot at turn start',
+    expectedFiles: ['package.json', 'vite.config.*'],
+    summaryAvailable: true,
+    fullAvailable: true,
     estTokens: 350,
     type: 'dynamic',
     profiles: [],
-    triggers: [/dev.*server|preview|browser|runtime|vite|run|build|terminal|servidor|deploy|erro.*runtime/i],
+    aliases: ['dev_server_status_detail'],
     phase: 1,
-  },
-  {
-    id: 'git_status_detail',
-    name: 'Git status (detail)',
-    description: 'Branch, upstream, and working-tree changes.',
+  }),
+  cx({
+    id: 'delivery.build_scripts',
+    domain: 'delivery/runtime',
+    capability: 'build',
+    name: 'Build scripts',
+    description: 'Build/test/package scripts and package-manager summary.',
+    scope: 'runtime',
+    costTier: 'low',
+    granularity: 'summary',
+    whenToUse: 'Use for build/test/package command discovery or build failures.',
+    whenNotToUse: 'Do not use for git commits unless build scripts are requested.',
+    dependencies: ['project.package_map'],
+    fallbackTo: ['project.package_map'],
+    sourceResolver: 'build_scripts',
+    freshnessPolicy: 'snapshot at turn start',
+    expectedFiles: ['package.json', 'yarn.lock', 'vite.config.*'],
+    summaryAvailable: true,
+    fullAvailable: false,
+    estTokens: 220,
+    type: 'dynamic',
+    profiles: [],
+    phase: 1,
+  }),
+  cx({
+    id: 'delivery.deploy',
+    domain: 'delivery',
+    capability: 'deploy',
+    name: 'Deploy/publishing',
+    description: 'Publish-ready fullstack defaults and deploy/provision guidance.',
+    scope: 'delivery',
+    costTier: 'high',
+    granularity: 'full',
+    whenToUse: 'Use for deploy, publish, provision, fullstack scaffolding, or production release tasks.',
+    whenNotToUse: 'Do not use for local bugfixes, semantic tokens, MCP, git-only commits, or dev-server preview troubleshooting.',
+    dependencies: ['project.package_map'],
+    fallbackTo: ['project.structure_overview'],
+    sourceResolver: 'publishing_fullstack',
+    freshnessPolicy: 'stable policy plus current package map',
+    expectedFiles: ['wrangler.jsonc', 'package.json', 'src-tauri/**'],
+    summaryAvailable: true,
+    fullAvailable: true,
+    estTokens: 5000,
+    type: 'static',
+    profiles: ['deploy_publish'],
+    aliases: ['publishing_fullstack'],
+    phase: 1,
+  }),
+  cx({
+    id: 'delivery.git_status',
+    domain: 'delivery/git',
+    capability: 'git_status',
+    name: 'Git status',
+    description: 'Branch, upstream state, and changed files snapshot.',
+    scope: 'git',
+    costTier: 'low',
+    granularity: 'summary',
+    whenToUse: 'Use for git, commit, branch, pull, push, diff, merge, tag, or rebase tasks.',
+    whenNotToUse: 'Do not use for dev server, design system, MCP, or backend bugfixes unless git is requested.',
+    dependencies: [],
+    fallbackTo: ['delivery.changed_files'],
+    sourceResolver: 'git_status_detail',
+    freshnessPolicy: 'snapshot at turn start',
+    expectedFiles: ['.git'],
+    summaryAvailable: true,
+    fullAvailable: true,
     estTokens: 450,
     type: 'dynamic',
     profiles: [],
-    triggers: [/\bgit\b|commit|branch|pull|push|diff|merge|tag|rebase|stash/i],
+    aliases: ['git_status_detail'],
     phase: 1,
-  },
+  }),
+  cx({
+    id: 'delivery.changed_files',
+    domain: 'delivery/git',
+    capability: 'changed_files',
+    name: 'Changed files',
+    description: 'Recently modified/changed-file working set.',
+    scope: 'git',
+    costTier: 'low',
+    granularity: 'index',
+    whenToUse: 'Use with git tasks or when the current changed-file set matters.',
+    whenNotToUse: 'Do not use as project structure discovery.',
+    dependencies: ['delivery.git_status'],
+    fallbackTo: ['project.structure_overview'],
+    sourceResolver: 'changed_files',
+    freshnessPolicy: 'snapshot at turn start',
+    expectedFiles: [],
+    summaryAvailable: true,
+    fullAvailable: false,
+    estTokens: 160,
+    type: 'dynamic',
+    profiles: [],
+    phase: 1,
+  }),
+  cx({
+    id: 'scaffold.workflow',
+    domain: 'project/scaffold',
+    capability: 'scaffold_workflow',
+    name: 'Scaffolding workflow',
+    description: 'New-project scaffolding and install workflow.',
+    scope: 'project',
+    costTier: 'medium',
+    granularity: 'summary',
+    whenToUse: 'Use for creating/scaffolding new projects or installing dependencies as part of project creation.',
+    whenNotToUse: 'Do not use for local bugfixes or existing-project token edits.',
+    dependencies: ['project.package_map'],
+    fallbackTo: ['delivery.build_scripts'],
+    sourceResolver: 'scaffolding_install',
+    freshnessPolicy: 'stable policy plus detected package manager',
+    expectedFiles: ['package.json'],
+    summaryAvailable: true,
+    fullAvailable: true,
+    estTokens: 1200,
+    type: 'static',
+    profiles: ['scaffold_project'],
+    aliases: ['scaffolding_install'],
+    phase: 1,
+  }),
+  cx({
+    id: 'auth_database.provision',
+    domain: 'auth_database',
+    capability: 'provision',
+    name: 'Auth/database provision',
+    description: 'Auth/database rules, provision workflow, and smoke-test guidance.',
+    scope: 'backend',
+    costTier: 'medium',
+    granularity: 'summary',
+    whenToUse: 'Use for auth, database, storage, upload, Firebase, SQLite, Turso, or provision tasks.',
+    whenNotToUse: 'Do not use for semantic tokens, MCP, git-only, or dev-server-only tasks.',
+    dependencies: ['delivery.deploy'],
+    fallbackTo: ['project.package_map'],
+    sourceResolver: 'auth_database_provision',
+    freshnessPolicy: 'stable policy',
+    expectedFiles: ['src/services/auth/**', 'src-tauri/**', 'drizzle.config.*'],
+    summaryAvailable: true,
+    fullAvailable: true,
+    estTokens: 350,
+    type: 'static',
+    profiles: ['auth_database'],
+    aliases: ['auth_database_provision'],
+    phase: 1,
+  }),
+  cx({
+    id: 'vision.image_rules',
+    domain: 'vision',
+    capability: 'image_rules',
+    name: 'Vision rules',
+    description: 'How to handle image/screenshot descriptions from the vision pipeline.',
+    scope: 'media',
+    costTier: 'low',
+    granularity: 'summary',
+    whenToUse: 'Use when images, screenshots, mockups, or diagrams are part of the task.',
+    whenNotToUse: 'Do not use for text-only tasks.',
+    dependencies: [],
+    fallbackTo: ['design_system.component_patterns'],
+    sourceResolver: 'vision_rules',
+    freshnessPolicy: 'stable policy',
+    expectedFiles: [],
+    summaryAvailable: true,
+    fullAvailable: true,
+    estTokens: 200,
+    type: 'static',
+    profiles: ['vision'],
+    aliases: ['vision_rules'],
+    phase: 1,
+  }),
+  cx({
+    id: 'project.docs_full',
+    domain: 'project',
+    capability: 'project_docs',
+    name: 'Project docs',
+    description: 'Full README/TMS/PLAN/TODO bodies. Use only when docs themselves are needed.',
+    scope: 'project-doc',
+    costTier: 'high',
+    granularity: 'full',
+    whenToUse: 'Use when README/TMS/PLAN/TODO content is explicitly needed.',
+    whenNotToUse: 'Do not use as general project orientation or when an index/read_file is enough.',
+    dependencies: [],
+    fallbackTo: ['project.structure_overview'],
+    sourceResolver: 'project_docs_full',
+    freshnessPolicy: 'snapshot at turn start',
+    expectedFiles: ['README.md', 'TMS.md', 'PLAN.md', 'TODO.md'],
+    summaryAvailable: true,
+    fullAvailable: true,
+    estTokens: 2000,
+    type: 'project-doc',
+    profiles: [],
+    aliases: ['project_docs_full'],
+    phase: 1,
+  }),
 ]
 
-// ── Selection ───────────────────────────────────────────────────────────
+const META_BY_ID = new Map(AUXILIARY_METAS.map(meta => [meta.id, meta]))
+const ALIAS_TO_ID = new Map<string, string>()
+for (const meta of AUXILIARY_METAS) {
+  for (const alias of meta.aliases ?? []) ALIAS_TO_ID.set(alias, meta.id)
+}
 
-/**
- * Decide which phase-1 auxiliaries load inline vs. stay on-demand.
- *
- * An auxiliary loads when EITHER its profile matches the classified intent OR
- * one of its keyword triggers fires in the user message. Otherwise it's omitted
- * and listed in the on-demand index. Phase-2 entries are always "omitted" in
- * the sense that they have no loader yet — they don't appear in the index
- * (the index only lists phase-1 omitted entries the agent can actually fetch).
- */
+export function resolveAuxiliaryId(id: string): string {
+  return ALIAS_TO_ID.get(id) ?? id
+}
+
+export function getAuxiliaryMeta(id: string): AuxiliaryMeta | undefined {
+  return META_BY_ID.get(resolveAuxiliaryId(id))
+}
+
+function unique(ids: string[]): string[] {
+  return Array.from(new Set(ids))
+}
+
+export function fallbackContextPlanForProfile(profile: PromptProfile): ContextPlan {
+  if (profile === 'scaffold_project') {
+    return {
+      taskDomain: 'project/scaffold',
+      requiredCapabilities: ['scaffold_workflow', 'package_map'],
+      minimumContextNeeded: 'summary',
+      candidateContexts: ['scaffold.workflow', 'project.package_map', 'delivery.build_scripts', 'project.structure_overview'],
+      selectedContexts: ['scaffold.workflow', 'project.package_map'],
+      toolGroups: ['FILE_OPS', 'SHELL'],
+      fallbackRisk: 'medium',
+      reason: 'Scaffold profile: load workflow and package map before broader project context.',
+    }
+  }
+
+  if (profile === 'deploy_publish') {
+    return {
+      taskDomain: 'delivery',
+      requiredCapabilities: ['deploy', 'build'],
+      minimumContextNeeded: 'summary',
+      candidateContexts: ['delivery.deploy', 'delivery.build_scripts', 'project.package_map', 'project.structure_overview'],
+      selectedContexts: ['delivery.deploy', 'delivery.build_scripts'],
+      toolGroups: ['PROVISION', 'SHELL'],
+      fallbackRisk: 'medium',
+      reason: 'Deploy profile: deploy and build context before project structure fallback.',
+    }
+  }
+
+  if (profile === 'auth_database') {
+    return {
+      taskDomain: 'auth_database',
+      requiredCapabilities: ['provision'],
+      minimumContextNeeded: 'summary',
+      candidateContexts: ['auth_database.provision', 'project.package_map', 'delivery.deploy'],
+      selectedContexts: ['auth_database.provision'],
+      toolGroups: ['PROVISION'],
+      fallbackRisk: 'medium',
+      reason: 'Auth/database profile: provision context first.',
+    }
+  }
+
+  if (profile === 'vision') {
+    return {
+      taskDomain: 'vision',
+      requiredCapabilities: ['image_rules'],
+      minimumContextNeeded: 'summary',
+      candidateContexts: ['vision.image_rules', 'design_system.component_patterns'],
+      selectedContexts: ['vision.image_rules'],
+      toolGroups: ['WEB'],
+      fallbackRisk: 'low',
+      reason: 'Vision profile: image rules are enough unless visual implementation is also needed.',
+    }
+  }
+
+  return {
+    taskDomain: 'bugfix_local',
+    requiredCapabilities: [],
+    minimumContextNeeded: 'index',
+    candidateContexts: [],
+    selectedContexts: [],
+    fallbackRisk: 'low',
+    reason: 'Context planner unavailable; conservative fallback loads no auxiliary context.',
+  }
+}
+
 export function selectAuxiliaries(
   profile: PromptProfile,
   userMessage: string | undefined,
   readOnlyHint?: boolean,
   reason?: string,
   routerInfo?: { source: 'model' | 'fallback'; confidence?: 'high' | 'medium' | 'low' | 'none'; error?: string; diagnostics?: RouterDiagnostics },
+  contextPlanOverride?: ContextPlan,
 ): AuxiliarySelection {
-  const msg = userMessage ?? ''
+  void userMessage
   const phase1 = AUXILIARY_METAS.filter((m) => m.phase === 1)
+  const contextPlan = contextPlanOverride ?? fallbackContextPlanForProfile(profile)
+  const selectedIds = new Set(contextPlan.selectedContexts.map(resolveAuxiliaryId))
+  const candidateIds = unique(contextPlan.candidateContexts.map(resolveAuxiliaryId))
 
   const loaded: AuxiliaryLoadResult[] = []
   const omitted: AuxiliaryOmitResult[] = []
@@ -389,43 +831,64 @@ export function selectAuxiliaries(
 
   for (const meta of phase1) {
     totalAvailableTokens += meta.estTokens
-    const profileMatch = meta.profiles.includes(profile)
-    const triggerMatch = meta.id === 'dev_server_status_detail' && profile === 'analysis_readonly'
-      ? false
-      : meta.triggers?.some((re) => re.test(msg)) ?? false
+    const planMatch = selectedIds.has(meta.id)
+    const shouldLoad = planMatch
 
-    if (profileMatch || triggerMatch) {
-      const reason = profileMatch
-        ? `profile "${profile}" includes this auxiliary`
-        : `keyword trigger matched in user message`
-      loaded.push({ id: meta.id, name: meta.name, reason, tokens: meta.estTokens })
+    if (shouldLoad) {
+      loaded.push({
+        id: meta.id,
+        name: meta.name,
+        reason: `model context plan selected for ${contextPlan.taskDomain}: ${meta.capability}`,
+        tokens: meta.estTokens,
+        domain: meta.domain,
+        capability: meta.capability,
+        scope: meta.scope,
+        costTier: meta.costTier,
+        granularity: meta.granularity,
+      })
       loadedTokens += meta.estTokens
     } else {
       omitted.push({
         id: meta.id,
         name: meta.name,
         description: meta.description,
-        reason: `not included by profile "${profile}" and no trigger matched`,
+        reason: candidateIds.includes(meta.id)
+          ? `candidate for ${contextPlan.taskDomain}, not minimum context`
+          : `not required by context plan for ${contextPlan.taskDomain}`,
         estTokens: meta.estTokens,
+        domain: meta.domain,
+        capability: meta.capability,
+        scope: meta.scope,
+        costTier: meta.costTier,
+        granularity: meta.granularity,
+        whenToUse: meta.whenToUse,
+        whenNotToUse: meta.whenNotToUse,
+        fallbackTo: meta.fallbackTo,
       })
     }
   }
 
   return {
     profile,
+    contextPlan,
     loaded,
     omitted,
     loadedTokens,
     totalAvailableTokens,
     savingsTokens: totalAvailableTokens - loadedTokens,
     autoLoadedSystemSections: loaded.map((l) => l.id),
+    contextPlanCandidateSections: candidateIds,
     modelRequestedContextSections: [],
     requestContextToolCalls: 0,
     requestContextSectionsLoaded: [],
+    requestContextSelectionReason: {},
+    requestContextCostTier: {},
+    requestContextFallbackUsed: false,
+    requestContextFallbackFrom: [],
+    requestContextFallbackTo: [],
     requestedButNotLoadedSections: [],
-    // analysis_readonly is inherently read-only; otherwise honour the hint.
     readOnly: profile === 'analysis_readonly' ? true : readOnlyHint === true,
-    reason: reason ?? `keyword classifier (profile=${profile})`,
+    reason: reason ?? `context planner (taskDomain=${contextPlan.taskDomain})`,
     routerSource: routerInfo?.source ?? 'keyword',
     routerConfidence: routerInfo?.confidence ?? 'none',
     routerError: routerInfo?.error,
@@ -433,24 +896,42 @@ export function selectAuxiliaries(
   }
 }
 
-/**
- * Build the short on-demand index injected into the core prompt when
- * auxiliaries are omitted. Lists each omitted auxiliary with its id,
- * description, and rough cost — enough for the agent to decide whether to
- * call `request_context`. Returns null when nothing is omitted (no index).
- */
 export function buildOnDemandIndex(selection: AuxiliarySelection): string | null {
   const omitted = selection.omitted
   if (omitted.length === 0) return null
 
-  const lines = omitted.map(
-    (o) => `- \`${o.id}\` — ${o.description} (~${o.estTokens} tokens)`,
+  const candidateSet = new Set(selection.contextPlanCandidateSections ?? [])
+  const candidates = omitted.filter(o => candidateSet.has(o.id))
+  const fallbackOnly = omitted.filter(o => !candidateSet.has(o.id) && (o.granularity === 'full' || o.costTier === 'high'))
+  const available = omitted.filter(o => !candidateSet.has(o.id) && !fallbackOnly.includes(o))
+
+  const candidateLines = candidates.map((o) =>
+    `- \`${o.id}\` [candidate; ${o.granularity}; ${o.costTier}] — ${o.description}`,
   )
+
+  const byDomain = new Map<string, string[]>()
+  for (const o of available) {
+    const ids = byDomain.get(o.domain) ?? []
+    ids.push(`\`${o.id}\``)
+    byDomain.set(o.domain, ids)
+  }
+  const domainLines = Array.from(byDomain.entries()).map(
+    ([domain, ids]) => `- ${domain}: ${ids.join(', ')}`,
+  )
+
+  const fallbackLine = fallbackOnly.length
+    ? `Fallback-only broad/high-cost contexts: ${fallbackOnly.map(o => `\`${o.id}\``).join(', ')}.`
+    : null
+
   return [
     '# Auxiliary context (on-demand)',
     '',
-    'The context blocks below were OMITTED to keep this prompt lean. If your task needs one, call `request_context({ auxiliary: "<id>" })` and the full content will be returned as a tool result for you to use this turn.',
+    `Context plan: ${selection.contextPlan.taskDomain}; required: ${selection.contextPlan.requiredCapabilities.join(', ') || 'none'}; minimum: ${selection.contextPlan.minimumContextNeeded}; fallback risk: ${selection.contextPlan.fallbackRisk}.`,
+    `Selected inline: ${selection.contextPlan.selectedContexts.length ? selection.contextPlan.selectedContexts.map(id => `\`${resolveAuxiliaryId(id)}\``).join(', ') : 'none'}.`,
+    'Rule: request the most specific capability context first. Use broad project/full contexts only after specific/domain contexts are insufficient.',
     '',
-    ...lines,
+    ...(candidateLines.length ? ['Candidate contexts:', ...candidateLines, ''] : []),
+    ...(domainLines.length ? ['Other available context ids by domain:', ...domainLines, ''] : []),
+    ...(fallbackLine ? [fallbackLine] : []),
   ].join('\n')
 }

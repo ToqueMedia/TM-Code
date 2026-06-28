@@ -12,14 +12,13 @@
  *
  * HOW IT WORKS
  * ────────────
- * The selector starts with a CORE toolset (search, read, edit, execute,
- * ask_user_question, update_tasks) and expands monotonically — once a tool
- * is activated it stays active for the rest of the run (never retracted, so
- * the tool-schema prefix stabilises and Anthropic prompt-caching can reuse it).
+ * The selector starts with the model-selected profile base and optional
+ * model-planned tool groups. It expands monotonically — once a tool is
+ * activated it stays active for the rest of the run (never retracted, so the
+ * tool-schema prefix stabilises and Anthropic prompt-caching can reuse it).
  *
- * Expansion triggers (any match keeps the group active for the session):
- *   1. Keyword in the user's message ("deploy", "auth", "git", "memory" …)
- *      → activates the matching group immediately.
+ * Expansion sources:
+ *   1. Context/tool plan from the utility model activates groups up front.
  *   2. The agent calls the `request_tools` meta-tool explicitly → activates
  *      the named tools for the next turn.
  *   3. The toolExecutor receives a call for a tool that exists in the registry
@@ -83,9 +82,9 @@ export const PROVISION_TOOLS = [
   REQUEST_CREDENTIALS,
 ] as const
 
-type GroupName = 'FILE_OPS' | 'SHELL' | 'WEB' | 'SUBAGENT' | 'MEMORY' | 'PROVISION'
+export type ToolsetGroupName = 'FILE_OPS' | 'SHELL' | 'WEB' | 'SUBAGENT' | 'MEMORY' | 'PROVISION'
 
-const GROUP_TOOLS: Record<GroupName, readonly string[]> = {
+const GROUP_TOOLS: Record<ToolsetGroupName, readonly string[]> = {
   FILE_OPS: FILE_OPS_TOOLS,
   SHELL: SHELL_TOOLS,
   WEB: WEB_TOOLS,
@@ -94,39 +93,12 @@ const GROUP_TOOLS: Record<GroupName, readonly string[]> = {
   PROVISION: PROVISION_TOOLS,
 }
 
-// ── Expansion triggers (keyword → groups) ────────────────────────────────
-
-interface ExpansionTrigger {
-  /** Case-insensitive regex tested against the user's message text. */
-  pattern: RegExp
-  groups: GroupName[]
-}
-
-const EXPANSION_TRIGGERS: ExpansionTrigger[] = [
-  { pattern: /deploy|publish|release|ship\b/i, groups: ['PROVISION', 'SHELL'] },
-  { pattern: /browser|preview|screenshot|webview|canvas/i, groups: ['SHELL'] },
-  { pattern: /\bgit\b|commit|branch|push|merge|rebase|stash/i, groups: ['SHELL'] },
-  { pattern: /\bimage\b|screenshot|html2canvas/i, groups: ['SHELL'] },
-  { pattern: /web_fetch|fetch.*url|research.*web|docs.*online|look.*up/i, groups: ['WEB', 'SUBAGENT'] },
-  { pattern: /memory|remember|forget\b/i, groups: ['MEMORY'] },
-  { pattern: /auth|login|sign.?up|sign.?in|firebase/i, groups: ['PROVISION'] },
-  { pattern: /database|sql|sqlite|turso|libsql|schema\b/i, groups: ['PROVISION'] },
-  { pattern: /sub.?agent|delegate|verify.*agent|research.*agent/i, groups: ['SUBAGENT'] },
-  { pattern: /skill|read_skill/i, groups: ['FILE_OPS'] },
-  { pattern: /create.*file|new.*file|write.*file/i, groups: ['FILE_OPS'] },
-  { pattern: /delete|remove.*file|rm\b/i, groups: ['FILE_OPS'] },
-  { pattern: /rename|move.*file|mv\b/i, groups: ['FILE_OPS'] },
-  { pattern: /background.*command|long.?running/i, groups: ['SHELL'] },
-  { pattern: /dev.*server|watch|hot.?reload|vite|wrangler/i, groups: ['SHELL'] },
-  { pattern: /credential|api.?key|secret|\.env\b/i, groups: ['PROVISION'] },
-]
-
 // ── Profile-bound toolsets ───────────────────────────────────────────────
 //
 // The Intent Router (qwen3.7-plus) classifies the user's request into a
 // PromptProfile + a readOnly flag. Each profile declares:
 //   - base:   the tools active on turn 1 (the smallest set the task needs)
-//   - allowed: the MAXIMUM tools request_tools/keywords can ever activate
+//   - allowed: the MAXIMUM tools request_tools/model-planned groups can activate
 //              for this profile (null = no bound — all tools allowed)
 //
 // This is what makes the tighter toolset actually bind: even if the model
@@ -173,7 +145,7 @@ const READONLY_BLOCKED_TOOLS = new Set<string>([
 interface ProfileToolset {
   /** Tools active on turn 1 (filtered against the registry). */
   base: readonly string[]
-  /** Maximum tools request_tools/keywords can activate. null = unbounded. */
+  /** Maximum tools request_tools/model-planned groups can activate. null = unbounded. */
   allowed: readonly string[] | null
 }
 
@@ -219,12 +191,11 @@ export const REQUEST_TOOLS_NAME = 'request_tools'
 // ── Meta-tool: request_context (on-demand auxiliary context) ────────────
 //
 // Parallel to request_tools, but for SYSTEM-PROMPT SECTIONS rather than tool
-// definitions. When the intent classifier omits an auxiliary block
-// (publishing, scaffolding/install, vision, auth/db — see auxiliaryRegistry)
+// definitions. When the context planner omits a domain/capability context
 // from the system prompt, this meta-tool lets the agent fetch the omitted
 // content on demand. The agentService bridge intercepts calls to this name
-// and returns the auxiliary's full text as a tool_result; the toolExecutor
-// never sees it. Only injected when at least one auxiliary was omitted.
+// and returns the auxiliary's text as a tool_result; the toolExecutor never
+// sees it. Only injected when at least one auxiliary was omitted.
 export const REQUEST_CONTEXT_NAME = 'request_context'
 
 export function requestContextDefinition(omittedIds: string[]): OpenAI.ChatCompletionTool {
@@ -233,10 +204,10 @@ export function requestContextDefinition(omittedIds: string[]): OpenAI.ChatCompl
     function: {
       name: REQUEST_CONTEXT_NAME,
       description:
-        'Request an auxiliary context block that was OMITTED from the system prompt to keep it lean. ' +
-        'Use this when your task needs guidance that isn\'t currently in the prompt ' +
-        '(e.g. publishing/deploy rules, scaffolding workflow, vision rules, auth/database rules). ' +
-        'The full content is returned as a tool result for you to use this turn. ' +
+        'Request a domain/capability context that was OMITTED from the system prompt to keep it lean. ' +
+        'Use the smallest specific context first (for example design_system.semantic_tokens, agent_runtime.mcp_routing, delivery.dev_server, delivery.git_status). ' +
+        'Use broad project/full contexts only when specific contexts are insufficient. ' +
+        'The content is returned as a tool result for you to use this turn. ' +
         'Call ONCE per auxiliary; do not re-request one already returned.',
       parameters: {
         type: 'object',
@@ -336,7 +307,7 @@ export class ToolsetSelector {
   /**
    * Maximum tools that can EVER be active for this run (the profile's
    * `allowed` set, intersected with non-destructive when readOnly). null = no
-   * bound. request_tools, keyword expansion, and defensive expandForToolName
+   * bound. request_tools, model-planned groups, and defensive expandForToolName
    * all refuse to activate names outside this set.
    */
   private allowedToolNames: Set<string> | null
@@ -358,7 +329,12 @@ export class ToolsetSelector {
    */
   private omittedAuxiliaryCount = 0
 
-  constructor(allToolNames: string[], profile: PromptProfile = 'bugfix_local', readOnly = false) {
+  constructor(
+    allToolNames: string[],
+    profile: PromptProfile = 'bugfix_local',
+    readOnly = false,
+    plannedGroups: ToolsetGroupName[] = [],
+  ) {
     this.allToolNames = new Set(allToolNames)
     this.profile = profile
     this.readOnly = readOnly
@@ -369,6 +345,9 @@ export class ToolsetSelector {
     this.activeToolNames = new Set(
       base.filter((n) => this.allToolNames.has(n) && this.isAllowed(n)),
     )
+    for (const group of plannedGroups) {
+      this.activateGroup(group)
+    }
   }
 
   /**
@@ -415,36 +394,27 @@ export class ToolsetSelector {
     this.omittedAuxiliaryIds = ids
   }
 
+  private activateGroup(group: ToolsetGroupName): void {
+    for (const name of GROUP_TOOLS[group]) {
+      if (this.allToolNames.has(name) && this.isAllowed(name)) {
+        this.activeToolNames.add(name)
+      }
+    }
+  }
+
   /**
-   * Select the active tools for this turn, expanding based on keywords in the
-   * user's message text. Returns the filtered definitions + the request_tools
-   * meta-tool (when not all tools are active).
+   * Select the active tools for this turn. No local text matching happens
+   * here; up-front expansion must come from the model-produced context/tool
+   * plan, and later expansion must come from request_tools or a defensive
+   * expandForToolName call.
    *
    * @param allTools  All tool definitions from the toolExecutor.
-   * @param userText  Concatenated user-message text for keyword detection.
    */
   selectForTurn(
     allTools: OpenAI.ChatCompletionTool[],
-    userText: string,
+    _userText = '',
   ): ToolsetSelection {
-    // 1. Expand based on keywords in the user message — but only into the
-    //    allowed bound. A keyword like "auth" on an analysis_readonly run
-    //    must NOT activate provision_auth (the bound refuses it).
-    if (userText) {
-      for (const trigger of EXPANSION_TRIGGERS) {
-        if (trigger.pattern.test(userText)) {
-          for (const group of trigger.groups) {
-            for (const name of GROUP_TOOLS[group]) {
-              if (this.allToolNames.has(name) && this.isAllowed(name)) {
-                this.activeToolNames.add(name)
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // 2. Build the filtered list, preserving the original order.
+    // Build the filtered list, preserving the original order.
     const activeTools = allTools.filter((t) =>
       this.activeToolNames.has(t.function.name),
     )

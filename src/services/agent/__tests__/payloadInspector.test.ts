@@ -82,10 +82,17 @@ describe('payloadInspector system-prompt analysis', () => {
 
   it('separates auto-loaded sections from real request_context loads', () => {
     const selection = selectAuxiliaries('bugfix_local', 'audit MCP routing')
-    selection.modelRequestedContextSections = ['project_docs_full', 'project_structure_full']
+    selection.modelRequestedContextSections = ['project.docs_full', 'project.structure_full']
     selection.requestContextToolCalls = 2
-    selection.requestContextSectionsLoaded = ['project_structure_full']
-    selection.requestedButNotLoadedSections = ['project_docs_full']
+    selection.requestContextSectionsLoaded = ['project.structure_full']
+    selection.requestedButNotLoadedSections = ['project.docs_full']
+    selection.requestContextSelectionReason = {
+      'project.structure_full': 'loaded project/structure_full; fallback for broad architecture',
+    }
+    selection.requestContextCostTier = { 'project.structure_full': 'high' }
+    selection.requestContextFallbackUsed = true
+    selection.requestContextFallbackFrom = ['agent_runtime.mcp_routing']
+    selection.requestContextFallbackTo = ['project.structure_full']
 
     const report = inspectPayload(
       [{ role: 'system', content: 'system' }, { role: 'user', content: 'audit MCP routing' }],
@@ -99,10 +106,16 @@ describe('payloadInspector system-prompt analysis', () => {
     )
 
     expect(report.autoLoadedSystemSections).toEqual(selection.autoLoadedSystemSections)
-    expect(report.modelRequestedContextSections).toEqual(['project_docs_full', 'project_structure_full'])
+    expect(report.contextPlanCandidateSections).toEqual(selection.contextPlanCandidateSections)
+    expect(report.modelRequestedContextSections).toEqual(['project.docs_full', 'project.structure_full'])
     expect(report.requestContextToolCalls).toBe(2)
-    expect(report.requestContextSectionsLoaded).toEqual(['project_structure_full'])
-    expect(report.requestedButNotLoadedSections).toEqual(['project_docs_full'])
-    expect(report.requestedContextSections).toEqual(['project_structure_full'])
+    expect(report.requestContextSectionsLoaded).toEqual(['project.structure_full'])
+    expect(report.requestContextSelectionReason['project.structure_full']).toContain('loaded')
+    expect(report.requestContextCostTier['project.structure_full']).toBe('high')
+    expect(report.requestContextFallbackUsed).toBe(true)
+    expect(report.requestContextFallbackFrom).toEqual(['agent_runtime.mcp_routing'])
+    expect(report.requestContextFallbackTo).toEqual(['project.structure_full'])
+    expect(report.requestedButNotLoadedSections).toEqual(['project.docs_full'])
+    expect(report.requestedContextSections).toEqual(['project.structure_full'])
   })
 })

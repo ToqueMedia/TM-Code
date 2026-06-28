@@ -9,7 +9,21 @@ import {
   selectAuxiliaries,
   buildOnDemandIndex,
   AUXILIARY_METAS,
+  type ContextPlan,
 } from '../contextBuilder/auxiliaryRegistry'
+
+function plan(overrides: Partial<ContextPlan>): ContextPlan {
+  return {
+    taskDomain: 'bugfix_local',
+    requiredCapabilities: [],
+    minimumContextNeeded: 'summary',
+    candidateContexts: [],
+    selectedContexts: [],
+    fallbackRisk: 'low',
+    reason: 'model test plan',
+    ...overrides,
+  }
+}
 
 describe('auxiliaryRegistry', () => {
   // ── classifyPromptIntent ──────────────────────────────────────
@@ -19,51 +33,18 @@ describe('auxiliaryRegistry', () => {
       expect(classifyPromptIntent('')).toBe('bugfix_local')
     })
 
-    it('classifies a localised bugfix as bugfix_local', () => {
-      // The canonical Phase-D test prompt: a UI tweak in an existing file.
-      // "dialog" matches frontend_ui — that's the intended escalation (UI
-      // baseline short version stays). Not bugfix_local because it IS a UI
-      // task. Verify it does NOT escalate to scaffold/deploy/auth/vision.
-      const p = classifyPromptIntent(
-        'Centralize os Dialogs de confirmação no meio, usando center no placement',
-      )
-      expect(p).not.toBe('scaffold_project')
-      expect(p).not.toBe('deploy_publish')
-      expect(p).not.toBe('auth_database')
-      expect(p).not.toBe('vision')
-    })
-
-    it('classifies a pure code bugfix (no UI keyword) as bugfix_local', () => {
+    it('does not infer profiles from free text in fallback mode', () => {
       expect(classifyPromptIntent('fix the off-by-one in the retry loop')).toBe('bugfix_local')
-      expect(classifyPromptIntent('corrige o bug no cálculo do total')).toBe('bugfix_local')
-    })
-
-    it('classifies new-project scaffolding', () => {
-      expect(classifyPromptIntent('create a new React app with Vite')).toBe('scaffold_project')
-      expect(classifyPromptIntent('criar um novo projeto de landing page')).toBe('scaffold_project')
-    })
-
-    it('classifies deploy/publish', () => {
-      expect(classifyPromptIntent('deploy this to production')).toBe('deploy_publish')
-      expect(classifyPromptIntent('publicar o app no domínio')).toBe('deploy_publish')
-    })
-
-    it('classifies auth/database', () => {
-      expect(classifyPromptIntent('add login with Google')).toBe('auth_database')
-      expect(classifyPromptIntent('create a sqlite database for users')).toBe('auth_database')
+      expect(classifyPromptIntent('create a new React app with Vite')).toBe('bugfix_local')
+      expect(classifyPromptIntent('deploy this to production')).toBe('bugfix_local')
+      expect(classifyPromptIntent('add login with Google')).toBe('bugfix_local')
+      expect(classifyPromptIntent('redesign the button styles')).toBe('bugfix_local')
     })
 
     it('classifies vision when an image is present', () => {
       expect(classifyPromptIntent('what is wrong here?', { hasImage: true })).toBe('vision')
     })
 
-    it('classifies frontend/ui tasks as frontend_ui', () => {
-      expect(classifyPromptIntent('redesign the button styles')).toBe('frontend_ui')
-      // NOTE: a UI task that mentions "login" resolves to auth_database because
-      // the auth pattern is checked before frontend_ui (auth wins on ambiguity).
-      // That's an accepted Phase-1 limitation — the on-demand mechanism covers it.
-      expect(classifyPromptIntent('muda o layout da tela principal')).toBe('frontend_ui')
-    })
   })
 
   // ── selectAuxiliaries ─────────────────────────────────────────
@@ -72,71 +53,169 @@ describe('auxiliaryRegistry', () => {
       const sel = selectAuxiliaries('bugfix_local', 'fix the retry bug')
       expect(sel.profile).toBe('bugfix_local')
       expect(sel.loaded).toHaveLength(0)
-      // Publishing, scaffolding, vision, auth/db must all be omitted.
       const omittedIds = sel.omitted.map((o) => o.id)
-      expect(omittedIds).toContain('publishing_fullstack')
-      expect(omittedIds).toContain('scaffolding_install')
-      expect(omittedIds).toContain('vision_rules')
-      expect(omittedIds).toContain('auth_database_provision')
-      // Savings = everything (nothing loaded).
+      expect(omittedIds).toContain('delivery.deploy')
+      expect(omittedIds).toContain('scaffold.workflow')
+      expect(omittedIds).toContain('vision.image_rules')
+      expect(omittedIds).toContain('auth_database.provision')
       expect(sel.savingsTokens).toBe(sel.totalAvailableTokens)
       expect(sel.loadedTokens).toBe(0)
     })
 
-    it('loads publishing + auth/db for scaffold_project', () => {
+    it('loads scaffold workflow for scaffold_project without broad project full context', () => {
       const sel = selectAuxiliaries('scaffold_project', 'create a new react app')
       const loadedIds = sel.loaded.map((l) => l.id)
-      expect(loadedIds).toContain('publishing_fullstack')
-      expect(loadedIds).toContain('scaffolding_install')
-      expect(loadedIds).toContain('auth_database_provision')
-      // Vision is NOT loaded for scaffolding (no image).
-      expect(loadedIds).not.toContain('vision_rules')
+      expect(loadedIds).toContain('scaffold.workflow')
+      expect(loadedIds).toContain('project.package_map')
+      expect(loadedIds).not.toContain('project.structure_full')
+      expect(loadedIds).not.toContain('vision.image_rules')
     })
 
-    it('loads publishing + auth/db for deploy_publish', () => {
+    it('loads deploy + build context for deploy_publish', () => {
       const sel = selectAuxiliaries('deploy_publish', 'deploy to production')
       const loadedIds = sel.loaded.map((l) => l.id)
-      expect(loadedIds).toContain('publishing_fullstack')
-      expect(loadedIds).toContain('auth_database_provision')
-      expect(loadedIds).not.toContain('scaffolding_install')
-      expect(loadedIds).not.toContain('vision_rules')
+      expect(loadedIds).toContain('delivery.deploy')
+      expect(loadedIds).toContain('delivery.build_scripts')
+      expect(loadedIds).not.toContain('scaffold.workflow')
+      expect(loadedIds).not.toContain('vision.image_rules')
     })
 
-    it('loads only vision_rules for the vision profile', () => {
+    it('loads only vision.image_rules for the vision profile', () => {
       const sel = selectAuxiliaries('vision', 'look at this screenshot')
       const loadedIds = sel.loaded.map((l) => l.id)
-      expect(loadedIds).toContain('vision_rules')
-      expect(loadedIds).not.toContain('publishing_fullstack')
-      expect(loadedIds).not.toContain('scaffolding_install')
+      expect(loadedIds).toContain('vision.image_rules')
+      expect(loadedIds).not.toContain('delivery.deploy')
+      expect(loadedIds).not.toContain('scaffold.workflow')
     })
 
-    it('trigger match activates an auxiliary even without a profile match', () => {
-      // bugfix_local profile, but the message mentions "provision" →
-      // publishing_fullstack trigger fires.
+    it('does not activate auxiliaries from free-text triggers without a model plan', () => {
       const sel = selectAuxiliaries('bugfix_local', 'help me provision the database')
-      const loadedIds = sel.loaded.map((l) => l.id)
-      expect(loadedIds).toContain('publishing_fullstack')
-      expect(loadedIds).toContain('auth_database_provision')
+      expect(sel.loaded).toHaveLength(0)
     })
 
     it('does not load UI baseline for an MCP audit just because the profile is frontend_ui', () => {
       const sel = selectAuxiliaries(
         'frontend_ui',
         'audit the MCP routing in src/screens/account/Settings.tsx',
+        false,
+        'test',
+        undefined,
+        plan({
+          taskDomain: 'agent_runtime',
+          requiredCapabilities: ['mcp_routing'],
+          candidateContexts: ['agent_runtime.mcp_routing', 'project.structure_overview'],
+          selectedContexts: ['agent_runtime.mcp_routing'],
+          reason: 'model selected MCP routing',
+        }),
       )
       const loadedIds = sel.loaded.map((l) => l.id)
 
-      expect(loadedIds).toContain('mcp_routing_detail')
-      expect(loadedIds).not.toContain('ui_baseline_full')
-      expect(loadedIds).not.toContain('taste_defaults')
+      expect(loadedIds).toContain('agent_runtime.mcp_routing')
+      expect(loadedIds).not.toContain('design_system.component_patterns')
+      expect(loadedIds).not.toContain('ui_patterns')
     })
 
     it('loads UI guidance only when the user explicitly asks for visual work', () => {
-      const sel = selectAuxiliaries('bugfix_local', 'polish the account screen layout')
+      const sel = selectAuxiliaries('bugfix_local', 'polish the account screen layout', false, 'test', undefined, plan({
+        taskDomain: 'design_system/ui',
+        requiredCapabilities: ['component_patterns', 'spacing_typography'],
+        candidateContexts: ['design_system.component_patterns', 'ui_patterns'],
+        selectedContexts: ['design_system.component_patterns', 'ui_patterns'],
+      }))
       const loadedIds = sel.loaded.map((l) => l.id)
 
-      expect(loadedIds).toContain('ui_baseline_full')
-      expect(loadedIds).toContain('taste_defaults')
+      expect(loadedIds).toContain('design_system.component_patterns')
+      expect(loadedIds).toContain('ui_patterns')
+    })
+
+    it('golden: semantic tokens choose design-system context before project structure', () => {
+      const sel = selectAuxiliaries(
+        'frontend_ui',
+        'Implemente os semantic tokens sidebar.session.item e sidebar.session.itemActive no design system/theme.',
+        false,
+        'test',
+        undefined,
+        plan({
+          taskDomain: 'design_system',
+          requiredCapabilities: ['semantic_tokens', 'theme_config'],
+          minimumContextNeeded: 'summary',
+          candidateContexts: ['design_system.semantic_tokens', 'design_system.theme_config', 'design_system.brand_palette', 'design_system.chakra_recipes', 'project.structure_overview'],
+          selectedContexts: ['design_system.semantic_tokens', 'design_system.theme_config'],
+          fallbackRisk: 'low',
+        }),
+      )
+      const loadedIds = sel.loaded.map((l) => l.id)
+
+      expect(sel.contextPlan.taskDomain).toBe('design_system')
+      expect(sel.contextPlan.requiredCapabilities).toEqual(['semantic_tokens', 'theme_config'])
+      expect(loadedIds).toContain('design_system.semantic_tokens')
+      expect(loadedIds).toContain('design_system.theme_config')
+      expect(loadedIds).not.toContain('project.structure_full')
+      expect(loadedIds).not.toContain('project_structure_full')
+      expect(sel.requestContextFallbackUsed).toBe(false)
+    })
+
+    it('golden: MCP audit chooses agent runtime routing only', () => {
+      const sel = selectAuxiliaries('analysis_readonly', 'Faça uma auditoria read-only da integração MCP.', true, 'test', undefined, plan({
+        taskDomain: 'agent_runtime',
+        requiredCapabilities: ['mcp_routing'],
+        candidateContexts: ['agent_runtime.mcp_routing', 'agent_runtime.tool_profiles', 'project.structure_overview'],
+        selectedContexts: ['agent_runtime.mcp_routing'],
+      }))
+      const loadedIds = sel.loaded.map((l) => l.id)
+
+      expect(sel.contextPlan.taskDomain).toBe('agent_runtime')
+      expect(loadedIds).toContain('agent_runtime.mcp_routing')
+      expect(loadedIds).not.toContain('design_system.semantic_tokens')
+      expect(loadedIds).not.toContain('project.structure_full')
+    })
+
+    it('golden: dev server preview chooses delivery runtime context', () => {
+      const sel = selectAuxiliaries('bugfix_local', 'O preview não abre no browser.', false, 'test', undefined, plan({
+        taskDomain: 'delivery/runtime',
+        requiredCapabilities: ['dev_server'],
+        candidateContexts: ['delivery.dev_server', 'delivery.build_scripts', 'project.package_map'],
+        selectedContexts: ['delivery.dev_server'],
+      }))
+      const loadedIds = sel.loaded.map((l) => l.id)
+
+      expect(sel.contextPlan.taskDomain).toBe('delivery/runtime')
+      expect(loadedIds).toContain('delivery.dev_server')
+      expect(loadedIds).not.toContain('delivery.git_status')
+      expect(loadedIds).not.toContain('design_system.semantic_tokens')
+    })
+
+    it('golden: UI polish chooses design system and UI patterns', () => {
+      const sel = selectAuxiliaries('frontend_ui', 'Melhore visualmente a lista de sessões.', false, 'test', undefined, plan({
+        taskDomain: 'design_system/ui',
+        requiredCapabilities: ['component_patterns', 'semantic_tokens', 'spacing_typography'],
+        candidateContexts: ['design_system.component_patterns', 'design_system.semantic_tokens', 'ui_patterns', 'project.structure_overview'],
+        selectedContexts: ['design_system.component_patterns', 'design_system.semantic_tokens', 'ui_patterns'],
+        fallbackRisk: 'medium',
+      }))
+      const loadedIds = sel.loaded.map((l) => l.id)
+
+      expect(sel.contextPlan.taskDomain).toBe('design_system/ui')
+      expect(loadedIds).toContain('design_system.component_patterns')
+      expect(loadedIds).toContain('design_system.semantic_tokens')
+      expect(loadedIds).toContain('ui_patterns')
+      expect(loadedIds).not.toContain('project.structure_full')
+    })
+
+    it('golden: git commit chooses git delivery context only', () => {
+      const sel = selectAuxiliaries('bugfix_local', 'Faz commit das alterações.', false, 'test', undefined, plan({
+        taskDomain: 'delivery/git',
+        requiredCapabilities: ['git_status', 'changed_files'],
+        candidateContexts: ['delivery.git_status', 'delivery.changed_files'],
+        selectedContexts: ['delivery.git_status', 'delivery.changed_files'],
+      }))
+      const loadedIds = sel.loaded.map((l) => l.id)
+
+      expect(sel.contextPlan.taskDomain).toBe('delivery/git')
+      expect(loadedIds).toContain('delivery.git_status')
+      expect(loadedIds).toContain('delivery.changed_files')
+      expect(loadedIds).not.toContain('delivery.dev_server')
+      expect(loadedIds).not.toContain('design_system.semantic_tokens')
     })
 
     it('every loaded entry has a reason', () => {
@@ -167,6 +246,15 @@ describe('auxiliaryRegistry', () => {
         loadedTokens: 0,
         totalAvailableTokens: 0,
         savingsTokens: 0,
+        contextPlan: {
+          taskDomain: 'test',
+          requiredCapabilities: [],
+          minimumContextNeeded: 'index' as const,
+          candidateContexts: [],
+          selectedContexts: [],
+          fallbackRisk: 'low' as const,
+          reason: 'test',
+        },
         readOnly: false,
         reason: 'test',
         routerSource: 'keyword' as const,
@@ -180,9 +268,9 @@ describe('auxiliaryRegistry', () => {
       const index = buildOnDemandIndex(sel)
       expect(index).not.toBeNull()
       expect(index).toContain('request_context')
-      expect(index).toContain('publishing_fullstack')
-      expect(index).toContain('scaffolding_install')
-      expect(index).toContain('vision_rules')
+      expect(index).toContain('delivery.deploy')
+      expect(index).toContain('scaffold.workflow')
+      expect(index).toContain('vision.image_rules')
     })
   })
 

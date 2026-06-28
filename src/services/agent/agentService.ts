@@ -41,6 +41,7 @@ import { buildByokClientFromSnapshot, buildByokThinkingConfig } from "./byokRout
 import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
 import { ToolsetSelector, REQUEST_TOOLS_NAME, REQUEST_CONTEXT_NAME } from "./toolsetSelector";
+import type { ToolsetGroupName } from "./toolsetSelector";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 
 // ── Extracted services ──
@@ -479,17 +480,17 @@ class AgentService {
     // 4. Build thinking config
     const thinkingConfig = this.buildThinkingConfig();
 
-    // 4.5. Dynamic toolset selector — starts with a CORE minimal toolset and
-    // expands monotonically based on user-message keywords + the request_tools
-    // meta-tool. Reduces tool-schema overhead (~10K tokens for 36 tools) to
-    // the few the current task needs. Sub-agents (lightweight) skip selection
+    // 4.5. Dynamic toolset selector — starts with the model-selected profile
+    // base plus model-planned groups, then expands monotonically through the
+    // request_tools meta-tool. Reduces tool-schema overhead (~10K tokens for
+    // 36 tools) to the few the current task needs. Sub-agents skip selection.
     // Wire auxiliary-context omissions + the Intent Router's profile/readOnly
     // into the selector. The selection was computed during buildSystemPrompt
     // (stored on the ContextBuilder singleton) — the profile + readOnly come
     // from the Intent Router (qwen3.7-plus) via the agentRunner call. We read
     // it BEFORE constructing the selector so the constructor can seed the
     // active set with the profile's base toolset (bugfix_local/analysis_readonly/…)
-    // and bound request_tools/keywords to the profile's allowed set. Sub-agents
+    // and bind request_tools/model-planned groups to the profile's allowed set. Sub-agents
     // skip this (they already receive a restricted tool set from the subAgentRunner).
     let auxiliarySelection: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection | null = null;
     if (!this.lightweightOptions) {
@@ -500,10 +501,11 @@ class AgentService {
     const toolsetSelector = this.lightweightOptions
       ? null
       : new ToolsetSelector(
-          openaiTools.map((t) => t.function.name),
-          auxiliarySelection?.profile ?? 'bugfix_local',
-          auxiliarySelection?.readOnly ?? false,
-        );
+        openaiTools.map((t) => t.function.name),
+        auxiliarySelection?.profile ?? 'bugfix_local',
+        auxiliarySelection?.readOnly ?? false,
+        (auxiliarySelection?.contextPlan.toolGroups ?? []) as ToolsetGroupName[],
+      );
     this.currentToolsetSelector = toolsetSelector;
 
     if (toolsetSelector && auxiliarySelection) {

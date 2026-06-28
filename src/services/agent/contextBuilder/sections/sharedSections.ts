@@ -171,7 +171,7 @@ export function sharedMcpIndexBlock(mcpTools: MCPToolSummary[]): string | null {
     '# MCP tools (index)',
     `Connected MCP servers/tools: ${servers}.`,
     `Examples: ${examples}${mcpTools.length > 8 ? `, +${mcpTools.length - 8} more` : ''}.`,
-    'Use `request_context({ auxiliary: "mcp_routing_detail" })` when the task explicitly involves MCPs, live external state, external side effects, or API/docs that should be read from an MCP.',
+    'Use `request_context({ auxiliary: "agent_runtime.mcp_routing" })` when the task explicitly involves MCPs, live external state, external side effects, or API/docs that should be read from an MCP.',
   ].join('\n')
 }
 

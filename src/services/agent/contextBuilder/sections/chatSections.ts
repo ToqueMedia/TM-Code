@@ -153,7 +153,7 @@ The developer is your co-pilot — they see what you log. Use this to diagnose t
 // ── 4a. Scaffolding/install workflow (AUXILIARY — gated by auxiliaryRegistry)
 // Extracted from getDoingTasksSection so it can be omitted for localised
 // bugfix tasks and loaded on-demand via `request_context({ auxiliary:
-// 'scaffolding_install' })`. Returns the "Installing dependencies — background
+// 'scaffold.workflow' })`. Returns the "Installing dependencies — background
 // pattern" + "Scaffolding workflow" blocks. See auxiliaryRegistry.ts.
 export function getScaffoldingInstallSection(ctx: { pmDetected: string }): string {
   return `## Installing dependencies — background pattern
@@ -740,7 +740,7 @@ export function getProjectStructureIndexSection(ctx: PromptContext): string | nu
     '(Snapshot at turn start. Full tree omitted from core to save tokens.)',
     top + more,
     '',
-    'Use `glob`, `list_directory`, `search_files`, or `request_context({ auxiliary: "project_structure_full" })` if you need the full tree.',
+    'Use `glob`, `list_directory`, `search_files`, or `request_context({ auxiliary: "project.structure_full" })` only if you need the full tree.',
   ].join('\n')
 }
 
@@ -773,7 +773,7 @@ export function getGitStatusSection(ctx: PromptContext): string | null {
 export function getGitStatusIndexSection(ctx: PromptContext): string | null {
   const git = ctx.gitContext
   if (!git) return null
-  return `# Git (compact index)\nrepo branch: ${git.branch}${git.files.length ? `; ${git.files.length}${git.truncatedFiles ? '+' : ''} changed files` : '; working tree clean'}\nFull git status is on-demand: request_context({ auxiliary: "git_status_detail" }) when the task mentions git/commit/branch/diff/push/pull/merge/tag.`
+  return `# Git (compact index)\nrepo branch: ${git.branch}${git.files.length ? `; ${git.files.length}${git.truncatedFiles ? '+' : ''} changed files` : '; working tree clean'}\nFull git status is on-demand: request_context({ auxiliary: "delivery.git_status" }) when the task mentions git/commit/branch/diff/push/pull/merge/tag.`
 }
 
 // ── Recently-modified files ────────────────────────────────────
@@ -799,7 +799,7 @@ export function getReadmeSection(ctx: PromptContext): string | null {
 export function getProjectMemorySection(ctx: PromptContext): string | null {
   if (!ctx.tmsContent) return null
   const truncated = ctx.tmsContent.length > 900
-    ? ctx.tmsContent.slice(0, 900) + '\n\n[... project memory body omitted — request project_docs_full or read TMS.md]'
+    ? ctx.tmsContent.slice(0, 900) + '\n\n[... project memory body omitted — request project.docs_full or read TMS.md]'
     : ctx.tmsContent
   return `# Project memory (compact index)\n${sanitizeProjectContent(truncated)}`
 }
@@ -904,7 +904,7 @@ export function getSessionMemorySection(ctx: PromptContext): string | null {
 export function getActivePlanSection(ctx: PromptContext): string | null {
   if (!ctx.planContent) return null
   const truncated = ctx.planContent.length > 900
-    ? ctx.planContent.slice(0, 900) + '\n\n[... plan body omitted — request project_docs_full or read PLAN.md]'
+    ? ctx.planContent.slice(0, 900) + '\n\n[... plan body omitted — request project.docs_full or read PLAN.md]'
     : ctx.planContent
   return `# Active plan (compact index)\n${sanitizeProjectContent(truncated)}`
 }
@@ -912,7 +912,7 @@ export function getActivePlanSection(ctx: PromptContext): string | null {
 export function getTaskListSection(ctx: PromptContext): string | null {
   if (!ctx.todoContent) return null
   const truncated = ctx.todoContent.length > 1000
-    ? ctx.todoContent.slice(0, 1000) + '\n\n[... task list body omitted — request project_docs_full or read TODO.md]'
+    ? ctx.todoContent.slice(0, 1000) + '\n\n[... task list body omitted — request project.docs_full or read TODO.md]'
     : ctx.todoContent
   return `# Task list (TODO.md — the project backlog you MUST drive to completion)
 ${sanitizeProjectContent(truncated)}
