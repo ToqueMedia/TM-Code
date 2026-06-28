@@ -70,4 +70,25 @@ describe('query payload @mention compaction', () => {
       turn2.mentionContextRepeatedTokens + turn3.mentionContextRepeatedTokens,
     )
   })
+
+  it('resets cumulative repeated-token savings for a new session', () => {
+    const history = [
+      { role: 'user' as const, content: `fix this\n${fullMention}` },
+      { role: 'assistant' as const, content: 'turn 1' },
+    ]
+
+    compactHistoricalMentionContextForPayload(history)
+    const turn2 = getAndResetMentionContextStats()
+    expect(turn2.mentionContextRepeatedTokensCumulative).toBeGreaterThan(0)
+
+    clearMentionContextTracker()
+    compactHistoricalMentionContextForPayload([
+      { role: 'user' as const, content: `new session\n${fullMention}` },
+    ])
+    const newTurn1 = getAndResetMentionContextStats()
+
+    expect(newTurn1.mentionContextSentFullThisTurn).toBe(true)
+    expect(newTurn1.mentionContextRepeatedTokens).toBe(0)
+    expect(newTurn1.mentionContextRepeatedTokensCumulative).toBe(0)
+  })
 })

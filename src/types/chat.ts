@@ -641,7 +641,17 @@ export interface RequestUsageEntry {
   auxiliaryOmitted?: string[]
   /** Alias for auxiliaryOmitted in newer exports. */
   omittedSystemSections?: string[]
-  /** Auxiliary ids fetched during this run through request_context. */
+  /** Sections loaded inline automatically by profile/trigger. */
+  autoLoadedSystemSections?: string[]
+  /** Auxiliary ids the model requested through request_context. */
+  modelRequestedContextSections?: string[]
+  /** Number of request_context tool calls intercepted in this run. */
+  requestContextToolCalls?: number
+  /** Auxiliary ids that request_context returned with content. */
+  requestContextSectionsLoaded?: string[]
+  /** Auxiliary ids requested but not loaded (unknown/already inline/no content). */
+  requestedButNotLoadedSections?: string[]
+  /** Legacy alias: auxiliary ids actually fetched during this run through request_context. */
   requestedContextSections?: string[]
   /** Tokens saved by omitting the auxiliaries (vs loading everything). */
   auxiliarySavingsTokens?: number

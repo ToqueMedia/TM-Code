@@ -195,6 +195,23 @@ class ContextBuilder {
     return this.lastAuxiliarySelection
   }
 
+  private recordRequestContextAttempt(id: string, loaded: boolean): void {
+    const sel = this.lastAuxiliarySelection
+    if (!sel) return
+
+    sel.requestContextToolCalls = (sel.requestContextToolCalls ?? 0) + 1
+    sel.modelRequestedContextSections ??= []
+    if (!sel.modelRequestedContextSections.includes(id)) {
+      sel.modelRequestedContextSections.push(id)
+    }
+
+    const target = loaded ? 'requestContextSectionsLoaded' : 'requestedButNotLoadedSections'
+    sel[target] ??= []
+    if (!sel[target]!.includes(id)) {
+      sel[target]!.push(id)
+    }
+  }
+
   /**
    * Load an omitted auxiliary's full content on demand. Called by the
    * `request_context` tool handler when the agent asks for a section that was
@@ -206,6 +223,7 @@ class ContextBuilder {
     if (!sel) return { content: null, name: id }
     // Already loaded inline → nothing to fetch.
     if (sel.loaded.some((l) => l.id === id)) {
+      this.recordRequestContextAttempt(id, false)
       return { content: null, name: id }
     }
     let content: string | null = null
@@ -258,8 +276,9 @@ class ContextBuilder {
     }
     const meta = sel.omitted.find((o) => o.id === id)
     if (content) {
-      sel.requestedContextSections ??= []
-      if (!sel.requestedContextSections.includes(id)) sel.requestedContextSections.push(id)
+      this.recordRequestContextAttempt(id, true)
+    } else {
+      this.recordRequestContextAttempt(id, false)
     }
     return { content, name: meta?.name ?? id }
   }

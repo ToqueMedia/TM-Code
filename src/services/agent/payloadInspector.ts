@@ -145,7 +145,17 @@ export interface PayloadReport {
   auxiliaryOmitted: Array<{ id: string; name: string; reason: string; estTokens: number }>
   /** Alias/export field for omitted system sections. */
   omittedSystemSections: string[]
-  /** Auxiliary sections fetched through request_context in this run. */
+  /** Sections loaded inline automatically by profile/trigger. */
+  autoLoadedSystemSections: string[]
+  /** Auxiliary ids the model requested through request_context. */
+  modelRequestedContextSections: string[]
+  /** Number of request_context tool calls intercepted in this run. */
+  requestContextToolCalls: number
+  /** Auxiliary ids that request_context returned with content. */
+  requestContextSectionsLoaded: string[]
+  /** Auxiliary ids requested but not loaded (unknown/already inline/no content). */
+  requestedButNotLoadedSections: string[]
+  /** Legacy alias: auxiliary sections actually fetched through request_context in this run. */
   requestedContextSections: string[]
   /** On-demand context architecture: estimated savings vs loading all phase-1 auxiliaries. */
   auxiliarySavingsTokens: number
@@ -596,7 +606,12 @@ export function inspectPayload(
     : 0
   const loadedSystemSections = auxiliaryLoaded.map((a) => a.id)
   const omittedSystemSections = auxiliaryOmitted.map((a) => a.id)
-  const requestedContextSections = auxiliarySelection?.requestedContextSections ?? []
+  const autoLoadedSystemSections = auxiliarySelection?.autoLoadedSystemSections ?? loadedSystemSections
+  const modelRequestedContextSections = auxiliarySelection?.modelRequestedContextSections ?? []
+  const requestContextToolCalls = auxiliarySelection?.requestContextToolCalls ?? 0
+  const requestContextSectionsLoaded = auxiliarySelection?.requestContextSectionsLoaded ?? []
+  const requestedButNotLoadedSections = auxiliarySelection?.requestedButNotLoadedSections ?? []
+  const requestedContextSections = requestContextSectionsLoaded
 
   const report: PayloadReport = {
     timestamp: Date.now(),
@@ -621,6 +636,11 @@ export function inspectPayload(
     loadedSystemSections,
     auxiliaryOmitted,
     omittedSystemSections,
+    autoLoadedSystemSections,
+    modelRequestedContextSections,
+    requestContextToolCalls,
+    requestContextSectionsLoaded,
+    requestedButNotLoadedSections,
     requestedContextSections,
     auxiliarySavingsTokens,
     systemPromptSavingsTokens: auxiliarySavingsTokens,

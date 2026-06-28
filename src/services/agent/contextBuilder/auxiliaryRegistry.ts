@@ -114,8 +114,16 @@ export interface AuxiliarySelection {
   totalAvailableTokens: number
   /** Savings vs loading everything (totalAvailable - loaded). */
   savingsTokens: number
-  /** Auxiliary ids fetched mid-run through request_context. */
-  requestedContextSections?: string[]
+  /** Sections loaded inline automatically by profile/trigger. */
+  autoLoadedSystemSections?: string[]
+  /** Auxiliary ids the model requested through request_context. */
+  modelRequestedContextSections?: string[]
+  /** Number of request_context tool calls intercepted in this run. */
+  requestContextToolCalls?: number
+  /** Auxiliary ids that request_context returned with content. */
+  requestContextSectionsLoaded?: string[]
+  /** Auxiliary ids requested but not loaded (unknown/already inline/no content). */
+  requestedButNotLoadedSections?: string[]
   /**
    * True when the user wants a read-only run (no file edits). Set by the
    * Intent Router (`readOnly` flag) — never derived from free-text phrasing.
@@ -278,8 +286,8 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     description: 'Full state-first UI design baseline. Load for frontend/design/visual work.',
     estTokens: 650,
     type: 'static',
-    profiles: ['frontend_ui'],
-    triggers: [/\bui\b|design|component|layout|style|\bcss\b|tailwind|chakra|modal|dialog|\btela\b|screen|interface visual/i],
+    profiles: [],
+    triggers: [/\b(ui|design|visual|layout|styling|polish|frontend proposal|component styling|screen design|interface visual|redesign)\b|melhorar.*\b(ui|visual|layout)\b|proposta.*frontend/i],
     phase: 1,
   },
   {
@@ -288,8 +296,8 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     description: 'Visual restraint defaults for creating or improving UI.',
     estTokens: 350,
     type: 'static',
-    profiles: ['frontend_ui'],
-    triggers: [/visual|design|style|polish|beautiful|bonito|melhorar.*ui|criar.*ui|landing|hero|layout/i],
+    profiles: [],
+    triggers: [/\b(visual|design|styling|polish|beautiful|redesign|landing|hero|layout|ui)\b|bonito|melhorar.*\b(ui|visual|layout)\b|criar.*ui/i],
     phase: 1,
   },
   {
@@ -410,7 +418,11 @@ export function selectAuxiliaries(
     loadedTokens,
     totalAvailableTokens,
     savingsTokens: totalAvailableTokens - loadedTokens,
-    requestedContextSections: [],
+    autoLoadedSystemSections: loaded.map((l) => l.id),
+    modelRequestedContextSections: [],
+    requestContextToolCalls: 0,
+    requestContextSectionsLoaded: [],
+    requestedButNotLoadedSections: [],
     // analysis_readonly is inherently read-only; otherwise honour the hint.
     readOnly: profile === 'analysis_readonly' ? true : readOnlyHint === true,
     reason: reason ?? `keyword classifier (profile=${profile})`,

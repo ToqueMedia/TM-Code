@@ -1,5 +1,6 @@
 import { inspectPayload } from '../payloadInspector'
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../contextBuilder/helpers'
+import { selectAuxiliaries } from '../contextBuilder/auxiliaryRegistry'
 
 describe('payloadInspector system-prompt analysis', () => {
   it('breaks down system prompt sections and flags on-demand candidates', () => {
@@ -77,5 +78,31 @@ describe('payloadInspector system-prompt analysis', () => {
     expect(report.mentionContextTokens).toBeGreaterThan(0)
     expect(report.byCategory.mention_context?.tokens).toBe(report.mentionContextTokens)
     expect(report.byCategory.mention_context?.tokens).toBeLessThan(100)
+  })
+
+  it('separates auto-loaded sections from real request_context loads', () => {
+    const selection = selectAuxiliaries('bugfix_local', 'audit MCP routing')
+    selection.modelRequestedContextSections = ['project_docs_full', 'project_structure_full']
+    selection.requestContextToolCalls = 2
+    selection.requestContextSectionsLoaded = ['project_structure_full']
+    selection.requestedButNotLoadedSections = ['project_docs_full']
+
+    const report = inspectPayload(
+      [{ role: 'system', content: 'system' }, { role: 'user', content: 'audit MCP routing' }],
+      'system',
+      [],
+      'test-model',
+      1,
+      undefined,
+      undefined,
+      selection,
+    )
+
+    expect(report.autoLoadedSystemSections).toEqual(selection.autoLoadedSystemSections)
+    expect(report.modelRequestedContextSections).toEqual(['project_docs_full', 'project_structure_full'])
+    expect(report.requestContextToolCalls).toBe(2)
+    expect(report.requestContextSectionsLoaded).toEqual(['project_structure_full'])
+    expect(report.requestedButNotLoadedSections).toEqual(['project_docs_full'])
+    expect(report.requestedContextSections).toEqual(['project_structure_full'])
   })
 })

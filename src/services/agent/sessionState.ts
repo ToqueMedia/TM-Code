@@ -10,6 +10,7 @@
  */
 
 import type { FileAccessEntry, ToolFailureEntry } from './types'
+import { clearMentionContextTracker } from './mentionContextTracker'
 
 // ── SessionState class ──
 
@@ -165,6 +166,7 @@ export class SessionState {
   // ── Reset ──
 
   resetForNewSession(): void {
+    clearMentionContextTracker()
     this.lastPromptTokens = 0
     this.fileAccessLog = []
     this.filesEditedThisSession.clear()

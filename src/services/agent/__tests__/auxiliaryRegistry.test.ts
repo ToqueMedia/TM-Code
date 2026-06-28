@@ -119,6 +119,26 @@ describe('auxiliaryRegistry', () => {
       expect(loadedIds).toContain('auth_database_provision')
     })
 
+    it('does not load UI baseline for an MCP audit just because the profile is frontend_ui', () => {
+      const sel = selectAuxiliaries(
+        'frontend_ui',
+        'audit the MCP routing in src/screens/account/Settings.tsx',
+      )
+      const loadedIds = sel.loaded.map((l) => l.id)
+
+      expect(loadedIds).toContain('mcp_routing_detail')
+      expect(loadedIds).not.toContain('ui_baseline_full')
+      expect(loadedIds).not.toContain('taste_defaults')
+    })
+
+    it('loads UI guidance only when the user explicitly asks for visual work', () => {
+      const sel = selectAuxiliaries('bugfix_local', 'polish the account screen layout')
+      const loadedIds = sel.loaded.map((l) => l.id)
+
+      expect(loadedIds).toContain('ui_baseline_full')
+      expect(loadedIds).toContain('taste_defaults')
+    })
+
     it('every loaded entry has a reason', () => {
       const sel = selectAuxiliaries('scaffold_project', 'create app')
       for (const l of sel.loaded) {

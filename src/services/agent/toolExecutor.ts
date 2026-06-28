@@ -39,6 +39,7 @@ import { READ_FILE, WRITE_FILE, EDIT_FILE, STOP_DEV_SERVER } from './toolNames'
 import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileStateCache } from './toolExecutor/fileStateCache'
 import { FILE_UNCHANGED_STUB } from './toolExecutor/readDedup'
 import { recordReadRange, clearReadRangeTracker } from './toolExecutor/readRangeTracker'
+import { clearMentionContextTracker } from './mentionContextTracker'
 import { addLineNumbers } from './toolExecutor/lineNumbers'
 import { hasBinaryExtension } from './toolExecutor/binaryExtensions'
 import { getSnippetForTwoFileDiff } from './toolExecutor/changedFileSnippet'
@@ -412,6 +413,7 @@ class ToolExecutor {
 
   /** Clears session-scoped state. Call on new sessions. */
   resetSessionState(): void {
+    clearMentionContextTracker()
     this.readFileTimestamps.clear()
     this.readFileState.clear()
     clearReadRangeTracker()

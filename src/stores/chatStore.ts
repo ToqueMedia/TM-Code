@@ -1580,7 +1580,15 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const session = sessions.get(activeSessionId)
         if (!session) return state
         const provider = entry.provider ?? session.byokSnapshot?.providerId ?? 'tms'
-        const log = [...(session.requestUsageLog ?? []), { ...entry, provider }]
+        const previousLog = session.requestUsageLog ?? []
+        const normalizedEntry = previousLog.length === 0
+          ? {
+              ...entry,
+              mentionContextRepeatedTokensCumulative: 0,
+              provider,
+            }
+          : { ...entry, provider }
+        const log = [...previousLog, normalizedEntry]
         // Cap the log to avoid unbounded growth on runaway sessions (400
         // entries ≈ a 200-turn session with retries; oldest drop first).
         if (log.length > 400) log.splice(0, log.length - 400)
