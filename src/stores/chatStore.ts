@@ -8,6 +8,7 @@ import { useAgentStore } from './agentStore'
 import { usePermissionStore } from './permissionStore'
 import { useToastStore } from './toastStore'
 import { clearCommandQueue as clearMessageQueue } from '../services/agent/messageQueue'
+import { clearMentionContextTracker } from '../services/agent/mentionContextTracker'
 export { clearMessageQueue }
 import { setQueueLogContext } from '../services/agent/queueOperationLog'
 import { logger } from '../utils/logger'
@@ -1027,6 +1028,7 @@ function reconcileMentionContext(
   const superseded = paths.filter(p =>
     toolTouches.some(t => t.index > msgIndex && samePath(p, t.path)),
   )
+
   if (superseded.length === 0) return ctx
 
   const list = superseded.join(', ')
@@ -1361,6 +1363,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     createSession: (projectPath: string) => {
       const sessionId = generateId('session')
       const now = Date.now()
+      // Clear mention-context telemetry from the previous session so the
+      // stub/saving stats don't bleed into the new session's export.
+      clearMentionContextTracker()
       const session: ChatSession = {
         id: sessionId,
         projectPath,
@@ -3140,6 +3145,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
     loadSessionFromDisk: async (projectPath: string, sessionId: string) => {
       set({ isLoadingSession: true })
+      // Clear mention-context telemetry from the previous session so the
+      // stub/saving stats don't bleed into the loaded session's export.
+      clearMentionContextTracker()
       try {
         const session = await sessionService.loadSession(projectPath, sessionId)
         if (!session) return

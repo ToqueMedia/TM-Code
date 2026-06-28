@@ -204,10 +204,11 @@ describe('resolveMentionContext', () => {
     const r = await resolveMentionContext('fix @packages/web/src/screens/account/AccountCode.tsx')
 
     expect(r.contextText.length).toBeLessThan(8_000)
-    expect(r.contextText).toContain('Mentioned file summary (@mention compacted; full content was NOT injected)')
+    expect(r.contextText).toContain('@mention compact_reference (intentional summary')
     expect(r.contextText).toContain('path: /proj/packages/web/src/screens/account/AccountCode.tsx')
     expect(r.contextText).toContain('language: TypeScript React')
-    expect(r.contextText).toContain('on-demand ref: call read_file')
+    expect(r.contextText).toContain('kind: compact_reference')
+    expect(r.contextText).toContain('read guidance')
     expect(r.contextText).toContain('AccountCodeProps')
     expect(r.contextText).not.toContain('x'.repeat(10_000))
     expect(mockExecutor.markMentionPathAsPartialView).toHaveBeenCalledWith('/proj/packages/web/src/screens/account/AccountCode.tsx')

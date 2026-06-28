@@ -42,6 +42,13 @@ import {
 import { isAtBlockingLimit } from "../../utils/contextWindow";
 import { contentAsText } from "./promptValueHelpers";
 import { inspectAndLogPayload } from "./payloadInspector";
+import { getReadRanges, getAndResetOverlapStats } from "./toolExecutor/readRangeTracker";
+import {
+  clearMentionContextTracker,
+  getAndResetMentionContextStats,
+  recordMentionContextFull,
+  recordMentionContextStub,
+} from "./mentionContextTracker";
 import {
   inferContinuationReason,
   isLegitimateContinuationReason,
@@ -123,6 +130,123 @@ export interface QueryMessage {
 }
 
 export type QueuedSteeringContent = string | ContentBlockAPI[];
+
+function mentionRefId(messageIndex: number): string {
+  return `mc-${messageIndex}`;
+}
+
+function isMentionContextSystemReminder(reminder: string): boolean {
+  return (
+    /Called the (read_file|list_directory) tool with the following input:/.test(reminder) ||
+    /Result of calling the (read_file|list_directory) tool:/.test(reminder) ||
+    /@mention compact_reference/.test(reminder) ||
+    /Mentioned file summary \(@mention compacted; full content was NOT injected\)/.test(reminder)
+  );
+}
+
+function extractMentionContextPath(text: string): string | null {
+  const pathLine = text.match(/^(?:path|filePath):\s*(.+)$/m)?.[1]?.trim();
+  if (pathLine) return pathLine;
+  const jsonPath = text.match(/"file_path"\s*:\s*"([^"]+)"/)?.[1]
+    ?? text.match(/"path"\s*:\s*"([^"]+)"/)?.[1];
+  return jsonPath?.trim() || null;
+}
+
+function buildMentionContextStub(refId: string, paths: string[]): string {
+  const filePath = paths.length > 0 ? paths.join(', ') : '(unknown)';
+  return [
+    '<system-reminder>@mention compact_reference already provided earlier.',
+    `mentionContextRefId: ${refId}`,
+    `filePath: ${filePath}`,
+    'alreadyProvided: true',
+    'Use previous outline or read only missing ranges.</system-reminder>',
+  ].join('\n');
+}
+
+function compactMentionContextText(
+  text: string,
+  refId: string,
+  shouldCompact: boolean,
+): string {
+  const re = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+  const mentionBlocks: string[] = [];
+  const paths: string[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = re.exec(text)) !== null) {
+    const reminder = match[0];
+    if (!isMentionContextSystemReminder(reminder)) continue;
+    mentionBlocks.push(reminder);
+    const path = extractMentionContextPath(reminder);
+    if (path && !paths.includes(path)) paths.push(path);
+  }
+
+  if (mentionBlocks.length === 0) return text;
+
+  const fullBody = mentionBlocks.join('\n');
+  if (!shouldCompact) {
+    recordMentionContextFull(refId, fullBody);
+    return text;
+  }
+
+  const stub = buildMentionContextStub(refId, paths);
+  let inserted = false;
+  const compacted = text.replace(re, (reminder) => {
+    if (!isMentionContextSystemReminder(reminder)) return reminder;
+    if (inserted) return '';
+    inserted = true;
+    return stub;
+  });
+  recordMentionContextStub(refId, fullBody, stub);
+  return compacted.replace(/\n{3,}/g, '\n\n');
+}
+
+/**
+ * Compact historical @-mention context in the exact in-memory payload that is
+ * about to be sent to the provider. The persisted ChatMessage is left intact;
+ * only older user turns in this request get a short reference stub.
+ */
+export function compactHistoricalMentionContextForPayload(
+  messages: QueryMessage[],
+): QueryMessage[] {
+  let lastNonSystemIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user' || messages[i].role === 'assistant') {
+      lastNonSystemIndex = i;
+      break;
+    }
+  }
+
+  let changed = false;
+  const next = messages.map((msg, index): QueryMessage => {
+    if (msg.role !== 'user') return msg;
+    const shouldCompact = index < lastNonSystemIndex;
+    const refId = mentionRefId(index);
+
+    if (typeof msg.content === 'string') {
+      const content = compactMentionContextText(msg.content, refId, shouldCompact);
+      if (content === msg.content) return msg;
+      changed = true;
+      return { ...msg, content };
+    }
+
+    if (!Array.isArray(msg.content)) return msg;
+
+    let partsChanged = false;
+    const content = msg.content.map((block) => {
+      if (block.type !== 'text') return block;
+      const text = compactMentionContextText(block.text, refId, shouldCompact);
+      if (text === block.text) return block;
+      partsChanged = true;
+      return { ...block, text };
+    });
+    if (!partsChanged) return msg;
+    changed = true;
+    return { ...msg, content };
+  });
+
+  return changed ? next : messages;
+}
 
 function steeringContentToUserMessage(content: QueuedSteeringContent): QueryMessage {
   return {
@@ -987,6 +1111,13 @@ export async function* query(
     // Filter incomplete tool calls (orphaned tool_use without tool_result)
     messagesForQuery = filterIncompleteToolCalls(messagesForQuery);
 
+    // Compact historical @-mention context in the exact payload about to be
+    // sent. The first turn keeps the full body; subsequent internal turns send
+    // a short ref stub. Reset telemetry here so exports reflect this final
+    // provider payload, not earlier persisted-history reconstruction.
+    clearMentionContextTracker();
+    messagesForQuery = compactHistoricalMentionContextForPayload(messagesForQuery);
+
     // Ensure message alternation: Anthropic requires user/assistant/user/...
     // NOTE: This synthetic assistant message was removed — it caused the model
     // to see 'Understood. What would you like me to do next?' as its own prior
@@ -1722,6 +1853,7 @@ export async function* query(
           cacheCreationInputTokens,
           cacheReadInputTokens,
           estimatedInputTokens: payloadReport?.totalEstimatedTokens ?? 0,
+          estimatedInputTokensBreakdown: payloadReport?.estimatedInputTokensBreakdown,
           totalMessages: payloadReport?.totalMessages,
           toolCount: payloadReport?.toolCount,
           toolCountTotal: payloadReport?.toolCountTotal,
@@ -1751,6 +1883,24 @@ export async function* query(
           routerDiagnostics: auxiliarySelection?.routerDiagnostics,
           expandedToolNames: toolsetSelector?.getExpandedNames(),
           deniedToolNames: toolsetSelector?.getDeniedNames(),
+          // ── Read Range Tracker telemetry (overlap dedup) ──
+          // readRanges/skippedOverlappingReads/adjustedReadRanges reflect
+          // tool calls executed between the previous request and this one;
+          // getAndResetOverlapStats() resets the counters each call.
+          readRanges: getReadRanges(),
+          ...(() => {
+            const s = getAndResetOverlapStats()
+            return {
+              skippedOverlappingReads: s.skippedOverlappingReads,
+              adjustedReadRanges: s.adjustedReadRanges,
+            }
+          })(),
+          // ── Mention context redundancy telemetry (Correção B) ──
+          // mentionContextSentFullThisTurn=false means the follow-up-turn
+          // stub fired (full outline replaced by a short reference);
+          // mentionContextRepeatedTokens is the token saving vs re-sending
+          // the full body. Both reset each turn.
+          ...getAndResetMentionContextStats(),
         })
       } catch { /* usage logging never blocks the agent loop */ }
     }

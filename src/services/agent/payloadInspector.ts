@@ -99,6 +99,25 @@ export interface PayloadReport {
   auxiliaryPromptCandidates: PromptSectionInfo[]
   /** Estimated tokens contributed by the tool definitions (schemas). */
   toolDefsTokens: number
+  /**
+   * Decomposition of `totalEstimatedTokens` by category, so an export can
+   * prove the estimate is system + user + mention + assistant + tool_result
+   * + tool_defs WITHOUT double-counting the system prompt. The message
+   * role:system already lives in byCategory.system; systemPromptTokens is
+   * kept as an attribute only and is NOT re-added to the total.
+   */
+  estimatedInputTokensBreakdown: {
+    system: number
+    userText: number
+    mentionContext: number
+    assistantText: number
+    toolCall: number
+    toolResult: number
+    thinking: number
+    toolDefs: number
+    /** Sum of the above — equals totalEstimatedTokens. */
+    total: number
+  }
   /** Number of tool definitions sent in THIS request (after dynamic selection). */
   toolCount: number
   /** Total tools available (before dynamic selection). Equal to toolCount when no selector is active. */
@@ -297,6 +316,8 @@ function isMentionContextReminder(text: string): boolean {
   return (
     /Called the (read_file|list_directory) tool with the following input:/.test(text) ||
     /Result of calling the (read_file|list_directory) tool:/.test(text) ||
+    /@mention compact_reference/.test(text) ||
+    /alreadyProvided:\s*true[\s\S]*mentionContextRefId|mentionContextRefId[\s\S]*alreadyProvided:\s*true/.test(text) ||
     /Mentioned file summary \(@mention compacted; full content was NOT injected\)/.test(text) ||
     /via @-mention/.test(text)
   )
@@ -479,10 +500,35 @@ export function inspectPayload(
   const systemPromptTokens = systemPrompt ? roughTokenEstimate(systemPrompt) : 0
   const { systemPromptSections, auxiliaryPromptCandidates } = analyzeSystemPrompt(systemPrompt)
   const mentionContextTokens = byCategory.mention_context?.tokens ?? 0
-  const totalEstimatedTokens =
-    systemPromptTokens +
-    toolDefsTokens +
-    Object.values(byCategory).reduce((sum, c) => sum + c.tokens, 0)
+  // NOTE: the system prompt travels inside apiMessages as a role:system
+  // message, so byCategory.system ALREADY accounts for it. Adding
+  // systemPromptTokens on top double-counts it — confirmed against the
+  // exported session (turn 1: breakdown.system=21790 + systemPromptTokens
+  // 21790 + tool_defs 2010 + user/mention 3291 == 48891 == the old buggy
+  // estimate, ~29K above the real inputTokens). We now sum byCategory
+  // (which includes system) + tool_defs only, and keep systemPromptTokens
+  // as an attribute for reference.
+  const estimatedInputTokensBreakdown = {
+    system: byCategory.system?.tokens ?? 0,
+    userText: byCategory['user-text']?.tokens ?? 0,
+    mentionContext: byCategory.mention_context?.tokens ?? 0,
+    assistantText: byCategory['assistant-text']?.tokens ?? 0,
+    toolCall: byCategory.tool_call?.tokens ?? 0,
+    toolResult: byCategory.tool_result?.tokens ?? 0,
+    thinking: byCategory.thinking?.tokens ?? 0,
+    toolDefs: toolDefsTokens,
+    total: 0,
+  }
+  estimatedInputTokensBreakdown.total =
+    estimatedInputTokensBreakdown.system +
+    estimatedInputTokensBreakdown.userText +
+    estimatedInputTokensBreakdown.mentionContext +
+    estimatedInputTokensBreakdown.assistantText +
+    estimatedInputTokensBreakdown.toolCall +
+    estimatedInputTokensBreakdown.toolResult +
+    estimatedInputTokensBreakdown.thinking +
+    estimatedInputTokensBreakdown.toolDefs
+  const totalEstimatedTokens = estimatedInputTokensBreakdown.total
 
   // Top 10 largest blocks
   const topBlocks = [...blocks].sort((a, b) => b.tokens - a.tokens).slice(0, 10)
@@ -540,6 +586,7 @@ export function inspectPayload(
     systemPromptSections,
     auxiliaryPromptCandidates,
     toolDefsTokens,
+    estimatedInputTokensBreakdown,
     toolCount: tools?.length ?? 0,
     toolCountTotal: totalToolCount ?? tools?.length ?? 0,
     continuationReason,

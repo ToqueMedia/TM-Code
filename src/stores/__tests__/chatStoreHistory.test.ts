@@ -125,11 +125,23 @@ describe('rebuildConversationHistory — @-mention staleness reconciliation', ()
     expect(text).toContain('/abs/config.ts')
   })
 
-  it('keeps the snapshot verbatim when the file was NOT later touched', () => {
+  it('keeps the full snapshot in rebuilt history when the file was not later touched', () => {
     const history = rebuildConversationHistory([
       userWithMention('look at @/abs/config.ts', SNAPSHOT, ['/abs/config.ts']),
       { id: 'a1', role: 'assistant', content: 'just talking', timestamp: ts },
     ])
+    const text = lastUserText(history)
+    // Provider payload compaction happens later in query.ts, against the final
+    // in-memory request. Rebuilt persisted history keeps the source body.
+    expect(text).toContain('OLD CONTENT')
+    expect(text).toContain('/abs/config.ts')
+  })
+
+  it('keeps the full snapshot on the FIRST turn (no following content)', () => {
+    const history = rebuildConversationHistory([
+      userWithMention('look at @/abs/config.ts', SNAPSHOT, ['/abs/config.ts']),
+    ])
+    // First turn → the model has never seen the outline; emit it in full.
     expect(lastUserText(history)).toContain('OLD CONTENT')
   })
 

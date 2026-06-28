@@ -246,21 +246,24 @@ function renderLargeMentionSummary(absolutePath: string, content: string, ext: s
   const outlineText = outline.length
     ? outline.map(item => `- ${item}`).join('\n')
     : '- No top-level symbols detected by the lightweight outline extractor.'
+  const previewEndLine = preview.lineCount
+  const hasMore = content.length > preview.text.length
   return [
-    `Mentioned file summary (@mention compacted; full content was NOT injected):`,
+    `@mention compact_reference (intentional summary — full file body was NOT inlined to save context tokens):`,
     `path: ${absolutePath}`,
     `language: ${languageForExtension(ext)}`,
     `size: ${content.length.toLocaleString()} chars, ${preview.totalLines.toLocaleString()} lines`,
-    `read status: partial @mention view only — this does NOT count as a full read_file for edit_file/write_file.`,
-    `on-demand ref: call read_file with {"file_path":"${absolutePath}","offset":1,"limit":200} and adjust offset/limit for the needed range.`,
+    `kind: compact_reference — this is an on-demand outline, NOT a truncated_tool_result (a truncated_tool_result is a read_file body cut by the byte cap; this is a deliberate summary).`,
+    `edit guard: this compact_reference does NOT count as a full read_file; call read_file for the exact range before edit_file/write_file.`,
+    `read guidance: the outline + preview below cover lines 1–${previewEndLine}. Use read_file ONLY for the specific range you still need (offset/limit). Do NOT re-read ranges already covered by this preview or by a previous read_file.`,
     ``,
     `outline:`,
     outlineText,
     ``,
     `preview (first ${preview.lineCount} lines / ${Math.min(content.length, preview.text.length).toLocaleString()} chars):`,
     preview.text,
-    content.length > preview.text.length
-      ? `\n[preview truncated; use read_file("${absolutePath}", offset, limit) for the exact range before editing]`
+    hasMore
+      ? `\n[preview covers lines 1–${previewEndLine} of ${preview.totalLines}; call read_file with offset:${previewEndLine + 1} to continue from here if needed]`
       : '',
   ].join('\n')
 }

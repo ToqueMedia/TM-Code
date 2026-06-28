@@ -156,6 +156,19 @@ pub struct FileSignature {
     pub sha256: String,
 }
 
+/// Cheap file stat — size + modification time only, NO content read, NO
+/// SHA-256. Mirrors claude-vaz's `getFileModificationTimeAsync` (a single
+/// `stat` syscall) used by the Read dedup freshness gate. `file_signature`
+/// reads the whole file to hash it, which defeats the dedup fast-path; this
+/// command lets the frontend prove a file is unchanged in O(1).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FileStat {
+    pub path: String,
+    pub size: u64,
+    pub modified_ms: Option<u64>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadFileWithSignatureResult {
@@ -912,6 +925,34 @@ pub async fn file_signature(path: String) -> Result<FileSignature> {
         size: metadata.len(),
         modified_ms: modified_ms(&metadata),
         sha256,
+    })
+}
+
+/// Cheap stat (metadata only — no content read, no hashing). Returns the
+/// file size and modification time so the frontend's read-dedup freshness
+/// gate can prove a file is unchanged without re-reading it (parity with
+/// claude-vaz `getFileModificationTimeAsync`). Throws PathNotFound for
+/// missing files and InvalidOperation for directories.
+#[tauri::command]
+pub async fn file_stat(path: String) -> Result<FileStat> {
+    let file_path = Path::new(&path);
+    let canonical = validate_path_safe(file_path)?;
+
+    if !canonical.exists() {
+        return Err(FileTreeError::PathNotFound(path));
+    }
+
+    if canonical.is_dir() {
+        return Err(FileTreeError::InvalidOperation(
+            "Path is a directory".to_string(),
+        ));
+    }
+
+    let metadata = tokio::fs::metadata(&canonical).await?;
+    Ok(FileStat {
+        path: normalize_path_for_frontend(&canonical),
+        size: metadata.len(),
+        modified_ms: modified_ms(&metadata),
     })
 }
 

@@ -536,6 +536,20 @@ export interface RequestUsageEntry {
   /** payloadInspector's pre-request estimate (ceil(chars/3)). Compare
    *  against the real inputTokens per request to gauge estimator accuracy. */
   estimatedInputTokens: number
+  /** Decomposition of estimatedInputTokens by category (system, userText,
+   *  mentionContext, assistantText, toolCall, toolResult, thinking, toolDefs,
+   *  total). Proves the estimate doesn't double-count the system prompt. */
+  estimatedInputTokensBreakdown?: {
+    system: number
+    userText: number
+    mentionContext: number
+    assistantText: number
+    toolCall: number
+    toolResult: number
+    thinking: number
+    toolDefs: number
+    total: number
+  }
   /** Number of messages sent to the provider in this request. */
   totalMessages?: number
   /** Number of tool definitions sent in this request. */
@@ -550,6 +564,29 @@ export interface RequestUsageEntry {
   continuationReason?: string
   /** Estimated tokens from @mention synthetic context specifically. */
   mentionContextTokens?: number
+  /** ── Mention context redundancy (Correção B) ──
+   *  When the mention context is sent as a short reference stub instead of
+   *  the full outline (turns > 1), this is the token SAVING vs the full body.
+   *  0 on the first turn (full outline sent) and whenever there's no mention. */
+  mentionContextRepeatedTokens?: number
+  /** True when the FULL mention outline was sent this turn; false when only a
+   *  short reference stub was sent (follow-up turns). Lets an export prove the
+   *  stub-path actually kicked in. */
+  mentionContextSentFullThisTurn?: boolean
+  /** Stable id for the mention context block, so the export can correlate the
+   *  stub reference back to the turn that carried the full outline. */
+  mentionContextRefId?: string
+  /** ── Read Range Tracker (Correção C) ──
+   *  Per-file read ranges the agent has read so far this session (offset/limit,
+   *  1-indexed; undefined limit = read-to-EOF). Exported so the overlap
+   *  dedup decisions are auditable. */
+  readRanges?: Array<{ path: string; offset?: number; limit?: number }>
+  /** Number of read_file calls skipped this turn because the requested range
+   *  was already fully covered by a previous read. */
+  skippedOverlappingReads?: number
+  /** Number of read_file calls adjusted this turn because the requested range
+   *  was partially covered — the call was narrowed to the missing sub-range. */
+  adjustedReadRanges?: number
   /** payloadInspector's per-category breakdown (system, tool_result,
    *  tool_call, text, etc.) — blocks/tokens/chars each. */
   breakdown: Record<string, { blocks: number; tokens: number; chars: number }>

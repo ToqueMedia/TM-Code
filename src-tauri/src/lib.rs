@@ -1264,6 +1264,7 @@ pub fn run() {
             rename_file_or_directory,
             read_file,
             file_signature,
+            file_stat,
             read_file_with_signature,
             path_exists,
             has_database_file,

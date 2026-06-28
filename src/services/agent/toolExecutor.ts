@@ -37,7 +37,10 @@ import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import { READ_FILE, WRITE_FILE, EDIT_FILE, STOP_DEV_SERVER } from './toolNames'
 import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileStateCache } from './toolExecutor/fileStateCache'
-import { checkReadDedup } from './toolExecutor/readDedup'
+import { FILE_UNCHANGED_STUB } from './toolExecutor/readDedup'
+import { recordReadRange, clearReadRangeTracker } from './toolExecutor/readRangeTracker'
+import { addLineNumbers } from './toolExecutor/lineNumbers'
+import { hasBinaryExtension } from './toolExecutor/binaryExtensions'
 import { getSnippetForTwoFileDiff } from './toolExecutor/changedFileSnippet'
 import { extractReadFilesFromMessages } from './toolExecutor/readStateRecovery'
 import { getLegacyProjectStateDir, getProjectStateDir } from '../projectStatePaths'
@@ -411,6 +414,7 @@ class ToolExecutor {
   resetSessionState(): void {
     this.readFileTimestamps.clear()
     this.readFileState.clear()
+    clearReadRangeTracker()
     this.largeResults.clear()
     this.largeResultsTotalBytes = 0
     this.largeResultRangesShown.clear()
@@ -2233,33 +2237,38 @@ ${preview}
         
         // Detect "provided" BEFORE clamping — Math.max(1, 0) would turn
         // a missing offset into 1 and make sliceRequested always true.
-        const offsetProvided = typeof input.offset === 'number' && input.offset > 0
-        const limitProvided = typeof input.limit === 'number' && input.limit > 0
-        const offset = offsetProvided ? Math.max(1, input.offset as number) : 1
-        const limit = limitProvided ? Math.max(1, input.limit as number) : 0
-        const sliceRequested = offsetProvided || limitProvided
+        let offsetProvided = typeof input.offset === 'number' && input.offset > 0
+        let limitProvided = typeof input.limit === 'number' && input.limit > 0
+        let offset = offsetProvided ? Math.max(1, input.offset as number) : 1
+        let limit = limitProvided ? Math.max(1, input.limit as number) : 0
+        let sliceRequested = offsetProvided || limitProvided
         await this.requirePathAccess(filePath)
 
-        // ── Dedup check ──────────────────────────────────────────────
-        // If we've already read this exact file+range and no writes have
-        // occurred since (fsVersion unchanged), return a short stub instead
-        // of re-sending the full content. The earlier tool_result is still
-        // in the conversation context — two full copies waste cache_creation
-        // tokens. First tries fsVersion (O(1)); if that misses, the signature
-        // preflight below can prove the file unchanged without reading its
-        // full body. Exact content equality remains the fallback.
-        // Mirrors claude-vaz FileReadTool.ts:523-573 with a Tauri-specific
-        // fallback for the global fsVersion false-negative case.
         const currentFsVersion = getFsVersion()
-        const dedupResult = checkReadDedup(
-          filePath,
-          offsetProvided ? offset : undefined,
-          limitProvided ? limit : undefined,
-          this.readFileState,
-          currentFsVersion,
-        )
-        if (dedupResult.isDuplicate && dedupResult.stub) {
-          return dedupResult.stub
+
+        // ── Overlap dedup: DISABLED for parity with claude-vaz ───────
+        // claude-vaz (FileReadTool.ts:523-573) only stubs a re-read when
+        // offset+limit match a prior read EXACTLY AND the file's mtime is
+        // unchanged on disk — it trusts the model to re-read overlapping
+        // ranges when it judges it needs to. The multi-range overlap
+        // tracker (readRangeTracker.ts) used to block fully-covered ranges
+        // and silently narrow partially-covered ones, which was MORE
+        // aggressive than Claude and could intercept a re-read the model
+        // genuinely wanted (e.g. after an external edit that didn't bump
+        // fsVersion). Disabled to match Claude's "trust the model" stance.
+        // recordReadRange() below still populates ranges for telemetry
+        // (readRanges export); it never blocks or narrows.
+        // To re-enable, call checkReadRangeOverlap() here and act on
+        // overlap.kind ('fully_covered' → return stub; 'partially_covered'
+        // → adjust offset/limit).
+
+        // ── Binary check (pre-read, claude-vaz parity) ──────────────
+        // claude-vaz rejects binary files by extension before reading
+        // (constants/files.ts hasBinaryExtension). The TM is text-only
+        // (Rust read_to_string), so reject all binary extensions up-front
+        // with a short error rather than letting UTF-8 decode fail.
+        if (hasBinaryExtension(filePath)) {
+          return `Error: ${filePath} is a binary file. read_file only supports text files. Use a dedicated tool to inspect binary content.`
         }
 
         try {
@@ -2269,41 +2278,67 @@ ${preview}
           const existingState = this.readFileState.get(filePath)
           let currentSignature: FileContentSignature | undefined
 
-          // Signature preflight: when fsVersion changed because another file
-          // was written, prove this path is unchanged before fetching its full
-          // body again. SHA-256 is computed in Rust and returns only metadata.
+          // ── Pre-read stat: size guard + dedup freshness (claude-vaz parity) ──
+          // claude-vaz does a single getFileModificationTimeAsync(path) stat
+          // — O(1), no content read — to (a) reject >256KB files pre-read
+          // (limits.ts) and (b) gate read dedup on the file's actual mtime
+          // (FileReadTool.ts:523-573). The Rust `file_stat` command mirrors
+          // that: size + modifiedMs only, no SHA-256. This replaces the prior
+          // fsVersion gate (a global counter that doesn't advance on external
+          // edits — formatters/git pull/manual edits — so it could stub a
+          // re-read of a file that had actually changed) and the expensive
+          // SHA-256 signature preflight (which read the whole file to hash
+          // it, defeating the dedup fast-path).
+          let preStat: { size: number; modifiedMs: number | null } | undefined
+          try {
+            preStat = await invoke<{ size: number; modifiedMs: number | null }>('file_stat', { path: filePath })
+          } catch {
+            // stat failed (file missing / unreadable / directory) — fall
+            // through to read_file_with_signature, which errors helpfully
+            // (File not found / Cannot read binary file as text).
+            preStat = undefined
+          }
+
+          // (a) Size guard, pre-read — claude-vaz limits.ts throws before
+          // reading a >256KB file; we now match that instead of reading the
+          // whole body first. Skipped when slicing (the slice IS the
+          // refinement path the error would recommend).
+          if (preStat && !sliceRequested && preStat.size > MAX_FILE_BYTES) {
+            void import('../../services/analytics').then(({ trackEvent }) => {
+              trackEvent('read_file_oversize_throw', {
+                path: filePath,
+                size_kb: Math.round(preStat.size / 1024),
+              })
+            }).catch(() => {})
+            return `Error: File is ${(preStat.size / 1024).toFixed(1)} KB which exceeds the 256 KB read cap. Use \`offset\` + \`limit\` to read a line range, or use search_files / glob to locate specific content. Reading the whole file would saturate the output budget for one call.`
+          }
+
+          // (b) Dedup freshness — claude-vaz FileReadTool.ts:523-573:
+          // only stub when offset+limit match a prior read EXACTLY AND the
+          // file's mtime is unchanged on disk. fsVersion is no longer the
+          // gate (it missed external edits). The cached mtime lives in the
+          // FileContentSignature captured at the prior read.
           if (
             existingState?.source === 'read' &&
             !existingState.isPartialView &&
-            existingState.signature &&
             existingState.offset === requestedOffset &&
-            existingState.limit === requestedLimit
+            existingState.limit === requestedLimit &&
+            existingState.signature?.modifiedMs !== undefined &&
+            existingState.signature?.modifiedMs !== null &&
+            preStat?.modifiedMs !== undefined &&
+            preStat?.modifiedMs !== null &&
+            preStat.modifiedMs === existingState.signature.modifiedMs
           ) {
-            try {
-              currentSignature = await invoke<FileContentSignature>('file_signature', { path: filePath })
-              const signatureDedupResult = checkReadDedup(
-                filePath,
-                requestedOffset,
-                requestedLimit,
-                this.readFileState,
-                currentFsVersion,
-                undefined,
-                currentSignature,
-              )
-              if (signatureDedupResult.isDuplicate && signatureDedupResult.stub) {
-                const now = Date.now()
-                this.readFileTimestamps.set(filePath, { timestamp: now, hash: existingState.hash })
-                this.readFileState.set(filePath, {
-                  ...existingState,
-                  timestamp: now,
-                  signature: currentSignature,
-                  fsVersion: currentFsVersion,
-                })
-                return signatureDedupResult.stub
-              }
-            } catch {
-              currentSignature = undefined
-            }
+            const now = Date.now()
+            this.readFileTimestamps.set(filePath, { timestamp: now, hash: existingState.hash })
+            // Refresh fsVersion on the cached entry so downstream
+            // fsVersion-keyed caches (ipcCache, prompt cache) stay coherent.
+            this.readFileState.set(filePath, {
+              ...existingState,
+              timestamp: now,
+              fsVersion: currentFsVersion,
+            })
+            return FILE_UNCHANGED_STUB
           }
 
           const readResult = await invoke<ReadFileWithSignatureResult>('read_file_with_signature', { path: filePath })
@@ -2311,59 +2346,20 @@ ${preview}
           currentSignature = readResult.signature
           const newHash = this.simpleHash(fullContent)
 
-          // Second-stage dedup: fsVersion is intentionally global, so a write
-          // to any other file makes the cheap pre-read dedup miss. After this
-          // read, compare the exact content against the model-visible cache and
-          // return a stub if it is identical. This still costs disk/IPC, but it
-          // prevents duplicate file bodies from being billed as model tokens.
-          const exactDedupResult = checkReadDedup(
-            filePath,
-            offsetProvided ? offset : undefined,
-            limitProvided ? limit : undefined,
-            this.readFileState,
-            currentFsVersion,
-            fullContent,
-            currentSignature,
-          )
-          if (exactDedupResult.isDuplicate && exactDedupResult.stub) {
-            const now = Date.now()
-            this.readFileTimestamps.set(filePath, { timestamp: now, hash: newHash })
-            const existingStateAfterRead = this.readFileState.get(filePath)
-            this.readFileState.set(filePath, {
-              content: fullContent,
-              timestamp: now,
-              offset: requestedOffset,
-              limit: requestedLimit,
-              source: 'read',
-              signature: currentSignature,
-              hash: newHash,
-              fsVersion: currentFsVersion,
-              isPartialView: existingStateAfterRead?.isPartialView,
-            })
-            return exactDedupResult.stub
-          }
-
-          // Byte-size guard (claude-vaz adoption, FileReadTool/limits.ts).
-          // The cheap pre-flight stat that claude-vaz uses isn't available
-          // on the Rust side yet, so we check AFTER read — still buys us
-          // throw-and-instruct (the 256 KB doesn't ship to the model;
-          // only a ~150-byte error does), which the claude-vaz #21841
-          // experiment showed beats auto-truncation in mean token cost.
-          // Skipped when the model is explicitly slicing — that's the
-          // refinement path the error tells it to use.
-          if (!sliceRequested && fullContent.length > MAX_FILE_BYTES) {
-            void import('../../services/analytics').then(({ trackEvent }) => {
-              trackEvent('read_file_oversize_throw', {
-                path: filePath,
-                size_kb: Math.round(fullContent.length / 1024),
-              })
-            }).catch(() => {})
-            return `Error: File is ${(fullContent.length / 1024).toFixed(1)} KB which exceeds the 256 KB read cap. Use \`offset\` + \`limit\` to read a line range, or use search_files / glob to locate specific content. Reading the whole file would saturate the output budget for one call.`
-          }
+          // (Second-stage content dedup + post-read byte-size guard removed
+          // for claude-vaz parity: claude-vaz gates dedup solely on mtime
+          // (done above via file_stat) and rejects >256KB pre-read (done
+          // above via file_stat.size). Re-adding a post-read content
+          // equality check would diverge from Claude's "stat is the gate"
+          // model.)
 
           // Apply line-based slice if requested. Lines are 1-indexed for
-          // model parity with Claude Code's Read tool.
+          // model parity with Claude Code's Read tool. The truncation suffix
+          // is kept separate so addLineNumbers (cat -n) only numbers the
+          // actual file body, not the metadata line.
           let content = fullContent
+          let truncationSuffix = ''
+          const startLine = sliceRequested ? offset : 1
           if (sliceRequested) {
             const lines = fullContent.split('\n')
             const start = Math.max(0, offset - 1)
@@ -2373,7 +2369,7 @@ ${preview}
             content = slice.join('\n')
             if (hasMore) {
               const nextOffset = end + 1
-              content += `\n\n[truncated at line ${end} of ${lines.length}; use offset: ${nextOffset} to continue]`
+              truncationSuffix = `\n\n[truncated at line ${end} of ${lines.length}; use offset: ${nextOffset} to continue]`
             }
           }
           // Detect external modification BEFORE overwriting the stored
@@ -2383,8 +2379,10 @@ ${preview}
           // this map on success) — something else touched the file
           // (formatter, git pull, manual edit, dev server output). Inject
           // a system-reminder INSIDE the tool result so the model sees
-          // it in the same turn the read completes. Same shape as
-          // claude-vaz FileReadTool.ts:706-730.
+          // it in the same turn the read completes.
+          // NOTE: claude-vaz does NOT inject this reminder (it relies on
+          // the mtime stat to either stub-or-read; when it reads changed
+          // content it just sends it). Kept here as a TM-specific aid.
           const prev = this.readFileTimestamps.get(filePath)
           const externalChange = prev !== undefined && prev.hash !== newHash
 
@@ -2397,8 +2395,8 @@ ${preview}
           // ── Update content cache ────────────────────────────────────
           // Store the file content in the cache for dedup and state recovery.
           // offset/limit reflect what was actually requested so future dedup
-          // checks can match exact ranges. fsVersion is captured so the
-          // dedup freshness check is O(1) — no need to re-read the file.
+          // checks can match exact ranges. fsVersion is captured so downstream
+          // fsVersion-keyed caches (ipcCache, prompt cache) stay coherent.
           this.readFileState.set(filePath, {
             content: fullContent,
             timestamp: now,
@@ -2410,16 +2408,39 @@ ${preview}
             fsVersion: currentFsVersion,
           })
 
+          // ── Record range in the overlap tracker ────────────────────
+          // Inert telemetry (overlap interception is disabled — see the
+          // disabled checkReadRangeOverlap block above). recordReadRange
+          // still populates the readRanges export; it never blocks/narrows.
+          recordReadRange(filePath, requestedOffset, requestedLimit, currentFsVersion)
+
           // Empty content: distinguish "file is empty" (no slice requested,
           // file genuinely has no bytes) from "slice past EOF" (model paged
-          // beyond the last line) — generic "empty" message would mislead.
+          // beyond the last line). Wording mirrors claude-vaz
+          // FileReadTool.ts mapToolResultToToolResultBlockParam.
           if (content.length === 0) {
             if (sliceRequested && fullContent.length > 0) {
               const totalLines = fullContent.split('\n').length
-              return `<system-reminder>The slice (offset ${offset}${limit > 0 ? `, limit ${limit}` : ''}) is past the end of the file. The file has ${totalLines} lines; pick an offset within range.</system-reminder>`
+              return `<system-reminder>Warning: the file exists but is shorter than the provided offset (${offset}). The file has ${totalLines} lines.</system-reminder>`
             }
-            return '<system-reminder>The file exists but the contents are empty.</system-reminder>'
+            return '<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>'
           }
+
+          // cat -n line numbers (claude-vaz parity — addLineNumbers). The
+          // model relies on these to target offset/limit and edit ranges.
+          // Only applied when the numbered result stays under the truncation
+          // threshold (12_000 chars = ToolExecutor.getToolResultMaxChars('read_file')):
+          // larger outputs flow through truncateResult → a char-offset preview
+          // + read_large_result paging, where numbering a partial char-window
+          // would mislead (line numbers wouldn't track real file lines across
+          // a sliced preview, and read_large_result's char offset would land
+          // mid-prefix). claude-vaz avoids this by throwing past 25k tokens
+          // instead of previewing; the TM's preview path is a divergence for
+          // large files only.
+          const READ_TRUNCATION_THRESHOLD = 12_000
+          const numbered = addLineNumbers(content, startLine)
+          const displayContent =
+            numbered.length < READ_TRUNCATION_THRESHOLD ? numbered : content
 
           if (externalChange) {
             const reminder =
@@ -2428,10 +2449,10 @@ ${preview}
               + 'touched it). Treat the content below as authoritative; assumptions from the previous '
               + 'read are stale and any planned edit must be reconciled against this new content.'
               + '</system-reminder>\n\n'
-            return reminder + content
+            return reminder + displayContent + truncationSuffix
           }
 
-          return content
+          return displayContent + truncationSuffix
         } catch (error) {
           // formatError handles Tauri's plain-object throws — the previous
           // `String(error)` could yield "[object Object]" which both swallowed

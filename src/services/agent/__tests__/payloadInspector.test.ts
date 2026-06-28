@@ -56,4 +56,26 @@ describe('payloadInspector system-prompt analysis', () => {
     expect(report.byCategory.mention_context?.tokens).toBe(report.mentionContextTokens)
     expect(report.byCategory['user-text']?.tokens).toBeGreaterThan(0)
   })
+
+  it('accounts compact @mention reference stubs as mention context', () => {
+    const stub = [
+      '<system-reminder>@mention compact_reference already provided earlier.',
+      'mentionContextRefId: mc-0',
+      'filePath: /proj/src/a.ts',
+      'alreadyProvided: true',
+      'Use previous outline or read only missing ranges.</system-reminder>',
+    ].join('\n')
+
+    const report = inspectPayload(
+      [{ role: 'user', content: `continue\n${stub}` }],
+      undefined,
+      [],
+      'test-model',
+      2,
+    )
+
+    expect(report.mentionContextTokens).toBeGreaterThan(0)
+    expect(report.byCategory.mention_context?.tokens).toBe(report.mentionContextTokens)
+    expect(report.byCategory.mention_context?.tokens).toBeLessThan(100)
+  })
 })

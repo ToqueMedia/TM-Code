@@ -209,6 +209,7 @@ jest.mock('../../browserSessionManager', () => ({
 // ═══════════════════════════════════════════════════════════════════════
 
 import ToolExecutor from '../toolExecutor'
+import { clearReadRangeTracker } from '../toolExecutor/readRangeTracker'
 // agentStore is NOT mocked — update_tasks drives the real Zustand store, so
 // the evidence-guard tests seed and assert against it directly.
 import { useAgentStore } from '../../../stores/agentStore'
@@ -253,6 +254,10 @@ beforeEach(() => {
   mockCurrentProject.path = '/projects/test-app'
   mockGetState_settings.mockReturnValue({ flaggedCommands: [] })
   mockInvokeImpl.mockResolvedValue('' as never)
+  // Clear the multi-range overlap tracker between tests so each test starts
+  // with a clean slate (otherwise a prior test's read range stubs the next
+  // test's read of the same file).
+  clearReadRangeTracker()
 })
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -469,7 +474,7 @@ describe('A: execute() orchestration', () => {
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/app.tsx' })
 
-    expect(result).toBe('plain text content')
+    expect(result).toBe('     1→plain text content')
   })
 
   it('passes _toolCallId and _abortSignal without error', async () => {
@@ -630,7 +635,7 @@ describe('C: Plan mode', () => {
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/app.tsx' })
 
     expect(result).not.toContain('Blocked')
-    expect(result).toBe('plan content')
+    expect(result).toBe('     1→plan content')
   })
 
   it('allows write_file to PLAN.md at project root in plan mode', async () => {
@@ -721,7 +726,7 @@ describe('C: Plan mode', () => {
     // Should work normally now
     mockInvokeImpl.mockResolvedValue('content' as never)
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/app.tsx' })
-    expect(result).toBe('content')
+    expect(result).toBe('     1→content')
   })
 
   it('resets plan progress flags on enablePlanMode (each /plan starts clean)', async () => {
@@ -799,7 +804,7 @@ describe('D: CMD mode', () => {
     })
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/app.tsx' })
-    expect(result).toBe('content')
+    expect(result).toBe('     1→content')
   })
 
   it('path outside CMD cwd is rejected', async () => {
@@ -834,7 +839,7 @@ describe('D: CMD mode', () => {
     // After disabling CMD mode, path is validated against project root
     mockInvokeImpl.mockResolvedValue('content' as never)
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/app.tsx' })
-    expect(result).toBe('content')
+    expect(result).toBe('     1→content')
   })
 
   it('edit_file in CMD mode calls edit_literal_replace', async () => {
@@ -1058,7 +1063,7 @@ describe('G: Truncation and large results', () => {
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/small.txt' })
 
-    expect(result).toBe(smallContent)
+    expect(result).toBe('     1→' + smallContent)
     expect(result).not.toContain('system-reminder')
   })
 
@@ -1375,7 +1380,7 @@ describe('J: Path validation', () => {
     mockInvokeImpl.mockResolvedValue('content' as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/src/app.tsx' })
-    expect(result).toBe('content')
+    expect(result).toBe('     1→content')
   })
 
   it('rejects paths outside the project root', async () => {
@@ -1398,7 +1403,7 @@ describe('J: Path validation', () => {
 
     // /projects/test-app/src/../app.tsx → /projects/test-app/app.tsx (still inside)
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/src/../app.tsx' })
-    expect(result).toBe('content')
+    expect(result).toBe('     1→content')
   })
 
   it('CMD mode uses cmdModeCwd for path validation', async () => {
@@ -1411,7 +1416,7 @@ describe('J: Path validation', () => {
       mockInvokeImpl.mockResolvedValue('content' as never)
 
       const result = await exec.execute('read_file', { file_path: '/other/root/file.txt' })
-      expect(result).toBe('content')
+      expect(result).toBe('     1→content')
     } finally {
       mockCurrentProject.path = originalPath
     }
@@ -1473,10 +1478,10 @@ describe('J: Path validation', () => {
     mockInvokeImpl.mockResolvedValue('content' as never)
 
     const result = await exec.execute('read_file', { file_path: 'PLAN.md' })
-    expect(result).toBe('content')
+    expect(result).toBe('     1→content')
 
     const nestedResult = await exec.execute('read_file', { file_path: './src/app.tsx' })
-    expect(nestedResult).toBe('content')
+    expect(nestedResult).toBe('     1→content')
   })
 
   it('rejects relative paths that traverse outside project root using dot-dots', async () => {
@@ -1490,10 +1495,10 @@ describe('J: Path validation', () => {
     mockInvokeImpl.mockResolvedValue('win-content' as never)
 
     const result = await exec.execute('read_file', { file_path: 'src\\components\\Button.tsx' })
-    expect(result).toBe('win-content')
+    expect(result).toBe('     1→win-content')
 
     const prefixResult = await exec.execute('read_file', { file_path: '.\\src\\components\\Button.tsx' })
-    expect(prefixResult).toBe('win-content')
+    expect(prefixResult).toBe('     1→win-content')
   })
 
   it('treats Windows drive-letter paths with forward slashes as absolute', async () => {
@@ -1505,7 +1510,7 @@ describe('J: Path validation', () => {
       file_path: 'C:/Users/celso/Documents/Gestao de Tarefas/src/App.tsx',
     })
 
-    expect(result).toBe('win-content')
+    expect(result).toBe('     1→win-content')
     expect(mockInvoke).toHaveBeenCalledWith('read_file_with_signature', {
       path: 'C:/Users/celso/Documents/Gestao de Tarefas/src/App.tsx',
     })
