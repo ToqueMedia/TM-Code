@@ -722,6 +722,34 @@ export interface RequestUsageEntry {
   /** Tools the model requested via request_tools but were DENIED by the
    *  profile bound — proves the bound is enforcing the tighter toolset. */
   deniedToolNames?: string[]
+  /** ── "Stopped without editing" guardrail telemetry ──
+   *  Populated from the query loop's run-level tracking. Lets an exported
+   *  session prove the guardrail fired and whether the model recovered. */
+  /** Whether any file-mutating tool (edit_file, write_file, …) ran
+   *  successfully during this run, as of this request. */
+  runHasEdited?: boolean
+  /** How many times the no-edit recovery steering was injected (0 or 1). */
+  noEditRecoveryCount?: number
+  /** True on the request AFTER the guardrail fired (the recovery turn). */
+  noEditGuardTriggered?: boolean
+  /** Turn number of the first successful file mutation (1-indexed). */
+  firstWriteTurn?: number
+  /** Total count of successful file-mutating tool calls this run. */
+  writeActionCount?: number
+  /** Final decision at the stop path: "completed" | "recovered_then_completed"
+   *  | "aborted" | "error" | "max_turns". Only set on the LAST entry. */
+  completionGuardDecision?: string
+  /** Human-readable reason for the guardrail's decision. Only set on the LAST entry. */
+  completionGuardReason?: string
+  /** ── Delegate/sub-agent telemetry ──
+   *  Populated when the delegate tool was called this run. Lets the session
+   *  export prove the member field was resolved (or why it was blocked). */
+  delegateRequestedMember?: string | null
+  delegateResolvedMember?: string | null
+  delegateBlocked?: boolean
+  delegateBlockedReason?: string | null
+  delegateInputSchemaVersion?: string
+  delegateRecoveryAttempted?: boolean
 }
 
 export interface SessionTokenUsage {

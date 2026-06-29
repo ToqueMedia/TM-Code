@@ -22,6 +22,7 @@ import {
 } from './contextBuilder/auxiliaryRegistry'
 
 const CONTEXT_PLANNER_TIMEOUT_MS = 12_000
+const CONTEXT_PLANNER_MAX_TOKENS = 1_200
 
 type ToolGroup = NonNullable<ContextPlan['toolGroups']>[number]
 
@@ -113,7 +114,7 @@ export async function planContextWithModel(
       body: JSON.stringify({
         stream: false,
         temperature: 0,
-        max_tokens: 500,
+        max_tokens: CONTEXT_PLANNER_MAX_TOKENS,
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: CONTEXT_PLANNER_SYSTEM },
@@ -170,7 +171,7 @@ export function parseContextPlanJson(
   const raw = text.trim()
   const extracted = extractJsonObject(raw)
   if (!extracted) {
-    if (diagnostics) diagnostics.parseError = `no JSON object found in content (len=${raw.length})`
+    if (diagnostics) diagnostics.parseError = describeJsonExtractionFailure(raw)
     return null
   }
 
@@ -207,6 +208,16 @@ function extractJsonObject(text: string): string | null {
   const end = cleaned.lastIndexOf('}')
   if (start === -1 || end === -1 || end <= start) return null
   return cleaned.slice(start, end + 1)
+}
+
+function describeJsonExtractionFailure(text: string): string {
+  if (!text) return 'empty content from context planner'
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start !== -1 && (end === -1 || end <= start)) {
+    return `incomplete JSON object in content (len=${text.length}, startsAt=${start})`
+  }
+  return `no JSON object found in content (len=${text.length})`
 }
 
 /** Parse + schema-validate. Returns null (and sets diagnostics.parseError)

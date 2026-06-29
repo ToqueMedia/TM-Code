@@ -54,6 +54,8 @@ import {
   isLegitimateContinuationReason,
   EFFICIENCY_TARGET_TURNS,
 } from "./turnEfficiency";
+import { DESTRUCTIVE_TOOLS } from "./toolsetSelector";
+import { EDIT_FILE } from "./toolNames";
 
 // ── Constants ──
 
@@ -360,6 +362,16 @@ export interface QueryParams {
   toolsetSelector?: import('./toolsetSelector').ToolsetSelector;
   /** Auxiliary-context selection — core/auxiliary breakdown for the inspector. */
   auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection;
+  /** Returns telemetry from the last delegate call, or null if delegate
+   *  wasn't called this run. Populated by the ToolExecutor bridge. */
+  getDelegateTelemetry?: () => {
+    requestedMember: string | null;
+    resolvedMember: string | null;
+    blocked: boolean;
+    blockedReason: string | null;
+    inputSchemaVersion: string;
+    recoveryAttempted: boolean;
+  } | null;
 }
 
 /** Terminal return value. */
@@ -368,6 +380,14 @@ export interface QueryTerminal {
   turnCount: number;
   totalInputTokens: number;
   totalOutputTokens: number;
+  /** ── Guardrail telemetry (populated on the final return) ── */
+  runHasEdited?: boolean;
+  noEditRecoveryCount?: number;
+  noEditGuardTriggered?: boolean;
+  firstWriteTurn?: number;
+  writeActionCount?: number;
+  completionGuardDecision?: string;
+  completionGuardReason?: string;
 }
 
 // ── Internal state ──
@@ -879,6 +899,21 @@ export async function* query(
   let totalOutputTokens = 0;
   const loopDetectorState = createLoopDetectorState();
   let thinkingOnlyRecoveryCount = 0;
+
+  // Guardrail: a bugfix_local run (readOnly=false) that ends without a single
+  // file mutation likely stopped prematurely — the model diagnosed the bug but
+  // deferred the fix ("No próximo turno, aplicarei…") without requesting
+  // edit_file (which is intentionally excluded from the bugfix_local base).
+  // Track whether any mutating tool ran successfully this run, and allow one
+  // recovery attempt to nudge the model back on track.
+  let runHasEdited = false;
+  let noEditRecoveryCount = 0;
+  /** Turn number of the first successful file mutation (1-indexed). */
+  let firstWriteTurn: number | undefined;
+  /** Total count of successful file-mutating tool calls this run. */
+  let writeActionCount = 0;
+  /** Set when the no-edit guardrail fires; reported on the NEXT request's usage entry. */
+  let guardTriggeredLastTurn = false;
 
   // eslint-disable-next-line no-constant-condition
   queryLoop: while (true) {
@@ -1910,9 +1945,39 @@ export async function* query(
           // mentionContextRepeatedTokens is the token saving vs re-sending
           // the full body. Both reset each turn.
           ...getAndResetMentionContextStats(),
+          // ── "Stopped without editing" guardrail telemetry ──
+          // Cumulative values as of THIS request. The guardrail fires AFTER
+          // onRequestUsage, so noEditGuardTriggered reflects the PREVIOUS
+          // turn's firing. Final decision fields (completionGuardDecision /
+          // completionGuardReason) are stamped on the last entry by the
+          // caller after the loop returns (see QueryTerminal).
+          runHasEdited,
+          noEditRecoveryCount,
+          noEditGuardTriggered: guardTriggeredLastTurn,
+          firstWriteTurn,
+          writeActionCount,
+          // ── Delegate/sub-agent telemetry ──
+          // Read from the toolExecutor's last delegate call info. Populated
+          // on the turn AFTER delegate was called (onRequestUsage fires before
+          // tool execution; the data surfaces on the next request's entry).
+          ...(() => {
+            const di = params.getDelegateTelemetry?.() ?? null
+            if (!di) return {}
+            return {
+              delegateRequestedMember: di.requestedMember,
+              delegateResolvedMember: di.resolvedMember,
+              delegateBlocked: di.blocked,
+              delegateBlockedReason: di.blockedReason,
+              delegateInputSchemaVersion: di.inputSchemaVersion,
+              delegateRecoveryAttempted: di.recoveryAttempted,
+            }
+          })(),
         })
       } catch { /* usage logging never blocks the agent loop */ }
     }
+    // Reset the guard-triggered flag after the usage entry has captured it,
+    // so it's only true on the request that immediately follows the firing.
+    guardTriggeredLastTurn = false;
 
     // ── Build provider-native state for round-trip ──
     // Reconstruct the assistant message as the provider would have
@@ -2109,6 +2174,38 @@ export async function* query(
         }
       }
 
+      // Guardrail: bugfix_local (readOnly=false) that ends without a single
+      // file mutation. The model likely diagnosed the bug but deferred the
+      // fix ("No próximo turno, aplicarei…") — often because edit_file is
+      // intentionally excluded from the bugfix_local base toolset and the
+      // model didn't call request_tools to activate it. Give it one chance
+      // to continue; if it stops again without editing, let it end.
+      if (
+        !runHasEdited &&
+        noEditRecoveryCount < 1 &&
+        toolsetSelector &&
+        !toolsetSelector.isReadOnly() &&
+        toolsetSelector.getProfile() === "bugfix_local"
+      ) {
+        const hasEditFile = toolsetSelector.isActive(EDIT_FILE);
+        state = {
+          ...state,
+          messages: [
+            ...updatedMessages,
+            {
+              role: "user",
+              content: hasEditFile
+                ? "You have edit_file available but have not applied any edit yet. Apply the fix now — do not defer to the next turn."
+                : "You have not applied any file edit yet. The edit_file tool is not in your active toolset — call request_tools to activate it, then apply the fix. Do not defer to the next turn — continue now.",
+            },
+          ],
+          continuationCount: 0,
+        };
+        noEditRecoveryCount++;
+        guardTriggeredLastTurn = true;
+        continue;
+      }
+
       // Model is done — return terminal
       state.messages = updatedMessages;
       return {
@@ -2116,6 +2213,24 @@ export async function* query(
         turnCount: state.turnCount,
         totalInputTokens,
         totalOutputTokens,
+        // Guardrail telemetry — final values at loop termination.
+        runHasEdited,
+        noEditRecoveryCount,
+        noEditGuardTriggered: noEditRecoveryCount > 0,
+        firstWriteTurn,
+        writeActionCount,
+        completionGuardDecision:
+          noEditRecoveryCount > 0 && runHasEdited
+            ? "recovered_then_completed"
+            : noEditRecoveryCount > 0 && !runHasEdited
+              ? "recovery_failed_then_completed"
+              : "completed",
+        completionGuardReason:
+          noEditRecoveryCount > 0
+            ? runHasEdited
+              ? "bugfix_local readOnly=false attempted to stop without edit; guardrail steered the model to request_tools + apply the fix"
+              : "bugfix_local readOnly=false attempted to stop without edit; guardrail fired but model did not recover"
+            : undefined,
       };
     }
 
@@ -2160,6 +2275,15 @@ export async function* query(
           content: modelContent,
           isError: result.isError,
         });
+        // Track whether any file-mutating tool ran successfully this run.
+        // Drives the "stopped without editing" guardrail at the stop path.
+        if (!result.isError && DESTRUCTIVE_TOOLS.has(tc.name)) {
+          runHasEdited = true;
+          writeActionCount++;
+          if (firstWriteTurn === undefined) {
+            firstWriteTurn = state.turnCount;
+          }
+        }
       } catch (err) {
         const errMsg = formatError(err);
         yield {

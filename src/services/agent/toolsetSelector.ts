@@ -123,8 +123,12 @@ const BUGFIX_BASE = [
 /** Exported for tests + the usage-log to reference the bugfix base set. */
 export { BUGFIX_BASE, READONLY_BASE }
 
-/** Tools that mutate the filesystem — stripped when readOnly is true. */
-const DESTRUCTIVE_TOOLS = new Set<string>([
+/**
+ * Tools that mutate the filesystem — stripped when readOnly is true.
+ * Exported so the agent loop can track whether any file mutation occurred
+ * during a run (the "stopped without editing" guardrail in query.ts).
+ */
+export const DESTRUCTIVE_TOOLS = new Set<string>([
   EDIT_FILE, WRITE_FILE, CREATE_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
 ])
 

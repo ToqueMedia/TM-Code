@@ -288,6 +288,17 @@ class ToolExecutor {
    * No shared mutable state between concurrent sub-agents.
    */
   private memoryScopeAgentType: string | null = null
+  private requestType: string | null = null
+
+  /** Telemetry from the last delegate call — read by query.ts onRequestUsage. */
+  lastDelegateInfo: {
+    requestedMember: string | null
+    resolvedMember: string | null
+    blocked: boolean
+    blockedReason: string | null
+    inputSchemaVersion: string
+    recoveryAttempted: boolean
+  } | null = null
 
   /**
    * Plan-mode progress flags. Together they enforce the architect contract:
@@ -339,6 +350,7 @@ class ToolExecutor {
   createIsolatedChild(): ToolExecutor {
     const child = new ToolExecutor()
     child.cmdModeCwd = this.cmdModeCwd
+    child.requestType = this.requestType
     child.planMode = this.planMode
     child.planModePlanFileName = this.planModePlanFileName
     child.planFileWritten = this.planFileWritten
@@ -354,6 +366,20 @@ class ToolExecutor {
     this.disablePlanMode()
     this.largeResultsDir = null
     this.memoryScopeAgentType = null
+  }
+
+  setRequestType(type: string | null): void {
+    this.requestType = type
+  }
+
+  clearDelegateTelemetry(): void {
+    this.lastDelegateInfo = null
+  }
+
+  consumeDelegateTelemetry(): ToolExecutor['lastDelegateInfo'] {
+    const info = this.lastDelegateInfo
+    this.lastDelegateInfo = null
+    return info
   }
 
   /** Enable CLI/CMD mode: file ops write directly to disk, no project required. */
@@ -3501,6 +3527,16 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
               enum: ['Explore', 'Research', 'Verify'],
               description: 'Which team member to delegate to.'
             },
+            member: {
+              type: 'string',
+              enum: ['Explore', 'Research', 'Verify'],
+              description: 'Alias for subagent_type. Which team member to delegate to.'
+            },
+            team_member: {
+              type: 'string',
+              enum: ['Explore', 'Research', 'Verify'],
+              description: 'Alias for subagent_type. Which team member to delegate to.'
+            },
             description: {
               type: 'string',
               description: 'Short label (3-5 words) for the task. Shown in the team activity indicator.'
@@ -3509,27 +3545,108 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
               type: 'string',
               description: 'Self-contained task description. The team member sees nothing from your conversation. Be specific about what you need back as a final summary.'
             },
+            task: {
+              type: 'string',
+              description: 'Alias for prompt. Self-contained task description.'
+            },
             thoroughness: {
               type: 'string',
               enum: ['quick', 'medium', 'thorough'],
               description: 'Controls search depth. "quick" = first match, stop. "medium" = check 2-3 locations. "thorough" = comprehensive sweep across naming conventions and edge cases. Default: medium.'
             }
           },
-          required: ['subagent_type', 'description', 'prompt']
+          required: []
         },
         concurrencySafe: true,
       },
       execute: async (input) => {
-        const subagentType = input.subagent_type as string
-        const description = (input.description as string) || 'delegation'
-        const prompt = input.prompt as string
+        // ── Alias normalization ──
+        // The schema's canonical field is `subagent_type`, but models may send
+        // `member`, `type`, `agentType`, `subAgentType`, or `name` instead.
+        // Normalize defensively so a field-name mismatch never silently breaks
+        // delegation. The canonical field in the schema is `subagent_type`;
+        // `member` is declared as an alias property so the model sees it too.
+        const ALIASES = ['subagent_type', 'member', 'team_member', 'teamMember', 'type', 'agentType', 'subAgentType', 'name'] as const
+        let rawMember: string | undefined
+        for (const alias of ALIASES) {
+          const v = input[alias]
+          if (typeof v === 'string' && v.trim()) {
+            rawMember = v.trim()
+            break
+          }
+        }
+
+        // Track telemetry for the usage log (read by query.ts onRequestUsage).
+        this.lastDelegateInfo = {
+          requestedMember: rawMember ?? null,
+          resolvedMember: null,
+          blocked: false,
+          blockedReason: null,
+          inputSchemaVersion: 'v2-aliases',
+          recoveryAttempted: false,
+        }
+
+        const AVAILABLE = ['Explore', 'Research', 'Verify']
+        if (!rawMember) {
+          this.lastDelegateInfo.blocked = true
+          this.lastDelegateInfo.blockedReason = 'No member field found in input'
+          throw new Error(JSON.stringify({
+            status: 'blocked',
+            reason: 'No team member specified. Pass subagent_type (or member alias) as one of: Explore, Research, Verify.',
+            receivedInput: Object.keys(input),
+            availableMembers: AVAILABLE,
+          }))
+        }
+
+        // Case-insensitive resolve against the canonical names.
+        const resolved = AVAILABLE.find((a) => a.toLowerCase() === rawMember!.toLowerCase())
+        if (!resolved) {
+          this.lastDelegateInfo.blocked = true
+          this.lastDelegateInfo.blockedReason = `Unknown member '${rawMember}'`
+          throw new Error(JSON.stringify({
+            status: 'blocked',
+            reason: `Unknown team member '${rawMember}'. Available: ${AVAILABLE.join(', ')}.`,
+            receivedInput: { member: rawMember, description: input.description, prompt: input.prompt },
+            availableMembers: AVAILABLE,
+          }))
+        }
+
+        this.lastDelegateInfo.resolvedMember = resolved
+        const subagentType = resolved
+        const prompt =
+          typeof input.prompt === 'string' && input.prompt.trim()
+            ? input.prompt
+            : typeof input.task === 'string' && input.task.trim()
+              ? input.task
+              : ''
+        if (!prompt) {
+          this.lastDelegateInfo.blocked = true
+          this.lastDelegateInfo.blockedReason = 'No prompt/task field found in input'
+          throw new Error(JSON.stringify({
+            status: 'blocked',
+            reason: 'No task prompt specified. Pass prompt (or task alias) with a self-contained task for the team member.',
+            receivedInput: Object.keys(input),
+            availableMembers: AVAILABLE,
+          }))
+        }
+        const description =
+          (typeof input.description === 'string' && input.description.trim())
+            ? input.description
+            : prompt.split(/\s+/).slice(0, 5).join(' ')
         const thoroughness = (input.thoroughness as string as 'quick' | 'medium' | 'thorough') || 'medium'
 
         // Resolve the definition (concurrent limit is checked atomically inside startRun)
         const { getAgentDefinition } = await import('./subAgents/builtInAgents')
         const def = getAgentDefinition(subagentType as 'Explore' | 'Research' | 'Verify')
         if (!def) {
-          return `Blocked: unknown sub-agent type '${subagentType}'. Available: Explore, Research, Verify.`
+          this.lastDelegateInfo.blocked = true
+          this.lastDelegateInfo.blockedReason = `getAgentDefinition returned null for '${subagentType}'`
+          throw new Error(JSON.stringify({
+            status: 'blocked',
+            reason: `Internal error: team member '${subagentType}' is recognized but has no definition. Available: ${AVAILABLE.join(', ')}.`,
+            receivedInput: { member: rawMember },
+            availableMembers: AVAILABLE,
+          }))
         }
 
         // Build filtered tools — only the sub-agent's allowed tools
@@ -3586,9 +3703,10 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
             parentMessageId,
             parentCtx,
             filteredTools,
+            requestType: this.requestType ?? undefined,
           })
         } catch (e) {
-          return `Error: ${e instanceof Error ? e.message : String(e)}`
+          throw new Error(`Failed to start ${subagentType} sub-agent: ${e instanceof Error ? e.message : String(e)}`)
         }
 
         // Wire subAgentRunIds so SubAgentCard renders in the UI.

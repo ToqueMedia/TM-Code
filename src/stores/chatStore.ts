@@ -109,6 +109,8 @@ interface ChatActions {
   setMentionContextOnLastUserMessage: (context: string, mentionedPaths?: string[]) => void
   /** Append a per-request usage entry to the active session's log. */
   addRequestUsage: (entry: RequestUsageEntry) => void
+  /** Merge fields into the last requestUsageLog entry (guardrail telemetry). */
+  updateLastRequestUsage: (patch: Partial<RequestUsageEntry>) => void
   setAttachmentPathsOnLastUserMessage: (paths: Record<string, string>) => void
   /**
    * Insert a user message BEFORE the streaming assistant message.
@@ -1592,6 +1594,23 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         // Cap the log to avoid unbounded growth on runaway sessions (400
         // entries ≈ a 200-turn session with retries; oldest drop first).
         if (log.length > 400) log.splice(0, log.length - 400)
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, requestUsageLog: log, updatedAt: Date.now() })
+        return { sessions: updatedSessions }
+      })
+      debouncedSave()
+    },
+
+    /** Merge fields into the last requestUsageLog entry (guardrail telemetry
+     *  that's only known after the loop terminates). No-op if the log is empty. */
+    updateLastRequestUsage: (patch) => {
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+        const session = sessions.get(activeSessionId)
+        if (!session?.requestUsageLog?.length) return state
+        const log = [...session.requestUsageLog]
+        log[log.length - 1] = { ...log[log.length - 1], ...patch }
         const updatedSessions = new Map(sessions)
         updatedSessions.set(activeSessionId, { ...session, requestUsageLog: log, updatedAt: Date.now() })
         return { sessions: updatedSessions }

@@ -38,6 +38,8 @@ export interface SubAgentRunOptions {
   parentCtx: SubAgentParentContext
   /** Tool definitions filtered to only the sub-agent's allowed tools. */
   filteredTools: import('../toolExecutor').OpenAIToolDefinition[]
+  /** Worker routing header inherited from the parent run. Omitted for BYOK. */
+  requestType?: string
 }
 
 function buildPartialSubAgentResult(runId: string, reason: string, partialText = ''): string {
@@ -64,7 +66,7 @@ function buildPartialSubAgentResult(runId: string, reason: string, partialText =
  * The sub-agent's events flow to subAgentStore — NOT chatStore.
  */
 export async function runSubAgent(options: SubAgentRunOptions): Promise<string> {
-  const { definition, prompt, description, parentMessageId, parentCtx, filteredTools } = options
+  const { definition, prompt, description, parentMessageId, parentCtx, filteredTools, requestType } = options
 
   // Create the run in the store — gets a runId and completionPromise.
   // Returns null if the concurrent limit (4) is reached.
@@ -146,6 +148,9 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   // ── Build system prompt ──
   const systemPrompt = definition.getSystemPrompt(parentCtx)
 
+  const subAgentExtraHeaders =
+    !byokActive && requestType ? { 'X-Request-Type': requestType } : undefined
+
   // ── Create QueryEngine ──
   const engine = new QueryEngine({
     client,
@@ -155,6 +160,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
     tools: openaiTools,
     executeTool,
     thinkingConfig,
+    extraHeaders: subAgentExtraHeaders,
     maxTurns: definition.maxTurns,
     onResponseHeaders: (headers) => {
       useBillingStore.getState().updateFromHeaders(headers)
@@ -215,6 +221,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
 
   // ── Track accumulated text + tokens ──
   let resultText = ''
+  let streamErrorMessage: string | undefined
   let inputTokens = 0
   let outputTokens = 0
 
@@ -269,7 +276,8 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
             break
 
           case 'error':
-            // Error events are handled by the terminal result
+            streamErrorMessage = event.message
+            console.error(`[subAgent:${definition.agentType}] stream error:`, event.message)
             break
 
           case 'interrupted':
@@ -289,7 +297,8 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
       const terminal = result.value as QueryTerminal
 
       if (terminal.reason === 'error') {
-        const msg = resultText || 'Model stream failed'
+        const msg = streamErrorMessage || resultText || 'Model stream failed'
+        console.error(`[subAgent:${definition.agentType}] terminal error:`, msg)
         useSubAgentStore.getState().errorRun(runId, msg)
         import('@/services/notificationService').then(({ notify }) => {
           notify({
@@ -323,6 +332,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
       clearTimeout(wallClockTimer)
       clearInterval(staleTimer)
       const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[subAgent:${definition.agentType}] unhandled error:`, err)
       useSubAgentStore.getState().errorRun(runId, msg)
 
       import('@/services/notificationService').then(({ notify }) => {

@@ -57,6 +57,15 @@ describe('parseContextPlanJson', () => {
     expect(out!.plan.taskDomain).toBe('design_system_ui')
   })
 
+  test('parses JSON after a thinking block', () => {
+    const out = parseContextPlanJson(
+      '<think>\nplanning\n</think>\n\n{"taskDomain":"bugfix_local","requiredCapabilities":[],"selectedContexts":[]}',
+      diag(),
+    )
+    expect(out).not.toBeNull()
+    expect(out!.plan.taskDomain).toBe('bugfix_local')
+  })
+
   test('repairs a trailing comma on a single attempt', () => {
     const d = diag()
     const out = parseContextPlanJson(
@@ -73,6 +82,20 @@ describe('parseContextPlanJson', () => {
     const out = parseContextPlanJson('Sorry, I cannot help with that.', d)
     expect(out).toBeNull()
     expect(d.parseError).toMatch(/no JSON object found/)
+  })
+
+  test('reports empty planner output distinctly', () => {
+    const d = diag()
+    const out = parseContextPlanJson('', d)
+    expect(out).toBeNull()
+    expect(d.parseError).toBe('empty content from context planner')
+  })
+
+  test('reports truncated planner JSON distinctly', () => {
+    const d = diag()
+    const out = parseContextPlanJson('<think>planning</think>\n{"taskDomain":"bugfix_local"', d)
+    expect(out).toBeNull()
+    expect(d.parseError).toMatch(/incomplete JSON object/)
   })
 
   test('rejects broken JSON syntax that repair cannot fix (fallback)', () => {

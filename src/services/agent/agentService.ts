@@ -160,6 +160,7 @@ class AgentService {
    */
   setRequestType(type: string | null) {
     this.requestType = type;
+    this.toolExecutor.setRequestType(type);
   }
   getRequestType(): string | null {
     return this.requestType;
@@ -515,6 +516,7 @@ class AgentService {
 
     // 5. Create tool executor bridge
     const executeTool = this.createToolExecutorBridge(callbacks);
+    this.toolExecutor.clearDelegateTelemetry();
 
     // 6. Build extra headers — X-Request-Type is sticky across turns
     const extraHeaders = this.buildExtraHeaders();
@@ -592,6 +594,8 @@ class AgentService {
       // Auxiliary-context selection (core/auxiliary breakdown for the
       // payloadInspector; null for sub-agents).
       auxiliarySelection: auxiliarySelection ?? undefined,
+      // Delegate telemetry — read from the toolExecutor's last delegate call.
+      getDelegateTelemetry: () => this.toolExecutor.consumeDelegateTelemetry(),
     });
     this.queryEngine = engine;
 
@@ -729,6 +733,23 @@ class AgentService {
 
     // 9. Terminal result
     const terminal = result.value as QueryTerminal;
+
+    // Stamp guardrail telemetry onto the last requestUsageLog entry so the
+    // session export shows the final decision explicitly (not just inferrable
+    // from expandedToolNames / toolCalls). Best-effort — never blocks.
+    if (terminal.completionGuardDecision !== undefined) {
+      try {
+        useChatStore.getState().updateLastRequestUsage({
+          runHasEdited: terminal.runHasEdited,
+          noEditRecoveryCount: terminal.noEditRecoveryCount,
+          noEditGuardTriggered: terminal.noEditGuardTriggered,
+          firstWriteTurn: terminal.firstWriteTurn,
+          writeActionCount: terminal.writeActionCount,
+          completionGuardDecision: terminal.completionGuardDecision,
+          completionGuardReason: terminal.completionGuardReason,
+        });
+      } catch { /* telemetry never blocks */ }
+    }
 
     // Loop detection on final text
     if (finalText && !this.lightweightOptions) {

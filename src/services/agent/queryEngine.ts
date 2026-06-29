@@ -68,6 +68,15 @@ export interface QueryEngineOptions {
   toolsetSelector?: import('./toolsetSelector').ToolsetSelector
   /** Auxiliary-context selection — core/auxiliary breakdown for the inspector. */
   auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection
+  /** Delegate telemetry — see QueryParams.getDelegateTelemetry. */
+  getDelegateTelemetry?: () => {
+    requestedMember: string | null;
+    resolvedMember: string | null;
+    blocked: boolean;
+    blockedReason: string | null;
+    inputSchemaVersion: string;
+    recoveryAttempted: boolean;
+  } | null;
 }
 
 export interface QueryEngineState {
@@ -180,6 +189,7 @@ export class QueryEngine {
       getContextLimits: this.options.getContextLimits,
       toolsetSelector: this.options.toolsetSelector,
       auxiliarySelection: this.options.auxiliarySelection,
+      getDelegateTelemetry: this.options.getDelegateTelemetry,
     }
 
     try {
