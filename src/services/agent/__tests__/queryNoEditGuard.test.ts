@@ -96,6 +96,7 @@ function makeSelector(opts: {
     }),
     getExpandedNames: () => [],
     getDeniedNames: () => [],
+    noteDeniedToolName: jest.fn(),
   } as unknown as ToolsetSelector
 }
 
@@ -137,6 +138,27 @@ describe('query — "stopped without editing" guardrail', () => {
 
     expect(terminal).toMatchObject({ reason: 'completed' })
     expect(create).toHaveBeenCalledTimes(1)
+  })
+
+  it('blocks direct write tool calls when readOnly is true', async () => {
+    const create = jest
+      .fn()
+      .mockImplementationOnce(() => streamResponse(EDIT_TURN))
+      .mockImplementationOnce(() => streamResponse(STOP_TURN))
+    const executeTool = jest.fn().mockResolvedValue({ content: 'edited', isError: false })
+
+    const terminal = await drain(
+      query(
+        baseParams({
+          client: makeClient(create),
+          toolsetSelector: makeSelector({ readOnly: true }),
+          executeTool,
+        }),
+      ),
+    ) as { runHasEdited?: boolean; writeActionCount?: number }
+
+    expect(executeTool).not.toHaveBeenCalled()
+    expect(terminal).toMatchObject({ reason: 'completed', runHasEdited: false, writeActionCount: 0 })
   })
 
   it('does NOT fire when the profile is not bugfix_local', async () => {

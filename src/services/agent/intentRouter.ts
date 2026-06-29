@@ -6,10 +6,11 @@
  * Routing: the worker picks the utility model (MiMo V2.5) by the
  * `X-Request-Type: intent-router` header — we send NO `model` in the body
  * (same pattern as memorySelector/visionSidecar). On any failure the router
- * falls back to { bugfix_local, readOnly:false } so the agent still runs;
- * the failure reason + raw response diagnostics are exported so the cause
- * (HTML error page, wrong model, non-strict JSON, empty content) is visible
- * without guessing.
+ * falls back to { bugfix_local, readOnly:false } so the agent still runs,
+ * except when the user text contains an explicit no-edit/read-only instruction.
+ * That local safety signal is enforced before any network call so HTTP 402,
+ * timeouts, or malformed router output cannot turn "do not edit" into a
+ * writable bugfix run.
  */
 
 import { resolveAIWorkerUrl } from '../../utils/devUrls'
@@ -27,8 +28,8 @@ export type { RouterDiagnostics }
 export interface IntentClassification {
   profile: PromptProfile
   readOnly: boolean
-  /** 'model' when classified by the router LLM; 'fallback' when it fell back. */
-  source: 'model' | 'fallback'
+  /** 'model' when classified by the router LLM; 'keyword' for local safety overrides; 'fallback' when it fell back. */
+  source: 'model' | 'fallback' | 'keyword'
   /** Router self-reported confidence ('high'|'medium'|'low'); 'none' on fallback. */
   confidence: 'high' | 'medium' | 'low' | 'none'
   /** Short reason for logging / export telemetry. */
@@ -46,6 +47,29 @@ const FALLBACK: IntentClassification = {
   confidence: 'none',
   reason: 'intent router unavailable',
   error: 'unavailable',
+}
+
+function normalizeIntentText(text: string): string {
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+}
+
+export function hasExplicitNoEditIntent(userMessage: string): boolean {
+  const text = normalizeIntentText(userMessage)
+  return [
+    /\bdo\s+not\s+edit\b/,
+    /\bdon['’]?t\s+edit\b/,
+    /\bno\s+(?:file\s+)?edits?\b/,
+    /\bno\s+code\s+changes?\b/,
+    /\bwithout\s+editing\b/,
+    /\bread[-\s]?only\b/,
+    /\bnao\s+(?:edite|editar|altere|alterar|modifique|modificar|mexa|mexer)\b/,
+    /\bsem\s+(?:editar|alterar|modificar|mexer|alteracoes?|mudancas?)\b/,
+    /\bapenas\s+(?:confirme|verifique|analise|inspecione)\b/,
+    /\bso\s+(?:confirme|verifique|analise|inspecione)\b/,
+  ].some((pattern) => pattern.test(text))
 }
 
 const VALID_PROFILES: ReadonlySet<PromptProfile> = new Set<PromptProfile>([
@@ -120,6 +144,16 @@ export async function classifyIntent(
   const trimmed = userMessage.trim()
   if (!trimmed) {
     return { ...FALLBACK, reason: 'empty user message' }
+  }
+
+  if (hasExplicitNoEditIntent(trimmed)) {
+    return {
+      profile: 'analysis_readonly',
+      readOnly: true,
+      source: 'keyword',
+      confidence: 'high',
+      reason: 'explicit no-edit/read-only instruction',
+    }
   }
 
   const token = await FirebaseAuthService.getInstance().getIdToken()
@@ -271,4 +305,3 @@ function parseIntentJson(
     return null
   }
 }
-

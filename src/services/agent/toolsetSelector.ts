@@ -483,6 +483,13 @@ export class ToolsetSelector {
     return Array.from(this.deniedNames)
   }
 
+  /** Record a denied direct tool call (not via request_tools) for telemetry. */
+  noteDeniedToolName(toolName: string): void {
+    if (this.allToolNames.has(toolName) && !this.isAllowed(toolName)) {
+      this.deniedNames.add(toolName)
+    }
+  }
+
   /** The profile driving this run's toolset. */
   getProfile(): PromptProfile {
     return this.profile

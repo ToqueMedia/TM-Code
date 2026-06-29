@@ -1,22 +1,6 @@
 /**
  * Read Range Tracker — multi-range overlap dedup for read_file.
  *
- * ⚠️ OVERLAP CHECK IS CURRENTLY DISABLED — see toolExecutor.ts read_file
- * execute(). The multi-range blocker (fully_covered → stub) and the silent
- * range narrowing (partially_covered → adjust) were MORE aggressive than
- * claude-vaz, which only stubs an EXACT range re-read when the file's mtime
- * is unchanged on disk (FileReadTool.ts:523-573) and otherwise trusts the
- * model to re-read overlapping ranges when it judges it needs to. Disabled
- * for parity with Claude's "trust the model" stance.
- *
- * The functions below are retained so the feature can be re-enabled by
- * re-calling checkReadRangeOverlap() in the read_file execute path.
- * recordReadRange() / getReadRanges() / getAndResetOverlapStats() stay
- * live for TELEMETRY: readRanges still reports which ranges the model read,
- * and skippedOverlappingReads / adjustedReadRanges now report 0 (honest
- * signal that overlap interception is off).
- *
- * Original design (kept for reference / re-enable):
  * The existing `readDedup.ts` only stubs a re-read when the requested range
  * matches EXACTLY a prior read (same offset + limit). The agent, however,
  * frequently re-reads OVERLAPPING ranges — e.g. it read lines 1–200, then
@@ -38,8 +22,9 @@
  * Same first gate as readDedup: the global `fsVersion` counter. If it has
  * advanced, ANY prior range may be stale (a write happened somewhere) so we
  * refuse to dedup and let the caller fall through to the signature/content
- * exact-match path in readDedup. When fsVersion is stable, ranges are valid
- * without disk access.
+ * exact-match path in readDedup. When the filesystem stat exposes mtime, the
+ * current mtime must also match the mtime captured with the range. This keeps
+ * overlap dedup from hiding external edits that do not bump fsVersion.
  *
  * This is a module-level singleton (like fsVersion) so both ToolExecutor
  * (records ranges + checks overlap) and query.ts (reads overlap stats for
@@ -59,6 +44,8 @@ export interface ReadRange {
   limit?: number
   /** Global fsVersion captured at read time. */
   fsVersion: number
+  /** File mtime captured at read time when available. */
+  modifiedMs?: number | null
 }
 
 export type OverlapKind = 'not_covered' | 'fully_covered' | 'partially_covered'
@@ -157,6 +144,7 @@ export function checkReadRangeOverlap(
   offset: number | undefined,
   limit: number | undefined,
   currentFsVersion: number,
+  currentModifiedMs?: number | null,
 ): OverlapResult {
   const key = normalizePath(filePath)
   const ranges = byPath.get(key)
@@ -164,7 +152,18 @@ export function checkReadRangeOverlap(
 
   // Only consider ranges captured at the same fsVersion. If the global
   // counter advanced (a write happened somewhere), prior ranges may be stale.
-  const valid = ranges.filter((r) => r.fsVersion === currentFsVersion)
+  const valid = ranges.filter((r) => {
+    if (r.fsVersion !== currentFsVersion) return false
+    if (
+      currentModifiedMs !== undefined &&
+      currentModifiedMs !== null &&
+      r.modifiedMs !== undefined &&
+      r.modifiedMs !== null
+    ) {
+      return r.modifiedMs === currentModifiedMs
+    }
+    return true
+  })
   if (valid.length === 0) return { kind: 'not_covered' }
 
   const [reqStart, reqEnd] = toInterval({ offset, limit })
@@ -228,6 +227,7 @@ export function recordReadRange(
   offset: number | undefined,
   limit: number | undefined,
   fsVersion: number,
+  modifiedMs?: number | null,
 ): void {
   const key = normalizePath(filePath)
   const ranges = byPath.get(key) ?? []
@@ -235,10 +235,10 @@ export function recordReadRange(
   // handled those; no need to bloat the list).
   const start = Math.max(1, offset ?? 1)
   const exists = ranges.some(
-    (r) => r.offset === start && r.limit === limit && r.fsVersion === fsVersion,
+    (r) => r.offset === start && r.limit === limit && r.fsVersion === fsVersion && r.modifiedMs === modifiedMs,
   )
   if (!exists) {
-    ranges.push({ offset: start, limit, fsVersion })
+    ranges.push({ offset: start, limit, fsVersion, modifiedMs })
     byPath.set(key, ranges)
   }
 }
@@ -252,11 +252,11 @@ export function getAndResetOverlapStats(): OverlapStats {
 
 /** All recorded ranges, for the `readRanges` export field. Returns a shallow
  *  copy so the caller can't mutate internal state. */
-export function getReadRanges(): Array<{ path: string; offset?: number; limit?: number }> {
-  const out: Array<{ path: string; offset?: number; limit?: number }> = []
+export function getReadRanges(): Array<{ path: string; offset?: number; limit?: number; readToEnd?: boolean }> {
+  const out: Array<{ path: string; offset?: number; limit?: number; readToEnd?: boolean }> = []
   for (const [path, ranges] of byPath) {
     for (const r of ranges) {
-      out.push({ path, offset: r.offset, limit: r.limit })
+      out.push({ path, offset: r.offset, limit: r.limit, readToEnd: r.limit === undefined })
     }
   }
   return out

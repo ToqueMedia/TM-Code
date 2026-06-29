@@ -324,8 +324,9 @@ async function runAgentInternal(
     // non-streaming) classifies the user's intent into a PromptProfile + a
     // readOnly flag BEFORE the system prompt is assembled. The result feeds
     // the context builder (prompt profile + on-demand auxiliaries) and — via
-    // lastAuxiliarySelection — the ToolsetSelector (bound toolset). Keeps
-    // user-text inference inside the model router/planner.
+    // lastAuxiliarySelection — the ToolsetSelector (bound toolset). User-text
+    // inference stays in the model router/planner except for the local
+    // no-edit/read-only safety override in classifyIntent.
     // Never throws; on failure it falls back to { bugfix_local, readOnly:false }
     // and buildSystemPrompt uses a conservative no-auxiliary fallback.
     const intentStart = Date.now()

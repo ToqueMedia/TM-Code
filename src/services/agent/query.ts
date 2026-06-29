@@ -2260,6 +2260,24 @@ export async function* query(
         toolInput = {};
       }
 
+      if (toolsetSelector?.isReadOnly() && DESTRUCTIVE_TOOLS.has(tc.name)) {
+        toolsetSelector.noteDeniedToolName(tc.name);
+        const blocked = `Tool blocked: ${tc.name} cannot run because the latest user request is read-only/no-edit.`;
+        yield {
+          type: "tool_result",
+          toolUseId: tc.id,
+          content: blocked,
+          isError: true,
+        };
+        toolResultBlocks.push({
+          type: "tool_result",
+          toolCallId: tc.id,
+          content: blocked,
+          isError: true,
+        });
+        continue;
+      }
+
       try {
         const result = await executeTool(tc.name, toolInput, tc.id, signal);
         const modelContent = sanitizeToolResultForModel(result.content)

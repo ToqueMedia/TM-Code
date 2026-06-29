@@ -1032,6 +1032,18 @@ class AgentService {
         };
       }
 
+      const selector = this.currentToolsetSelector;
+      if (selector && !selector.isActive(toolName)) {
+        const activated = selector.expandForToolName(toolName);
+        if (!activated) {
+          selector.noteDeniedToolName(toolName);
+          return {
+            content: `Tool blocked: ${toolName} is not available for the current task profile/read-only policy.`,
+            isError: true,
+          };
+        }
+      }
+
       // Announce + start the tool at execution time. The query loop runs tools
       // serially, so doing the announcement here keeps later write calls out of
       // the UI while an earlier permission / diff / credential decision is

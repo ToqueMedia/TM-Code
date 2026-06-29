@@ -100,6 +100,17 @@ describe('ToolsetSelector (profile-bound)', () => {
       expect(selector.isActive(EDIT_FILE)).toBe(true)
     })
 
+    it('DENIES edit_file via request_tools when readOnly is active', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local', true)
+      const result = selector.requestTools([EDIT_FILE])
+      expect(result.added).toEqual([])
+      expect(result.denied).toEqual([EDIT_FILE])
+      expect(selector.getExpandedNames()).not.toContain(EDIT_FILE)
+      expect(selector.getDeniedNames()).toContain(EDIT_FILE)
+      expect(selector.isActive(EDIT_FILE)).toBe(false)
+      expect(selector.selectForTurn(ALL_TOOLS).tools.map((t) => t.function.name)).not.toContain(EDIT_FILE)
+    })
+
     it('DENIES destructive create/write via request_tools (outside bound)', () => {
       const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')
       const result = selector.requestTools([WRITE_FILE, CREATE_FILE, DELETE_FILE])

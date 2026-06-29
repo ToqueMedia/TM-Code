@@ -584,9 +584,9 @@ export interface RequestUsageEntry {
   mentionContextRefId?: string
   /** ── Read Range Tracker (Correção C) ──
    *  Per-file read ranges the agent has read so far this session (offset/limit,
-   *  1-indexed; undefined limit = read-to-EOF). Exported so the overlap
-   *  dedup decisions are auditable. */
-  readRanges?: Array<{ path: string; offset?: number; limit?: number }>
+   *  1-indexed). Missing limit means read-to-EOF, not a hidden default page
+   *  size; readToEnd marks that semantic explicitly in exports. */
+  readRanges?: Array<{ path: string; offset?: number; limit?: number; readToEnd?: boolean }>
   /** Number of read_file calls skipped this turn because the requested range
    *  was already fully covered by a previous read. */
   skippedOverlappingReads?: number

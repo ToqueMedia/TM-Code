@@ -38,7 +38,7 @@ import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import { READ_FILE, WRITE_FILE, EDIT_FILE, STOP_DEV_SERVER } from './toolNames'
 import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileStateCache } from './toolExecutor/fileStateCache'
 import { FILE_UNCHANGED_STUB } from './toolExecutor/readDedup'
-import { recordReadRange, clearReadRangeTracker } from './toolExecutor/readRangeTracker'
+import { checkReadRangeOverlap, recordReadRange, clearReadRangeTracker } from './toolExecutor/readRangeTracker'
 import { clearMentionContextTracker } from './mentionContextTracker'
 import { addLineNumbers } from './toolExecutor/lineNumbers'
 import { hasBinaryExtension } from './toolExecutor/binaryExtensions'
@@ -2274,22 +2274,6 @@ ${preview}
 
         const currentFsVersion = getFsVersion()
 
-        // ── Overlap dedup: DISABLED for parity with claude-vaz ───────
-        // claude-vaz (FileReadTool.ts:523-573) only stubs a re-read when
-        // offset+limit match a prior read EXACTLY AND the file's mtime is
-        // unchanged on disk — it trusts the model to re-read overlapping
-        // ranges when it judges it needs to. The multi-range overlap
-        // tracker (readRangeTracker.ts) used to block fully-covered ranges
-        // and silently narrow partially-covered ones, which was MORE
-        // aggressive than Claude and could intercept a re-read the model
-        // genuinely wanted (e.g. after an external edit that didn't bump
-        // fsVersion). Disabled to match Claude's "trust the model" stance.
-        // recordReadRange() below still populates ranges for telemetry
-        // (readRanges export); it never blocks or narrows.
-        // To re-enable, call checkReadRangeOverlap() here and act on
-        // overlap.kind ('fully_covered' → return stub; 'partially_covered'
-        // → adjust offset/limit).
-
         // ── Binary check (pre-read, claude-vaz parity) ──────────────
         // claude-vaz rejects binary files by extension before reading
         // (constants/files.ts hasBinaryExtension). The TM is text-only
@@ -2301,8 +2285,8 @@ ${preview}
 
         try {
           const MAX_FILE_BYTES = 256 * 1024
-          const requestedOffset = offsetProvided ? offset : undefined
-          const requestedLimit = limitProvided ? limit : undefined
+          let requestedOffset = offsetProvided ? offset : undefined
+          let requestedLimit = limitProvided ? limit : undefined
           const existingState = this.readFileState.get(filePath)
           let currentSignature: FileContentSignature | undefined
 
@@ -2367,6 +2351,30 @@ ${preview}
               fsVersion: currentFsVersion,
             })
             return FILE_UNCHANGED_STUB
+          }
+
+          // ── Overlap dedup / narrowing ─────────────────────────────
+          // `limit` omitted means read-to-EOF. A prior read-to-EOF range
+          // fully covers later sub-ranges; a partially covered request is
+          // narrowed to the first missing line range before the disk read.
+          const overlap = checkReadRangeOverlap(
+            filePath,
+            requestedOffset,
+            requestedLimit,
+            currentFsVersion,
+            preStat?.modifiedMs,
+          )
+          if (overlap.kind === 'fully_covered' && overlap.stub) {
+            return overlap.stub
+          }
+          if (overlap.kind === 'partially_covered' && overlap.adjustedRange) {
+            offset = overlap.adjustedRange.offset
+            limit = overlap.adjustedRange.limit ?? 0
+            offsetProvided = true
+            limitProvided = overlap.adjustedRange.limit !== undefined
+            sliceRequested = true
+            requestedOffset = offset
+            requestedLimit = overlap.adjustedRange.limit
           }
 
           const readResult = await invoke<ReadFileWithSignatureResult>('read_file_with_signature', { path: filePath })
@@ -2437,10 +2445,9 @@ ${preview}
           })
 
           // ── Record range in the overlap tracker ────────────────────
-          // Inert telemetry (overlap interception is disabled — see the
-          // disabled checkReadRangeOverlap block above). recordReadRange
-          // still populates the readRanges export; it never blocks/narrows.
-          recordReadRange(filePath, requestedOffset, requestedLimit, currentFsVersion)
+          // `limit === undefined` means read-to-EOF, not a hidden default
+          // page size. The usage export marks those ranges with readToEnd.
+          recordReadRange(filePath, requestedOffset, requestedLimit, currentFsVersion, currentSignature.modifiedMs)
 
           // Empty content: distinguish "file is empty" (no slice requested,
           // file genuinely has no bytes) from "slice past EOF" (model paged

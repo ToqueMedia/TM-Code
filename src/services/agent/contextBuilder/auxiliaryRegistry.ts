@@ -829,7 +829,7 @@ export function selectAuxiliaries(
   userMessage: string | undefined,
   readOnlyHint?: boolean,
   reason?: string,
-  routerInfo?: { source: 'model' | 'fallback'; confidence?: 'high' | 'medium' | 'low' | 'none'; error?: string; diagnostics?: RouterDiagnostics },
+  routerInfo?: { source: 'model' | 'fallback' | 'keyword'; confidence?: 'high' | 'medium' | 'low' | 'none'; error?: string; diagnostics?: RouterDiagnostics },
   contextPlanOverride?: ContextPlan,
   plannerInfo?: { status: 'parsed' | 'fallback'; error?: string; rawOutput?: string; selectionReason?: string },
 ): AuxiliarySelection {
