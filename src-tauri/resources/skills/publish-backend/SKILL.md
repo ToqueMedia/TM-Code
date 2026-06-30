@@ -105,6 +105,44 @@ The user's frontend (`src/`, `client/src/`) imports NEITHER `@libsql/client` NOR
 
 If you find `import { drizzle } from 'drizzle-orm/...'` in any frontend file → **wrong file**. Drizzle lives in `server/`.
 
+### CRITICAL — Request JSON/FormData is stringly typed; coerce before Drizzle writes
+
+Never pass raw request payloads into Drizzle:
+
+```ts
+const body = await req.json()
+await db.insert(products).values(body)          // ✗
+await db.update(products).set(req.body)         // ✗
+await db.insert(products).values({ vat: body.vat }) // ✗ if vat is integer()/real()
+```
+
+Browser form values arrive as strings even from `<input type="number">`. Local SQLite may appear to accept `"1.3"` for a REAL column, but the production `drizzle-orm/sqlite-proxy` path serializes query params as JSON and the TMDB/libSQL endpoint rejects a string where it expects `f64`:
+
+```text
+JSON parse error: invalid type: string "1.3", expected f64
+```
+
+For every route that writes to `integer()` or `real()` columns, validate and coerce at the server boundary. Prefer Zod:
+
+```ts
+import { z } from 'zod'
+
+const createProductSchema = z.object({
+  name: z.string().min(1),
+  vat: z.coerce.number().finite().min(0),
+  price: z.coerce.number().finite().nonnegative(),
+})
+
+const parsed = createProductSchema.parse(await req.json())
+await db.insert(products).values({
+  name: parsed.name,
+  vat: parsed.vat,
+  price: parsed.price,
+})
+```
+
+If a value such as `"1.3"` is a version/code/SKU rather than math, the schema is wrong: store it as `text()`, generate a migration, and keep it a string.
+
 ### CRITICAL — Call `provision_database` BEFORE writing `db.ts` (mechanical check)
 
 The `db.ts` template below references `process.env.TMDB_URL` and `process.env.TMDB_TOKEN`. Those env vars do not exist by default — `provision_database` mints them. Forgetting the call leaves `db.ts` referencing variables that don't exist; the prod path throws `TMDB_URL must be set` on first request.
@@ -332,6 +370,22 @@ await db.transaction(async (tx) => {
 ```
 
 Drizzle's relational query API (`db.query.X.findMany`) is the recommended path for any READ that needs related data — type-safe, no manual JOIN, single round-trip.
+
+#### Writes from HTTP routes — validate first, then write
+
+Every route body is untrusted and may be stringly typed. Do not write the raw body object, and do not map numeric columns straight from it. Build a parsed DTO first:
+
+```ts
+const payload = createProductSchema.parse(await req.json())
+await db.insert(schema.products).values({
+  name: payload.name,
+  vat: payload.vat,       // number, not "1.3"
+  price: payload.price,   // number, not "1999"
+  createdAt: new Date(),
+})
+```
+
+Return `400` for validation errors. This must be tested with the same payload shape the browser sends, especially decimals like `"1.3"`.
 
 ### 5. Caching is optional (not a default requirement)
 

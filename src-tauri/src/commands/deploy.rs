@@ -14,6 +14,7 @@
 //! lint walk so the lint sees exactly the file set the tarball would.
 
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 // === Deploy bundle (static assets + DB detection) ===
@@ -891,7 +892,9 @@ pub async fn validate_backend_for_cloud_run(project_path: String) -> Result<Vec<
         findings.push(finding);
     }
 
-    walk_and_lint(project, project, &mut findings)
+    let numeric_columns = collect_drizzle_numeric_columns(project);
+
+    walk_and_lint(project, project, &mut findings, &numeric_columns)
         .map_err(|e| format!("Lint walk failed: {}", e))?;
     Ok(findings)
 }
@@ -972,7 +975,12 @@ fn lint_session_trust_proxy(project: &Path) -> Option<String> {
     }
 }
 
-fn walk_and_lint(dir: &Path, base: &Path, findings: &mut Vec<String>) -> std::io::Result<()> {
+fn walk_and_lint(
+    dir: &Path,
+    base: &Path,
+    findings: &mut Vec<String>,
+    numeric_columns: &HashSet<String>,
+) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -991,7 +999,7 @@ fn walk_and_lint(dir: &Path, base: &Path, findings: &mut Vec<String>) -> std::io
         }
 
         if file_type.is_dir() {
-            walk_and_lint(&path, base, findings)?;
+            walk_and_lint(&path, base, findings, numeric_columns)?;
             continue;
         }
 
@@ -1009,6 +1017,7 @@ fn walk_and_lint(dir: &Path, base: &Path, findings: &mut Vec<String>) -> std::io
             if let Ok(content) = std::fs::read_to_string(&path) {
                 scan_express_wildcard_routes(&content, &rel, findings);
                 scan_base64_in_db_insert(&content, &rel, findings);
+                scan_raw_request_body_db_write(&content, &rel, numeric_columns, findings);
             }
         }
     }
@@ -1023,6 +1032,51 @@ fn is_js_ts_source(name: &str) -> bool {
         || lower.ends_with(".jsx")
         || lower.ends_with(".mjs")
         || lower.ends_with(".cjs")
+}
+
+/// Collect Drizzle `integer()` / `real()` column property names and SQL names
+/// from the common schema locations. The raw-request-body lint uses this to
+/// catch mappings like `{ vat: body.vat }`, where local SQLite may coerce the
+/// string but the production sqlite-proxy rejects it as the wrong JSON type.
+fn collect_drizzle_numeric_columns(project: &Path) -> HashSet<String> {
+    const SCHEMA_CANDIDATES: &[&str] = &[
+        "server/schema.ts",
+        "server/db/schema.ts",
+        "server/src/db/schema.ts",
+        "backend/src/db/schema.ts",
+        "src/db/schema.ts",
+        "src/lib/db/schema.ts",
+        "src/server/db/schema.ts",
+        "lib/db/schema.ts",
+        "db/schema.ts",
+        "app/db/schema.ts",
+        "drizzle/schema.ts",
+    ];
+
+    let mut out = HashSet::new();
+    for rel in SCHEMA_CANDIDATES {
+        let path = project.join(rel);
+        if let Ok(content) = std::fs::read_to_string(path) {
+            scan_numeric_drizzle_columns(&content, &mut out);
+        }
+    }
+    out
+}
+
+fn scan_numeric_drizzle_columns(content: &str, out: &mut HashSet<String>) {
+    let Ok(re) = regex::Regex::new(
+        r#"\b([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*(?:integer|real)\s*\(\s*['"]([^'"]+)['"]"#,
+    ) else {
+        return;
+    };
+    for caps in re.captures_iter(content) {
+        if let Some(prop) = caps.get(1) {
+            out.insert(prop.as_str().to_string());
+        }
+        if let Some(sql_name) = caps.get(2) {
+            out.insert(sql_name.as_str().to_string());
+        }
+    }
 }
 
 /// Detect `app.<verb>('*', ...)` and `router.<verb>('*', ...)` style routes
@@ -1314,6 +1368,149 @@ fn scan_base64_in_db_insert(content: &str, rel_path: &str, findings: &mut Vec<St
     }
 }
 
+/// Detect raw HTTP payloads flowing into Drizzle writes:
+///   const body = await req.json()
+///   await db.insert(table).values(body)          // rejects unknown/typed fields in prod
+///   await db.insert(table).values({ vat: body.vat }) // if vat is integer()/real()
+///
+/// This intentionally catches only high-confidence patterns near a Drizzle
+/// write chain. It does not attempt full TS type inference; the goal is to
+/// block the production-only sqlite-proxy failure where local SQLite coerces a
+/// browser string (`"1.3"`) but TMDB expects a JSON number/f64.
+fn scan_raw_request_body_db_write(
+    content: &str,
+    rel_path: &str,
+    numeric_columns: &HashSet<String>,
+    findings: &mut Vec<String>,
+) {
+    const PROXIMITY_BYTES: usize = 900;
+    const DB_WRITE_PATTERNS: &[&str] = &[
+        "db.insert(",
+        "db.update(",
+        "tx.insert(",
+        "tx.update(",
+        "this.db.insert(",
+        "this.db.update(",
+    ];
+
+    let bytes = content.as_bytes();
+    let (in_code, _) = compute_code_masks(bytes);
+    let aliases = raw_request_body_aliases(content, &in_code);
+    let column_alt = numeric_columns
+        .iter()
+        .map(|c| regex::escape(c))
+        .collect::<Vec<_>>()
+        .join("|");
+
+    let direct_request_re = regex::Regex::new(
+        r#"\.(?:values|set)\s*\(\s*(?:await\s+)?[A-Za-z_$][A-Za-z0-9_$.]*(?:\.json\s*\(\s*\)|\.body\b)"#,
+    )
+    .expect("valid direct request body regex");
+
+    for db_pat in DB_WRITE_PATTERNS {
+        let db_bytes = db_pat.as_bytes();
+        let mut from = 0;
+        while let Some(pos) = find_subsequence(&bytes[from..], db_bytes) {
+            let abs = from + pos;
+            from = abs + 1;
+            if !in_code[abs] {
+                continue;
+            }
+
+            let window_end = (abs + PROXIMITY_BYTES).min(bytes.len());
+            let window = String::from_utf8_lossy(&bytes[abs..window_end]);
+
+            if let Some(m) = direct_request_re.find(&window) {
+                let off = abs + m.start();
+                if off < in_code.len() && in_code[off] {
+                    findings.push(format!(
+                        "{}:{} — raw request payload passed directly into a Drizzle write near `{}`. Parse/validate the body first; use `z.coerce.number().finite()` for `integer()`/`real()` columns before `.values()`/`.set()`.",
+                        rel_path,
+                        line_at_offset(bytes, off),
+                        db_pat
+                    ));
+                    continue;
+                }
+            }
+
+            let mut reported = false;
+            for alias in &aliases {
+                let alias_esc = regex::escape(alias);
+                let direct_alias_re =
+                    regex::Regex::new(&format!(r#"\.(?:values|set)\s*\(\s*{}\s*\)"#, alias_esc))
+                        .expect("valid raw body alias regex");
+                if let Some(m) = direct_alias_re.find(&window) {
+                    let off = abs + m.start();
+                    if off < in_code.len() && in_code[off] {
+                        findings.push(format!(
+                            "{}:{} — raw request body `{}` is passed directly into a Drizzle write near `{}`. Build an explicit values object from a validated schema instead of writing the request object wholesale.",
+                            rel_path,
+                            line_at_offset(bytes, off),
+                            alias,
+                            db_pat
+                        ));
+                        reported = true;
+                        break;
+                    }
+                }
+
+                if !column_alt.is_empty() {
+                    let numeric_map_re = regex::Regex::new(&format!(
+                        r#"(?m)(?:\b(?:{cols})\b|['"](?:{cols})['"])\s*:\s*{alias}\s*(?:\.\s*(?:{cols})\b|\[\s*['"](?:{cols})['"]\s*\])"#,
+                        cols = column_alt,
+                        alias = alias_esc,
+                    ))
+                    .expect("valid numeric raw body mapping regex");
+                    if let Some(m) = numeric_map_re.find(&window) {
+                        let off = abs + m.start();
+                        if off < in_code.len() && in_code[off] {
+                            findings.push(format!(
+                                "{}:{} — request body `{}` is mapped directly into an `integer()`/`real()` Drizzle column near `{}`. Browser number inputs arrive as strings; coerce with `z.coerce.number().finite()` or `Number(...)` + 400 validation before writing.",
+                                rel_path,
+                                line_at_offset(bytes, off),
+                                alias,
+                                db_pat
+                            ));
+                            reported = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if reported {
+                continue;
+            }
+        }
+    }
+}
+
+fn raw_request_body_aliases(content: &str, in_code: &[bool]) -> HashSet<String> {
+    let mut aliases = HashSet::new();
+    let patterns = [
+        // const body = await req.json()
+        r#"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*await\s+[A-Za-z_$][A-Za-z0-9_$.]*\.json\s*\("#,
+        // const form = await request.formData()
+        r#"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*await\s+[A-Za-z_$][A-Za-z0-9_$.]*\.formData\s*\("#,
+        // const body = req.body
+        r#"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*[A-Za-z_$][A-Za-z0-9_$.]*\.body\b"#,
+    ];
+
+    for pat in patterns {
+        let re = regex::Regex::new(pat).expect("valid raw request alias regex");
+        for caps in re.captures_iter(content) {
+            let Some(m) = caps.get(0) else { continue };
+            if m.start() >= in_code.len() || !in_code[m.start()] {
+                continue;
+            }
+            if let Some(alias) = caps.get(1) {
+                aliases.insert(alias.as_str().to_string());
+            }
+        }
+    }
+    aliases
+}
+
 /// Compute `(in_code, in_comment)` bitmaps for the source — `in_code` is
 /// true only inside actual JS code (not strings, not comments); `in_comment`
 /// is true inside line/block comments. Both masks are byte-indexed.
@@ -1600,6 +1797,13 @@ mod tests {
         out
     }
 
+    fn lint_raw_body(src: &str, cols: &[&str]) -> Vec<String> {
+        let mut out = Vec::new();
+        let numeric_columns = cols.iter().map(|c| c.to_string()).collect();
+        scan_raw_request_body_db_write(src, "routes/admin.ts", &numeric_columns, &mut out);
+        out
+    }
+
     #[test]
     fn detects_base64_tostring_near_db_insert() {
         let src = r#"
@@ -1701,6 +1905,126 @@ mod tests {
         "#;
         let out = lint_b64(src);
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn collects_numeric_drizzle_columns() {
+        let mut out = HashSet::new();
+        scan_numeric_drizzle_columns(
+            r#"
+                export const plans = sqliteTable('plans', {
+                    id: integer('id').primaryKey({ autoIncrement: true }),
+                    vatRate: real('vat_rate').notNull(),
+                    name: text('name').notNull(),
+                })
+            "#,
+            &mut out,
+        );
+        assert!(out.contains("id"));
+        assert!(out.contains("vatRate"));
+        assert!(out.contains("vat_rate"));
+        assert!(!out.contains("name"));
+    }
+
+    #[test]
+    fn detects_raw_json_alias_passed_to_values() {
+        let src = r#"
+            const body = await req.json()
+            await db.insert(products).values(body)
+        "#;
+        let out = lint_raw_body(src, &["price"]);
+        assert_eq!(out.len(), 1, "expected one finding, got: {:?}", out);
+        assert!(out[0].contains("raw request body `body`"));
+    }
+
+    #[test]
+    fn detects_req_body_alias_passed_to_set() {
+        let src = r#"
+            const payload = req.body
+            await db.update(products).set(payload).where(eq(products.id, id))
+        "#;
+        let out = lint_raw_body(src, &["price"]);
+        assert_eq!(out.len(), 1, "expected one finding, got: {:?}", out);
+        assert!(out[0].contains("raw request body `payload`"));
+    }
+
+    #[test]
+    fn detects_direct_request_json_in_values() {
+        let src = r#"
+            await db.insert(products).values(await request.json())
+        "#;
+        let out = lint_raw_body(src, &["price"]);
+        assert_eq!(out.len(), 1, "expected one finding, got: {:?}", out);
+        assert!(out[0].contains("raw request payload"));
+    }
+
+    #[test]
+    fn detects_raw_numeric_column_mapping() {
+        let src = r#"
+            const body = await c.req.json()
+            await db.insert(products).values({
+                name: body.name,
+                vat: body.vat,
+            })
+        "#;
+        let out = lint_raw_body(src, &["vat"]);
+        assert_eq!(out.len(), 1, "expected one finding, got: {:?}", out);
+        assert!(out[0].contains("integer()`/`real()"));
+    }
+
+    #[test]
+    fn detects_raw_numeric_sql_name_mapping() {
+        let src = r#"
+            const body = await req.json()
+            await db.insert(products).values({
+                'vat_rate': body['vat_rate'],
+            })
+        "#;
+        let out = lint_raw_body(src, &["vat_rate"]);
+        assert_eq!(out.len(), 1, "expected one finding, got: {:?}", out);
+    }
+
+    #[test]
+    fn ignores_non_numeric_raw_mapping() {
+        let src = r#"
+            const body = await req.json()
+            await db.insert(products).values({
+                name: body.name,
+            })
+        "#;
+        assert_eq!(lint_raw_body(src, &["price"]).len(), 0);
+    }
+
+    #[test]
+    fn ignores_number_coercion_for_numeric_mapping() {
+        let src = r#"
+            const body = await req.json()
+            await db.insert(products).values({
+                vat: Number(body.vat),
+            })
+        "#;
+        assert_eq!(lint_raw_body(src, &["vat"]).len(), 0);
+    }
+
+    #[test]
+    fn ignores_zod_parsed_payload() {
+        let src = r#"
+            const payload = createProductSchema.parse(await req.json())
+            await db.insert(products).values({
+                vat: payload.vat,
+            })
+        "#;
+        assert_eq!(lint_raw_body(src, &["vat"]).len(), 0);
+    }
+
+    #[test]
+    fn ignores_raw_body_patterns_in_comments() {
+        let src = r#"
+            // const body = await req.json()
+            // await db.insert(products).values(body)
+            await db.insert(products).values({ vat: 1.3 })
+        "#;
+        assert_eq!(lint_raw_body(src, &["vat"]).len(), 0);
     }
 
     #[test]
