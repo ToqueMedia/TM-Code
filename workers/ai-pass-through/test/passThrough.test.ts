@@ -1612,6 +1612,8 @@ function firestoreTeamDoc(opts: {
   cycleEnd?: string
   percentAllocation?: number
   memberConsumed?: number
+  byokTeamConsumed?: number
+  byokMemberConsumed?: number
   memberBlocked?: boolean
   subscriptionActive?: boolean
   uid?: string
@@ -1627,6 +1629,11 @@ function firestoreTeamDoc(opts: {
       tokenBudget: { mapValue: { fields: {
         purchasedExtra: { integerValue: String(opts.purchasedExtra ?? 0) },
       } } },
+      ...(opts.byokTeamConsumed !== undefined ? {
+        byokBudget: { mapValue: { fields: {
+          consumed: { integerValue: String(opts.byokTeamConsumed) },
+        } } },
+      } : {}),
       cycle: { mapValue: { fields: {
         cycleEnd: { stringValue: opts.cycleEnd ?? '2026-12-31' },
       } } },
@@ -1634,6 +1641,7 @@ function firestoreTeamDoc(opts: {
         [uid]: { mapValue: { fields: {
           percentAllocation: { doubleValue: opts.percentAllocation ?? 0 },
           tokensConsumed: { integerValue: String(opts.memberConsumed ?? 0) },
+          ...(opts.byokMemberConsumed !== undefined ? { byokConsumed: { integerValue: String(opts.byokMemberConsumed) } } : {}),
           ...(opts.memberBlocked !== undefined ? { blocked: { booleanValue: opts.memberBlocked } } : {}),
         } } },
       } } },
@@ -1947,6 +1955,50 @@ test('team BYOK: getTeamByokConfig resolves + DECRYPTS the inline key', async ()
   assert.equal(resolved!.config.baseUrl, 'https://dashscope-us.aliyuncs.com/compatible-mode/v1')
   // Decrypted back to the real key for buildUpstreamHeaders.
   assert.equal(resolved!.config.apiKey, 'sk-team-real-key')
+})
+
+test('team BYOK: metered pool is shared, not capped by member allocation', async () => {
+  const cfg = await teamCfg({ pool: 1_000_000 })
+  const fetcher = teamFetcher({
+    userDoc: () => firestoreTeamUserDoc('T1'),
+    teamDoc: () => firestoreTeamDoc({
+      percentAllocation: 0,
+      byokTeamConsumed: 470_000,
+      byokMemberConsumed: 470_000,
+    }),
+  })
+  const res = await handleRequest(
+    request(),
+    kvEnv({ 'team:T1': cfg }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY, BUDGET_ENFORCEMENT: 'enforce' }),
+    { fetcher },
+  )
+
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-tm-team-byok'), 'true')
+  assert.equal(fetcher.calls.length, 1)
+})
+
+test('team BYOK: metered pool blocks only when the shared pool is exhausted', async () => {
+  const cfg = await teamCfg({ pool: 1_000_000 })
+  const fetcher = teamFetcher({
+    userDoc: () => firestoreTeamUserDoc('T1'),
+    teamDoc: () => firestoreTeamDoc({
+      percentAllocation: 1,
+      byokTeamConsumed: 1_000_000,
+      byokMemberConsumed: 0,
+    }),
+  })
+  const res = await handleRequest(
+    request(),
+    kvEnv({ 'team:T1': cfg }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY, BUDGET_ENFORCEMENT: 'enforce' }),
+    { fetcher },
+  )
+
+  assert.equal(res.status, 402)
+  const body = await res.text()
+  assert.match(body, /tm_team_byok_exhausted/)
+  assert.doesNotMatch(body, /slice/i)
+  assert.equal(fetcher.calls.length, 0)
 })
 
 test('team BYOK: missing enc key / bad ciphertext / disabled / oauth / absent → null', async () => {

@@ -539,6 +539,29 @@ function errorPayload(error: unknown): string {
   }
 }
 
+function apiErrorInfo(error: unknown): { type?: string; message?: string } {
+  const apiError = (error as { error?: unknown } | null)?.error;
+  if (!apiError) return {};
+
+  let payload: unknown = apiError;
+  if (typeof apiError === "string") {
+    try {
+      payload = JSON.parse(apiError);
+    } catch {
+      return { message: apiError };
+    }
+  }
+
+  if (!payload || typeof payload !== "object") return {};
+  const record = payload as Record<string, unknown>;
+  const nested = record.error && typeof record.error === "object"
+    ? record.error as Record<string, unknown>
+    : record;
+  const type = typeof nested.type === "string" ? nested.type : undefined;
+  const message = typeof nested.message === "string" ? nested.message : undefined;
+  return { type, message };
+}
+
 function isPlatformAuthError(error: unknown): boolean {
   if (errorSource(error) === "upstream") return false;
   if (errorStatus(error) !== 401) return false;
@@ -1683,27 +1706,31 @@ export async function* query(
         pendingToolCalls,
       });
 
-      // Orçamento esgotado — o gate do worker (BUDGET_ENFORCEMENT=enforce)
-      // rejeitou com 402 tm_budget_exhausted. Não é retryable: marca o
-      // billing store para o agentRunner/usePromptBar bloquearem o próximo
-      // turno localmente e o CreditIndicator mostrar o estado.
+      // Orçamento esgotado — o gate do worker rejeitou com 402 tipado.
+      // Não é retryable. Para budget TM/fatia Team normal marcamos o billing
+      // store para bloquear o próximo turno localmente; Team BYOK usa outro
+      // ledger, então preservamos só a mensagem do worker.
       if (errorStatus(error) === 402) {
-        // Membro de equipa esgotou a fatia → mensagem dedicada (não pode comprar;
-        // só o admin realoca). Owner/pessoal → mensagem de compra/upgrade.
+        const apiInfo = apiErrorInfo(error);
+        const isTeamByokExhausted = apiInfo.type === "tm_team_byok_exhausted";
         let teamMemberBlocked = false;
         try {
           const { useBillingStore } = await import("../../stores/billingStore");
           const store = useBillingStore.getState();
-          store.setNoCredits();
+          if (!isTeamByokExhausted) store.setNoCredits();
           teamMemberBlocked = !!store.team && store.team.role !== "owner";
         } catch {
           /* non-critical */
         }
+        const message =
+          apiInfo.type?.startsWith("tm_") && apiInfo.message
+            ? apiInfo.message
+            : teamMemberBlocked
+              ? "Your team slice is exhausted for this cycle. Ask your team admin to increase your allocation."
+              : "Token budget exhausted for this cycle. Buy extra usage or wait for the cycle reset.";
         yield {
           type: "error",
-          message: teamMemberBlocked
-            ? "Your team slice is exhausted for this cycle. Ask your team admin to increase your allocation."
-            : "Token budget exhausted for this cycle. Buy extra usage or wait for the cycle reset.",
+          message,
         };
         return {
           reason: "error",

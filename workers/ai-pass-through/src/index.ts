@@ -305,10 +305,10 @@ async function handleChatCompletions(
 
   // ── Team BYOK: orçamento VIRTUAL opcional (opt-in pelo admin) ───────────────
   // Quando a config da equipa define um `pool` (> 0), medimos o uso BYOK contra
-  // essa pool + a fatia do membro (a MESMA percentAllocation do Plano de
-  // Equipas) e bloqueamos quando qualquer um esgota — hard cap estrito. Sem
-  // pool → pass-through puro (sem gate, sem commit), como antes. A pool é uma
-  // ESTIMATIVA do que o admin pagou ao provedor, NÃO o saldo real.
+  // a pool bruta da equipa. Não há fatia por membro em BYOK: percentAllocation
+  // só controla o plano TM gerido. Sem pool → pass-through puro (sem gate, sem
+  // commit), como antes. A pool é uma ESTIMATIVA do que o admin pagou ao
+  // provedor, NÃO o saldo real.
   let teamByokMetered = false
   if (teamByok && config.pool && config.pool > 0 && budgetState?.team) {
     teamByokMetered = true
@@ -318,9 +318,7 @@ async function handleChatCompletions(
         return jsonError(
           402,
           'tm_team_byok_exhausted',
-          gate.reason === 'team'
-            ? 'The team BYOK budget is exhausted. Ask your team admin to top it up.'
-            : 'Your team BYOK slice is exhausted. Ask your team admin to increase your allocation.',
+          'The team BYOK budget is exhausted. Ask your team admin to top it up.',
         )
       }
     }

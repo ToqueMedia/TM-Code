@@ -143,7 +143,8 @@ export interface TeamMemberBudget {
   /** Fatia do membro (0..1). */
   percentAllocation: number
   /** Team BYOK virtual ledger (raw 1x tokens) — usado SÓ quando a config
-   *  team:{teamId} tem `pool > 0`. Independente do budget gerido por ciclo. */
+   *  team:{teamId} tem `pool > 0`. Independente do budget gerido por ciclo;
+   *  byokMemberConsumed é apenas telemetria por membro, não gate. */
   byokTeamConsumed: number
   byokMemberConsumed: number
 }
@@ -342,7 +343,7 @@ interface TeamMemberRead {
   memberBlocked: boolean
   cycleEnd: string
   /** Team BYOK virtual ledger (independent of the cycle-based managed budget):
-   *  the team total + this member's slice consumed. Both raw (1x) tokens. */
+   *  the team total + this member's observed usage. Both raw (1x) tokens. */
   byokTeamConsumed: number
   byokMemberConsumed: number
 }
@@ -511,7 +512,7 @@ export function bumpCachedConsumption(userId: string, rawTokens: number, asOvera
 }
 
 /** Como bumpCachedConsumption mas para o ledger BYOK virtual da equipa — sem
- *  isto, pedidos consecutivos dentro da janela de cache (60s) viam a fatia
+ *  isto, pedidos consecutivos dentro da janela de cache (60s) viam a pool
  *  desatualizada e podiam ultrapassar o teto antes do Firestore atualizar. */
 export function bumpCachedByokConsumption(userId: string, rawTokens: number): void {
   const cached = stateCache.get(userId)
@@ -520,24 +521,20 @@ export function bumpCachedByokConsumption(userId: string, rawTokens: number): vo
   cached.state.team.byokTeamConsumed += rawTokens
 }
 
-/** Gate do Team BYOK (hard cap ESTRITO): o membro só usa a sua fatia
- *  (percentAllocation × pool) e a equipa nunca passa a pool. Bloqueia quando
- *  qualquer um esgota. O caller só chama isto com `pool > 0`. */
+/** Gate do Team BYOK (hard cap ESTRITO): BYOK usa uma pool bruta partilhada.
+ *  Não há fatia por membro; percentAllocation só vale para o plano TM gerido.
+ *  O caller só chama isto com `pool > 0`. */
 export interface TeamByokGate {
   allowed: boolean
-  /** 'team' = a pool total esgotou; 'member' = a fatia do membro esgotou. */
-  reason?: 'team' | 'member'
+  /** 'team' = a pool total esgotou. */
+  reason?: 'team'
   poolRemaining: number
-  memberRemaining: number
 }
 
 export function checkTeamByokBudget(pool: number, team: TeamMemberBudget): TeamByokGate {
-  const memberCeiling = Math.floor(Math.max(0, Math.min(1, team.percentAllocation)) * pool)
-  const memberRemaining = Math.max(0, memberCeiling - team.byokMemberConsumed)
   const poolRemaining = Math.max(0, pool - team.byokTeamConsumed)
-  if (poolRemaining <= 0) return { allowed: false, reason: 'team', poolRemaining, memberRemaining }
-  if (memberRemaining <= 0) return { allowed: false, reason: 'member', poolRemaining, memberRemaining }
-  return { allowed: true, poolRemaining, memberRemaining }
+  if (poolRemaining <= 0) return { allowed: false, reason: 'team', poolRemaining }
+  return { allowed: true, poolRemaining }
 }
 
 // ── Cost budget check (porte do control-plane billing.ts) ────────────────
@@ -778,7 +775,7 @@ async function commitTeamConsumption(args: CommitArgs): Promise<boolean> {
 /**
  * Commit do Team BYOK — ledger VIRTUAL, totalmente separado do budget gerido
  * por ciclo. Dual-write atómico em `teams/{teamId}`: total da pool
- * (`byokBudget.consumed`) + fatia do membro (`members.{uid}.byokConsumed`), num
+ * (`byokBudget.consumed`) + telemetria do membro (`members.{uid}.byokConsumed`), num
  * único :commit. Tokens RAW (1x — é a despesa real do admin no provedor, sem o
  * multiplicador de billing da TM). Não toca em `lifetimeTokensConsumed` (esse é
  * o contador de uso GERIDO). Só corre em sucesso do upstream → um 502/erro do
