@@ -366,7 +366,8 @@ export interface QueryParams {
    * Dynamic toolset selector — when present, the loop filters the tool
    * definitions to the active subset each turn. It starts from the
    * model-selected profile base plus model-planned groups, then expands
-   * monotonically through `request_tools`. Null/undefined → send all tools
+   * through `request_tools`. On-demand additions are transient per model step.
+   * Null/undefined → send all tools
    * (legacy behaviour).
    */
   toolsetSelector?: import('./toolsetSelector').ToolsetSelector;
@@ -2030,9 +2031,10 @@ export async function* query(
           systemPromptSections: payloadReport?.systemPromptSections ?? [],
           auxiliaryPromptCandidates: payloadReport?.auxiliaryPromptCandidates ?? [],
           // ── Lazy System Prompt + Tighter Toolset telemetry (Phase 1) ──
-          // The tighter toolset only "counts" if the export can prove it:
+          // The dynamic/on-demand toolset only "counts" if the export can prove it:
           // which profile the Intent Router chose, the core/auxiliary token
-          // split, the savings, and which tools were expanded vs denied.
+          // split, the savings, and which tools were requested vs denied by
+          // explicit policy.
           selectedPromptProfile: auxiliarySelection?.profile,
           selectedToolProfile: toolsetSelector?.getProfile() ?? auxiliarySelection?.profile,
           coreContextTokens: payloadReport?.coreContextTokens,

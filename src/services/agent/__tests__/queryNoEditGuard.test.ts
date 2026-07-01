@@ -126,7 +126,7 @@ describe('query — "stopped without editing" guardrail', () => {
     expect(steeredInto(create, 1, 'request_tools')).toBe(true)
   })
 
-  it('does NOT fire when readOnly is true', async () => {
+  it('does NOT fire when hard readOnly enforcement is true', async () => {
     const create = jest.fn().mockImplementationOnce(() => streamResponse(STOP_TURN))
 
     const terminal = await drain(
@@ -144,7 +144,7 @@ describe('query — "stopped without editing" guardrail', () => {
     expect(create).toHaveBeenCalledTimes(1)
   })
 
-  it('blocks direct write tool calls when readOnly is true', async () => {
+  it('blocks direct write tool calls when hard readOnly enforcement is true', async () => {
     const create = jest
       .fn()
       .mockImplementationOnce(() => streamResponse(EDIT_TURN))

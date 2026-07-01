@@ -120,6 +120,7 @@ class AgentService {
   private postTmsBootstrapToolProfile: {
     profile: PromptProfile;
     readOnly: boolean;
+    enforceReadOnly: boolean;
   } | null = null;
 
   // Última resposta HTTP confirmou TM Speed (`X-TM-Speed-Applied: true`)?
@@ -172,8 +173,8 @@ class AgentService {
   setSystemPrompt(prompt: string) {
     this.systemPrompt = prompt;
   }
-  setPostTmsBootstrapToolProfile(profile: PromptProfile, readOnly: boolean): void {
-    this.postTmsBootstrapToolProfile = { profile, readOnly };
+  setPostTmsBootstrapToolProfile(profile: PromptProfile, readOnly: boolean, enforceReadOnly = false): void {
+    this.postTmsBootstrapToolProfile = { profile, readOnly, enforceReadOnly };
   }
   clearPostTmsBootstrapToolProfile(): void {
     this.postTmsBootstrapToolProfile = null;
@@ -513,7 +514,7 @@ class AgentService {
     const thinkingConfig = this.buildThinkingConfig();
 
     // 4.5. Dynamic toolset selector — starts with the model-selected profile
-    // base plus model-planned groups, then expands monotonically through the
+    // base plus model-planned groups, then expands on demand through the
     // request_tools meta-tool. Reduces tool-schema overhead (~10K tokens for
     // 36 tools) to the few the current task needs. Sub-agents skip selection.
     // Wire auxiliary-context omissions + the Intent Router's profile/readOnly
@@ -521,9 +522,9 @@ class AgentService {
     // (stored on the ContextBuilder singleton) — the profile + readOnly come
     // from the Intent Router (qwen3.7-plus) via the agentRunner call. We read
     // it BEFORE constructing the selector so the constructor can seed the
-    // active set with the profile's base toolset (bugfix_local/analysis_readonly/…)
-    // and bind request_tools/model-planned groups to the profile's allowed set. Sub-agents
-    // skip this (they already receive a restricted tool set from the subAgentRunner).
+    // active set with the profile's base toolset (bugfix_local/analysis_readonly/…).
+    // Profiles are starters, not authorization ceilings. Sub-agents skip this
+    // (they already receive a restricted tool set from the subAgentRunner).
     let auxiliarySelection: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection | null = null;
     if (!this.lightweightOptions) {
       const ContextBuilder = (await import('./contextBuilder')).default;
@@ -536,9 +537,11 @@ class AgentService {
     const userMessageText = typeof userMessage === "string"
       ? userMessage
       : contentAsText(userMessage);
+    const enforceReadOnly = auxiliarySelection?.readOnly === true &&
+      auxiliarySelection.routerSource === "keyword";
     const mutableTask = executionPhase === "original_task" &&
       !this.lightweightOptions &&
-      auxiliarySelection?.readOnly !== true &&
+      !enforceReadOnly &&
       isMutableTask(userMessageText);
 
     const toolsetSelector = this.lightweightOptions
@@ -548,6 +551,7 @@ class AgentService {
         auxiliarySelection?.profile ?? 'bugfix_local',
         auxiliarySelection?.readOnly ?? false,
         (auxiliarySelection?.contextPlan.toolGroups ?? []) as ToolsetGroupName[],
+        enforceReadOnly,
       );
     this.currentToolsetSelector = toolsetSelector;
 
@@ -1162,10 +1166,10 @@ class AgentService {
         }
         const result = selector.requestTools(requested);
         const parts: string[] = [];
-        if (result.added.length) parts.push(`Activated for next turn: ${result.added.join(', ')}.`);
+        if (result.added.length) parts.push(`Activated for next model step: ${result.added.join(', ')}.`);
         if (result.alreadyActive.length) parts.push(`Already active: ${result.alreadyActive.join(', ')}.`);
         if (result.unknown.length) parts.push(`Unknown (not in registry): ${result.unknown.join(', ')}.`);
-        if (result.denied.length) parts.push(`Denied (outside the current task profile — not available for this run): ${result.denied.join(', ')}.`);
+        if (result.denied.length) parts.push(`Denied by explicit read-only/no-edit policy: ${result.denied.join(', ')}.`);
         if (parts.length === 0) parts.push('No tools requested.');
         return { content: parts.join(' '), isError: false };
       }
@@ -1190,8 +1194,14 @@ class AgentService {
             isError: false,
           };
         }
-        if (auxiliaryId === 'project.docs_full' || auxiliaryId === 'project_docs_full') {
-          markTmsFullContextSent('project.docs_full');
+        if (
+          auxiliaryId === 'project.docs_full' ||
+          auxiliaryId === 'project_docs_full' ||
+          auxiliaryId.startsWith('tms.') ||
+          auxiliaryId.startsWith('tms_') ||
+          auxiliaryId.startsWith('project.tms_')
+        ) {
+          markTmsFullContextSent(auxiliaryId);
         }
         return {
           content: `# Auxiliary context: ${name}\n\n${content}`,
@@ -1240,7 +1250,7 @@ class AgentService {
         if (!activated) {
           selector.noteDeniedToolName(effectiveToolName);
           return {
-            content: `Tool blocked: ${effectiveToolName} is not available for the current task profile/read-only policy.`,
+            content: `Tool blocked: ${effectiveToolName} is not available for the current explicit policy or registry.`,
             isError: true,
           };
         }
@@ -1317,6 +1327,8 @@ class AgentService {
                 this.currentToolsetSelector.switchProfile(
                   this.postTmsBootstrapToolProfile.profile,
                   this.postTmsBootstrapToolProfile.readOnly,
+                  [],
+                  this.postTmsBootstrapToolProfile.enforceReadOnly,
                 );
                 this.postTmsBootstrapToolProfile = null;
               }

@@ -241,37 +241,43 @@ export function getCmdGlobalMemorySection(ctx: CmdPromptContext): string | null 
 }
 
 /**
- * TMS.md guidance for CMD mode — instructs the agent to create or
- * maintain the project-level TMS.md persistent memory file.
+ * TMS.md guidance for CMD mode.
  *
- * Mirrors the chat-mode `getMemoryGuidanceSection` logic but adapted
- * for Terminal mode's higher autonomy (no diff approval, direct writes).
- *
- * Two paths:
- *  1. TMS.md exists → keep it updated.
- *  2. TMS.md missing → create it after the first significant task.
+ * Creation is only requested when the file is missing. Existing TMS.md files
+ * are treated as compact project memory, not as a task to rewrite every turn.
  */
 export function getCmdTmsGuidanceSection(ctx: CmdPromptContext): string | null {
   if (ctx.tmsContent) {
-    return `**TMS.md** (project persistent memory) exists at ${ctx.normalizedCwd}/TMS.md. Keep it updated with milestones (dated) and architectural decisions (with rationale) as you complete work. Preserve "Project Analysis" and "Custom Instructions" sections as-is.`
+    return [
+      `**TMS.md** exists at ${ctx.normalizedCwd}/TMS.md.`,
+      'Maintain it as compact operational project memory using the /init structure: Overview, Stack, Commands, Structure, EntryPoints, Project Patterns, Agent Rules, Confirmed, Inferred, Pending Confirmation, lastGeneratedAt, sourceFilesUsed.',
+      'Update it only when durable commands, entrypoints, repo patterns, agent rules, confirmed facts, or pending confirmations change. Do not append milestone diaries or recreate legacy Project Analysis/Memory/Custom Instructions sections.',
+    ].join(' ')
   }
 
-  return `This project has no TMS.md — the persistent project memory file that stores framework info, dev commands, architectural decisions, and milestones across sessions. Without it, every session re-analyzes the project from scratch.
+  return `This project has no TMS.md — the compact operational project memory file that stores verified project orientation across sessions.
 
 **After completing your first significant task in this session**, create TMS.md at the project root (\`${ctx.normalizedCwd}/TMS.md\`) with these sections:
-- \`# TMS — Project Memory\`
-- \`## Project Analysis\` (name, framework, package manager, key deps, directory overview)
-- \`## Memory\` with sub-sections: \`### Milestones\` (dated entries), \`### Decisions\` (with rationale), \`### Pending Tasks\`
-- \`## Custom Instructions\` (developer-specific rules from user input)
+- \`# TMS.md\`
+- \`## Overview\`
+- \`## Stack\`
+- \`## Commands\`
+- \`## Structure\`
+- \`## EntryPoints\`
+- \`## Project Patterns\`
+- \`## Agent Rules\`
+- \`## Confirmed\`
+- \`## Inferred\`
+- \`## Pending Confirmation\`
+- \`## lastGeneratedAt\`
+- \`## sourceFilesUsed\`
 
-Use your existing knowledge of the project (file reads, package.json, directory structure) to populate it. This file persists across sessions and is your project-level persistent memory.`
+Keep it concise. Use search/list tools before reading, read only the source files needed to confirm facts, and do not create a milestone diary.`
 }
 
 /**
- * Injects the actual content of the project's TMS.md into the prompt.
- * Chat mode has `getProjectMemorySection` for this; CMD mode was missing
- * it — the agent could see guidance to create TMS.md but never read the
- * existing content.
+ * Injects a compact TMS.md stub into CMD mode. The full file should be read
+ * only when the task needs exact project-memory text.
  */
 export function getCmdTmsContentSection(ctx: CmdPromptContext): string | null {
   if (!ctx.tmsContent) return null
@@ -290,7 +296,7 @@ export function getCmdTmsContentSection(ctx: CmdPromptContext): string | null {
     `lastGeneratedAt: ${lastGeneratedAt}`,
     'Available sections:',
     ...(headings.length ? headings.map(line => `- ${line}`) : ['- (section index unavailable)']),
-    'Do not inject full TMS.md by default. Read TMS.md only when the task needs a complete section.',
+    'Do not inject full TMS.md by default. Use the listed headings to choose the smallest useful section; read TMS.md only when the task needs exact project-memory text.',
   ].join('\n')
   markTmsStubSent(stub)
   return sanitizeProjectContent(stub)

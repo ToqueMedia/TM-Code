@@ -54,6 +54,11 @@ import {
 } from './contextBuilder/projectUtils'
 import { buildProjectSymbolIndexSection } from './contextBuilder/projectSymbolIndex'
 import {
+  buildTmsSectionContext,
+  isTmsSectionContextId,
+  tmsSectionContextKeyFromId,
+} from './contextBuilder/tmsSectionContext'
+import {
   sharedContextPreservation,
   sharedIdentity,
   sharedMcpBlock,
@@ -248,6 +253,10 @@ class ContextBuilder {
   private async renderAuxiliaryContent(id: string): Promise<string | null> {
     const ctx = this.lastAuxiliaryCtx
     const resolvedId = resolveAuxiliaryId(id)
+    if (isTmsSectionContextId(resolvedId)) {
+      const key = tmsSectionContextKeyFromId(resolvedId)
+      return key && ctx?.promptCtx ? buildTmsSectionContext(ctx.promptCtx.tmsContent, key) : null
+    }
     switch (resolvedId) {
       case 'delivery.deploy':
         return getPublishingSection()
@@ -316,7 +325,8 @@ class ContextBuilder {
       case 'agent_runtime.tool_profiles':
         return [
           '# Agent runtime: tool profiles',
-          'Tool profiles bound available tools to the current task profile. Use request_tools only when the current active set lacks a required capability.',
+          'Tool profiles choose the starter toolset for the current task. They do not cap what can be loaded later.',
+          'Use request_tools whenever the current active set lacks a required capability; a registered tool should be delivered on demand unless an explicit no-edit/read-only policy blocks it.',
           'Expected files: src/services/agent/toolsetSelector.ts and callers that pass selectedPromptProfile.',
         ].join('\n')
       case 'agent_runtime.request_context_policy':
@@ -1148,17 +1158,13 @@ class ContextBuilder {
         'skill set depends on project-type detection'),
       dynamicSection('global_memory', () => getCmdGlobalMemorySection(ctx),
         '~/.toquemedia-studio/TMS.md is user-editable'),
-      // TMS.md content — injects the actual project memory into the prompt.
-      // Chat mode has getProjectMemorySection for this; CMD mode was missing
-      // it, so the agent could see guidance to create TMS.md but never read
-      // the existing content. Placed before guidance so the agent reads
-      // existing content first, then gets the create/update directive.
+      // TMS.md content stub — injects headings/metadata, not the full project
+      // memory body. Placed before guidance so the agent knows whether TMS.md
+      // exists before it receives maintenance rules.
       dynamicSection('tms_content', () => getCmdTmsContentSection(ctx),
         'TMS.md content changes as the agent updates it'),
-      // TMS.md guidance — instructs the agent to create or maintain the
-      // project-level persistent memory file. Placed after TMS.md content
-      // so the agent reads existing memory first, then gets the create/
-      // update directive. Same ordering as chat mode.
+      // TMS.md guidance — asks for creation only when missing, otherwise
+      // keeps maintenance compact and tied to durable project facts.
       dynamicSection('tms_guidance', () => getCmdTmsGuidanceSection(ctx),
         'TMS.md existence is a per-session check (file may be created mid-session)'),
       // Persistent memory — user-scope + project-scope MEMORY.md indexes.

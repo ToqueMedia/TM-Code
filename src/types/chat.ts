@@ -773,11 +773,10 @@ export interface RequestUsageEntry {
   contextPlannerRejectedContexts?: string[]
   /** The planner's selection rationale. */
   contextPlannerSelectionReason?: string
-  /** Tool names in the active set that were expanded via request_tools (empty
-   *  on turn 1; grows monotonically). */
+  /** Tool names requested on demand during the run. This is an audit trail,
+   *  not proof those tools are still active on later model steps. */
   expandedToolNames?: string[]
-  /** Tools the model requested via request_tools but were DENIED by the
-   *  profile bound — proves the bound is enforcing the tighter toolset. */
+  /** Tools the model requested but an explicit policy denied. */
   deniedToolNames?: string[]
   /** ── "Stopped without editing" guardrail telemetry ──
    *  Populated from the query loop's run-level tracking. Lets an exported

@@ -815,7 +815,7 @@ export function getProjectMemorySection(ctx: PromptContext): string | null {
     `lastGeneratedAt: ${lastGeneratedAt}`,
     'Available sections:',
     ...(headings.length ? headings.map(line => `- ${line.replace(/^#+\s*/, '')}`) : ['- (section index unavailable)']),
-    `Do not treat this stub as the full project memory. Use request_context with \`project.docs_full\` or ${READ_ALIAS} on TMS.md only when a complete section is needed.`,
+    `Do not treat this stub as the full project memory. Use request_context with the smallest needed section, such as \`tms.commands\`, \`tms.entrypoints\`, \`tms.project_patterns\`, \`tms.agent_rules\`, \`tms.confirmed\`, or \`project.docs_full\` only when the whole document is needed. Use ${READ_ALIAS} on TMS.md only when request_context is insufficient.`,
   ].join('\n')
   markTmsStubSent(stub)
   return sanitizeProjectContent(stub)
@@ -1046,12 +1046,7 @@ export function getTrackerStateSection(ctx: PromptContext): string | null {
 export { buildMemoryGuidanceSection as getMemoryToolsGuidanceSection } from '../../memoryGuidance'
 
 /**
- * TMS.md guidance — unified for all cases.
-
-/**
- * TMS.md guidance — unified for all cases.
- *
- * TMS.md guidance.
+ * TMS.md maintenance guidance.
  *
  * Missing-TMS creation is handled by the explicit project_bootstrap preflight,
  * not by a passive reminder in the normal task prompt. Injecting a "create
@@ -1060,7 +1055,10 @@ export { buildMemoryGuidanceSection as getMemoryToolsGuidanceSection } from '../
  */
 export function getMemoryGuidanceSection(ctx: PromptContext): string | null {
   if (ctx.tmsContent) {
-    return `Keep TMS.md updated with milestones (dated) and architectural decisions (with rationale) as you complete work. Preserve "Project Analysis" and "Custom Instructions" sections as-is.`
+    return [
+      'Maintain TMS.md as compact operational project memory using the /init structure: Overview, Stack, Commands, Structure, EntryPoints, Project Patterns, Agent Rules, Confirmed, Inferred, Pending Confirmation, lastGeneratedAt, sourceFilesUsed.',
+      'Update it only when durable commands, entrypoints, repo patterns, agent rules, confirmed facts, or pending confirmations change. Do not append milestone diaries or recreate legacy Project Analysis/Memory/Custom Instructions sections.',
+    ].join(' ')
   }
   return null
 }

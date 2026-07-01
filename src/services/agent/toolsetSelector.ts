@@ -13,20 +13,21 @@
  * HOW IT WORKS
  * ────────────
  * The selector starts with the model-selected profile base and optional
- * model-planned tool groups. It expands monotonically — once a tool is
- * activated it stays active for the rest of the run (never retracted, so the
- * tool-schema prefix stabilises and Anthropic prompt-caching can reuse it).
+ * model-planned tool groups. Additional tools are delivered on demand when
+ * the model asks for them. On-demand activations are transient: they are sent
+ * on the next model step, then dropped unless requested again.
  *
  * Expansion sources:
  *   1. Context/tool plan from the utility model activates groups up front.
  *   2. The agent calls the `request_tools` meta-tool explicitly → activates
- *      the named tools for the next turn.
+ *      the named tools for the next model step.
  *   3. The toolExecutor receives a call for a tool that exists in the registry
  *      but isn't active → activates it (defensive: covers model hallucination
  *      of a tool name it read about in the system prompt).
  *
- * The `request_tools` meta-tool is injected into every active set (until ALL
- * tools are active) so the model can ask for capabilities it doesn't have.
+ * Profiles are not authorization bounds. If a registered tool is requested,
+ * the selector delivers it unless a hard policy applies, such as an explicit
+ * developer no-edit/read-only instruction.
  */
 
 import type OpenAI from 'openai'
@@ -95,19 +96,13 @@ const GROUP_TOOLS: Record<ToolsetGroupName, readonly string[]> = {
   PROVISION: PROVISION_TOOLS,
 }
 
-// ── Profile-bound toolsets ───────────────────────────────────────────────
+// ── Profile starter toolsets ─────────────────────────────────────────────
 //
 // The Intent Router (qwen3.7-plus) classifies the user's request into a
-// PromptProfile + a readOnly flag. Each profile declares:
-//   - base:   the tools active on turn 1 (the smallest set the task needs)
-//   - allowed: the MAXIMUM tools request_tools/model-planned groups can activate
-//              for this profile (null = no bound — all tools allowed)
-//
-// This is what makes the tighter toolset actually bind: even if the model
-// calls request_tools asking for everything, only `allowed` tools activate;
-// the rest are denied. `readOnly` further intersects `allowed` with
-// non-destructive tools (no edit/write/create/delete/rename) so a "deploy
-// without editing" run keeps Publishing/Shell but drops file mutations.
+// PromptProfile + a readOnly hint. Each profile declares only the tools that
+// should be active on the first model step. request_tools/model-planned groups
+// may activate any registered tool later; profile selection is a cost/context
+// optimisation, not an authorization boundary.
 
 /** Verification/audit without editing files (Parte B: read-only set). */
 const READONLY_BASE = [
@@ -136,7 +131,7 @@ const BUGFIX_BASE = [
 export { BUGFIX_BASE, READONLY_BASE }
 
 /**
- * Tools that mutate the filesystem — stripped when readOnly is true.
+ * Tools that mutate the filesystem.
  * Exported so the agent loop can track whether any file mutation occurred
  * during a run (the "stopped without editing" guardrail in query.ts).
  */
@@ -145,12 +140,11 @@ export const DESTRUCTIVE_TOOLS = new Set<string>([
 ])
 
 /**
- * The FULL set stripped when readOnly is true: destructive file tools +
- * provisioning (creates cloud resources) + shell/dev-server/background
- * (can mutate via commands). A read-only run is pure inspection — read,
- * search, list, ask — nothing that changes state. `execute_command`
- * (synchronous, often read-only like `git log`/`ls`) is intentionally NOT
- * blocked; the analysis_readonly profile simply omits it from its base.
+ * The FULL set stripped only when read-only enforcement is hard. Most
+ * readOnly classifications are hints from the router/planner and should not
+ * deny on-demand tools. A hard lock is reserved for explicit developer
+ * no-edit/read-only instructions. `execute_command` (synchronous, often
+ * read-only like `git log`/`ls`) is intentionally NOT blocked.
  */
 const READONLY_BLOCKED_TOOLS = new Set<string>([
   ...DESTRUCTIVE_TOOLS,
@@ -161,51 +155,44 @@ const READONLY_BLOCKED_TOOLS = new Set<string>([
 interface ProfileToolset {
   /** Tools active on turn 1 (filtered against the registry). */
   base: readonly string[]
-  /** Maximum tools request_tools/model-planned groups can activate. null = unbounded. */
-  allowed: readonly string[] | null
 }
 
 const PROFILE_TOOLSETS: Record<PromptProfile, ProfileToolset> = {
   // Visible /init-like project profiling for TMS.md. execute_command is not
-  // available by default and request_tools cannot activate it under this
-  // profile.
+  // available by default; request_tools may still activate it if needed.
   project_bootstrap: {
     base: PROJECT_BOOTSTRAP_BASE,
-    allowed: PROJECT_BOOTSTRAP_BASE,
   },
 
-  // Hard read-only: verification/audit. request_tools can't expand beyond
-  // the read set, so it's effectively a no-op (and omitted when allActive).
-  analysis_readonly: { base: READONLY_BASE, allowed: READONLY_BASE },
+  // Verification/audit starter set. Hard no-edit enforcement is controlled by
+  // the constructor flag, not by this profile.
+  analysis_readonly: { base: READONLY_BASE },
 
   // Bugfix in existing files. edit_file/update_tasks/list_directory/read_skill
-  // are request_tools-expandable; provision/shell/destructive-create are NOT.
+  // are not active by default; any registered tool can be requested on demand.
   bugfix_local: {
     base: BUGFIX_BASE,
-    allowed: [...BUGFIX_BASE, EDIT_FILE, UPDATE_TASKS, LIST_DIRECTORY, READ_SKILL],
   },
 
   // UI/design work — needs edit + create/write for components.
   frontend_ui: {
     base: [...BUGFIX_BASE, EDIT_FILE],
-    allowed: [...BUGFIX_BASE, EDIT_FILE, UPDATE_TASKS, LIST_DIRECTORY, READ_SKILL, CREATE_FILE, WRITE_FILE],
   },
 
-  // New project — broad toolset, unbounded (needs everything to scaffold).
-  scaffold_project: { base: [...BUGFIX_BASE, EDIT_FILE, WRITE_FILE, CREATE_FILE], allowed: null },
+  // New project — broad starter set (needs everything to scaffold).
+  scaffold_project: { base: [...BUGFIX_BASE, EDIT_FILE, WRITE_FILE, CREATE_FILE] },
 
-  // Deploy/publish — Publishing + shell + read. Unbounded, but readOnly
-  // strips destructive file tools so "deploy without editing" holds.
-  deploy_publish: { base: [...BUGFIX_BASE, ...PROVISION_TOOLS, ...SHELL_TOOLS], allowed: null },
+  // Deploy/publish — Publishing + shell + read.
+  deploy_publish: { base: [...BUGFIX_BASE, ...PROVISION_TOOLS, ...SHELL_TOOLS] },
 
-  // Auth/database — provisioning + read. Unbounded.
-  auth_database: { base: [...BUGFIX_BASE, ...PROVISION_TOOLS], allowed: null },
+  // Auth/database — provisioning + read.
+  auth_database: { base: [...BUGFIX_BASE, ...PROVISION_TOOLS] },
 
-  // Image/attachment — web fetch + read. Unbounded.
-  vision: { base: [...BUGFIX_BASE, WEB_FETCH], allowed: null },
+  // Image/attachment — web fetch + read.
+  vision: { base: [...BUGFIX_BASE, WEB_FETCH] },
 
   // Fallback (shouldn't normally be classified) — full CORE.
-  core: { base: CORE_TOOLS, allowed: null },
+  core: { base: CORE_TOOLS },
 }
 
 // ── Meta-tool: request_tools ─────────────────────────────────────────────
@@ -229,7 +216,7 @@ export function requestContextDefinition(omittedIds: string[]): OpenAI.ChatCompl
       name: REQUEST_CONTEXT_NAME,
       description:
         'Request a domain/capability context that was OMITTED from the system prompt to keep it lean. ' +
-        'Use the smallest specific context first (for example design_system.semantic_tokens, agent_runtime.mcp_routing, delivery.dev_server, delivery.git_status). ' +
+        'Use the smallest specific context first (for example tms.commands, tms.entrypoints, design_system.semantic_tokens, agent_runtime.mcp_routing, delivery.dev_server, delivery.git_status). ' +
         'Use broad project/full contexts only when specific contexts are insufficient. ' +
         'The content is returned as a tool result for you to use this turn. ' +
         'Call ONCE per auxiliary; do not re-request one already returned.',
@@ -266,7 +253,7 @@ export function requestToolsDefinition(allInactiveNames: string[]): OpenAI.ChatC
         'Request additional tools that are NOT in the current active toolset. ' +
         'Use this when you need a capability that is not currently available ' +
         '(e.g. write_file, create_file, delegate, save_memory, provision_*). ' +
-        'The requested tools will be available on the NEXT turn. ' +
+        'The requested tools will be available on the next model step, then may be dropped if not requested again. ' +
         'Call this ONCE with all the tools you need — do not call it repeatedly ' +
         'for individual tools. After calling this, finish your current turn; ' +
         'the tools will be active when you resume.',
@@ -309,42 +296,38 @@ export interface RequestToolsResult {
   alreadyActive: string[]
   /** Tool names that don't exist in the available set. */
   unknown: string[]
-  /**
-   * Tool names the model asked for but were DENIED because they fall outside
-   * the profile's `allowed` set (or are destructive while readOnly). These
-   * never activate — the bound is what keeps a bugfix at ~6 tools instead of
-   * the model pulling all 31 via request_tools.
-   */
+  /** Tool names denied by a hard policy such as explicit read-only/no-edit. */
   denied: string[]
 }
 
 /**
- * Stateful toolset selector. One per agent run. Expands monotonically —
- * once a tool is activated it never leaves the active set, so the tool-schema
- * prefix stabilises and prompt-caching can reuse it.
+ * Stateful toolset selector. One per agent run. Profile/base tools persist
+ * through the run; tools requested on demand are sent for one model step and
+ * then removed unless the model asks for them again.
  */
 export class ToolsetSelector {
-  /** Names of tools that are currently active (starts with the profile base). */
+  /** Names of tools currently active for the next request. */
   private activeToolNames: Set<string>
+  /** Names that belong to the current profile/planned starter set. */
+  private persistentToolNames: Set<string>
+  /** On-demand names added via request_tools or direct defensive expansion. */
+  private transientToolNames = new Set<string>()
+  /** Transient names already sent in the previous provider request. */
+  private transientToolNamesOffered = new Set<string>()
   /** All available tool names (from the toolExecutor registry). */
   private allToolNames: Set<string>
-  /**
-   * Maximum tools that can EVER be active for this run (the profile's
-   * `allowed` set, intersected with non-destructive when readOnly). null = no
-   * bound. request_tools, model-planned groups, and defensive expandForToolName
-   * all refuse to activate names outside this set.
-   */
-  private allowedToolNames: Set<string> | null
-  /** The profile driving base + allowed. */
+  /** The profile driving the starter toolset. */
   private profile: PromptProfile
-  /** Read-only hint from the Intent Router (strips destructive tools). */
-  private readOnly: boolean
+  /** Read-only hint from the Intent Router / context plan. Telemetry only. */
+  private readOnlyHint: boolean
+  /** Hard no-edit policy from an explicit developer instruction. */
+  private enforceReadOnly: boolean
   /**
-   * Names activated via request_tools across the whole run (monotonic) —
-   * exposed for the usage log so an export proves what was expanded and when.
+   * Names activated on demand across the whole run. This is audit history;
+   * it does not mean those tools are still active.
    */
   private expandedNames = new Set<string>()
-  /** Names the model requested but were DENIED by the profile bound (monotonic). */
+  /** Names the model requested but were denied by a hard policy. */
   private deniedNames = new Set<string>()
   /**
    * Number of auxiliary context blocks omitted from the system prompt (set by
@@ -358,20 +341,15 @@ export class ToolsetSelector {
     profile: PromptProfile = 'bugfix_local',
     readOnly = false,
     plannedGroups: ToolsetGroupName[] = [],
+    enforceReadOnly = readOnly,
   ) {
     this.allToolNames = new Set(allToolNames)
     this.profile = profile
-    this.readOnly = readOnly
-    this.allowedToolNames = this.resolveAllowed(profile, readOnly)
-    // Start with the profile's base — only keep names that exist in the
-    // registry AND are inside the allowed bound.
-    const base = PROFILE_TOOLSETS[profile]?.base ?? CORE_TOOLS
-    this.activeToolNames = new Set(
-      base.filter((n) => this.allToolNames.has(n) && this.isAllowed(n)),
-    )
-    for (const group of plannedGroups) {
-      this.activateGroup(group)
-    }
+    this.readOnlyHint = readOnly
+    this.enforceReadOnly = enforceReadOnly
+    this.persistentToolNames = new Set()
+    this.activeToolNames = new Set()
+    this.resetPersistentTools(profile, plannedGroups)
   }
 
   /**
@@ -383,46 +361,34 @@ export class ToolsetSelector {
     profile: PromptProfile,
     readOnly = false,
     plannedGroups: ToolsetGroupName[] = [],
+    enforceReadOnly = readOnly,
   ): void {
     this.profile = profile
-    this.readOnly = readOnly
-    this.allowedToolNames = this.resolveAllowed(profile, readOnly)
+    this.readOnlyHint = readOnly
+    this.enforceReadOnly = enforceReadOnly
+    this.resetPersistentTools(profile, plannedGroups)
+  }
+
+  private resetPersistentTools(profile: PromptProfile, plannedGroups: ToolsetGroupName[]): void {
+    this.transientToolNames.clear()
+    this.transientToolNamesOffered.clear()
+    this.persistentToolNames = new Set()
     const base = PROFILE_TOOLSETS[profile]?.base ?? CORE_TOOLS
-    this.activeToolNames = new Set(
-      base.filter((n) => this.allToolNames.has(n) && this.isAllowed(n)),
-    )
+    for (const name of base) {
+      if (this.canActivate(name)) this.persistentToolNames.add(name)
+    }
     for (const group of plannedGroups) {
       this.activateGroup(group)
     }
+    this.activeToolNames = new Set(this.persistentToolNames)
   }
 
-  /**
-   * Resolve the allowed set for a profile + readOnly. null means unbounded
-   * (the profile permits all tools). readOnly ALWAYS strips the
-   * READONLY_BLOCKED set (destructive + provision + shell/dev-server/
-   * background): when allowed is null, the ceiling becomes allToolNames
-   * minus blocked; when allowed is a list, it's intersected with non-blocked.
-   */
-  private resolveAllowed(profile: PromptProfile, readOnly: boolean): Set<string> | null {
-    const ts = PROFILE_TOOLSETS[profile]
-    if (!ts) return null
-    let allowed: readonly string[] | null = ts.allowed
-    if (readOnly) {
-      if (allowed === null) {
-        // Unbounded profile + readOnly: ceiling = all tools minus blocked.
-        return new Set(
-          Array.from(this.allToolNames).filter((n) => !READONLY_BLOCKED_TOOLS.has(n)),
-        )
-      }
-      allowed = allowed.filter((n) => !READONLY_BLOCKED_TOOLS.has(n))
-    }
-    return allowed === null ? null : new Set(allowed)
+  private isBlockedByHardPolicy(name: string): boolean {
+    return this.enforceReadOnly && READONLY_BLOCKED_TOOLS.has(name)
   }
 
-  /** Whether a name is inside the allowed bound (or unbounded). */
-  private isAllowed(name: string): boolean {
-    if (this.allowedToolNames === null) return true
-    return this.allowedToolNames.has(name)
+  private canActivate(name: string): boolean {
+    return this.allToolNames.has(name) && !this.isBlockedByHardPolicy(name)
   }
 
   /**
@@ -442,10 +408,27 @@ export class ToolsetSelector {
 
   private activateGroup(group: ToolsetGroupName): void {
     for (const name of GROUP_TOOLS[group]) {
-      if (this.allToolNames.has(name) && this.isAllowed(name)) {
-        this.activeToolNames.add(name)
+      if (this.canActivate(name)) {
+        this.persistentToolNames.add(name)
       }
     }
+  }
+
+  private pruneOfferedTransientTools(): void {
+    if (this.transientToolNamesOffered.size === 0) return
+    for (const name of this.transientToolNamesOffered) {
+      this.transientToolNames.delete(name)
+      if (!this.persistentToolNames.has(name)) {
+        this.activeToolNames.delete(name)
+      }
+    }
+    this.transientToolNamesOffered.clear()
+  }
+
+  private getRequestableToolNames(): Set<string> {
+    return new Set(
+      Array.from(this.allToolNames).filter((name) => !this.isBlockedByHardPolicy(name)),
+    )
   }
 
   /**
@@ -460,15 +443,15 @@ export class ToolsetSelector {
     allTools: OpenAI.ChatCompletionTool[],
     _userText = '',
   ): ToolsetSelection {
+    this.pruneOfferedTransientTools()
+
     // Build the filtered list, preserving the original order.
     const activeTools = allTools.filter((t) =>
       this.activeToolNames.has(t.function.name),
     )
 
-    // allActive means every ALLOWED tool is active (not every tool in the
-    // registry — when a bound is in place, the bound is the ceiling).
-    const ceiling = this.allowedToolNames ?? this.allToolNames
-    const allActive = this.activeToolNames.size >= ceiling.size
+    const requestable = this.getRequestableToolNames()
+    const allActive = Array.from(requestable).every((name) => this.activeToolNames.has(name))
     // Meta-tools: request_tools (when tools are omitted) + request_context
     // (when auxiliary context blocks are omitted). Both can coexist; each is
     // only injected when there's something to request.
@@ -477,6 +460,7 @@ export class ToolsetSelector {
     if (this.omittedAuxiliaryCount > 0) {
       tools.push(this.buildRequestContextMetaTool())
     }
+    this.transientToolNamesOffered = new Set(this.transientToolNames)
 
     return {
       tools,
@@ -488,8 +472,8 @@ export class ToolsetSelector {
 
   /**
    * Activate specific tool names (called by the request_tools meta-tool bridge).
-   * Returns which were newly added, already active, unknown, or DENIED
-   * (outside the profile's allowed bound — never activated).
+   * Returns which were newly added, already active, unknown, or denied by a
+   * hard policy. Registered tools are otherwise delivered on demand.
    */
   requestTools(toolNames: string[]): RequestToolsResult {
     const added: string[] = []
@@ -499,15 +483,14 @@ export class ToolsetSelector {
     for (const name of toolNames) {
       if (!this.allToolNames.has(name)) {
         unknown.push(name)
-      } else if (!this.isAllowed(name)) {
-        // The model asked for a tool the profile forbids — deny it. This is
-        // the bound that stops a bugfix from pulling all 31 tools.
+      } else if (this.isBlockedByHardPolicy(name)) {
         denied.push(name)
         this.deniedNames.add(name)
       } else if (this.activeToolNames.has(name)) {
         alreadyActive.push(name)
       } else {
         this.activeToolNames.add(name)
+        this.transientToolNames.add(name)
         this.expandedNames.add(name)
         added.push(name)
       }
@@ -515,19 +498,19 @@ export class ToolsetSelector {
     return { added, alreadyActive, unknown, denied }
   }
 
-  /** Names activated via request_tools so far this run (monotonic). */
+  /** Names activated on demand so far this run (audit trail, not active set). */
   getExpandedNames(): string[] {
     return Array.from(this.expandedNames)
   }
 
-  /** Names the model requested but the profile bound denied (monotonic). */
+  /** Names the model requested but hard policy denied (audit trail). */
   getDeniedNames(): string[] {
     return Array.from(this.deniedNames)
   }
 
   /** Record a denied direct tool call (not via request_tools) for telemetry. */
   noteDeniedToolName(toolName: string): void {
-    if (this.allToolNames.has(toolName) && !this.isAllowed(toolName)) {
+    if (this.allToolNames.has(toolName) && this.isBlockedByHardPolicy(toolName)) {
       this.deniedNames.add(toolName)
     }
   }
@@ -537,23 +520,29 @@ export class ToolsetSelector {
     return this.profile
   }
 
-  /** Whether the run is read-only (no destructive file tools). */
+  /** Whether a hard explicit no-edit/read-only policy is enforced. */
   isReadOnly(): boolean {
-    return this.readOnly
+    return this.enforceReadOnly
+  }
+
+  /** Router/planner read-only classification, kept as a hint for telemetry. */
+  getReadOnlyHint(): boolean {
+    return this.readOnlyHint
   }
 
   /**
    * Activate a single tool by name (defensive: called when the executor
-   * receives a call for a tool that exists but isn't active). Refuses to
-   * activate tools outside the allowed bound; returns false in that case so
-   * the caller can surface a proper error instead of silently expanding.
+   * receives a call for a registered tool that isn't active). Refuses only
+   * unknown names or hard-policy-blocked names.
    */
   expandForToolName(toolName: string): boolean {
-    if (!this.allToolNames.has(toolName) || !this.isAllowed(toolName)) {
+    if (!this.canActivate(toolName)) {
       return false
     }
     if (!this.activeToolNames.has(toolName)) {
       this.activeToolNames.add(toolName)
+      this.transientToolNames.add(toolName)
+      this.expandedNames.add(toolName)
       return true
     }
     return false
@@ -564,15 +553,13 @@ export class ToolsetSelector {
     return this.activeToolNames.has(toolName)
   }
 
-  /** Build the request_tools meta-tool listing only the ALLOWED-but-inactive
-   *  names. When a bound is in place, tools outside the bound are deliberately
-   *  hidden from the description so the model doesn't waste a turn asking for
-   *  them (and getting denied). */
+  /** Build the request_tools meta-tool listing registered inactive names that
+   *  are not blocked by a hard explicit policy. */
   private buildRequestToolsMetaTool(): OpenAI.ChatCompletionTool {
     const inactive: string[] = []
     for (const name of this.allToolNames) {
       if (this.activeToolNames.has(name)) continue
-      if (this.isAllowed(name)) inactive.push(name)
+      if (!this.isBlockedByHardPolicy(name)) inactive.push(name)
     }
     return requestToolsDefinition(inactive)
   }
