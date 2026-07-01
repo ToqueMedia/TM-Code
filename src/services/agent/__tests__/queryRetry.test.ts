@@ -22,6 +22,26 @@ function makeStream(chunks: unknown[]): AsyncIterable<unknown> {
   }
 }
 
+function makeHeartbeatOnlyStream(onReturn: jest.Mock): AsyncIterable<unknown> {
+  return {
+    [Symbol.asyncIterator]() {
+      return {
+        async next() {
+          await new Promise(resolve => setTimeout(resolve, 2))
+          return {
+            done: false,
+            value: { choices: [{ delta: { role: 'assistant' } }] },
+          }
+        },
+        async return() {
+          onReturn()
+          return { done: true, value: undefined }
+        },
+      }
+    },
+  }
+}
+
 function makeClient(create: jest.Mock) {
   return {
     chat: {
@@ -372,5 +392,34 @@ describe('query retry handling', () => {
     expect(terminal.done).toBe(true)
     expect(terminal.value).toMatchObject({ reason: 'error' })
     expect(create).toHaveBeenCalledTimes(4)
+  })
+
+  it('aborts a live stream that never produces useful model progress', async () => {
+    const streamReturn = jest.fn()
+    const create = jest.fn((_body, _opts) => ({
+      withResponse: async () => ({
+        data: makeHeartbeatOnlyStream(streamReturn),
+        response: { headers: new Headers() },
+      }),
+    }))
+
+    const generator = query(baseParams({
+      client: makeClient(create),
+      streamSemanticIdleTimeoutMs: 15,
+    }))
+
+    expect(await nextEvent(generator)).toEqual({ type: 'message_start' })
+    expect(await nextEvent(generator)).toMatchObject({
+      type: 'error',
+      message: expect.stringContaining('did not produce model output'),
+    })
+
+    const requestSignal = create.mock.calls[0]?.[1]?.signal as AbortSignal
+    expect(requestSignal.aborted).toBe(true)
+    expect(streamReturn).toHaveBeenCalled()
+
+    const terminal = await generator.next()
+    expect(terminal.done).toBe(true)
+    expect(terminal.value).toMatchObject({ reason: 'error' })
   })
 })

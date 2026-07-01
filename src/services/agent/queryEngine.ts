@@ -48,6 +48,8 @@ export interface QueryEngineOptions {
   thinkingConfig?: Record<string, unknown>
   /** Usage callback. */
   onUsage?: (inputTokens: number, outputTokens: number) => void
+  /** Override for tests: max time without useful model progress while streaming. */
+  streamSemanticIdleTimeoutMs?: number
   /** Per-request usage callback (real tokens + inspector estimate + breakdown). */
   onRequestUsage?: (entry: RequestUsageEntry) => void
   /** Compact instructions. */
@@ -182,6 +184,7 @@ export class QueryEngine {
         this._state.totalOutputTokens += outputTokens
         this.options.onUsage?.(inputTokens, outputTokens)
       },
+      streamSemanticIdleTimeoutMs: this.options.streamSemanticIdleTimeoutMs,
       onRequestUsage: (entry) => {
         this.options.onRequestUsage?.(entry)
       },

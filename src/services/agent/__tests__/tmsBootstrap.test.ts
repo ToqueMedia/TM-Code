@@ -35,7 +35,7 @@ describe('runTmsPreflight', () => {
     mockedInvoke.mockReset()
   })
 
-  it('continues the original task when TMS.md is absent', async () => {
+  it('bootstraps the project when TMS.md is absent', async () => {
     mockedInvoke.mockRejectedValueOnce(new Error('not found'))
 
     const result = await runTmsPreflight({
@@ -46,22 +46,23 @@ describe('runTmsPreflight', () => {
 
     expect(result).toMatchObject({
       tmsFound: false,
-      shouldBootstrap: false,
+      shouldBootstrap: true,
       reason: 'missing',
       path: '/repo/TMS.md',
     })
     expect(telemetry).toMatchObject({
-      executionPhase: 'original_task',
+      executionPhase: 'project_bootstrap',
       tmsFoundAtStart: false,
       tmsAvailable: false,
-      tmsBootstrapTriggered: false,
-      tmsBootstrapPhase: 'missing_skipped',
+      tmsBootstrapTriggered: true,
+      tmsBootstrapPhase: 'preflight_missing',
+      tmsBootstrapToolset: 'project_bootstrap',
       originalUserMessageDisplayed: true,
       originalTaskResumedAfterBootstrap: false,
     })
   })
 
-  it('does not build a bootstrap prompt for missing TMS.md', async () => {
+  it('builds a bootstrap prompt only for missing TMS.md', async () => {
     mockedInvoke.mockRejectedValueOnce(new Error('not found'))
 
     const result = await runTmsPreflight({
@@ -71,10 +72,13 @@ describe('runTmsPreflight', () => {
     })
     const prompt = buildTmsBootstrapOnlyPrompt(result, 'Implementar modal de NIF em /billing.')
 
-    expect(prompt).toBe('')
+    expect(prompt).toContain('TMS.md was not found')
+    expect(prompt).toContain('Original user request, pending for the next phase')
+    expect(prompt).toContain('Implementar modal de NIF em /billing.')
+    expect(prompt).toContain('First map the project and create TMS.md')
   })
 
-  it('frames repair bootstrap as agent preflight, not as the user request', async () => {
+  it('does not auto-repair an existing invalid TMS.md during normal preflight', async () => {
     mockedInvoke.mockResolvedValueOnce('# TMS.md\n')
 
     const result = await runTmsPreflight({
@@ -86,24 +90,49 @@ describe('runTmsPreflight', () => {
 
     expect(result).toMatchObject({
       tmsFound: true,
-      shouldBootstrap: true,
+      shouldBootstrap: false,
       reason: 'invalid',
     })
-    expect(prompt).toContain('The user did NOT ask you to create TMS.md')
-    expect(prompt).toContain('Original user request, pending for the next phase')
-    expect(prompt).toContain('Implementar modal de NIF em /billing.')
-    expect(prompt).toContain('TMS.md exists but is incomplete or invalid')
-    expect(prompt).toContain('detected that an existing TMS.md needs repair')
-    expect(prompt).toContain('First read and preserve the existing TMS.md')
-    expect(prompt).toContain('If TMS.md already exists, read it first with Read')
-    expect(prompt).not.toContain('TMS.md não encontrado')
-    expect(prompt).not.toContain('TMS.md was not found')
-    expect(prompt).not.toContain('project memory/map is missing')
-    expect(prompt).not.toContain('TMS.md criado')
-    expect(prompt).not.toContain('visão geral')
-    expect(prompt).not.toContain('comandos')
-    expect(prompt).not.toContain('padrões do projecto')
-    expect(prompt).not.toContain('regras para o agente')
+    expect(prompt).toBe('')
+    expect(getTmsTurnTelemetry()).toMatchObject({
+      executionPhase: 'original_task',
+      tmsBootstrapTriggered: false,
+      tmsBootstrapPhase: 'already_exists_invalid',
+      tmsAlreadyExists: true,
+      tmsAvailable: true,
+    })
+  })
+
+  it('does not auto-refresh an existing stale TMS.md during normal preflight', async () => {
+    const staleTms = [
+      VALID_TMS,
+      '- src/app.ts',
+    ].join('\n')
+    mockedInvoke
+      .mockResolvedValueOnce(staleTms)
+      .mockResolvedValueOnce({ modifiedMs: Date.parse('2026-06-30T00:00:00.000Z') })
+
+    const result = await runTmsPreflight({
+      projectPath: '/repo',
+      originalUserMessageDisplayed: true,
+      originalUserMessage: 'Corrigir bug no login.',
+    })
+
+    expect(result).toMatchObject({
+      tmsFound: true,
+      valid: true,
+      stale: true,
+      shouldBootstrap: false,
+      reason: 'stale',
+    })
+    expect(buildTmsBootstrapOnlyPrompt(result, 'Corrigir bug no login.')).toBe('')
+    expect(getTmsTurnTelemetry()).toMatchObject({
+      executionPhase: 'original_task',
+      tmsBootstrapTriggered: false,
+      tmsBootstrapPhase: 'already_exists_stale',
+      tmsAlreadyExists: true,
+      tmsAvailable: true,
+    })
   })
 
   it('marks original_task directly when a valid TMS.md already exists', async () => {

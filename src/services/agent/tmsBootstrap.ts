@@ -189,10 +189,11 @@ export async function runTmsPreflight(options: {
   }
 
   if (existing === null) {
-    // Missing TMS.md is normal for projects opened before /init.
-    // Match Claude-style memory loading: absence is optional context, not
-    // a reason to hijack the user's next request with bootstrap work.
-    const shouldBootstrap = false
+    // Automatic project bootstrap is only for the missing-file case. If a
+    // TMS.md already exists, even if it is stale or incomplete, normal user
+    // messages must not be hijacked into repair work; /init is the explicit
+    // refresh path.
+    const shouldBootstrap = !options.skipBootstrap
     const result: TmsPreflightResult = {
       tmsFound: false,
       valid: false,
@@ -218,10 +219,10 @@ export async function runTmsPreflight(options: {
       tmsAlreadyExists: false,
       tmsBootstrapFailed: false,
       tmsPath,
-      tmsBootstrapInputTokens: 0,
+      tmsBootstrapInputTokens: shouldBootstrap ? estimateTokens(buildTmsBootstrapOnlyPrompt(result, options.originalUserMessage)) : 0,
       tmsBootstrapOutputTokens: 0,
-      tmsBootstrapPhase: 'missing_skipped',
-      tmsBootstrapToolset: undefined,
+      tmsBootstrapPhase: shouldBootstrap ? 'preflight_missing' : 'missing_skipped',
+      tmsBootstrapToolset: shouldBootstrap ? 'project_bootstrap' : undefined,
       tmsWriteAttempted: false,
       tmsWriteToolCallId: undefined,
       tmsBootstrapFailedReason: undefined,
@@ -261,7 +262,7 @@ export async function runTmsPreflight(options: {
   const valid = validateTms(existing)
   const stale = await isTmsStale(options.projectPath, existing)
   const reason: TmsPreflightResult['reason'] = !valid ? 'invalid' : stale ? 'stale' : 'ok'
-  const shouldBootstrap = !options.skipBootstrap && reason !== 'ok'
+  const shouldBootstrap = false
   const result: TmsPreflightResult = {
     tmsFound: true,
     valid,
@@ -280,9 +281,9 @@ export async function runTmsPreflight(options: {
     originalTaskFailedReason: undefined,
     tmsFound: true,
     tmsFoundAtStart: true,
-    tmsAvailable: !shouldBootstrap,
-    tmsAvailableAfterBootstrap: !shouldBootstrap,
-    tmsBootstrapCompleted: !shouldBootstrap,
+    tmsAvailable: true,
+    tmsAvailableAfterBootstrap: true,
+    tmsBootstrapCompleted: true,
     tmsBootstrapTriggered: shouldBootstrap,
     tmsCreated: false,
     tmsAlreadyExists: !shouldBootstrap,
@@ -290,8 +291,8 @@ export async function runTmsPreflight(options: {
     tmsPath,
     tmsBootstrapInputTokens: shouldBootstrap ? estimateTokens(buildTmsBootstrapOnlyPrompt(result, options.originalUserMessage)) : 0,
     tmsBootstrapOutputTokens: 0,
-    tmsBootstrapPhase: shouldBootstrap ? `preflight_${reason}` : 'already_exists',
-    tmsBootstrapToolset: shouldBootstrap ? 'project_bootstrap' : undefined,
+    tmsBootstrapPhase: reason === 'ok' ? 'already_exists' : `already_exists_${reason}`,
+    tmsBootstrapToolset: undefined,
     tmsWriteAttempted: false,
     tmsWriteToolCallId: undefined,
     tmsBootstrapFailedReason: undefined,

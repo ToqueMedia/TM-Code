@@ -79,6 +79,13 @@ const CREDENTIAL_CONFIG_RETRY_DELAY_MS = 30_000;
 const RATE_LIMIT_MAX_RETRIES = 6;
 const RATE_LIMIT_RETRY_DELAYS_MS = [10_000, 20_000, 30_000, 45_000, 55_000, 60_000];
 
+// Client-side semantic watchdog for streaming model turns. The Worker has
+// byte-level watchdogs, but providers can keep a stream alive with empty/role
+// chunks that produce no user-visible text, reasoning, tool call, or finish
+// event. Without this guard the UI can stay in "awaiting_response" until the
+// SDK transport timeout or forever on custom BYOK transports.
+const STREAM_SEMANTIC_IDLE_TIMEOUT_MS = 180_000;
+
 /** Lê o Retry-After (segundos) dos headers de um APIError do SDK, se existir. */
 function retryAfterMs(error: unknown): number | null {
   const headers = (error as { headers?: Record<string, string> | Headers } | null)?.headers;
@@ -309,6 +316,9 @@ export interface QueryParams {
   thinkingConfig?: Record<string, unknown>;
   /** Callback for reporting token usage. */
   onUsage?: (inputTokens: number, outputTokens: number) => void;
+  /** Timeout for no useful model progress while reading a streaming turn.
+   *  Production uses STREAM_SEMANTIC_IDLE_TIMEOUT_MS; tests may override. */
+  streamSemanticIdleTimeoutMs?: number;
   /** Callback for reporting per-request usage (real tokens + inspector
    *  estimate + breakdown). Fires once per chat.completions.create, right
    *  after the provider's usage chunk lands. Best-effort, never throws. */
@@ -428,6 +438,74 @@ function abortableDelay(ms: number, signal: AbortSignal): Promise<boolean> {
     };
     signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function createLinkedAbortController(parent: AbortSignal): {
+  controller: AbortController;
+  cleanup: () => void;
+} {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (parent.aborted) {
+    controller.abort();
+  } else {
+    parent.addEventListener("abort", onAbort, { once: true });
+  }
+  return {
+    controller,
+    cleanup: () => parent.removeEventListener("abort", onAbort),
+  };
+}
+
+function createStreamSemanticIdleError(timeoutMs: number): Error {
+  return new Error(
+    `Active AI provider did not produce model output for ${Math.round(timeoutMs / 1000)}s. ` +
+    `The request was aborted to avoid leaving the agent stuck awaiting a response.`,
+  );
+}
+
+async function readNextStreamChunk<T>(
+  iterator: AsyncIterator<T>,
+  semanticDeadlineMs: number,
+  timeoutMs: number,
+  onTimeout: () => void,
+): Promise<IteratorResult<T>> {
+  const remainingMs = semanticDeadlineMs - Date.now();
+  if (remainingMs <= 0) {
+    onTimeout();
+    throw createStreamSemanticIdleError(timeoutMs);
+  }
+
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const nextPromise = iterator.next();
+  // If the timeout wins, the pending nextPromise may later reject because the
+  // request was aborted. Observe it so browsers do not surface an unhandled
+  // rejection after we already reported the semantic timeout.
+  nextPromise.catch(() => {});
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      onTimeout();
+      reject(createStreamSemanticIdleError(timeoutMs));
+    }, remainingMs);
+  });
+
+  try {
+    return await Promise.race([nextPromise, timeoutPromise]);
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  }
+}
+
+function cancelStreamIterator(iterator: AsyncIterator<unknown>): void {
+  try {
+    const returned = iterator.return?.();
+    if (returned && typeof (returned as PromiseLike<IteratorResult<unknown>>).then === "function") {
+      void (returned as Promise<IteratorResult<unknown>>).catch(() => {});
+    }
+  } catch {
+    // Best-effort stream cleanup after timeout.
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -1236,11 +1314,20 @@ export async function* query(
     let authRefreshAttempts = 0;
     let credentialConfigRetries = 0;
     let rateLimitRetries = 0;
+    const semanticIdleTimeoutMs = Math.max(
+      1,
+      params.streamSemanticIdleTimeoutMs ?? STREAM_SEMANTIC_IDLE_TIMEOUT_MS,
+    );
 
     // Retry the same model turn only before any assistant output/tool call has
     // been emitted. Retrying after visible output could duplicate text or tools.
     // eslint-disable-next-line no-constant-condition
     while (true) {
+    const requestAbort = createLinkedAbortController(signal);
+    let semanticDeadlineMs = Date.now() + semanticIdleTimeoutMs;
+    const markModelProgress = () => {
+      semanticDeadlineMs = Date.now() + semanticIdleTimeoutMs;
+    };
     try {
       const streamParams: Record<string, unknown> = {
         model,
@@ -1263,7 +1350,7 @@ export async function* query(
           ...streamParams,
           stream: true,
         } as any,
-        { signal, headers: extraHeaders },
+        { signal: requestAbort.controller.signal, headers: extraHeaders },
       );
       const { data: stream, response } =
         typeof (responsePromise as any).withResponse === "function"
@@ -1274,7 +1361,19 @@ export async function* query(
       }
 
       // Process OpenAI stream chunks
-      for await (const chunk of stream as any) {
+      const streamIterator = (stream as AsyncIterable<unknown>)[Symbol.asyncIterator]();
+      while (true) {
+        const next = await readNextStreamChunk(
+          streamIterator,
+          semanticDeadlineMs,
+          semanticIdleTimeoutMs,
+          () => {
+            requestAbort.controller.abort();
+            cancelStreamIterator(streamIterator);
+          },
+        );
+        if (next.done) break;
+        const chunk = next.value as any;
         if (signal.aborted) {
           yield { type: "interrupted" };
           return {
@@ -1330,6 +1429,7 @@ export async function* query(
           const reasoning = String(delta.content);
           assistantThinkingParts.push(reasoning);
           nativeAccumulator.reasoningContent += reasoning;
+          markModelProgress();
           yield { type: "thinking_delta", thinking: reasoning };
           continue;
         }
@@ -1341,6 +1441,7 @@ export async function* query(
           const reasoning = delta.reasoning_content;
           assistantThinkingParts.push(reasoning);
           nativeAccumulator.reasoningContent += reasoning;
+          markModelProgress();
           yield { type: "thinking_delta", thinking: reasoning };
         }
 
@@ -1355,6 +1456,7 @@ export async function* query(
             nativeAccumulator.reasoningDetails.push(detail);
             if (detail?.text) {
               assistantThinkingParts.push(detail.text);
+              markModelProgress();
               yield { type: "thinking_delta", thinking: detail.text };
             }
           }
@@ -1376,6 +1478,7 @@ export async function* query(
         // Text content — MiniMax may embed <think> tags in content
         // We use a state machine to handle tags spanning multiple chunks
         if (delta?.content) {
+          markModelProgress();
           const raw = delta.content;
           contentBuffer.push(raw);
 
@@ -1461,6 +1564,7 @@ export async function* query(
 
         // Tool calls (streaming)
         if (delta?.tool_calls) {
+          markModelProgress();
           for (const tc of delta.tool_calls) {
             let pending = pendingToolCalls.get(tc.index);
             if (!pending) {
@@ -1528,6 +1632,7 @@ export async function* query(
 
         // Finish reason — may appear in multiple chunks (e.g. MiniMax)
         if (choice.finish_reason) {
+          markModelProgress();
           stopReason = choice.finish_reason;
           // Emit tool_use_stop for all completed tool calls (guard against duplicates)
           const seenToolIds = new Set(collectedToolCalls.map((tc) => tc.id));
@@ -1803,6 +1908,8 @@ export async function* query(
         totalInputTokens,
         totalOutputTokens,
       };
+    } finally {
+      requestAbort.cleanup();
     }
     }
 
