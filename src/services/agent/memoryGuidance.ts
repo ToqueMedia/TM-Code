@@ -70,7 +70,7 @@ If the developer explicitly asks you to remember something, save it as the type 
 - Code patterns, conventions, architecture, file paths, project structure — derivable from the current state by reading.
 - Git history, recent changes, who-changed-what — \`git log\` / \`git blame\` are authoritative.
 - Debugging solutions or fix recipes — the fix is in the code; the commit message has the context.
-- Anything already documented in CLAUDE.md or TMS.md.
+- Anything already documented in TMS.md.
 - Ephemeral task details: in-progress work, current conversation context (the task tracker handles those).
 
 These exclusions apply **even when the developer explicitly asks you to save.** If they ask you to save "the deploy log" or "the PR list", ask what was *surprising* or *non-obvious* about it — that's the part worth keeping.

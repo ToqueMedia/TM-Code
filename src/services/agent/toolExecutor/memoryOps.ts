@@ -31,7 +31,7 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
     definition: {
       name: 'save_memory',
       description:
-        'Persist a long-lived memory the model should see in future turns and future sessions. Use when you learn a fact about the developer (their role, preferences), get explicit feedback ("don\'t do X" / "yes exactly, do X"), discover a project-specific decision worth keeping (initiative, deadline, ownership), or want to remember where to look up external info (Linear project, Grafana board). DO NOT save: code patterns/conventions derivable from the repo, git-blame style "who changed what", debugging recipes (the fix is in the code), or anything already in CLAUDE.md. The entry is written to disk and travels with the project (project/reference types) or the IDE installation (user/feedback types).',
+        'Persist a long-lived memory the model should see in future turns and future sessions. Use when you learn a fact about the developer (their role, preferences), get explicit feedback ("don\'t do X" / "yes exactly, do X"), discover a project-specific decision worth keeping (initiative, deadline, ownership), or want to remember where to look up external info (Linear project, Grafana board). DO NOT save: code patterns/conventions derivable from the repo, git-blame style "who changed what", debugging recipes (the fix is in the code), or anything already in TMS.md. The entry is written to disk and travels with the project (project/reference types) or the IDE installation (user/feedback types).',
       input_schema: {
         type: 'object',
         properties: {

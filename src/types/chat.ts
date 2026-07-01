@@ -529,6 +529,57 @@ export interface RequestUsageEntry {
   outputTokens: number
   /** Whether inputTokens/outputTokens came from a provider usage chunk. */
   usageAvailable?: boolean
+  /** TMS.md bootstrap/context telemetry for this request. */
+  executionPhase?: 'project_bootstrap' | 'original_task'
+  bootstrapCompleted?: boolean
+  originalTaskStarted?: boolean
+  originalTaskCompleted?: boolean
+  originalTaskFailedReason?: string
+  tmsFound?: boolean
+  tmsFoundAtStart?: boolean
+  tmsAvailable?: boolean
+  tmsAvailableAfterBootstrap?: boolean
+  tmsBootstrapCompleted?: boolean
+  tmsBootstrapTriggered?: boolean
+  tmsCreated?: boolean
+  tmsAlreadyExists?: boolean
+  tmsBootstrapFailed?: boolean
+  tmsPath?: string
+  tmsBootstrapInputTokens?: number
+  tmsBootstrapOutputTokens?: number
+  tmsBootstrapPhase?: string
+  tmsBootstrapToolset?: string
+  tmsWriteAttempted?: boolean
+  tmsWriteToolCallId?: string
+  tmsBootstrapFailedReason?: string
+  tmsContextSentFullThisTurn?: boolean
+  tmsContextStubTokens?: number
+  tmsStubTokens?: number
+  tmsSectionsAvailable?: string[]
+  tmsSectionsLoaded?: string[]
+  tmsRequestedSections?: string[]
+  tmsSectionsRequested?: string[]
+  originalUserMessageDisplayed?: boolean
+  originalTaskResumedAfterBootstrap?: boolean
+  originalTaskResumeRequestId?: string
+  mutableTask?: boolean
+  originalTaskWriteActionCount?: number
+  originalTaskFirstWriteTurn?: number
+  noEditGuardReason?: string
+  noEditRecoveryAction?: string
+  readBeforeWriteBlocked?: boolean
+  readBeforeWriteBlockCount?: number
+  readBeforeWriteBlockedTools?: string[]
+  readBeforeWriteBlockedReasons?: string[]
+  symbolIndexRequested?: boolean
+  symbolIndexFilesConsidered?: number
+  symbolIndexFilesScanned?: number
+  symbolIndexEntries?: number
+  symbolIndexTruncated?: boolean
+  symbolIndexTokensEstimate?: number
+  shellReadBlocked?: boolean
+  shellReadConvertedToFileTool?: boolean
+  executeCommandPurpose?: 'validation' | 'file_read' | 'unknown'
   /** Anthropic prompt-cache creation tokens, when reported. */
   cacheCreationInputTokens?: number
   /** Anthropic prompt-cache read tokens, when reported. */
@@ -702,10 +753,16 @@ export interface RequestUsageEntry {
   /** 'parsed' = planner returned valid JSON; 'fallback' = invalid/missing and
    *  a deterministic per-profile plan was used instead. */
   contextPlannerStatus?: 'parsed' | 'fallback'
+  /** 'model' when the context plan came from a model. 'fallback' exists for legacy exports only. */
+  contextPlannerSource?: 'model' | 'fallback'
+  /** Which model layer produced the plan. 'code' means utility planner retries failed and the code model returned valid JSON. */
+  contextPlannerModel?: 'utility' | 'code'
   /** When status === 'fallback', the failure reason (schema/parse/HTTP/…). */
   contextPlannerError?: string
   /** The raw planner output (model JSON or HTTP body preview) for audit. */
   contextPlannerRawOutput?: string
+  /** Why the planner escalated to the code model, when applicable. */
+  contextPlannerFallbackReason?: string
   /** Task domain the planner assigned (e.g. 'design_system_ui'). */
   contextPlannerTaskDomain?: string
   /** Capabilities the planner declared as required. */

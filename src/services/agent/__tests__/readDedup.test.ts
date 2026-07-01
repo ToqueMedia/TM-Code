@@ -115,7 +115,7 @@ describe('read_file dedup', () => {
   })
 
   it('does not dedupe partial injected views', () => {
-    const cache = cacheWith('/repo/CLAUDE.md', {
+    const cache = cacheWith('/repo/TMS.md', {
       content: 'partial content',
       timestamp: 1,
       offset: undefined,
@@ -126,7 +126,7 @@ describe('read_file dedup', () => {
       isPartialView: true,
     })
 
-    expect(checkReadDedup('/repo/CLAUDE.md', undefined, undefined, cache, 7))
+    expect(checkReadDedup('/repo/TMS.md', undefined, undefined, cache, 7))
       .toEqual({ isDuplicate: false, stub: null })
   })
 })

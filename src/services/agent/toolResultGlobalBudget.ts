@@ -44,6 +44,7 @@
  */
 
 import type { ContentBlockAPI } from '../../types/chat'
+import { GREP_ALIAS, READ_ALIAS, canonicalToolName, normalizeToolInputForCanonical } from './toolNames'
 
 // ── Constants ──
 
@@ -120,6 +121,8 @@ function extractContextFromArgs(
   args: Record<string, unknown> | undefined,
 ): string {
   if (!toolName || !args) return ''
+  args = normalizeToolInputForCanonical(toolName, args)
+  toolName = canonicalToolName(toolName)
   switch (toolName) {
     case 'read_file':
     case 'edit_file':
@@ -165,6 +168,10 @@ function buildCompactSummary(
   toolName: string | undefined,
   toolArgs: Record<string, unknown> | undefined,
 ): string {
+  const canonicalName = toolName ? canonicalToolName(toolName) : undefined
+  const canonicalArgs = toolName && toolArgs
+    ? normalizeToolInputForCanonical(toolName, toolArgs)
+    : toolArgs
   const chars = original.length
   const tokens = roughTokenEstimate(original)
   const hash = fnv1aHex(original)
@@ -175,17 +182,17 @@ function buildCompactSummary(
 
   // Tell the model HOW to re-fetch the full content based on the tool type.
   let reReadHint: string
-  if (toolName === 'read_file') {
-    const path = (toolArgs?.file_path as string | undefined) ?? ''
+  if (canonicalName === 'read_file') {
+    const path = (canonicalArgs?.file_path as string | undefined) ?? ''
     reReadHint = path
-      ? `Re-read via read_file("${path}") — optionally with offset/limit for a specific range.`
-      : 'Re-read via read_file(path) if needed.'
-  } else if (toolName === 'search_files') {
-    reReadHint = 'Re-run search_files with a narrower query or includePatterns if needed.'
-  } else if (toolName === 'execute_command' || toolName === 'execute_command_background') {
+      ? `Re-read via ${READ_ALIAS} on "${path}" — optionally with offset/limit for a specific range.`
+      : `Re-read via ${READ_ALIAS} if needed.`
+  } else if (canonicalName === 'search_files') {
+    reReadHint = `Re-run ${GREP_ALIAS} with a narrower pattern or includePatterns if needed.`
+  } else if (canonicalName === 'execute_command' || canonicalName === 'execute_command_background') {
     reReadHint = 'Re-run the command if you need the full output; errors are preserved in this summary.'
-  } else if (toolName === 'read_large_result') {
-    const id = (toolArgs?.id as string | undefined) ?? ''
+  } else if (canonicalName === 'read_large_result') {
+    const id = (canonicalArgs?.id as string | undefined) ?? ''
     reReadHint = id
       ? `Re-read via read_large_result("${id}", offset: 0) for the full content.`
       : 'Re-read via read_large_result(id) if needed.'
@@ -195,7 +202,7 @@ function buildCompactSummary(
 
   const lines: string[] = [
     `[tool-result-summary]`,
-    `tool: ${toolName ?? 'unknown'}${context ? ` | ${context}` : ''} | original: ${chars} chars (~${tokens} tokens) | hash: ${hash}`,
+    `tool: ${toolName ?? 'unknown'}${canonicalName && canonicalName !== toolName ? ` (${canonicalName})` : ''}${context ? ` | ${context}` : ''} | original: ${chars} chars (~${tokens} tokens) | hash: ${hash}`,
   ]
   if (chars > 0) {
     lines.push(`preview (first ${previewEnd} chars):`, preview)

@@ -41,7 +41,7 @@ function readFileLogic(args: {
 
   if (!sliceRequested && fullContent.length > MAX_FILE_BYTES) {
     return {
-      result: `Error: File is ${(fullContent.length / 1024).toFixed(1)} KB which exceeds the 256 KB read cap. Use \`offset\` + \`limit\` to read a line range, or use search_files / glob to locate specific content. Reading the whole file would saturate the output budget for one call.`,
+      result: `Error: File is ${(fullContent.length / 1024).toFixed(1)} KB which exceeds the 256 KB read cap. Use Read with \`offset\` + \`limit\` to read a line range, or use Grep / Glob to locate specific content. Reading the whole file would saturate the output budget for one call.`,
       isError: true,
       kind: 'oversize',
     }
@@ -93,7 +93,8 @@ describe('read_file — byte cap (claude-vaz adoption)', () => {
     expect(r.result).toContain('256 KB')
     expect(r.result).toContain('offset')
     expect(r.result).toContain('limit')
-    expect(r.result).toContain('search_files')
+    expect(r.result).toContain('Grep')
+    expect(r.result).toContain('Glob')
     // Throw vs truncate: the error MUST be much smaller than the file
     // (the whole point — ~150 bytes vs 300 KB).
     expect(r.result.length).toBeLessThan(500)

@@ -19,6 +19,7 @@ import {
 } from '../toolsetSelector'
 import {
   SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE,
+  READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
   WRITE_FILE, CREATE_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
   LIST_DIRECTORY, GLOB, READ_SKILL,
@@ -35,6 +36,7 @@ import type OpenAI from 'openai'
 
 // All 36 tool names in the registry.
 const ALL_NAMES = [
+  READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE,
   EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
   WRITE_FILE, CREATE_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
@@ -59,6 +61,54 @@ function makeTools(names: string[]): OpenAI.ChatCompletionTool[] {
 const ALL_TOOLS = makeTools(ALL_NAMES)
 
 describe('ToolsetSelector (profile-bound)', () => {
+  describe('project_bootstrap', () => {
+    it('starts with the TMS bootstrap toolset and excludes execute_command', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'project_bootstrap')
+      const { tools, allActive } = selector.selectForTurn(ALL_TOOLS, 'bootstrap TMS.md')
+      const toolNames = tools.map((t) => t.function.name)
+
+      expect(toolNames).toEqual(expect.arrayContaining([
+        LS_ALIAS,
+        GLOB_ALIAS,
+        GREP_ALIAS,
+        READ_ALIAS,
+        LIST_DIRECTORY,
+        GLOB,
+        SEARCH_FILES,
+        READ_FILE,
+        WRITE_FILE,
+        CREATE_FILE,
+        ASK_USER_QUESTION,
+      ]))
+      expect(toolNames).not.toContain(EXECUTE_COMMAND)
+      expect(toolNames).not.toContain(EDIT_FILE)
+      expect(allActive).toBe(true)
+      expect(toolNames).not.toContain(REQUEST_TOOLS_NAME)
+    })
+
+    it('denies execute_command and non-bootstrap tools via request_tools', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'project_bootstrap')
+      const result = selector.requestTools([EXECUTE_COMMAND, EDIT_FILE, START_DEV_SERVER])
+
+      expect(result.added).toEqual([])
+      expect(result.denied).toEqual(expect.arrayContaining([
+        EXECUTE_COMMAND,
+        EDIT_FILE,
+        START_DEV_SERVER,
+      ]))
+      expect(selector.isActive(EXECUTE_COMMAND)).toBe(false)
+    })
+
+    it('can switch to the original task profile after bootstrap completes', () => {
+      const selector = new ToolsetSelector(ALL_NAMES, 'project_bootstrap')
+      selector.switchProfile('bugfix_local', false)
+
+      expect(selector.getProfile()).toBe('bugfix_local')
+      expect(selector.isActive(EXECUTE_COMMAND)).toBe(true)
+      expect(selector.isActive(WRITE_FILE)).toBe(false)
+    })
+  })
+
   describe('bugfix_local (default)', () => {
     it('starts with the BUGFIX_BASE toolset (~6 tools), not all 36', () => {
       const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')

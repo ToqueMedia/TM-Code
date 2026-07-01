@@ -4,6 +4,7 @@ import {
   SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE, GLOB,
   EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
   WRITE_FILE, START_DEV_SERVER, PROVISION_AUTH,
+  READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
 } from '../toolNames'
 import {
   resetContextCollapse,
@@ -268,6 +269,7 @@ describe('query retry handling', () => {
 
   it('selects tools from human-authored text, not synthetic @mention/tool_result content', async () => {
     const names = [
+      READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
       SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE, GLOB,
       EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
       WRITE_FILE, START_DEV_SERVER, PROVISION_AUTH,

@@ -186,9 +186,11 @@ export function checkReadRangeOverlap(
     return {
       kind: 'fully_covered',
       stub:
-        `Range already covered by previous read_file: ${filePath}:${rangeLabel}. ` +
-        `The content you previously read for these lines is still current. ` +
-        `Use your existing knowledge; do not re-read this range.`,
+        `Range already covered by previous Read: ${filePath}:${rangeLabel}. ` +
+        `The content you previously read for these lines is still current in the conversation/cache. ` +
+        `Use that existing knowledge; do not re-read this range or work around it with execute_command/cat/head/tail/sed. ` +
+        `If you need different lines, call Read only for the missing range. ` +
+        `If compaction removed the exact text from context and you truly need the same range again, call Read once with force: true.`,
     }
   }
 
@@ -211,9 +213,9 @@ export function checkReadRangeOverlap(
   stats.skippedOverlappingReads++
   return {
     kind: 'fully_covered',
-    stub: `Range already covered by previous read_file: ${filePath}:${reqStart}-${
+    stub: `Range already covered by previous Read: ${filePath}:${reqStart}-${
       reqEnd === Number.POSITIVE_INFINITY ? 'EOF' : reqEnd
-    }. The content you previously read for these lines is still current.`,
+    }. The content you previously read for these lines is still current in the conversation/cache. Do not work around this with execute_command/cat/head/tail/sed. If compaction removed the exact text from context and you truly need the same range again, call Read once with force: true.`,
   }
 }
 

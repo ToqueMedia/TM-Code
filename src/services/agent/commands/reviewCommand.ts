@@ -9,6 +9,7 @@ import { getQueryGuard } from '../queryGuard'
 import { languageDirective } from './_languageInstruction'
 import { logger } from '../../../utils/logger'
 import { t } from '../../../i18n'
+import { GLOB_ALIAS, GREP_ALIAS, LS_ALIAS, READ_ALIAS } from '../toolNames'
 import type { SlashCommandMode } from '../slashCommandRegistry'
 
 /**
@@ -428,7 +429,7 @@ async function resolveScopeFiles(
     }
 
     case 'description': {
-      // Sub-agent discovers its own files via search_files / glob. We pass
+      // Sub-agent discovers its own files via Grep / Glob. We pass
       // the description through unchanged.
       return { scope, files: [], capped: false, originalCount: 0 }
     }
@@ -553,7 +554,7 @@ LOW — naming, organization, micro-readability. Defaults: do NOT report unless 
 <protocol>
 1. Read the review request and identify the scope (specific file, last commit, session changes, or free-form description).
 
-2. Read the relevant files completely. Do not skim. If the request mentions a flow that spans multiple files, follow the references with read_file / search_files / glob.
+2. Read the relevant files completely. Do not skim. If the request mentions a flow that spans multiple files, follow the references with ${READ_ALIAS} / ${GREP_ALIAS} / ${GLOB_ALIAS}.
 
 3. If the project has a TMS.md (project memory), read it. It often documents intentional architectural choices that look unusual but are deliberate.
 
@@ -597,13 +598,13 @@ function buildReviewPrompt(resolved: ResolvedScope): string {
 
   switch (scope.type) {
     case 'file':
-      return `Review the file: \`${files[0]}\`\n\nRead it in full, follow references as needed using read_file/search_files, and report findings per the protocol.`
+      return `Review the file: \`${files[0]}\`\n\nRead it in full, follow references as needed using ${READ_ALIAS}/${GREP_ALIAS}, and report findings per the protocol.`
 
     case 'last_commit':
       return `Review the files changed in the last git commit (HEAD~1..HEAD). The IDE already resolved the file list:\n\n${fileList}\n\nRead each in full and report findings per the protocol. Pay special attention to the diff between HEAD~1 and HEAD where you can — those are the lines that just landed.`
 
     case 'description':
-      return `Review the feature/area described: "${scope.description}"\n\nFind the relevant files yourself using search_files / glob / list_directory, then review per the protocol. Don't review unrelated files.`
+      return `Review the feature/area described: "${scope.description}"\n\nFind the relevant files yourself using ${GREP_ALIAS} / ${GLOB_ALIAS} / ${LS_ALIAS}, then review per the protocol. Don't review unrelated files.`
 
     case 'session':
     default: {

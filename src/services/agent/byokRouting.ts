@@ -14,6 +14,7 @@ import { useByokStore } from '../../stores/byokStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { createByokAgentClient } from './sdkClient'
+import { extractAssistantTextFromCompletion } from './completionText'
 import { resolveThinkingHint } from './thinkingShapeDetection'
 import { BYOK_THINKING_BUDGET_TOKENS } from './agentConfig'
 import type { ByokSessionSnapshot } from '../../types/chat'
@@ -116,7 +117,7 @@ export async function byokAuxCompletion(
       body as unknown as OpenAI.ChatCompletionCreateParamsNonStreaming,
       params.signal ? { signal: params.signal } : undefined,
     )
-    return resp.choices?.[0]?.message?.content ?? null
+    return extractAssistantTextFromCompletion(resp) || null
   } catch {
     return null
   }

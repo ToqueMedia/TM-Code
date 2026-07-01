@@ -51,9 +51,17 @@ import { getQueryGuard } from '../../services/agent/queryGuard'
 import { isAtBlockingLimit, totalContextTokens } from '../../utils/contextWindow'
 import { enqueueSerializedRun } from '../../services/agent/agentRunner'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
-import type { ByokSessionSnapshot } from '../../types/chat'
+import type { ByokSessionSnapshot, ConversationMessage } from '../../types/chat'
 import { useQueueProcessor } from '../../hooks/useQueueProcessor'
 import { classifyPendingPlanIntent } from '../../services/agent/planResumeIntent'
+import {
+  buildTmsBootstrapOnlyPrompt,
+  getTmsBootstrapCompleteMessageKey,
+  getTmsBootstrapStartMessageKey,
+  runTmsPreflight,
+  type TmsPreflightResult,
+} from '../../services/agent/tmsBootstrap'
+import { getTmsTurnTelemetry, markOriginalTaskFailed } from '../../services/agent/tmsContext'
 
 /**
  * ServiceError codes that mean "transient upstream / network problem the user
@@ -626,11 +634,17 @@ export function usePromptBar() {
   const runAgentForPrompt = useCallback(async (
     content: PromptValue,
     skipUserMessage = false,
+    runOptions?: {
+      conversationHistoryOverride?: ConversationMessage[]
+      reuseAssistantMessage?: boolean
+    },
   ) => {
     const chatStore = useChatStore.getState()
     const agentStore = useAgentStore.getState()
     const projectPath = currentProject?.path || ''
     const projectType = currentProject?.projectType || 'unknown'
+    const historyBeforeCurrentUser = runOptions?.conversationHistoryOverride
+      ?? useChatStore.getState().conversationHistory
 
     // Ensure a session exists SYNCHRONOUSLY so addUserMessage below has a
     // home for the bubble. We use sync createSession (not async
@@ -645,53 +659,6 @@ export function usePromptBar() {
       chatStore.createSession(projectPath)
     }
 
-    // ── TMS.md Bootstrap Gate ──
-    // When an external project lacks TMS.md, run a dedicated bootstrap turn
-    // that creates TMS.md and starts the dev server BEFORE processing the
-    // user's message. The recursive call uses skipUserMessage=true so the
-    // bootstrap prompt is invisible to the user — only the agent's work
-    // (reading files, creating TMS.md) appears in the chat.
-    const pState = useProjectStore.getState()
-    if (pState.noTmsFile && !pState.tmsBootstrapping && !skipUserMessage) {
-      pState.setTmsBootstrapping(true)
-      try {
-        const { getTmsBootstrapPrompt } = await import('../../services/agent/tmsBootstrap')
-        chatStore.addSystemMessage(t('common.tmsBootstrapStart'))
-
-        const bootstrapPrompt = getTmsBootstrapPrompt(projectPath)
-        const bootstrapOk = await runAgentForPrompt(bootstrapPrompt, true)
-
-        // Verify TMS.md was created
-        try {
-          await invoke('read_file', { path: `${projectPath}/TMS.md` })
-          pState.setNoTmsFile(false)
-          // Invalidate cached system prompt so next build picks up TMS.md
-          ContextBuilder.getInstance().invalidatePromptCache(projectPath)
-          if (bootstrapOk) {
-            chatStore.addSystemMessage(t('common.tmsBootstrapComplete'))
-
-            // Show the user's original message in the chat, then replace
-            // the content with a synthetic prompt that asks the agent to
-            // check with the user before proceeding. This prevents the
-            // redundant "run the project" after the bootstrap already did it.
-            const originalDisplay = extractDisplayFromValue(content)
-            chatStore.addUserMessage(originalDisplay.text, originalDisplay.attachments)
-
-            const originalText = typeof content === 'string' ? content : ''
-            content = `Project setup complete (TMS.md created, dev server started). The user's original request was: "${originalText}". Before doing anything else, ask the user if they still want you to carry out this request, since the initial setup is already done.`
-            skipUserMessage = true
-          }
-        } catch {
-          // TMS.md not created — show warning but continue with user's message
-          chatStore.addSystemMessage(t('common.tmsBootstrapFailed'))
-        }
-      } catch (err) {
-        logger.error('prompt', 'TMS bootstrap failed:', err)
-      } finally {
-        pState.setTmsBootstrapping(false)
-      }
-    }
-
     // Render the user's bubble + assistant placeholder BEFORE the async
     // augmentation step (mention resolution + attachment disk reads can
     // take 50–500ms). Display extraction is sync, so we can paint the
@@ -701,9 +668,26 @@ export function usePromptBar() {
       const blocks = typeof content === 'string' ? undefined : content
       chatStore.addUserMessage(display.text, display.attachments, blocks)
     }
-    chatStore.startAssistantMessage(
-      AgentService.getInstance().isThinkingRequestedForNextTurn(),
-    )
+
+    let tmsPreflight: TmsPreflightResult | null = null
+    if (projectPath && !skipUserMessage && !useProjectStore.getState().tmsBootstrapping) {
+      tmsPreflight = await runTmsPreflight({
+        projectPath,
+        originalUserMessageDisplayed: true,
+        originalUserMessage: display.text,
+      })
+    }
+    const bootstrapOnly = tmsPreflight?.shouldBootstrap === true
+
+    if (!runOptions?.reuseAssistantMessage) {
+      chatStore.startAssistantMessage(
+        AgentService.getInstance().isThinkingRequestedForNextTurn(),
+      )
+    }
+    if (bootstrapOnly) {
+      appendTextDeltaBuffered(`${t(getTmsBootstrapStartMessageKey(tmsPreflight!))}\n\n`)
+      flushBufferedDeltas()
+    }
     agentStore.setStatus('awaiting_response')
 
     // Split on model capability. Vision-capable models (Qwen 3.6 Plus
@@ -728,7 +712,9 @@ export function usePromptBar() {
     const activeModelSupportsImageParts =
       byokNativeVision !== null ? byokNativeVision : activeProfile.supportsAttachments
 
-    let userContent: string | OpenAIContentPart[] | null = null
+    let userContent: string | OpenAIContentPart[] | null = bootstrapOnly && tmsPreflight
+      ? buildTmsBootstrapOnlyPrompt(tmsPreflight, display.text)
+      : null
 
     // Bundle the Tauri-backed resolvers once — both helpers consume the
     // same shape, so call sites are immune to argument reordering.
@@ -737,7 +723,7 @@ export function usePromptBar() {
       resolveImageDataUri: resolveImageToDataUri,
     }
 
-    if (planAllowsImagePipeline && display.attachments.some(a => a.type === 'image')) {
+    if (!bootstrapOnly && planAllowsImagePipeline && display.attachments.some(a => a.type === 'image')) {
       // Build content parts (image_url). If buildContentParts returns null
       // (no images survived disk read / size limits / size budget), fall
       // through to the text path.
@@ -762,9 +748,12 @@ export function usePromptBar() {
       }
     }
 
-    if (userContent === null) {
+    if (!bootstrapOnly && userContent === null) {
       // Text-only path — interleaved `<attached_image>` placeholders.
       userContent = await buildAugmentedPrompt(content, promptResolvers)
+    }
+    if (userContent === null) {
+      userContent = display.text
     }
 
     // ── @-mentions + external-modification sweep (claude-vaz parity) ──
@@ -774,7 +763,7 @@ export function usePromptBar() {
     // sweep covers files the model has in context that changed on disk
     // since it last saw them — claude-vaz injects the same note at turn
     // start via getAttachmentMessages.
-    try {
+    if (!bootstrapOnly) try {
       const mentionResolution = await resolveMentionContext(display.text)
       const changedContext = await collectChangedFileContext()
       if (mentionResolution.contextText || mentionResolution.imageParts.length > 0 || changedContext) {
@@ -827,7 +816,9 @@ export function usePromptBar() {
       // hashtags (#auth-google, #design, etc.) and inline the corresponding
       // CRITICAL skill rules at turn 1 — before scaffoldingDetector has any
       // filesystem markers to find.
-      const userMessageText = display.text
+      const userMessageText = bootstrapOnly && tmsPreflight
+        ? buildTmsBootstrapOnlyPrompt(tmsPreflight, display.text)
+        : display.text
       // Intent Router: classify the user's intent via a lightweight model
       // call (qwen3.7-plus, no tools, non-streaming) BEFORE assembling the
       // system prompt. The result feeds the context builder (prompt profile +
@@ -837,14 +828,26 @@ export function usePromptBar() {
       // on failure it falls back to { bugfix_local, readOnly:false } and
       // buildSystemPrompt then uses the deterministic keyword classifier.
       const intentStart = Date.now()
-      const intent = await classifyIntent(userMessageText)
+      const intent = bootstrapOnly
+        ? {
+            profile: 'project_bootstrap' as const,
+            readOnly: false,
+            source: 'keyword' as const,
+            confidence: 'high' as const,
+            reason: 'TMS.md bootstrap preflight selected project_bootstrap before the original task',
+          }
+        : await classifyIntent(userMessageText)
+      const effectiveIntent = intent
+      AgentService.getInstance().clearPostTmsBootstrapToolProfile()
       logger.info(
         'agent',
-        `→ Intent router: profile=${intent.profile} readOnly=${intent.readOnly} (${intent.source}, ${Date.now() - intentStart}ms) — ${intent.reason}`,
+        `→ Intent router: profile=${effectiveIntent.profile} readOnly=${effectiveIntent.readOnly} (${effectiveIntent.source}, ${Date.now() - intentStart}ms) — ${effectiveIntent.reason}`,
       )
-      const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText, AgentService.getInstance().getAccessedFilePaths(), { profile: intent.profile, readOnly: intent.readOnly, reason: intent.reason, source: intent.source, confidence: intent.confidence, error: intent.error, diagnostics: intent.diagnostics })
+      const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText, AgentService.getInstance().getAccessedFilePaths(), { profile: effectiveIntent.profile, readOnly: effectiveIntent.readOnly, reason: effectiveIntent.reason, source: effectiveIntent.source, confidence: effectiveIntent.confidence, error: effectiveIntent.error, diagnostics: effectiveIntent.diagnostics })
 
-      const rawHistory = useChatStore.getState().conversationHistory
+      const rawHistory = bootstrapOnly
+        ? historyBeforeCurrentUser
+        : (runOptions?.conversationHistoryOverride ?? useChatStore.getState().conversationHistory)
       // The history is canonical (carries content parts when previous
       // turns had images). Downgrade to text if the active model is
       // text-only — its API cannot consume the array form.
@@ -858,9 +861,11 @@ export function usePromptBar() {
       // agentRunner; a contabilidade real vive no worker ai-pass-through).
       useBillingStore.getState().resetLastRequestStats()
 
+      let streamedAssistantText = ''
       await agentService.runAgentLoop(userContent, history, {
         onTextDelta: (delta) => {
           agentStore.setStatus('generating')
+          streamedAssistantText += delta
           appendTextDeltaBuffered(delta)
         },
         onReasoningDelta: (delta) => {
@@ -882,10 +887,27 @@ export function usePromptBar() {
         onTurnComplete: () => {
           useChatStore.getState().incrementTurnCount()
         },
-        onDone: async () => {
+        onDone: async (finalText) => {
           flushBufferedDeltas()
-          useChatStore.getState().finalizeAssistantMessage()
-          agentStore.setStatus('idle')
+          if (finalText && finalText !== streamedAssistantText) {
+            const suffix = finalText.startsWith(streamedAssistantText)
+              ? finalText.slice(streamedAssistantText.length)
+              : finalText
+            if (suffix) {
+              appendTextDeltaBuffered(suffix)
+              flushBufferedDeltas()
+            }
+          }
+          const keepAssistantOpenForOriginalTask =
+            bootstrapOnly &&
+            (() => {
+              const tms = getTmsTurnTelemetry()
+              return tms.tmsCreated || tms.tmsAlreadyExists
+            })()
+          if (!keepAssistantOpenForOriginalTask) {
+            useChatStore.getState().finalizeAssistantMessage()
+          }
+          agentStore.setStatus(keepAssistantOpenForOriginalTask ? 'awaiting_response' : 'idle')
 
           // Re-scan project diagnostics after agent finishes
           useProblemsStore.getState().scanProject().catch(() => {})
@@ -902,6 +924,13 @@ export function usePromptBar() {
         onError: (error) => {
           flushBufferedDeltas()
           resolveAllPendingDiffApprovals(false)
+          if (AgentService.getInstance().isAborted()) {
+            agentStore.setError(null)
+            agentStore.setStatus('cancelled')
+            useChatStore.getState().finalizeAssistantMessage()
+            hadError = true
+            return
+          }
           agentStore.setStatus('error')
           agentStore.setError(error.message)
           useChatStore.getState().finalizeAssistantMessage()
@@ -1005,13 +1034,30 @@ export function usePromptBar() {
         },
       })
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!bootstrapOnly) {
+        markOriginalTaskFailed(message)
+      }
       // Cleanup if anything fails before or during runAgentLoop setup.
       // Prevents isStreaming/agentStatus getting stuck.
       flushBufferedDeltas()
       useChatStore.getState().finalizeAssistantMessage()
       agentStore.setStatus('idle')
       logger.error('prompt', 'runAgentForPrompt failed:', error)
+      useChatStore.getState().addSystemMessage(`A tarefa não pôde continuar: ${message}`, 'error')
       hadError = true
+    }
+
+    if (!hadError && bootstrapOnly) {
+      const tms = getTmsTurnTelemetry()
+      if (tms.tmsCreated || tms.tmsAlreadyExists) {
+        appendTextDeltaBuffered(`\n\n${t(getTmsBootstrapCompleteMessageKey(tms.tmsCreated))}\n\n`)
+        flushBufferedDeltas()
+        return runAgentForPrompt(content, true, {
+          conversationHistoryOverride: historyBeforeCurrentUser,
+          reuseAssistantMessage: true,
+        })
+      }
     }
 
     return !hadError
@@ -1292,7 +1338,8 @@ export function usePromptBar() {
     // Resolve any pending diff approval waits (rejects them)
     resolveAllPendingDiffApprovals(false)
     AgentService.getInstance().cancelLoop()
-    useAgentStore.getState().setStatus('idle')
+    useAgentStore.getState().setError(null)
+    useAgentStore.getState().setStatus('cancelled')
     useChatStore.getState().finalizeAssistantMessage()
   }, [clearMessageQueue])
 

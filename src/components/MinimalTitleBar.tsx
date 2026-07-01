@@ -100,6 +100,7 @@ function MinimalTitleBar() {
     generating: { color: tokens.colors.accent.primary, label: t('titlebar.generating') },
     applying: { color: tokens.colors.accent.purple, label: t('titlebar.applying') },
     compressing: { color: tokens.colors.accent.orange, label: t('titlebar.compressing') },
+    cancelled: { color: tokens.colors.text.disabled, label: t('titlebar.cancelled') },
     error: { color: tokens.colors.accent.red, label: t('titlebar.error') },
   }
 
@@ -238,7 +239,7 @@ function MinimalTitleBar() {
             borderRadius="full"
             bg={config.color}
             boxShadow={`0 0 6px ${config.color}40`}
-            css={status !== 'idle' && status !== 'error' ? {
+            css={status !== 'idle' && status !== 'cancelled' && status !== 'error' ? {
               animation: 'pulse 1.5s ease-in-out infinite',
               '@keyframes pulse': {
                 '0%, 100%': { opacity: 1 },

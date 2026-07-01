@@ -64,7 +64,8 @@ function AgentStatusBar() {
     // Abort all running sub-agents before stopping the main agent
     useSubAgentStore.getState().abortAll()
     AgentService.getInstance().cancelLoop()
-    useAgentStore.getState().setStatus('idle')
+    useAgentStore.getState().setError(null)
+    useAgentStore.getState().setStatus('cancelled')
     useChatStore.getState().finalizeAssistantMessage()
   }
 
@@ -75,6 +76,7 @@ function AgentStatusBar() {
     generating: { color: tokens.colors.accent.primary, label: t('chat.generating'), pulse: true },
     applying: { color: tokens.colors.accent.green, label: t('chat.applying'), pulse: true },
     compressing: { color: tokens.colors.accent.orange, label: t('chat.compressing'), pulse: true },
+    cancelled: { color: tokens.colors.text.disabled, label: t('chat.cancelled'), pulse: false },
     error: { color: tokens.colors.accent.red, label: error || 'Error', pulse: false },
   }
 
@@ -100,7 +102,7 @@ function AgentStatusBar() {
   // Per-phase elapsed timer. Pauses automatically when a permission dialog
   // is open (shared hook keeps all three timer surfaces aligned).
   const { elapsedMs, isPaused } = useAgentElapsed('phase')
-  const isBusy = status !== 'idle' && status !== 'error'
+  const isBusy = status !== 'idle' && status !== 'cancelled' && status !== 'error'
   const showElapsed = isBusy && elapsedMs >= 5000
   // Thinking is no longer user-toggleable mid-session (claude-vaz parity).
   // The mandatory badge below renders only when the backend reports the

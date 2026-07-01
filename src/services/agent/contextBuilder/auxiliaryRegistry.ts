@@ -9,6 +9,7 @@
 export type PromptProfile =
   | 'core'
   | 'bugfix_local'
+  | 'project_bootstrap'
   | 'analysis_readonly'
   | 'frontend_ui'
   | 'scaffold_project'
@@ -137,8 +138,11 @@ export interface AuxiliarySelection {
   // taskDomain / requiredCapabilities / selectedContexts ride on
   // `contextPlan`; rejectedContexts and selectionReason are surfaced here.
   contextPlannerStatus?: 'parsed' | 'fallback'
+  contextPlannerSource?: 'model' | 'fallback'
+  contextPlannerModel?: 'utility' | 'code'
   contextPlannerError?: string
   contextPlannerRawOutput?: string
+  contextPlannerFallbackReason?: string
   contextPlannerRejectedContexts?: string[]
   contextPlannerSelectionReason?: string
 }
@@ -407,6 +411,30 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     estTokens: 220,
     type: 'dynamic',
     profiles: [],
+    phase: 1,
+  }),
+  cx({
+    id: 'project.symbol_index',
+    domain: 'project',
+    capability: 'symbol_index',
+    name: 'Project symbol index',
+    description: 'Lightweight file/symbol map with line numbers for targeted Read calls.',
+    scope: 'project',
+    costTier: 'low',
+    granularity: 'index',
+    whenToUse: 'Use when you need to locate functions, classes, hooks, components, handlers, or services before reading code.',
+    whenNotToUse: 'Do not use as source code or as permission to edit; confirm the exact range with Read before mutating files.',
+    dependencies: [],
+    fallbackTo: ['project.structure_overview'],
+    sourceResolver: 'project_symbol_index',
+    freshnessPolicy: 'generated on demand from current files',
+    expectedFiles: ['src/**/*.{ts,tsx,js,jsx}', 'src-tauri/src/**/*.rs', '**/*.{go,py,php,rb,java,kt,swift,cs}'],
+    summaryAvailable: true,
+    fullAvailable: false,
+    estTokens: 900,
+    type: 'dynamic',
+    profiles: [],
+    aliases: ['project_symbol_index', 'symbol_index', 'code_map'],
     phase: 1,
   }),
   cx({
@@ -761,6 +789,18 @@ function unique(ids: string[]): string[] {
 }
 
 export function fallbackContextPlanForProfile(profile: PromptProfile): ContextPlan {
+  if (profile === 'project_bootstrap') {
+    return {
+      taskDomain: 'project_bootstrap',
+      requiredCapabilities: ['project_map', 'tms_write'],
+      minimumContextNeeded: 'index',
+      candidateContexts: [],
+      selectedContexts: [],
+      fallbackRisk: 'low',
+      reason: 'TMS bootstrap profile: inspect only focused project files and write TMS.md before resuming the user request.',
+    }
+  }
+
   if (profile === 'scaffold_project') {
     return {
       taskDomain: 'project/scaffold',
@@ -831,7 +871,7 @@ export function selectAuxiliaries(
   reason?: string,
   routerInfo?: { source: 'model' | 'fallback' | 'keyword'; confidence?: 'high' | 'medium' | 'low' | 'none'; error?: string; diagnostics?: RouterDiagnostics },
   contextPlanOverride?: ContextPlan,
-  plannerInfo?: { status: 'parsed' | 'fallback'; error?: string; rawOutput?: string; selectionReason?: string },
+  plannerInfo?: { status: 'parsed' | 'fallback'; source?: 'model' | 'fallback'; modelTier?: 'utility' | 'code'; error?: string; rawOutput?: string; fallbackReason?: string; selectionReason?: string },
 ): AuxiliarySelection {
   void userMessage
   const phase1 = AUXILIARY_METAS.filter((m) => m.phase === 1)
@@ -910,8 +950,12 @@ export function selectAuxiliaries(
     routerDiagnostics: routerInfo?.diagnostics,
     contextPlannerStatus:
       plannerInfo?.status ?? (contextPlanOverride ? 'parsed' : 'fallback'),
+    contextPlannerSource:
+      plannerInfo?.source ?? (contextPlanOverride ? 'model' : 'fallback'),
+    contextPlannerModel: plannerInfo?.modelTier,
     contextPlannerError: plannerInfo?.error,
     contextPlannerRawOutput: plannerInfo?.rawOutput,
+    contextPlannerFallbackReason: plannerInfo?.fallbackReason,
     // Authoritative audit set: every candidate the planner exposed that was
     // NOT selected. Derived from candidateIds/selectedIds (the actual gating
     // decision) rather than the model's declared rejectedContexts, so the
@@ -947,6 +991,10 @@ export function buildOnDemandIndex(selection: AuxiliarySelection): string | null
   const fallbackLine = fallbackOnly.length
     ? `Fallback-only broad/high-cost contexts: ${fallbackOnly.map(o => `\`${o.id}\``).join(', ')}.`
     : null
+  const hasSymbolIndex = omitted.some(o => o.id === 'project.symbol_index')
+  const symbolIndexLine = hasSymbolIndex
+    ? 'Navigation shortcut: request `project.symbol_index` when you need to locate functions/classes/components/hooks/handlers/services before choosing a Read range. It is an index only; verify source with Read before editing.'
+    : null
 
   return [
     '# Auxiliary context (on-demand)',
@@ -954,6 +1002,7 @@ export function buildOnDemandIndex(selection: AuxiliarySelection): string | null
     `Context plan: ${selection.contextPlan.taskDomain}; required: ${selection.contextPlan.requiredCapabilities.join(', ') || 'none'}; minimum: ${selection.contextPlan.minimumContextNeeded}; fallback risk: ${selection.contextPlan.fallbackRisk}.`,
     `Selected inline: ${selection.contextPlan.selectedContexts.length ? selection.contextPlan.selectedContexts.map(id => `\`${resolveAuxiliaryId(id)}\``).join(', ') : 'none'}.`,
     'Rule: request the most specific capability context first. Use broad project/full contexts only after specific/domain contexts are insufficient.',
+    ...(symbolIndexLine ? [symbolIndexLine] : []),
     '',
     ...(candidateLines.length ? ['Candidate contexts:', ...candidateLines, ''] : []),
     ...(domainLines.length ? ['Other available context ids by domain:', ...domainLines, ''] : []),

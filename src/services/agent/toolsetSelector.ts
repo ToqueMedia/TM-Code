@@ -32,6 +32,7 @@
 import type OpenAI from 'openai'
 import {
   SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE,
+  READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
   WRITE_FILE, CREATE_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
   LIST_DIRECTORY, GLOB, READ_SKILL,
@@ -50,6 +51,7 @@ import type { PromptProfile } from './contextBuilder/auxiliaryRegistry'
 
 /** The minimal toolset for a localized code task. Always active. */
 export const CORE_TOOLS = [
+  GREP_ALIAS, READ_ALIAS, GLOB_ALIAS, LS_ALIAS,
   SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE, GLOB,
   EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
 ] as const
@@ -109,14 +111,24 @@ const GROUP_TOOLS: Record<ToolsetGroupName, readonly string[]> = {
 
 /** Verification/audit without editing files (Parte B: read-only set). */
 const READONLY_BASE = [
+  READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   READ_FILE, SEARCH_FILES, GLOB, LIST_DIRECTORY, READ_LARGE_RESULT,
   READ_SKILL, ASK_USER_QUESTION,
+] as const
+
+/** Project bootstrap for TMS.md: inspect focused files, then write only the
+ *  project profile. No shell by default. */
+const PROJECT_BOOTSTRAP_BASE = [
+  LS_ALIAS, GLOB_ALIAS, GREP_ALIAS, READ_ALIAS,
+  LIST_DIRECTORY, GLOB, SEARCH_FILES, READ_FILE, WRITE_FILE, CREATE_FILE,
+  ASK_USER_QUESTION,
 ] as const
 
 /** Localised bugfix — reading + execute + ask (Parte B). edit_file is
  *  intentionally OUT of the base so the model must request it explicitly;
  *  this keeps a verification-style bugfix at ~6 tools, not 8. */
 const BUGFIX_BASE = [
+  READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   READ_FILE, SEARCH_FILES, GLOB, READ_LARGE_RESULT, EXECUTE_COMMAND,
   ASK_USER_QUESTION,
 ] as const
@@ -154,6 +166,14 @@ interface ProfileToolset {
 }
 
 const PROFILE_TOOLSETS: Record<PromptProfile, ProfileToolset> = {
+  // Visible /init-like project profiling for TMS.md. execute_command is not
+  // available by default and request_tools cannot activate it under this
+  // profile.
+  project_bootstrap: {
+    base: PROJECT_BOOTSTRAP_BASE,
+    allowed: PROJECT_BOOTSTRAP_BASE,
+  },
+
   // Hard read-only: verification/audit. request_tools can't expand beyond
   // the read set, so it's effectively a no-op (and omitted when allActive).
   analysis_readonly: { base: READONLY_BASE, allowed: READONLY_BASE },
@@ -345,6 +365,28 @@ export class ToolsetSelector {
     this.allowedToolNames = this.resolveAllowed(profile, readOnly)
     // Start with the profile's base — only keep names that exist in the
     // registry AND are inside the allowed bound.
+    const base = PROFILE_TOOLSETS[profile]?.base ?? CORE_TOOLS
+    this.activeToolNames = new Set(
+      base.filter((n) => this.allToolNames.has(n) && this.isAllowed(n)),
+    )
+    for (const group of plannedGroups) {
+      this.activateGroup(group)
+    }
+  }
+
+  /**
+   * Switch the active task profile inside the same run. Used only after the
+   * project_bootstrap phase has produced TMS.md, so the original user task can
+   * continue with its normal task toolset.
+   */
+  switchProfile(
+    profile: PromptProfile,
+    readOnly = false,
+    plannedGroups: ToolsetGroupName[] = [],
+  ): void {
+    this.profile = profile
+    this.readOnly = readOnly
+    this.allowedToolNames = this.resolveAllowed(profile, readOnly)
     const base = PROFILE_TOOLSETS[profile]?.base ?? CORE_TOOLS
     this.activeToolNames = new Set(
       base.filter((n) => this.allToolNames.has(n) && this.isAllowed(n)),

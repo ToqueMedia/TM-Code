@@ -36,6 +36,11 @@ const REQUEST_TYPE_TO_SIDECAR_KEY: Record<string, string> = {
   // degrades to the active (flagship) model, which may not honour
   // response_format:json_object and returns unparseable content.
   'intent-router': 'sidecar:utility',
+  // Context Planner — selects small on-demand context domains before the main
+  // agent loop. It has the same JSON-capable utility-model requirement as the
+  // intent router. Without this mapping it falls through to the active coding
+  // model and often returns prose instead of JSON.
+  'context-planner': 'sidecar:utility',
 }
 
 export function sidecarKeyForRequestType(requestType: string | null): string | null {

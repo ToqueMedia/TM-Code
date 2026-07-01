@@ -501,8 +501,9 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           // Mark file as dirty
           getUnsavedChangesService().markFileAsDirty(path);
           
-          // Adiciona à queue de auto-save (apenas se realmente mudou)
-          getAutoSaveQueue().addToQueue(path, content);
+          // Auto-save temporarily disabled: keep the file dirty until the
+          // developer explicitly saves. Manual save still removes any stale
+          // queue entry through saveFile().
 
           // Persist dirty buffer to disk — protects against data loss on
           // crash/reload when autosave is off or hasn't fired yet. The

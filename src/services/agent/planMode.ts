@@ -15,6 +15,7 @@ import {
   WEB_SEARCH, WEB_FETCH, DELEGATE,
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
   ASK_USER_QUESTION,
+  canonicalToolName,
 } from './toolNames'
 
 // Tools the architect agent is allowed to call while planMode is on.
@@ -86,6 +87,7 @@ export function checkPlanModeAccess(
   projectRoot: string,
   planFileName: string = 'PLAN.md',
 ): string | null {
+  toolName = canonicalToolName(toolName)
   const planLabel = normalisePlanFileName(planFileName)
   if (!PLAN_MODE_ALLOWED_TOOLS.has(toolName)) {
     const allowedList = [

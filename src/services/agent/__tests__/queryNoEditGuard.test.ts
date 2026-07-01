@@ -103,7 +103,7 @@ function makeSelector(opts: {
 // ── Tests ────────────────────────────────────────────────────────────────
 
 describe('query — "stopped without editing" guardrail', () => {
-  it('injects a steering turn when bugfix_local (readOnly=false) stops without any edit', async () => {
+  it('injects a steering turn when a mutable original_task stops without any edit', async () => {
     const create = jest
       .fn()
       .mockImplementationOnce(() => streamResponse(STOP_TURN)) // turn 1: stops with text
@@ -114,6 +114,8 @@ describe('query — "stopped without editing" guardrail', () => {
         baseParams({
           client: makeClient(create),
           toolsetSelector: makeSelector({ editFileActive: false }),
+          executionPhase: 'original_task',
+          mutableTask: true,
         }),
       ),
     )
@@ -132,6 +134,8 @@ describe('query — "stopped without editing" guardrail', () => {
         baseParams({
           client: makeClient(create),
           toolsetSelector: makeSelector({ readOnly: true }),
+          executionPhase: 'original_task',
+          mutableTask: true,
         }),
       ),
     )
@@ -161,7 +165,7 @@ describe('query — "stopped without editing" guardrail', () => {
     expect(terminal).toMatchObject({ reason: 'completed', runHasEdited: false, writeActionCount: 0 })
   })
 
-  it('does NOT fire when the profile is not bugfix_local', async () => {
+  it('does NOT fire when mutableTask is false', async () => {
     const create = jest.fn().mockImplementationOnce(() => streamResponse(STOP_TURN))
 
     const terminal = await drain(
@@ -169,12 +173,35 @@ describe('query — "stopped without editing" guardrail', () => {
         baseParams({
           client: makeClient(create),
           toolsetSelector: makeSelector({ profile: 'frontend_ui' }),
+          executionPhase: 'original_task',
+          mutableTask: false,
         }),
       ),
     )
 
     expect(terminal).toMatchObject({ reason: 'completed' })
     expect(create).toHaveBeenCalledTimes(1)
+  })
+
+  it('fires for mutable frontend_ui tasks, not only bugfix_local', async () => {
+    const create = jest
+      .fn()
+      .mockImplementationOnce(() => streamResponse(STOP_TURN))
+      .mockImplementationOnce(() => streamResponse(STOP_TURN))
+
+    await drain(
+      query(
+        baseParams({
+          client: makeClient(create),
+          toolsetSelector: makeSelector({ profile: 'frontend_ui', editFileActive: true }),
+          executionPhase: 'original_task',
+          mutableTask: true,
+        }),
+      ),
+    )
+
+    expect(create).toHaveBeenCalledTimes(2)
+    expect(steeredInto(create, 1, 'edit_file available')).toBe(true)
   })
 
   it('does NOT fire when an edit was already applied', async () => {
@@ -189,6 +216,8 @@ describe('query — "stopped without editing" guardrail', () => {
           client: makeClient(create),
           toolsetSelector: makeSelector({ editFileActive: true }),
           executeTool: jest.fn().mockResolvedValue({ content: 'edited', isError: false }),
+          executionPhase: 'original_task',
+          mutableTask: true,
         }),
       ),
     )
@@ -210,6 +239,8 @@ describe('query — "stopped without editing" guardrail', () => {
         baseParams({
           client: makeClient(create),
           toolsetSelector: makeSelector({ editFileActive: false }),
+          executionPhase: 'original_task',
+          mutableTask: true,
         }),
       ),
     )
@@ -229,6 +260,8 @@ describe('query — "stopped without editing" guardrail', () => {
         baseParams({
           client: makeClient(create),
           toolsetSelector: makeSelector({ editFileActive: true }),
+          executionPhase: 'original_task',
+          mutableTask: true,
         }),
       ),
     )
@@ -274,6 +307,8 @@ describe('query — "stopped without editing" guardrail', () => {
           toolsetSelector: makeSelector({ editFileActive: true }),
           executeTool: jest.fn().mockResolvedValue({ content: 'edited', isError: false }),
           onRequestUsage: (entry) => { usageEntries.push(entry) },
+          executionPhase: 'original_task',
+          mutableTask: true,
         }),
       ),
     ) as { completionGuardDecision?: string; runHasEdited?: boolean; noEditRecoveryCount?: number; firstWriteTurn?: number; writeActionCount?: number }
@@ -285,7 +320,7 @@ describe('query — "stopped without editing" guardrail', () => {
     // hasn't run yet at this point in the request cycle).
     expect(usageEntries[1]).toMatchObject({ runHasEdited: false, noEditRecoveryCount: 1, noEditGuardTriggered: true })
     // Turn 3: edit ran in turn 2 → cumulative values now reflect it.
-    expect(usageEntries[2]).toMatchObject({ runHasEdited: true, noEditRecoveryCount: 1, noEditGuardTriggered: false, firstWriteTurn: 2, writeActionCount: 1 })
+    expect(usageEntries[2]).toMatchObject({ runHasEdited: true, noEditRecoveryCount: 1, noEditGuardTriggered: false, firstWriteTurn: 2, writeActionCount: 1, originalTaskWriteActionCount: 1 })
     // Terminal: final decision.
     expect(terminal).toMatchObject({ completionGuardDecision: 'recovered_then_completed', runHasEdited: true, noEditRecoveryCount: 1, firstWriteTurn: 2, writeActionCount: 1 })
   })

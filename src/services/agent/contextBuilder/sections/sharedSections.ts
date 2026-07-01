@@ -29,7 +29,11 @@ import {
   EXECUTE_COMMAND,
   EXECUTE_COMMAND_BACKGROUND,
   GLOB,
+  GLOB_ALIAS,
   LIST_DIRECTORY,
+  LS_ALIAS,
+  GREP_ALIAS,
+  READ_ALIAS,
   READ_FILE,
   SEARCH_FILES,
 } from '../../toolNames'
@@ -200,11 +204,11 @@ Operate like an interactive terminal operator, not a script generator.
 
  - **Act atomically**: prefer one purposeful command, observe its stdout/stderr/exit code, then decide the next command. Avoid \`&&\`, \`||\`, \`;\`, and pipes as workflow glue because they hide the failing step and remove your feedback loop.
  - **Use persistent shell for interactive state**: when you need to stay inside a shell, SSH session, REPL, or stateful CLI, call \`${AGENT_SHELL_START}\`, then send one input line at a time with \`${AGENT_SHELL_WRITE}\`, observe with \`${AGENT_SHELL_READ}\`, and finish with \`${AGENT_SHELL_STOP}\`. The start result includes \`platform\` and \`command_style\`; obey it. On Windows, \`command_style: posix\` means Git Bash is active and POSIX commands are appropriate; \`powershell\` or \`cmd\` means use native Windows syntax until you enter a remote Unix shell. Example: start shell → write \`ssh root@host\` → read prompt → write \`apt-get update\` → read → write \`DEBIAN_FRONTEND=noninteractive apt-get upgrade -yq\`.
- - **Use shell for terminal work only**: use dedicated tools for file/code exploration, and \`${EXECUTE_COMMAND}\` for everything else. The mapping is:
-   - \`${READ_FILE}\` — read file contents (replaces \`cat\`, \`head\`, \`tail\`)
-   - \`${SEARCH_FILES}\` — search text/patterns in files (replaces \`grep\`, \`rg\`, \`ack\`)
-   - \`${LIST_DIRECTORY}\` — list directory contents (replaces \`ls\`, \`tree\`)
-   - \`${GLOB}\` — find files by pattern (replaces \`find\`, \`fd\`)
+ - **Use shell for terminal work only**: use dedicated tools for file/code exploration, and \`${EXECUTE_COMMAND}\` for everything else. Prefer the Claude-like aliases; TM Code maps them internally:
+   - \`${READ_ALIAS}\` — read file contents (internal \`${READ_FILE}\`; replaces \`cat\`, \`head\`, \`tail\`, \`sed -n\`)
+   - \`${GREP_ALIAS}\` — search text/patterns in files (internal \`${SEARCH_FILES}\`; replaces \`grep\`, \`rg\`, \`ack\`)
+   - \`${LS_ALIAS}\` — list directory contents (internal \`${LIST_DIRECTORY}\`; replaces \`ls\`, \`tree\`)
+   - \`${GLOB_ALIAS}\` — find files by pattern (internal \`${GLOB}\`; replaces \`find\`, \`fd\`)
    - \`${EXECUTE_COMMAND}\` — run CLIs, tests, builds, package managers, git diagnostics, curl, and system operations
  - **Observe before continuing**: after every \`${EXECUTE_COMMAND}\`, read the full result. Exit code ≠ 0, timeout, or meaningful stderr is a blocker to diagnose, not noise to skip.
  - **Choose blocking vs background deliberately**: quick commands that you need immediately go through \`${EXECUTE_COMMAND}\`. ${backgroundGuidance}
@@ -259,7 +263,7 @@ User-facing output contains your final answer only — keep planning, deliberati
  * Mirrors the `sharedIdentity` ↔ `sharedIdentityReminder` pattern: the
  * full section sits in the recency block (before tone/style), and a
  * one-liner gets stitched into the final Reminder so it survives the
- * U-Curve dip even when CLAUDE.md / TMS.md content pushes the section
+ * U-Curve dip even when TMS.md content pushes the section
  * back toward the middle of the prompt.
  */
 export function sharedUiBaselineReminder(): string {

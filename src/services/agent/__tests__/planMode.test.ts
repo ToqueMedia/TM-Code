@@ -36,6 +36,13 @@ describe('checkPlanModeAccess', () => {
       }
     })
 
+    test('allows Claude-like read aliases via canonical tool mapping', () => {
+      const allowed = ['Read', 'LS', 'Glob', 'Grep']
+      for (const tool of allowed) {
+        expect(checkPlanModeAccess(tool, 'src/components/App.tsx', ROOT)).toBeNull()
+      }
+    })
+
     test('allows update_tasks and collect_results (no file paths)', () => {
       expect(checkPlanModeAccess('update_tasks', '', ROOT)).toBeNull()
       expect(checkPlanModeAccess('collect_results', '', ROOT)).toBeNull()

@@ -42,7 +42,28 @@ import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
 import { ToolsetSelector, REQUEST_TOOLS_NAME, REQUEST_CONTEXT_NAME } from "./toolsetSelector";
 import type { ToolsetGroupName } from "./toolsetSelector";
+import type { PromptProfile } from "./contextBuilder/auxiliaryRegistry";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
+import { classifyExecuteCommandPurpose, convertShellReadCommand } from "./commandPurpose";
+import { isMutableTask } from "./taskClassification";
+import { EDIT_FILE } from "./toolNames";
+import { formatShellReadRedirect } from "./shellReadRedirect";
+import {
+  decorateTmsRequestUsage,
+  getTmsTurnTelemetry,
+  markExecuteCommandPurpose,
+  markNoEditGuard,
+  markOriginalTaskCompleted,
+  markOriginalTaskFailed,
+  markOriginalTaskStarted,
+  markOriginalTaskWriteStats,
+  markShellReadBlocked,
+  markTmsBootstrapFailed,
+  markTmsCreated,
+  markTmsFullContextSent,
+  markTmsWriteAttempt,
+  setTmsTurnTelemetry,
+} from "./tmsContext";
 
 // ── Extracted services ──
 
@@ -96,6 +117,10 @@ class AgentService {
   // runQueryEngineLoop; the createToolExecutorBridge reads it to intercept
   // the request_tools meta-tool.
   private currentToolsetSelector: ToolsetSelector | null = null;
+  private postTmsBootstrapToolProfile: {
+    profile: PromptProfile;
+    readOnly: boolean;
+  } | null = null;
 
   // Última resposta HTTP confirmou TM Speed (`X-TM-Speed-Applied: true`)?
   // Os headers chegam no início de cada resposta e o `message_stop` desse
@@ -146,6 +171,12 @@ class AgentService {
 
   setSystemPrompt(prompt: string) {
     this.systemPrompt = prompt;
+  }
+  setPostTmsBootstrapToolProfile(profile: PromptProfile, readOnly: boolean): void {
+    this.postTmsBootstrapToolProfile = { profile, readOnly };
+  }
+  clearPostTmsBootstrapToolProfile(): void {
+    this.postTmsBootstrapToolProfile = null;
   }
   getAgentType(): string | null {
     return this.agentType;
@@ -499,6 +530,17 @@ class AgentService {
       auxiliarySelection = ContextBuilder.getInstance().getLastAuxiliarySelection();
     }
 
+    const executionPhase = auxiliarySelection?.profile === "project_bootstrap"
+      ? "project_bootstrap"
+      : "original_task";
+    const userMessageText = typeof userMessage === "string"
+      ? userMessage
+      : contentAsText(userMessage);
+    const mutableTask = executionPhase === "original_task" &&
+      !this.lightweightOptions &&
+      auxiliarySelection?.readOnly !== true &&
+      isMutableTask(userMessageText);
+
     const toolsetSelector = this.lightweightOptions
       ? null
       : new ToolsetSelector(
@@ -512,6 +554,16 @@ class AgentService {
     if (toolsetSelector && auxiliarySelection) {
       toolsetSelector.setOmittedAuxiliaries(auxiliarySelection.omitted.length);
       toolsetSelector.setOmittedAuxiliaryIds(auxiliarySelection.omitted.map((o) => o.id));
+    }
+    if (!this.lightweightOptions) {
+      if (executionPhase === "original_task") {
+        markOriginalTaskStarted(mutableTask);
+      } else {
+        setTmsTurnTelemetry({ executionPhase: "project_bootstrap" });
+      }
+    }
+    if (mutableTask && toolsetSelector && !toolsetSelector.isActive(EDIT_FILE)) {
+      toolsetSelector.requestTools([EDIT_FILE]);
     }
 
     // 5. Create tool executor bridge
@@ -588,12 +640,14 @@ class AgentService {
       // callback here or output tokens will be double-counted (SUM semantics).
       // onRequestUsage is distinct: it carries the payloadInspector breakdown
       // (not in message_stop) — pure observability, no double-counting.
-      onRequestUsage: (entry) => callbacks.onRequestUsage?.(entry),
+      onRequestUsage: (entry) => callbacks.onRequestUsage?.(decorateTmsRequestUsage(entry, this.systemPrompt)),
       // Dynamic toolset selector (null for sub-agents).
       toolsetSelector: toolsetSelector ?? undefined,
       // Auxiliary-context selection (core/auxiliary breakdown for the
       // payloadInspector; null for sub-agents).
       auxiliarySelection: auxiliarySelection ?? undefined,
+      executionPhase,
+      mutableTask,
       // Delegate telemetry — read from the toolExecutor's last delegate call.
       getDelegateTelemetry: () => this.toolExecutor.consumeDelegateTelemetry(),
     });
@@ -739,16 +793,90 @@ class AgentService {
     // from expandedToolNames / toolCalls). Best-effort — never blocks.
     if (terminal.completionGuardDecision !== undefined) {
       try {
+        if (!this.lightweightOptions && executionPhase === "original_task") {
+          markOriginalTaskWriteStats(
+            terminal.originalTaskWriteActionCount ?? terminal.writeActionCount ?? 0,
+            terminal.originalTaskFirstWriteTurn ?? terminal.firstWriteTurn,
+          );
+          if (terminal.noEditGuardReason) {
+            markNoEditGuard(
+              terminal.noEditGuardReason,
+              terminal.noEditRecoveryAction ?? "unknown",
+            );
+          }
+          if (terminal.reason === "completed") {
+            markOriginalTaskCompleted();
+          } else {
+            markOriginalTaskFailed(terminal.reason);
+          }
+        }
         useChatStore.getState().updateLastRequestUsage({
+          ...getTmsTurnTelemetry(),
+          executionPhase,
+          mutableTask,
           runHasEdited: terminal.runHasEdited,
           noEditRecoveryCount: terminal.noEditRecoveryCount,
           noEditGuardTriggered: terminal.noEditGuardTriggered,
+          noEditGuardReason: terminal.noEditGuardReason,
+          noEditRecoveryAction: terminal.noEditRecoveryAction,
           firstWriteTurn: terminal.firstWriteTurn,
           writeActionCount: terminal.writeActionCount,
+          originalTaskWriteActionCount: terminal.originalTaskWriteActionCount ?? terminal.writeActionCount,
+          originalTaskFirstWriteTurn: terminal.originalTaskFirstWriteTurn ?? terminal.firstWriteTurn,
           completionGuardDecision: terminal.completionGuardDecision,
           completionGuardReason: terminal.completionGuardReason,
         });
       } catch { /* telemetry never blocks */ }
+    }
+    if (terminal.completionGuardDecision === undefined && !this.lightweightOptions && executionPhase === "original_task") {
+      try {
+        markOriginalTaskWriteStats(
+          terminal.originalTaskWriteActionCount ?? terminal.writeActionCount ?? 0,
+          terminal.originalTaskFirstWriteTurn ?? terminal.firstWriteTurn,
+        );
+        markOriginalTaskFailed(terminal.reason);
+        useChatStore.getState().updateLastRequestUsage({
+          ...getTmsTurnTelemetry(),
+          executionPhase,
+          mutableTask,
+          originalTaskFailedReason: terminal.reason,
+          originalTaskWriteActionCount: terminal.originalTaskWriteActionCount ?? terminal.writeActionCount ?? 0,
+          originalTaskFirstWriteTurn: terminal.originalTaskFirstWriteTurn ?? terminal.firstWriteTurn,
+        });
+      } catch { /* telemetry never blocks */ }
+    }
+
+    if (auxiliarySelection?.profile === "project_bootstrap") {
+      let bootstrapFailureText: string | null = null;
+      try {
+        const telemetryBefore = getTmsTurnTelemetry();
+        if (telemetryBefore.tmsBootstrapTriggered) {
+          setTmsTurnTelemetry({
+            tmsBootstrapOutputTokens: terminal.totalOutputTokens ?? 0,
+          });
+          const latest = getTmsTurnTelemetry();
+          if (!latest.tmsCreated && !latest.tmsAlreadyExists) {
+            const reason =
+              terminal.reason === "max_turns"
+                ? "project_bootstrap atingiu o limite de turnos antes de criar TMS.md"
+                : latest.tmsWriteAttempted
+                  ? "foi feita uma tentativa de escrita, mas TMS.md não foi confirmado como criado"
+                  : "o agente terminou o bootstrap antes de tentar escrever TMS.md";
+            markTmsBootstrapFailed(reason);
+            bootstrapFailureText = `Não consegui criar TMS.md: ${reason}.`;
+          }
+          useChatStore.getState().updateLastRequestUsage({
+            ...getTmsTurnTelemetry(),
+          });
+        }
+      } catch {
+        /* telemetry must never hide the model response */
+      }
+      if (bootstrapFailureText) {
+        finalText = finalText
+          ? `${finalText}\n\n${bootstrapFailureText}`
+          : bootstrapFailureText;
+      }
     }
 
     // Loop detection on final text
@@ -970,6 +1098,42 @@ class AgentService {
     return buildByokThinkingConfig(this.byokSnapshot);
   }
 
+  private getToolInputPath(toolInput: Record<string, unknown>): string | null {
+    const value = toolInput.file_path ?? toolInput.path ?? toolInput.directory;
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  }
+
+  private async getCurrentProjectRootPath(): Promise<string | null> {
+    try {
+      const { useProjectStore } = await import("../../stores/projectStore");
+      return useProjectStore.getState().currentProject?.path ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async markProjectTmsPresent(): Promise<void> {
+    try {
+      const { useProjectStore } = await import("../../stores/projectStore");
+      useProjectStore.getState().setNoTmsFile(false);
+    } catch {
+      /* non-critical outside the full Tauri app */
+    }
+  }
+
+  private async isProjectRootTmsPath(rawPath: string | null): Promise<boolean> {
+    if (!rawPath) return false;
+    const normalizedPath = rawPath.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (normalizedPath === "TMS.md" || normalizedPath === "./TMS.md") return true;
+
+    const projectRoot = (await this.getCurrentProjectRootPath())
+      ?.replace(/\\/g, "/")
+      .replace(/\/+$/, "");
+    if (!projectRoot) return /(^|\/)TMS\.md$/i.test(normalizedPath);
+
+    return normalizedPath.toLowerCase() === `${projectRoot}/TMS.md`.toLowerCase();
+  }
+
   /**
    * Create the ToolExecutorFn bridge that connects the query loop's tool
    * execution to TM Code's ToolExecutor with diff approval support.
@@ -1017,7 +1181,7 @@ class AgentService {
           return { content: 'No auxiliary id provided. Call request_context with an auxiliary id from the on-demand index.', isError: false };
         }
         const ContextBuilder = (await import('./contextBuilder')).default;
-        const { content, name } = ContextBuilder.getInstance().loadAuxiliaryOnDemand(auxiliaryId);
+        const { content, name } = await ContextBuilder.getInstance().loadAuxiliaryOnDemand(auxiliaryId);
         if (content === null) {
           const sel = ContextBuilder.getInstance().getLastAuxiliarySelection();
           const available = sel ? sel.omitted.map(o => o.id).join(', ') : '(none)';
@@ -1026,19 +1190,57 @@ class AgentService {
             isError: false,
           };
         }
+        if (auxiliaryId === 'project.docs_full' || auxiliaryId === 'project_docs_full') {
+          markTmsFullContextSent('project.docs_full');
+        }
         return {
           content: `# Auxiliary context: ${name}\n\n${content}`,
           isError: false,
         };
       }
 
-      const selector = this.currentToolsetSelector;
-      if (selector && !selector.isActive(toolName)) {
-        const activated = selector.expandForToolName(toolName);
-        if (!activated) {
-          selector.noteDeniedToolName(toolName);
+      let effectiveToolName = toolName;
+      let effectiveToolInput = toolInput;
+
+      if (toolName === "execute_command") {
+        const command = typeof toolInput.command === "string" ? toolInput.command : "";
+        const converted = convertShellReadCommand(command);
+        const purpose = converted ? "file_read" : classifyExecuteCommandPurpose(command);
+        markExecuteCommandPurpose(purpose);
+        if (converted) {
+          markShellReadBlocked(false);
           return {
-            content: `Tool blocked: ${toolName} is not available for the current task profile/read-only policy.`,
+            content: formatShellReadRedirect(command, converted),
+            isError: true,
+          };
+        } else if (purpose === "file_read") {
+          markShellReadBlocked(false);
+          return {
+            content: formatShellReadRedirect(command, null),
+            isError: true,
+          };
+        }
+      }
+
+      const selector = this.currentToolsetSelector;
+      const isTmsBootstrap = selector?.getProfile() === "project_bootstrap";
+      if (isTmsBootstrap && WRITE_TOOLS.has(effectiveToolName)) {
+        const targetPath = this.getToolInputPath(effectiveToolInput);
+        if (!(await this.isProjectRootTmsPath(targetPath))) {
+          return {
+            content: `Tool blocked: project_bootstrap may only write the root TMS.md file. Requested path: ${targetPath ?? "(missing)"}.`,
+            isError: true,
+          };
+        }
+        markTmsWriteAttempt(toolUseId, targetPath ?? undefined);
+      }
+
+      if (selector && !selector.isActive(effectiveToolName)) {
+        const activated = selector.expandForToolName(effectiveToolName);
+        if (!activated) {
+          selector.noteDeniedToolName(effectiveToolName);
+          return {
+            content: `Tool blocked: ${effectiveToolName} is not available for the current task profile/read-only policy.`,
             isError: true,
           };
         }
@@ -1050,23 +1252,24 @@ class AgentService {
       // pending. onToolCallPending creates the card; onToolCallStart immediately
       // flips it to "running". Execution was already gated by the serial loop +
       // waitForUserGates; this only fixes the visual pile-up.
-      callbacks.onToolCallPending(toolUseId, toolName);
-      callbacks.onToolCallStart(toolUseId, toolName, toolInput);
+      callbacks.onToolCallPending(toolUseId, effectiveToolName);
+      callbacks.onToolCallStart(toolUseId, effectiveToolName, effectiveToolInput);
 
       try {
         const raw = await this.toolExecutor.execute(
-          toolName,
-          toolInput,
+          effectiveToolName,
+          effectiveToolInput,
           toolUseId,
           signal ?? undefined,
           this.agentType,
         );
+        const content = raw;
 
         // Track file access
-        this.sessionState.trackFileAccess(toolName, toolInput);
+        this.sessionState.trackFileAccess(effectiveToolName, effectiveToolInput);
 
         // Diff approval for write/edit/create tools
-        if (WRITE_TOOLS.has(toolName) && !this.lightweightOptions?.readOnly) {
+        if (WRITE_TOOLS.has(effectiveToolName) && !this.lightweightOptions?.readOnly) {
           let parsedDiff: {
             type: string;
             path: string;
@@ -1074,7 +1277,7 @@ class AgentService {
             newContent?: string;
           } | null = null;
           try {
-            const parsed = JSON.parse(raw);
+            const parsed = JSON.parse(content);
             if (parsed?.type === "diff") {
               parsedDiff = {
                 type: parsed.type,
@@ -1088,16 +1291,55 @@ class AgentService {
           }
 
           if (parsedDiff) {
+            const autoApplyTmsBootstrap =
+              this.currentToolsetSelector?.getProfile() === "project_bootstrap" &&
+              /[\\/]TMS\.md$/i.test(parsedDiff.path) &&
+              parsedDiff.newContent !== undefined;
+            if (autoApplyTmsBootstrap) {
+              const newContent = parsedDiff.newContent as string;
+              await invoke("write_file", {
+                path: parsedDiff.path,
+                content: newContent,
+              });
+              const appliedRaw = JSON.stringify({
+                ...JSON.parse(content),
+                alreadyApplied: true,
+              });
+              callbacks.onToolResult(toolUseId, effectiveToolName, appliedRaw, false);
+              this.sessionState.trackFileEdit(parsedDiff.path);
+              markTmsCreated(parsedDiff.path);
+              await this.markProjectTmsPresent();
+              this.toolExecutor.updateReadStateAfterWrite(
+                parsedDiff.path,
+                newContent,
+              );
+              if (this.postTmsBootstrapToolProfile && this.currentToolsetSelector) {
+                this.currentToolsetSelector.switchProfile(
+                  this.postTmsBootstrapToolProfile.profile,
+                  this.postTmsBootstrapToolProfile.readOnly,
+                );
+                this.postTmsBootstrapToolProfile = null;
+              }
+              return {
+                content: `File ${parsedDiff.isNewFile ? "created" : "updated"}: ${parsedDiff.path}\nProject bootstrap is complete. Stop this phase; the host will resume the original user request.`,
+                isError: false,
+              };
+            }
+
             // Publish the diff before waiting. updateToolCallWithResult is the
             // code path that registers pendingDiffs, so waiting first deadlocks:
             // no approval UI exists yet to resolve createDiffApprovalPromise.
-            callbacks.onToolResult(toolUseId, toolName, raw, false);
+            callbacks.onToolResult(toolUseId, effectiveToolName, content, false);
             const approved = await createDiffApprovalPromise(toolUseId);
             if (signal?.aborted) {
               return { content: "Aborted", isError: true };
             }
             if (approved) {
               this.sessionState.trackFileEdit(parsedDiff.path);
+              if (/[\\/]TMS\.md$/i.test(parsedDiff.path)) {
+                markTmsCreated(parsedDiff.path);
+                await this.markProjectTmsPresent();
+              }
               if (parsedDiff.newContent !== undefined) {
                 this.toolExecutor.updateReadStateAfterWrite(
                   parsedDiff.path,
@@ -1116,14 +1358,14 @@ class AgentService {
           }
         }
 
-        return { content: raw, isError: false };
+        return { content, isError: false };
       } catch (err) {
         // formatError (not String(err)): a Tauri reject is usually a plain
         // object or serde-tagged enum — e.g. list_directory's build_file_tree
         // rejecting with {"PathNotFound":"…"} — which String() turns into the
         // literal "Error: [object Object]" the model (and the chat row) showed.
         const errorMsg = formatError(err);
-        const failKey = `${toolName}:${String(toolInput.file_path || toolInput.command || "").slice(0, 80)}`;
+        const failKey = `${effectiveToolName}:${String(effectiveToolInput.file_path || effectiveToolInput.command || "").slice(0, 80)}`;
         const count = this.sessionState.recordToolFailure(failKey, errorMsg);
         let content = `Error: ${errorMsg}`;
         if (count > 1)

@@ -16,6 +16,7 @@
 import { logger } from '../../utils/logger'
 import { resolveAIWorkerUrl } from '../../utils/devUrls'
 import { contentAsText } from './promptValueHelpers'
+import { canonicalToolName, normalizeToolInputForCanonical } from './toolNames'
 import { buildCompactPrompt, buildPostCompactionSummaryMessage, formatCompactSummary } from './compactPrompt'
 import { archivePreCompactTranscript } from './compactTranscriptArchive'
 import type { InternalMessage } from './messageUtils'
@@ -235,9 +236,11 @@ export function mechanicalFallback(messages: InternalMessage[]): string {
     if (msg.role === 'assistant' && Array.isArray(msg.content)) {
       for (const block of msg.content as Array<{ type: string; name?: string; arguments?: string; input?: Record<string, unknown>; id?: string }>) {
         if (block.type === 'tool_call' && block.name) {
-          const args = (block.arguments ? JSON.parse(block.arguments) : block.input ?? {}) as Record<string, unknown>
-          const path = (args.file_path as string) || ''
-          switch (block.name) {
+          const originalName = block.name
+          const argsRaw = (block.arguments ? JSON.parse(block.arguments) : block.input ?? {}) as Record<string, unknown>
+          const args = normalizeToolInputForCanonical(originalName, argsRaw)
+          const path = ((args.file_path ?? args.path ?? args.directory) as string) || ''
+          switch (canonicalToolName(originalName)) {
             case 'read_file': filesRead.add(path); break
             case 'write_file': case 'create_file': case 'edit_file':
               filesModified.add(path); break
@@ -283,9 +286,13 @@ export function extractToolOpsLog(messages: InternalMessage[]): string {
     if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
     for (const block of msg.content) {
       if (block.type !== 'tool_call') continue
-      const name = block.name as string
+      const originalName = block.name as string
+      const name = canonicalToolName(originalName)
       let input: Record<string, unknown> = {}
-      try { input = block.arguments ? JSON.parse(block.arguments) : {} } catch { /* ignore */ }
+      try {
+        const raw = block.arguments ? JSON.parse(block.arguments) : {}
+        input = normalizeToolInputForCanonical(originalName, raw)
+      } catch { /* ignore */ }
       let entry = ''
       switch (name) {
         case 'execute_command':

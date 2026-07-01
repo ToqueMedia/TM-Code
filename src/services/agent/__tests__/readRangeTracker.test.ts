@@ -20,6 +20,10 @@ describe('readRangeTracker', () => {
 
     const overlap = checkReadRangeOverlap('/repo/subAgentRunner.ts', 90, 130, 1, 1000)
     expect(overlap.kind).toBe('fully_covered')
+    expect(overlap.stub).toContain('previous Read')
+    expect(overlap.stub).toContain('do not re-read this range')
+    expect(overlap.stub).toContain('execute_command/cat/head/tail/sed')
+    expect(overlap.stub).toContain('force: true')
     expect(getAndResetOverlapStats()).toEqual({
       skippedOverlappingReads: 1,
       adjustedReadRanges: 0,

@@ -17,6 +17,23 @@ jest.mock('../../auth/firebaseAuth', () => ({
 // invoke is already mocked in setupTests.ts
 const mockedInvoke = invoke as jest.MockedFunction<typeof invoke>
 
+function completionEnvelope(content: string): string {
+  return JSON.stringify({
+    choices: [{ message: { content } }],
+  })
+}
+
+function mockResponse(body: string, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: {
+      get: () => undefined,
+    },
+    text: jest.fn().mockResolvedValue(body),
+  } as unknown as Response
+}
+
 describe('ContextBuilder', () => {
   let builder: ContextBuilder
 
@@ -37,6 +54,7 @@ describe('ContextBuilder', () => {
     const { __resetFsVersionForTests } = require('../../fsVersion')
     __resetIpcCacheForTests()
     __resetFsVersionForTests()
+    Reflect.deleteProperty(globalThis, 'fetch')
   })
 
   describe('singleton', () => {
@@ -126,6 +144,51 @@ describe('ContextBuilder', () => {
     it('includes constraints section', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
       expect(prompt).toContain('# Constraints')
+    })
+
+    it('does not inject missing-TMS creation guidance into the normal task prompt', async () => {
+      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+
+      expect(prompt).not.toContain('No TMS.md yet')
+      expect(prompt).not.toContain('After completing your first significant task')
+      expect(prompt).not.toContain('This project has no TMS.md')
+    })
+
+    it('does not abort prompt build when the context planner returns empty content', async () => {
+      const fetchMock = jest.fn()
+        .mockResolvedValueOnce(mockResponse(completionEnvelope('')) as never)
+        .mockResolvedValueOnce(mockResponse(completionEnvelope('')) as never)
+        .mockResolvedValueOnce(mockResponse(completionEnvelope('')) as never)
+        .mockResolvedValueOnce(mockResponse(completionEnvelope('')) as never)
+      Object.defineProperty(globalThis, 'fetch', {
+        value: fetchMock,
+        configurable: true,
+        writable: true,
+      })
+
+      const prompt = await builder.buildSystemPrompt(
+        '/test/project',
+        'web',
+        [],
+        20,
+        'Rota: /billing ou /payments. Detectar NIF e abrir modal.',
+        [],
+        {
+          profile: 'frontend_ui',
+          readOnly: false,
+          source: 'model',
+          confidence: 'high',
+          reason: 'frontend UI task',
+        },
+      )
+      const selection = builder.getLastAuxiliarySelection()
+
+      expect(prompt).toContain('# Role')
+      expect(fetchMock).toHaveBeenCalledTimes(4)
+      expect(selection?.profile).toBe('frontend_ui')
+      expect(selection?.contextPlannerStatus).toBe('fallback')
+      expect(selection?.contextPlan.selectedContexts).toEqual([])
+      expect(selection?.contextPlannerError).toContain('context planner failed after')
     })
 
     it('includes system section', async () => {
@@ -296,6 +359,42 @@ describe('ContextBuilder', () => {
       expect(prompt).toContain('Operate like an interactive terminal operator')
       expect(prompt).toContain('execute_command_background')
       expect(prompt).toContain('check_background_commands')
+    })
+
+    it('applies explicit profile overrides in Terminal mode', async () => {
+      const prompt = await builder.buildCmdModeSystemPrompt(
+        '/test/project',
+        '/test/home',
+        [],
+        '/init',
+        {
+          profile: 'project_bootstrap',
+          readOnly: false,
+          source: 'keyword',
+          confidence: 'high',
+          reason: '/init selected project_bootstrap',
+        },
+      )
+      const selection = builder.getLastAuxiliarySelection()
+
+      expect(prompt).toContain('**Mode: TERMINAL**')
+      expect(selection?.profile).toBe('project_bootstrap')
+      expect(selection?.readOnly).toBe(false)
+      expect(selection?.contextPlan.taskDomain).toBe('project_bootstrap')
+    })
+
+    it('clears Terminal-mode auxiliary selection when no override is provided', async () => {
+      await builder.buildCmdModeSystemPrompt('/test/project', '/test/home', [], '/init', {
+        profile: 'project_bootstrap',
+        readOnly: false,
+        source: 'keyword',
+        confidence: 'high',
+        reason: '/init selected project_bootstrap',
+      })
+
+      await builder.buildCmdModeSystemPrompt('/test/project', '/test/home')
+
+      expect(builder.getLastAuxiliarySelection()).toBeNull()
     })
 
     it('includes package.json summary when available', async () => {

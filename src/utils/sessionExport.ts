@@ -62,11 +62,80 @@ interface ExportOptions {
   envSnapshot?: EnvironmentSnapshot | null
 }
 
+export interface RequestEfficiencyReport {
+  totalRequests: number
+  symbolIndexRequests: number
+  symbolIndexTokensEstimate: number
+  symbolIndexFilesConsidered: number
+  symbolIndexFilesScanned: number
+  symbolIndexEntries: number
+  symbolIndexTruncated: boolean
+  finalReadRangeCount: number
+  finalReadRangeFileCount: number
+  finalReadToEndRangeCount: number
+  finalBoundedReadRangeCount: number
+  skippedOverlappingReads: number
+  adjustedReadRanges: number
+  readBeforeWriteBlockCount: number
+  readBeforeWriteBlockedTools: string[]
+  readBeforeWriteBlockedReasons: string[]
+  firstSymbolIndexRequest?: { requestNumber: number; turn: number }
+  readRangesBeforeFirstSymbolIndex?: number
+  readRangesAfterFirstSymbolIndex?: number
+}
+
 function isoTimestamp(ms: number): string {
   try {
     return new Date(ms).toISOString()
   } catch {
     return String(ms)
+  }
+}
+
+function unique(values: Array<string | undefined | null>): string[] {
+  return Array.from(new Set(values.filter((v): v is string => Boolean(v))))
+}
+
+export function buildRequestEfficiencyReport(log: RequestUsageEntry[] | undefined): RequestEfficiencyReport | null {
+  if (!log || log.length === 0) return null
+
+  const symbolEntries = log.filter(e => e.symbolIndexRequested)
+  const firstSymbolIndex = symbolEntries.length
+    ? log.findIndex(e => e.symbolIndexRequested)
+    : -1
+  const beforeSymbolReadRanges =
+    firstSymbolIndex > 0
+      ? log[firstSymbolIndex - 1]?.readRanges?.length ?? 0
+      : firstSymbolIndex === 0
+        ? 0
+        : undefined
+  const finalReadRanges = [...log].reverse().find(e => e.readRanges)?.readRanges ?? []
+  const readBeforeWriteBlockCount = Math.max(0, ...log.map(e => e.readBeforeWriteBlockCount ?? 0))
+
+  return {
+    totalRequests: log.length,
+    symbolIndexRequests: symbolEntries.length,
+    symbolIndexTokensEstimate: symbolEntries.reduce((sum, e) => sum + (e.symbolIndexTokensEstimate ?? 0), 0),
+    symbolIndexFilesConsidered: symbolEntries.reduce((sum, e) => sum + (e.symbolIndexFilesConsidered ?? 0), 0),
+    symbolIndexFilesScanned: symbolEntries.reduce((sum, e) => sum + (e.symbolIndexFilesScanned ?? 0), 0),
+    symbolIndexEntries: symbolEntries.reduce((sum, e) => sum + (e.symbolIndexEntries ?? 0), 0),
+    symbolIndexTruncated: symbolEntries.some(e => e.symbolIndexTruncated),
+    finalReadRangeCount: finalReadRanges.length,
+    finalReadRangeFileCount: new Set(finalReadRanges.map(r => r.path)).size,
+    finalReadToEndRangeCount: finalReadRanges.filter(r => r.readToEnd).length,
+    finalBoundedReadRangeCount: finalReadRanges.filter(r => !r.readToEnd).length,
+    skippedOverlappingReads: log.reduce((sum, e) => sum + (e.skippedOverlappingReads ?? 0), 0),
+    adjustedReadRanges: log.reduce((sum, e) => sum + (e.adjustedReadRanges ?? 0), 0),
+    readBeforeWriteBlockCount,
+    readBeforeWriteBlockedTools: unique(log.flatMap(e => e.readBeforeWriteBlockedTools ?? [])),
+    readBeforeWriteBlockedReasons: unique(log.flatMap(e => e.readBeforeWriteBlockedReasons ?? [])),
+    firstSymbolIndexRequest: firstSymbolIndex >= 0
+      ? { requestNumber: firstSymbolIndex + 1, turn: log[firstSymbolIndex]?.turn ?? 0 }
+      : undefined,
+    readRangesBeforeFirstSymbolIndex: beforeSymbolReadRanges,
+    readRangesAfterFirstSymbolIndex: beforeSymbolReadRanges === undefined
+      ? undefined
+      : Math.max(0, finalReadRanges.length - beforeSymbolReadRanges),
   }
 }
 
@@ -107,6 +176,7 @@ function sanitizeByokSnapshot(snap: ByokSessionSnapshot | null | undefined): Byo
 
 export function sessionToJson(session: ChatSession, opts: ExportOptions = {}): string {
   const stripImageData = opts.stripImageData !== false
+  const requestUsageLog = session.requestUsageLog ?? []
   const payload = {
     schemaVersion: 2,
     exportedAt: new Date().toISOString(),
@@ -118,7 +188,8 @@ export function sessionToJson(session: ChatSession, opts: ExportOptions = {}): s
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
       byokSnapshot: sanitizeByokSnapshot(session.byokSnapshot),
-      requestUsageLog: session.requestUsageLog ?? [],
+      requestUsageLog,
+      requestEfficiencyReport: buildRequestEfficiencyReport(requestUsageLog),
       messages: session.messages.map(m => sanitizeMessage(m, stripImageData)),
     },
     environment: opts.envSnapshot ?? null,
@@ -317,6 +388,38 @@ function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
   }
   if (totalCacheRead > 0 || totalCacheCreate > 0) {
     lines.push(`**Prompt cache:** read ${totalCacheRead.toLocaleString()} · create ${totalCacheCreate.toLocaleString()} · uncached ${totalUncached.toLocaleString()} · ${cachedPct}% of input cached`)
+  }
+  const efficiency = buildRequestEfficiencyReport(log)
+  if (efficiency) {
+    lines.push(``)
+    lines.push(`**Agent reading efficiency:**`)
+    lines.push(``)
+    lines.push(`| metric | value |`)
+    lines.push(`|---|---:|`)
+    lines.push(`| symbol index requests | ${efficiency.symbolIndexRequests.toLocaleString()} / ${efficiency.totalRequests.toLocaleString()} |`)
+    lines.push(`| symbol index tokens est. | ${efficiency.symbolIndexTokensEstimate.toLocaleString()} |`)
+    lines.push(`| symbol index files considered | ${efficiency.symbolIndexFilesConsidered.toLocaleString()} |`)
+    lines.push(`| symbol index files scanned | ${efficiency.symbolIndexFilesScanned.toLocaleString()} |`)
+    lines.push(`| symbol index entries | ${efficiency.symbolIndexEntries.toLocaleString()} |`)
+    lines.push(`| symbol index truncated | ${efficiency.symbolIndexTruncated ? 'yes' : 'no'} |`)
+    lines.push(`| final read ranges | ${efficiency.finalReadRangeCount.toLocaleString()} |`)
+    lines.push(`| files read | ${efficiency.finalReadRangeFileCount.toLocaleString()} |`)
+    lines.push(`| read-to-end ranges | ${efficiency.finalReadToEndRangeCount.toLocaleString()} |`)
+    lines.push(`| bounded ranges | ${efficiency.finalBoundedReadRangeCount.toLocaleString()} |`)
+    lines.push(`| skipped overlapping reads | ${efficiency.skippedOverlappingReads.toLocaleString()} |`)
+    lines.push(`| adjusted read ranges | ${efficiency.adjustedReadRanges.toLocaleString()} |`)
+    lines.push(`| read-before-write blocks | ${efficiency.readBeforeWriteBlockCount.toLocaleString()} |`)
+    if (efficiency.firstSymbolIndexRequest) {
+      lines.push(`| first symbol index request | #${efficiency.firstSymbolIndexRequest.requestNumber.toLocaleString()} / turn ${efficiency.firstSymbolIndexRequest.turn.toLocaleString()} |`)
+      lines.push(`| read ranges before symbol index | ${efficiency.readRangesBeforeFirstSymbolIndex?.toLocaleString() ?? '—'} |`)
+      lines.push(`| read ranges after symbol index | ${efficiency.readRangesAfterFirstSymbolIndex?.toLocaleString() ?? '—'} |`)
+    }
+    if (efficiency.readBeforeWriteBlockedTools.length) {
+      lines.push(`| blocked write tools | ${efficiency.readBeforeWriteBlockedTools.map(tool => `\`${tool}\``).join(', ')} |`)
+    }
+    if (efficiency.readBeforeWriteBlockedReasons.length) {
+      lines.push(`| block reasons | ${efficiency.readBeforeWriteBlockedReasons.map(reason => `\`${reason}\``).join(', ')} |`)
+    }
   }
   lines.push(``)
   lines.push('| # | turn | provider | model | usage | msgs | tools | tool defs | IN (real) | OUT | est. IN | @mention ctx | cache read | cache create | uncached IN |')

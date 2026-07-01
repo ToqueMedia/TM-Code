@@ -11,6 +11,7 @@ import { detectAiAgentIntent, buildAiAgentPlatformLine } from '../aiAgentIntent'
 import type { Attachment, PlanResumePending, PromptBlock } from '../../../types/chat'
 import {
   READ_FILE, LIST_DIRECTORY, GLOB, SEARCH_FILES,
+  READ_ALIAS,
   READ_SKILL, WRITE_FILE, EDIT_FILE, CREATE_FILE,
   EXECUTE_COMMAND, START_DEV_SERVER,
   PROVISION_AUTH, REQUEST_CREDENTIALS, UPDATE_TASKS,
@@ -1411,7 +1412,7 @@ function buildArchitectSystemPrompt(mode: 'chat' | 'terminal' = 'chat', planFile
 function buildTodoPrompt(projectPath: string, planPath: string = joinProjectFile(projectPath, 'PLAN.md'), planFileName: string = 'PLAN.md'): string {
   return `Read the approved ${planFileName} at ${planPath} and generate a development task list.
 
-Begin directly with the read_file call. Do NOT acknowledge "I'll generate the task list" or recap ${planFileName}'s intent — the deliverable is TODO.md (via write_file) plus a 3-sentence summary, in that order. The first action after this prompt should be the read_file('${planPath}') tool call.
+Begin directly with the ${READ_ALIAS} call. Do NOT acknowledge "I'll generate the task list" or recap ${planFileName}'s intent — the deliverable is TODO.md (via write_file) plus a 3-sentence summary, in that order. The first action after this prompt should be ${READ_ALIAS} on '${planPath}'.
 
 Note: the architect already populated the task tracker via update_tasks during /plan. The tracker is the source-of-truth for the developer's UI. TODO.md is the markdown checklist version with finer detail (file paths, acceptance criteria, dependencies). Use the SAME task IDs the architect used (e.g., "1.1", "1.2", "2.1") — TODO.md and the tracker must correlate so the implementation agent can flip tracker rows by ID as it progresses.
 

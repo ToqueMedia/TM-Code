@@ -94,6 +94,10 @@ const INTENT_ROUTER_SYSTEM =
   '- "deploy_publish": deploy, publish, release, domain, cloud hosting.\n' +
   '- "auth_database": login, auth, database, storage, uploads.\n' +
   '- "vision": an image/screenshot/mockup is attached.\n\n' +
+  'Disambiguation:\n' +
+  '- Billing/payment/account tasks that require screens, routes, dialogs, modals, forms, buttons, or UI edits are "frontend_ui", even when they read or save user profile data.\n' +
+  '- Use "auth_database" only when the main work is auth, database schema/storage, provisioning, credentials, rules, uploads, or backend data plumbing without a primary UI surface.\n' +
+  '- If the request mentions /billing, /payments, AccountOverview, a modal, NIF/tax id, invoices/facturas, Multicaixa, or Reference and asks to implement UI behavior, choose "frontend_ui"; auth/database may be auxiliary context, not the main profile.\n\n' +
   'readOnly rules:\n' +
   '- Set "readOnly": true when the user EXPLICITLY says they don\'t want edits — "don\'t edit", "just confirm", "sem editar", "nao edite", "read-only", "apenas confirme", "não edite ficheiros".\n' +
   '- A profile of "analysis_readonly" ALWAYS implies readOnly true.\n' +

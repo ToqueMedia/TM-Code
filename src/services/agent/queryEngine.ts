@@ -68,6 +68,10 @@ export interface QueryEngineOptions {
   toolsetSelector?: import('./toolsetSelector').ToolsetSelector
   /** Auxiliary-context selection — core/auxiliary breakdown for the inspector. */
   auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection
+  /** Execution phase for bootstrap/original-task telemetry and guardrails. */
+  executionPhase?: 'project_bootstrap' | 'original_task'
+  /** True when the original user request asks to implement/change/fix files. */
+  mutableTask?: boolean
   /** Delegate telemetry — see QueryParams.getDelegateTelemetry. */
   getDelegateTelemetry?: () => {
     requestedMember: string | null;
@@ -189,6 +193,8 @@ export class QueryEngine {
       getContextLimits: this.options.getContextLimits,
       toolsetSelector: this.options.toolsetSelector,
       auxiliarySelection: this.options.auxiliarySelection,
+      executionPhase: this.options.executionPhase,
+      mutableTask: this.options.mutableTask,
       getDelegateTelemetry: this.options.getDelegateTelemetry,
     }
 

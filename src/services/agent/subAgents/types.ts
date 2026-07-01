@@ -30,7 +30,7 @@ export interface SubAgentDefinition {
   /** UI border accent — hex color for the SubAgentCard left border. */
   color: SubAgentColor
 
-  /** Skip the parent's project context (CLAUDE.md hierarchy, file tree
+  /** Skip the parent's project context (TMS.md, file tree
    *  preview, recent files) in the sub-agent's system prompt. Saves ~5-15 KB
    *  per spawn. Read-only agents that report findings to the parent don't
    *  need commit/PR/lint guidelines. */

@@ -272,6 +272,72 @@ describe('A: execute() orchestration', () => {
     )
   })
 
+  it('canonicalizes Read alias to read_file execution', async () => {
+    const exec = freshExecutor()
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'file_stat') return { size: 12, modifiedMs: 1700000000000 }
+      if (cmd === 'read_file_with_signature') return 'hello world'
+      return undefined
+    })
+
+    const result = await exec.execute('Read', { path: 'src/App.tsx' })
+
+    expect(result).toContain('hello world')
+    expect(mockInvokeImpl).toHaveBeenCalledWith('read_file_with_signature', {
+      path: '/projects/test-app/src/App.tsx',
+    })
+  })
+
+  it('lets Read force bypass duplicate-read suppression for context-loss recovery', async () => {
+    const exec = freshExecutor()
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'file_stat') return { size: 12, modifiedMs: 1700000000000 }
+      if (cmd === 'read_file_with_signature') return 'hello world'
+      return undefined
+    })
+
+    await exec.execute('Read', { path: 'src/App.tsx' })
+    const suppressed = await exec.execute('Read', { path: 'src/App.tsx' })
+    const forced = await exec.execute('Read', { path: 'src/App.tsx', force: true })
+
+    expect(suppressed).toContain('File unchanged since last Read')
+    expect(forced).toContain('hello world')
+    expect(mockInvokeImpl).toHaveBeenCalledWith('read_file_with_signature', {
+      path: '/projects/test-app/src/App.tsx',
+    })
+    expect(mockInvokeImpl.mock.calls.filter(([cmd]) => cmd === 'read_file_with_signature')).toHaveLength(2)
+  })
+
+  it('canonicalizes Grep, Glob, and LS aliases to native read tools', async () => {
+    const exec = freshExecutor()
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'search_in_files') {
+        return { query: 'foo', total_files: 0, total_matches: 0, files: [], file_name_matches: [], duration_ms: 0, truncated: false }
+      }
+      if (cmd === 'glob_files') return ['/projects/test-app/src/App.tsx']
+      if (cmd === 'build_file_tree') return { name: 'src', type: 'directory', children: [] }
+      return undefined
+    })
+
+    await exec.execute('Grep', { pattern: 'foo', path: 'src', glob: '*.ts' })
+    await exec.execute('Glob', { pattern: '**/*.tsx', path: 'src' })
+    await exec.execute('LS', { path: 'src', maxDepth: 1 })
+
+    expect(mockInvokeImpl).toHaveBeenCalledWith('search_in_files', expect.objectContaining({
+      query: 'foo',
+      directory: '/projects/test-app/src',
+      options: expect.objectContaining({ include_patterns: ['*.ts'] }),
+    }))
+    expect(mockInvokeImpl).toHaveBeenCalledWith('glob_files', {
+      pattern: '**/*.tsx',
+      directory: '/projects/test-app/src',
+    })
+    expect(mockInvokeImpl).toHaveBeenCalledWith('build_file_tree', {
+      rootPath: '/projects/test-app/src',
+      filter: { showHidden: false, maxDepth: 1 },
+    })
+  })
+
   it('returns abort message when signal is already aborted', async () => {
     const exec = freshExecutor()
     const controller = new AbortController()
@@ -883,7 +949,7 @@ describe('E: Read-before-write enforcement', () => {
 
     // Attempt write without reading first — returns error string, does not throw
     const result = await exec.execute('write_file', { file_path: '/projects/test-app/x.txt', content: 'new' })
-    expect(result).toContain('Error: You must read_file')
+    expect(result).toContain('Error: You must call Read')
     expect(result).toContain('before overwriting')
   })
 
@@ -906,7 +972,7 @@ describe('E: Read-before-write enforcement', () => {
 
     // Returns error string, does not throw
     const result = await exec.execute('edit_file', { file_path: '/projects/test-app/x.txt', old_string: 'a', new_string: 'b' })
-    expect(result).toContain('Error: You must read_file')
+    expect(result).toContain('Error: You must call Read')
     expect(result).toContain('before editing')
   })
 
@@ -1110,6 +1176,36 @@ describe('G: Truncation and large results', () => {
     expect(preview.endsWith('x'.repeat(49) + '\n')).toBe(true)
   })
 
+  it('records only model-visible lines as covered when a large Read is preview-truncated', async () => {
+    const exec = freshExecutor()
+    const line = (n: number) => `line ${String(n).padStart(3, '0')} ` + 'x'.repeat(40)
+    const bigContent = Array.from({ length: 800 }, (_, i) => line(i + 1)).join('\n')
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'file_stat') return { size: bigContent.length, modifiedMs: 1700000000000 }
+      if (cmd === 'read_file_with_signature') return bigContent
+      return undefined
+    })
+
+    const first = await exec.execute('read_file', { file_path: '/projects/test-app/lines.ts' })
+    expect(first).toContain('read_large_result')
+
+    const covered = await exec.execute('read_file', {
+      file_path: '/projects/test-app/lines.ts',
+      offset: 20,
+      limit: 5,
+    })
+    expect(covered).toContain('Range already covered')
+
+    const outsidePreview = await exec.execute('read_file', {
+      file_path: '/projects/test-app/lines.ts',
+      offset: 220,
+      limit: 5,
+    })
+    expect(outsidePreview).toContain('line 220')
+    expect(outsidePreview).not.toContain('Range already covered')
+    expect(mockInvokeImpl.mock.calls.filter(([cmd]) => cmd === 'read_file_with_signature')).toHaveLength(2)
+  })
+
   it('continuation offset equals the actual chars shown (no gap skipped)', async () => {
     const exec = freshExecutor()
     const line = 'y'.repeat(49) + '\n'
@@ -1285,6 +1381,10 @@ describe('I: Tool definitions and metadata', () => {
     const names = defs.map(d => d.function.name)
 
     expect(names).toContain('read_file')
+    expect(names).toContain('Read')
+    expect(names).toContain('Grep')
+    expect(names).toContain('Glob')
+    expect(names).toContain('LS')
     expect(names).toContain('write_file')
     expect(names).toContain('execute_command')
     expect(names).toContain('start_dev_server')
@@ -1311,6 +1411,14 @@ describe('I: Tool definitions and metadata', () => {
   it('isConcurrencySafe returns true for read_file', () => {
     const exec = freshExecutor()
     expect(exec.isConcurrencySafe('read_file')).toBe(true)
+  })
+
+  it('isConcurrencySafe returns true for Claude-like read aliases', () => {
+    const exec = freshExecutor()
+    expect(exec.isConcurrencySafe('Read')).toBe(true)
+    expect(exec.isConcurrencySafe('Grep')).toBe(true)
+    expect(exec.isConcurrencySafe('Glob')).toBe(true)
+    expect(exec.isConcurrencySafe('LS')).toBe(true)
   })
 
   it('isConcurrencySafe returns true for web_search', () => {
@@ -1449,6 +1557,18 @@ describe('J: Path validation', () => {
     const exec = freshExecutor()
     const result = await exec.execute('list_directory', { file_path: '/etc' })
     expect(result).toContain('outside the project directory')
+  })
+
+  it('list_directory accepts path as an alias for file_path', async () => {
+    const exec = freshExecutor()
+    mockInvokeImpl.mockResolvedValueOnce({ name: 'src', type: 'directory', children: [] } as never)
+
+    await exec.execute('list_directory', { path: '/projects/test-app/src', maxDepth: 1 })
+
+    expect(mockInvoke).toHaveBeenLastCalledWith('build_file_tree', {
+      rootPath: '/projects/test-app/src',
+      filter: { showHidden: false, maxDepth: 1 },
+    })
   })
 
   it('search_files validates directory before searching', async () => {

@@ -18,9 +18,9 @@ export const ChatWorkingTips = memo(function ChatWorkingTips() {
   const status = useAgentStore(s => s.status)
   const isStreaming = useChatStore(s => s.isStreaming)
 
-  // "A trabalhar" = streaming OU qualquer status que não seja ocioso/erro —
+  // "A trabalhar" = streaming OU qualquer status que não seja ocioso/parado/erro —
   // booleano, por isso as transições internas de fase não reiniciam o intervalo.
-  const working = isStreaming || (status !== 'idle' && status !== 'error')
+  const working = isStreaming || (status !== 'idle' && status !== 'cancelled' && status !== 'error')
 
   const pool = useMemo(() => buildChatTipPool(t), [t])
   const poolRef = useRef(pool)

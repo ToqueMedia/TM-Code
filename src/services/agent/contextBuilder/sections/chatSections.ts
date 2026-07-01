@@ -15,6 +15,7 @@ import { useLayoutStore } from '../../../../stores/layoutStore'
 import SkillService from '../../skillService'
 import {
   READ_FILE, SEARCH_FILES, LIST_DIRECTORY, GLOB,
+  READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   READ_SKILL, READ_LARGE_RESULT, READ_DEV_SERVER_LOGS,
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
   EXECUTE_COMMAND, EXECUTE_COMMAND_BACKGROUND, CHECK_BACKGROUND_COMMANDS, START_DEV_SERVER, STOP_DEV_SERVER,
@@ -22,6 +23,7 @@ import {
 } from '../../toolNames'
 import { extractCriticalSectionsWithStats, sanitizeProjectContent } from '../helpers'
 import { renderCounterweights } from '../../modelProfiles'
+import { markTmsStubSent } from '../../tmsContext'
 import type { PromptContext } from '../types'
 import {
   sharedDoingTasksCore,
@@ -114,7 +116,7 @@ When the developer uses \`@path/to/file\` or \`@path/to/dir/\`, the target is re
  - **The content is already in your context** — do not re-read a mentioned file unless a note says it was truncated.
  - A mentioned file that you already have a fresh copy of may be OMITTED entirely — no system-reminder appears. Use the copy you have.
  - Mentions are a hint to what the developer is looking at, **not necessarily where the problem lives**. If the mentioned content doesn't match the described task, say so and search the codebase for the right place instead of forcing changes into the mentioned file.
- - **For directories** (\`@src/components/\`), the listing shows direct children — use \`glob\` or \`read_file\` to drill into specific files.
+ - **For directories** (\`@src/components/\`), the listing shows direct children — use \`${GLOB_ALIAS}\` or \`${READ_ALIAS}\` to drill into specific files.
 
 ## Dependencies — mechanical protocol
 
@@ -244,22 +246,22 @@ ${totalTools} tools available. Key behaviors not obvious from tool schemas:
  - \`${EXECUTE_COMMAND}\` blocks until the process exits. \`${START_DEV_SERVER}\` returns immediately (background process), auto-detects URLs, and feeds the preview panel without opening it. Use \`${START_DEV_SERVER}\` for dev servers — it handles host injection and URL classification. Use \`${EXECUTE_COMMAND}\` for one-off commands and verification (curl, build, test).
  - \`${STOP_DEV_SERVER}\` stops the dev server you no longer need. Use it after temporary debug/smoke-test servers; leave the server running only when the developer should manually inspect the app, and then tell them to click Preview.
  - \`${WRITE_FILE}\` replaces the entire file — omitted code is deleted. Use \`${EDIT_FILE}\` for small changes (~20 lines).
- - \`${WRITE_FILE}\` and \`${EDIT_FILE}\` require you to \`${READ_FILE}\` first. The system will block writes to files you haven't read.
+ - \`${WRITE_FILE}\` and \`${EDIT_FILE}\` require you to use \`${READ_ALIAS}\` first. The system will block writes to files you haven't read.
  - \`${READ_DEV_SERVER_LOGS}\` reads output from the running dev server AND runtime errors from the live preview (browser console). Entries prefixed [runtime] are from the browser. Use after file changes or when asked about preview/browser errors. The buffer is CUMULATIVE — old errors persist after a fix; pass the response's \`next_since\` cursor as \`since_timestamp\` on the follow-up call to verify whether your fix landed (otherwise you keep seeing the same stale entry).
  - \`${READ_LARGE_RESULT}\` retrieves large tool outputs that were too big to return inline. Use the reference ID from the "Output too large" message.
  - \`delegate\`: delegate a task to a team member. Returns immediately — the task runs in background while you continue working. Available team members:
-   - **Explore** — Read-only codebase search (glob, search_files, read_file). Use for "find all usages of X", "where is Y defined".
+   - **Explore** — Read-only codebase search (${GLOB_ALIAS}, ${GREP_ALIAS}, ${READ_ALIAS}, ${LS_ALIAS}). Use for "find all usages of X", "where is Y defined".
    - **Research** — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X".
    - **Verify** — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API) to catch bugs. Returns PASS, FAIL, or PARTIAL.
    All tasks run in parallel. After delegating:
    - If you have other work to do (reads, edits, analysis), do it in the same turn.
    - If you have nothing else to do, end your turn. Team results will be available on your next interaction — the system injects active team status automatically. Tell the user you delegated the task and will synthesize results when ready.
    - Do NOT call \`collect_results\` immediately after spawning unless you need the results right now to continue your current work.
-   - **Do NOT delegate trivial tasks** — if the answer is one \`read_file\`, \`glob\`, or \`search_files\` call away, just do it yourself. Delegation adds 30-60s of overhead; reserve it for multi-step research or verification.
+   - **Do NOT delegate trivial tasks** — if the answer is one \`${READ_ALIAS}\`, \`${GLOB_ALIAS}\`, or \`${GREP_ALIAS}\` call away, just do it yourself. Delegation adds 30-60s of overhead; reserve it for multi-step research or verification.
  - \`collect_results\`: collect results from team members. Returns immediately with all finished results — does NOT block. If some members are still running, their status is shown. The system auto-wakes you when new results arrive, so you do not need to poll.
  - \`${EXECUTE_COMMAND_BACKGROUND}\`: runs a shell command without blocking your turn. Returns immediately with an ID. Max 6 concurrent. The system auto-wakes you when it exits; results are read via \`${CHECK_BACKGROUND_COMMANDS}\`.
    **When to use:** commands that take >30 seconds — \`npm install\`, \`npm run build\`, \`tsc --noEmit\`, large compilations. Fire-and-forget: start the install in background, then continue reading/editing files while it runs. If there is no other work, end your turn and wait for auto-wake.
-   **When NOT to use:** quick commands (<30s) — \`ls\`, \`cat\`, \`git status\`, \`curl\`, small \`npm test\` runs. Use \`${EXECUTE_COMMAND}\` for those — you need the output immediately to decide next steps.
+   **When NOT to use:** quick terminal diagnostics (<30s) — \`git status\`, \`curl\`, small \`npm test\` runs. Use \`${EXECUTE_COMMAND}\` for those when you need the output immediately. Do not use shell commands for file/code inspection; use \`${READ_ALIAS}\`, \`${GREP_ALIAS}\`, \`${LS_ALIAS}\`, or \`${GLOB_ALIAS}\` instead.
  - \`${CHECK_BACKGROUND_COMMANDS}\`: see status and output of background commands. Use once after auto-wake or after doing other useful work. If commands are still running, do NOT call it repeatedly; end your turn and wait for auto-wake.
  - \`${UPDATE_TASKS}\`: show a task list to the developer with real-time progress. This panel is the developer's main window into what you are doing, so **ALWAYS seed it at the START of any multi-step task (3+ steps: scaffolding, a multi-file feature, anything you would break into a plan) BEFORE you begin editing** — then flip statuses as you progress. Grinding silently through a multi-step task with an empty task list is a defect, not brevity: if the task is non-trivial and the panel is empty, you skipped a required step. **Patch semantics**: each entry is merged with the existing tracker by ID — to change only a status, send \`{ id, status }\` (description is optional when updating an existing task); new IDs are appended. You do NOT need to resend the whole list, and omitting a task does NOT delete it. Mark a task \`completed\` only when ITS acceptance criterion is verified, and include an \`evidence\` field with the signal you observed (\`"tsc --noEmit clean"\`, \`"GET /users → 200"\`, \`"14 tests pass"\`) — a completion without real evidence is reverted to in_progress, and "files exist on disk" does not count. You may complete several at once if each has its own evidence. Update sparingly: at the start, when a task completes, and at the end — not after every single tool call.
  - \`ask_user_question\`: structured multi-question form. Use when the task has genuine ambiguity that affects your implementation (stack choice, auth provider, scope ambiguity). Present 2-4 options with labels and descriptions, plus an "Other" option for free-text. Do NOT use for simple yes/no confirmations — just proceed. Do NOT use for sensitive credentials — use \`request_credentials\` for those.
@@ -740,7 +742,7 @@ export function getProjectStructureIndexSection(ctx: PromptContext): string | nu
     '(Snapshot at turn start. Full tree omitted from core to save tokens.)',
     top + more,
     '',
-    'Use `glob`, `list_directory`, `search_files`, or `request_context({ auxiliary: "project.structure_full" })` only if you need the full tree.',
+    `Use \`${GLOB_ALIAS}\`, \`${LS_ALIAS}\`, \`${GREP_ALIAS}\`, or \`request_context({ auxiliary: "project.structure_full" })\` only if you need the full tree.`,
   ].join('\n')
 }
 
@@ -798,10 +800,25 @@ export function getReadmeSection(ctx: PromptContext): string | null {
 // ── 12. Project memory: TMS / PLAN / TODO ──────────────────────
 export function getProjectMemorySection(ctx: PromptContext): string | null {
   if (!ctx.tmsContent) return null
-  const truncated = ctx.tmsContent.length > 900
-    ? ctx.tmsContent.slice(0, 900) + '\n\n[... project memory body omitted — request project.docs_full or read TMS.md]'
-    : ctx.tmsContent
-  return `# Project memory (compact index)\n${sanitizeProjectContent(truncated)}`
+  const headings = ctx.tmsContent
+    .split('\n')
+    .filter(line => /^#{1,3}\s+/.test(line.trim()))
+    .map(line => line.trim())
+    .slice(0, 24)
+  const lastGeneratedAt =
+    ctx.tmsContent.match(/##\s+lastGeneratedAt\s*\n+([^\n]+)/i)?.[1]?.trim() ??
+    ctx.tmsContent.match(/lastGeneratedAt\s*:\s*([^\n]+)/i)?.[1]?.trim() ??
+    'unknown'
+  const stub = [
+    '# Project memory (TMS.md stub)',
+    `TMS.md exists at ${ctx.normalizedProjectPath}/TMS.md.`,
+    `lastGeneratedAt: ${lastGeneratedAt}`,
+    'Available sections:',
+    ...(headings.length ? headings.map(line => `- ${line.replace(/^#+\s*/, '')}`) : ['- (section index unavailable)']),
+    `Do not treat this stub as the full project memory. Use request_context with \`project.docs_full\` or ${READ_ALIAS} on TMS.md only when a complete section is needed.`,
+  ].join('\n')
+  markTmsStubSent(stub)
+  return sanitizeProjectContent(stub)
 }
 
 /**
@@ -840,7 +857,7 @@ export function getMemorySection(ctx: PromptContext): string | null {
     parts.push(
       `**Freshness:** some entries below are tagged with their age (e.g. _(45d old)_). ` +
       `For old entries that cite specific file paths, function names, env vars, or flags, ` +
-      `verify the citation against current code (\`read_file\` / \`search_files\`) before recommending. ` +
+      `verify the citation against current code (\`${READ_ALIAS}\` / \`${GREP_ALIAS}\`) before recommending. ` +
       `The rule the memory captures is usually still valid; the *concrete identifiers* may have moved.`,
     )
   }
@@ -1034,34 +1051,18 @@ export { buildMemoryGuidanceSection as getMemoryToolsGuidanceSection } from '../
 /**
  * TMS.md guidance — unified for all cases.
  *
- * Three paths:
- *  1. TMS.md exists → keep it updated.
- *  2. TMS.md missing, external project → explain, offer /init or self-create.
- *  3. TMS.md missing, TM Code project → passive reminder (shouldn't normally happen).
+ * TMS.md guidance.
+ *
+ * Missing-TMS creation is handled by the explicit project_bootstrap preflight,
+ * not by a passive reminder in the normal task prompt. Injecting a "create
+ * TMS.md" reminder here makes the model treat TMS.md as the user's request and
+ * breaks the two-phase flow.
  */
-export function getMemoryGuidanceSection(ctx: PromptContext): string {
+export function getMemoryGuidanceSection(ctx: PromptContext): string | null {
   if (ctx.tmsContent) {
     return `Keep TMS.md updated with milestones (dated) and architectural decisions (with rationale) as you complete work. Preserve "Project Analysis" and "Custom Instructions" sections as-is.`
   }
-
-  // External project without TMS.md — active bootstrap.
-  // This path is a FALLBACK for when the code-level bootstrap gate in
-  // usePromptBar.ts fails (e.g. agent crashes mid-bootstrap, or the gate
-  // is bypassed). In the normal flow, the gate creates TMS.md before the
-  // user's message reaches the agent, so this section never fires.
-  if (!ctx.tmCodeOwned && ctx.treeString) {
-    return `This project has no TMS.md — the persistent project memory file that stores framework info, dev commands, architectural decisions, and milestones across sessions. Without it, you re-analyze the project from scratch every turn.
-
-**Before responding to the user's message:**
-1. Briefly explain (2-3 sentences) why TMS.md matters for this project.
-2. Offer two options:
-   - Run \`/init\` to generate it automatically.
-   - You create it yourself (same analysis as /init: read package.json, detect framework, scan directory, identify key files).
-3. If the user chooses either option, create TMS.md before processing their original request.`
-  }
-
-  // TM Code project missing TMS.md (rare) — passive reminder
-  return `No TMS.md yet. After completing your first significant task, create one at the project root with these sections: \`# TMS — Project Memory\`, \`## Project Analysis\` (name, framework, package manager, key deps, directory overview), \`## Memory\` (sub-sections \`### Milestones\` dated, \`### Decisions\` with rationale, \`### Pending Tasks\`), and \`## Custom Instructions\` (developer-specific rules). This is your persistent memory across sessions.`
+  return null
 }
 
 // ── 13. Skills (uses pre-loaded list from buildSystemPrompt) ──
@@ -1195,7 +1196,7 @@ export function getReminderSection(ctx: PromptContext): string {
 2. **AFTER** file changes with a dev server running: \`${READ_DEV_SERVER_LOGS}\` and fix errors before continuing. Track the \`next_since\` cursor — without it you re-read stale entries.
 3. **FINAL CHECKPOINT**: run one highest-signal verification path for the change (dev-server logs, typecheck/build, targeted test, or endpoint curl). If it passes, update \`${UPDATE_TASKS}\` and TMS.md only when the task is significant, then stop with summary + verification + next steps. End the report with a CTA for user-visible work: tell the developer to click the **Preview** button at the top-right of Chat to see what changed. If a dev server is left running for manual inspection, include that CTA; if it was only for debugging, call \`${STOP_DEV_SERVER}\` first. **Do not run extra defensive checks after a clean pass.** If verification isn't possible, say so explicitly. When the task tracker has \`in_progress\` rows still open, never call the run "done" or mark everything completed in one \`${UPDATE_TASKS}\` jump; resume the in_progress row and flip statuses one at a time as each acceptance is verified.
 4. **AFTER** \`execute_command\`: **READ** the output. If exit code ≠ 0, **DIAGNOSE AND FIX** the actual error. **DO NOT BLINDLY RETRY** the exact same command.
-5. **For reading files**, use \`${READ_FILE}\`. **For searching**, use \`${SEARCH_FILES}\`. **For listing directories**, use \`${LIST_DIRECTORY}\`. **For finding files by pattern**, use \`${GLOB}\`. Use \`${EXECUTE_COMMAND}\` to run test runners (\`jest\`, \`vitest\`), scripts (\`ts-node\`, \`bun\`), and system commands.
+5. **For reading files**, use \`${READ_ALIAS}\` (internal \`${READ_FILE}\`). **For searching**, use \`${GREP_ALIAS}\` (internal \`${SEARCH_FILES}\`). **For listing directories**, use \`${LS_ALIAS}\` (internal \`${LIST_DIRECTORY}\`). **For finding files by pattern**, use \`${GLOB_ALIAS}\` (internal \`${GLOB}\`). Use \`${EXECUTE_COMMAND}\` to run test runners (\`jest\`, \`vitest\`), scripts (\`ts-node\`, \`bun\`), and system commands.
 6. **DEVELOPER-OWNED env vars** (third-party services the developer integrates — LLM, payments, email, SMTP, analytics, webhooks): call \`${REQUEST_CREDENTIALS}\` in the SAME turn you write \`process.env.X\`. For **PLATFORM-MANAGED** vars (\`TM_AUTH_*\`, \`TMDB_*\`, \`TM_FILES_*\`, \`APP_ID\`) use the matching \`provision_*\` tool instead — \`request_credentials\` is the wrong path.
 7. **FILE UPLOADS** use TM Files, never base64-in-DB. When uploading user content (avatars, images, attachments, documents): call \`provision_files\` if \`TM_FILES_URL\` is missing from .env, generate \`backend/src/files.ts\` (or \`server/src/files.ts\` if the project uses the \`server/\` convention) from the publish-backend skill recipe, and call \`uploadFile()\` from your upload routes. Store the returned \`publicUrl\` in DB columns — never the bytes. The pre-deploy lint catches the common base64-in-DB shape (Drizzle \`db.insert().values({...toString('base64')...})\` and data-URI literals) but the discipline is the goal: never base64 user content into the DB even when the lint wouldn't catch it.
 8. ${sharedUiBaselineReminder()}

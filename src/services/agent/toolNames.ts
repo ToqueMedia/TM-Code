@@ -25,6 +25,13 @@ export const READ_SKILL = 'read_skill'
 export const READ_LARGE_RESULT = 'read_large_result'
 export const READ_DEV_SERVER_LOGS = 'read_dev_server_logs'
 
+// Claude-like read aliases — exposed to the model, mapped internally to the
+// TM Code tools above. Keep internal names stable for history/telemetry.
+export const READ_ALIAS = 'Read'
+export const GREP_ALIAS = 'Grep'
+export const GLOB_ALIAS = 'Glob'
+export const LS_ALIAS = 'LS'
+
 // Write tools — produce diffs, require approval
 export const WRITE_FILE = 'write_file'
 export const CREATE_FILE = 'create_file'
@@ -83,6 +90,7 @@ export const DISTILL_MEMORY = 'distill_memory'
  */
 export const TOOL_NAMES = [
   READ_FILE, LIST_DIRECTORY, SEARCH_FILES, GLOB,
+  READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   READ_SKILL, READ_LARGE_RESULT, READ_DEV_SERVER_LOGS,
   WRITE_FILE, CREATE_FILE, EDIT_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
   EXECUTE_COMMAND, EXECUTE_COMMAND_BACKGROUND, CHECK_BACKGROUND_COMMANDS,
@@ -103,4 +111,53 @@ const TOOL_NAMES_SET: ReadonlySet<string> = new Set(TOOL_NAMES)
  *  (`scripts/verify-skills.ts`) to detect stale tool-name references. */
 export function isKnownToolName(name: string): name is ToolName {
   return TOOL_NAMES_SET.has(name)
+}
+
+export function canonicalToolName(name: string): string {
+  switch (name) {
+    case READ_ALIAS: return READ_FILE
+    case GREP_ALIAS: return SEARCH_FILES
+    case GLOB_ALIAS: return GLOB
+    case LS_ALIAS: return LIST_DIRECTORY
+    default: return name
+  }
+}
+
+export function normalizeToolInputForCanonical(
+  requestedToolName: string,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  switch (requestedToolName) {
+    case READ_ALIAS:
+      return {
+        ...input,
+        file_path: input.file_path ?? input.path,
+      }
+    case GREP_ALIAS: {
+      const glob = input.glob
+      const includePatterns = Array.isArray(input.includePatterns)
+        ? input.includePatterns
+        : typeof glob === 'string' && glob.trim()
+          ? [glob]
+          : undefined
+      return {
+        ...input,
+        query: input.query ?? input.pattern,
+        directory: input.directory ?? input.path ?? '.',
+        ...(includePatterns ? { includePatterns } : {}),
+      }
+    }
+    case GLOB_ALIAS:
+      return {
+        ...input,
+        directory: input.directory ?? input.path,
+      }
+    case LS_ALIAS:
+      return {
+        ...input,
+        file_path: input.file_path ?? input.path ?? input.directory ?? '.',
+      }
+    default:
+      return input
+  }
 }

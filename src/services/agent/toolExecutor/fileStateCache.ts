@@ -123,7 +123,7 @@ export interface FileState {
    */
   fsVersion: number
   /**
-   * True when this entry was populated by auto-injection (e.g. CLAUDE.md
+   * True when this entry was populated by auto-injection (e.g. project memory
    * content injected into the system prompt) and the injected content did
    * not match disk (stripped HTML comments, stripped frontmatter, truncated
    * MEMORY.md). The model has only seen a partial view; Edit/Write must

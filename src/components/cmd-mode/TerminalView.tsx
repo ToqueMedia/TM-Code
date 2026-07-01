@@ -368,7 +368,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   useEffect(() => {
     const isAgentActive = () => {
       const status = agentStatusRef.current
-      return isStreamingRef.current || (status !== 'idle' && status !== 'error')
+      return isStreamingRef.current || (status !== 'idle' && status !== 'cancelled' && status !== 'error')
     }
     const stepFontSize = (direction: 1 | -1 | 0) => {
       const { chatTextFontSize, setChatTextFontSize } = useSettingsStore.getState()
@@ -481,7 +481,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   useEffect(() => {
     const isAgentActive = () => {
       const status = agentStatusRef.current
-      return isStreamingRef.current || (status !== 'idle' && status !== 'error')
+      return isStreamingRef.current || (status !== 'idle' && status !== 'cancelled' && status !== 'error')
     }
     const handler = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return

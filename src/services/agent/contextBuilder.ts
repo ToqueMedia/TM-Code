@@ -20,6 +20,7 @@
  */
 
 import SkillService from './skillService'
+import { logger } from '../../utils/logger'
 import {
   CRITICAL_SECTIONS_MAX_BYTES,
   PROMPT_CACHE_TTL_MS,
@@ -51,6 +52,7 @@ import {
   readTemplateManifest,
   safeReadFile,
 } from './contextBuilder/projectUtils'
+import { buildProjectSymbolIndexSection } from './contextBuilder/projectSymbolIndex'
 import {
   sharedContextPreservation,
   sharedIdentity,
@@ -126,7 +128,7 @@ import {
 } from './contextBuilder/sections/cmdSections'
 
 import { getPublishingSection } from './contextBuilder/sections/chatPublishing'
-import { planContextWithModel } from './contextPlanner'
+import { ContextPlannerError, planContextWithModel } from './contextPlanner'
 import {
   classifyPromptIntent,
   selectAuxiliaries,
@@ -137,6 +139,7 @@ import {
   type PromptProfile,
   type RouterDiagnostics,
 } from './contextBuilder/auxiliaryRegistry'
+import { getTmsTurnTelemetry, markProjectSymbolIndexRequested } from './tmsContext'
 
 // ── Re-exports — keep the legacy import surface so external callers (tests,
 // other services) don't have to update their import paths after the slice. ──
@@ -242,7 +245,7 @@ class ContextBuilder {
     }
   }
 
-  private renderAuxiliaryContent(id: string): string | null {
+  private async renderAuxiliaryContent(id: string): Promise<string | null> {
     const ctx = this.lastAuxiliaryCtx
     const resolvedId = resolveAuxiliaryId(id)
     switch (resolvedId) {
@@ -303,6 +306,9 @@ class ContextBuilder {
           ctx.promptCtx.pathAliases.length ? `path aliases:\n${ctx.promptCtx.pathAliases.map(a => `- ${a}`).join('\n')}` : null,
           'Use search/list/read tools to confirm the exact entrypoint before editing.',
         ].filter(Boolean).join('\n')
+      case 'project.symbol_index':
+        if (!ctx?.promptCtx) return null
+        return buildProjectSymbolIndexSection(ctx.promptCtx.projectPath)
       case 'project.structure_full':
         return ctx?.promptCtx ? getProjectStructureSection(ctx.promptCtx) : null
       case 'agent_runtime.mcp_routing':
@@ -317,6 +323,7 @@ class ContextBuilder {
         return [
           '# Agent runtime: request_context policy',
           'Choose the smallest sufficient context: capability-specific > domain summary > project overview > full project tree.',
+          'When locating functions, classes, components, hooks, handlers, stores, providers, or services, request project.symbol_index before broad project structure.',
           'Use project.structure_full only after specific contexts fail, files are unknown, architecture is broad, or dependency mapping spans areas.',
           'Expected files: src/services/agent/contextBuilder/auxiliaryRegistry.ts, src/services/agent/contextBuilder.ts, src/services/agent/payloadInspector.ts.',
         ].join('\n')
@@ -364,7 +371,7 @@ class ContextBuilder {
    * omitted from the system prompt. Returns null for unknown ids or
    * already-loaded auxiliaries (no-op — the content is already inline).
    */
-  loadAuxiliaryOnDemand(id: string): { content: string | null; name: string } {
+  async loadAuxiliaryOnDemand(id: string): Promise<{ content: string | null; name: string }> {
     const sel = this.lastAuxiliarySelection
     if (!sel) return { content: null, name: id }
     const resolvedId = resolveAuxiliaryId(id)
@@ -373,7 +380,7 @@ class ContextBuilder {
       this.recordRequestContextAttempt(resolvedId, false)
       return { content: null, name: resolvedId }
     }
-    const content = this.renderAuxiliaryContent(resolvedId)
+    const content = await this.renderAuxiliaryContent(resolvedId)
     const meta = sel.omitted.find((o) => o.id === resolvedId) ?? getAuxiliaryMeta(resolvedId)
     if (content) {
       this.recordRequestContextAttempt(resolvedId, true)
@@ -571,14 +578,52 @@ class ContextBuilder {
     const accessedCount = accessedPaths?.length ?? 0
     // ── Auxiliary context selection (on-demand architecture) ──
     // Intent Router supplies profile/readOnly. Context Planner (utility model)
-    // supplies the actual domain/capability plan and initial tool groups. If
-    // either model path is unavailable, fallback is conservative and does not
-    // infer task meaning from user text.
+    // supplies the actual domain/capability plan and initial tool groups. The
+    // planner is model-owned: utility sidecar retries first, then the code
+    // model. If both fail, do not block the main agent: continue without
+    // preloaded auxiliary context and let the primary model request context
+    // on demand. This fallback deliberately does not inspect the user text or
+    // choose a semantic domain.
     const auxProfile = intentOverride?.profile ?? classifyPromptIntent(userMessage, {
       mentionedFiles: accessedPaths,
     })
     const readOnly = intentOverride?.readOnly ?? false
-    const contextPlan = await planContextWithModel(userMessage ?? '', auxProfile, readOnly)
+    let contextPlan: Awaited<ReturnType<typeof planContextWithModel>>
+    let plannerFailure: ContextPlannerError | null = null
+    try {
+      contextPlan = await planContextWithModel(userMessage ?? '', auxProfile, readOnly)
+    } catch (err) {
+      if (err instanceof ContextPlannerError) {
+        plannerFailure = err
+        logger.warn('context-builder', 'context planner failed; continuing without preloaded auxiliary context', {
+          error: err.message,
+          fallbackReason: err.fallbackReason,
+          diagnostics: err.diagnostics,
+          rawOutput: err.rawOutput?.slice(0, 500),
+        })
+        contextPlan = {
+          plan: {
+            taskDomain: `${auxProfile}.planner_unavailable`,
+            requiredCapabilities: [],
+            minimumContextNeeded: 'index',
+            candidateContexts: [],
+            selectedContexts: [],
+            rejectedContexts: [],
+            toolGroups: readOnly ? [] : ['FILE_OPS'],
+            fallbackRisk: 'medium',
+            reason: 'Context planner failed after model retries; no auxiliary context was preloaded. The primary agent must request context on demand.',
+          },
+          source: 'fallback',
+          confidence: 'none',
+          reason: 'planner unavailable; delegated context selection to primary agent',
+          error: err.message,
+          fallbackReason: err.fallbackReason,
+          diagnostics: err.diagnostics,
+        }
+      } else {
+        throw err
+      }
+    }
     const plannerReason = `${contextPlan.source === 'model' ? 'model context planner' : 'context planner fallback'}: ${contextPlan.reason}`
     const auxSelection = selectAuxiliaries(
       auxProfile,
@@ -589,8 +634,11 @@ class ContextBuilder {
       contextPlan.plan,
       {
         status: contextPlan.source === 'model' ? 'parsed' : 'fallback',
-        error: contextPlan.error,
-        rawOutput: contextPlan.diagnostics?.contentPreview ?? contextPlan.diagnostics?.rawBodyPreview,
+        source: contextPlan.source,
+        modelTier: contextPlan.modelTier,
+        error: contextPlan.error ?? plannerFailure?.message,
+        rawOutput: contextPlan.diagnostics?.contentPreview ?? contextPlan.diagnostics?.rawBodyPreview ?? plannerFailure?.rawOutput?.slice(0, 500),
+        fallbackReason: contextPlan.fallbackReason,
         selectionReason: contextPlan.reason,
       },
     )
@@ -624,6 +672,9 @@ class ContextBuilder {
       // `request_context` loader (needs pmDetected for scaffolding/install)
       // works even when the prompt itself is served from cache.
       this.lastAuxiliaryCtx = cached.auxiliaryCtx ?? null
+      if (cached.symbolIndexTelemetry) {
+        markProjectSymbolIndexRequested(cached.symbolIndexTelemetry)
+      }
       return cached.prompt
     }
     // Kick off memory work IMMEDIATELY so its network call (selector
@@ -786,7 +837,7 @@ class ContextBuilder {
     this.lastAuxiliaryCtx = { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb, promptCtx: ctx, loadedSkills }
     const auxLoadedContent: Record<string, string> = {}
     for (const l of auxSelection.loaded) {
-      const body = this.renderAuxiliaryContent(l.id)
+      const body = await this.renderAuxiliaryContent(l.id)
       if (body) auxLoadedContent[l.id] = body
     }
     const onDemandIndex = buildOnDemandIndex(auxSelection)
@@ -942,7 +993,17 @@ class ContextBuilder {
       .slice(0, 15)
 
     const full = sections.join('\n\n')
-    this.promptCache.set(cacheKey, { key: cacheKey, prompt: full, expiresAt: now + PROMPT_CACHE_TTL_MS, auxiliaryCtx: { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb, promptCtx: ctx, loadedSkills } })
+    const telemetryAfterRender = getTmsTurnTelemetry()
+    const symbolIndexTelemetry = telemetryAfterRender.symbolIndexRequested
+      ? {
+          filesConsidered: telemetryAfterRender.symbolIndexFilesConsidered,
+          filesScanned: telemetryAfterRender.symbolIndexFilesScanned,
+          entries: telemetryAfterRender.symbolIndexEntries,
+          truncated: telemetryAfterRender.symbolIndexTruncated,
+          tokensEstimate: telemetryAfterRender.symbolIndexTokensEstimate,
+        }
+      : undefined
+    this.promptCache.set(cacheKey, { key: cacheKey, prompt: full, expiresAt: now + PROMPT_CACHE_TTL_MS, symbolIndexTelemetry, auxiliaryCtx: { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb, promptCtx: ctx, loadedSkills } })
     // Cache-miss telemetry — includes the boundary split bytes so we can
     // see the prompt shape over time (regressions in cache discipline
     // surface as the static byte share shrinking).
@@ -965,9 +1026,26 @@ class ContextBuilder {
     homeDir: string | null,
     mcpTools?: { name: string; description: string; serverName: string }[],
     userMessage?: string,
+    intentOverride?: { profile: PromptProfile; readOnly: boolean; reason?: string; source?: 'model' | 'fallback' | 'keyword'; confidence?: 'high' | 'medium' | 'low' | 'none'; error?: string; diagnostics?: RouterDiagnostics },
   ): Promise<string> {
     const normalizedCwd = cwd.replace(/\\/g, '/')
     const normalizedHome = homeDir ? homeDir.replace(/\\/g, '/') : null
+    this.lastAuxiliarySelection = intentOverride
+      ? selectAuxiliaries(
+        intentOverride.profile,
+        userMessage,
+        intentOverride.readOnly,
+        intentOverride.reason,
+        intentOverride.source
+          ? {
+              source: intentOverride.source,
+              confidence: intentOverride.confidence,
+              error: intentOverride.error,
+              diagnostics: intentOverride.diagnostics,
+            }
+          : undefined,
+      )
+      : null
 
     // Parallel gather — language + memory files + session memory + memdir indexes
     const [langInstruction, globalTmsContent, tmsContent, sessionMemory, userMemIdx, projectMemIdx] = await Promise.all([

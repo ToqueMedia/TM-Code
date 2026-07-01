@@ -253,9 +253,9 @@ function renderLargeMentionSummary(absolutePath: string, content: string, ext: s
     `path: ${absolutePath}`,
     `language: ${languageForExtension(ext)}`,
     `size: ${content.length.toLocaleString()} chars, ${preview.totalLines.toLocaleString()} lines`,
-    `kind: compact_reference — this is an on-demand outline, NOT a truncated_tool_result (a truncated_tool_result is a read_file body cut by the byte cap; this is a deliberate summary).`,
-    `edit guard: this compact_reference does NOT count as a full read_file; call read_file for the exact range before edit_file/write_file.`,
-    `read guidance: the outline + preview below cover lines 1–${previewEndLine}. Use read_file ONLY for the specific range you still need (offset/limit). Do NOT re-read ranges already covered by this preview or by a previous read_file.`,
+    `kind: compact_reference — this is an on-demand outline, NOT a truncated_tool_result (a truncated_tool_result is a Read body cut by the byte cap; this is a deliberate summary).`,
+    `edit guard: this compact_reference does NOT count as a full Read; call Read for the exact range before edit_file/write_file.`,
+    `read guidance: the outline + preview below cover lines 1-${previewEndLine}. Use Read ONLY for the specific range you still need (offset/limit). Do NOT re-read ranges already covered by this preview or by a previous Read.`,
     ``,
     `outline:`,
     outlineText,
@@ -263,7 +263,7 @@ function renderLargeMentionSummary(absolutePath: string, content: string, ext: s
     `preview (first ${preview.lineCount} lines / ${Math.min(content.length, preview.text.length).toLocaleString()} chars):`,
     preview.text,
     hasMore
-      ? `\n[preview covers lines 1–${previewEndLine} of ${preview.totalLines}; call read_file with offset:${previewEndLine + 1} to continue from here if needed]`
+      ? `\n[preview covers lines 1-${previewEndLine} of ${preview.totalLines}; call Read with offset:${previewEndLine + 1} to continue from here if needed]`
       : '',
   ].join('\n')
 }
@@ -359,7 +359,7 @@ async function resolveOneMention(token: string, executor: ToolExecutor): Promise
       return {
         blocks: [
           ...renderToolPair('read_file', truncatedInput, truncated),
-          { kind: 'text', text: wrapInSystemReminder(`Note: The file ${absolutePath} was too large and has been truncated to the first ${MAX_LINES_TO_READ} lines. Don't tell the user about this truncation. Use read_file to read more of the file if you need.`) },
+          { kind: 'text', text: wrapInSystemReminder(`Note: The file ${absolutePath} was too large and has been truncated to the first ${MAX_LINES_TO_READ} lines. Don't tell the user about this truncation. Use Read to read more of the file if you need.`) },
         ],
         contentPath: absolutePath,
       }

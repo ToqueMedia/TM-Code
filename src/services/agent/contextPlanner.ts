@@ -3,16 +3,17 @@
  *
  * This deliberately avoids local regex/keyword inference. The utility model
  * decides taskDomain, required capabilities, minimum context, selected
- * contexts, and initial tool groups. On failure we use a conservative profile
- * fallback that does not inspect user text.
+ * contexts, and initial tool groups. On failure we retry the utility model,
+ * then ask the active code model. This module reports hard planner failure;
+ * ContextBuilder decides whether to continue without preloaded auxiliaries.
  */
 
 import { resolveAIWorkerUrl } from '../../utils/devUrls'
 import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
 import { logger } from '../../utils/logger'
+import { extractAssistantTextFromCompletion } from './completionText'
 import {
   AUXILIARY_METAS,
-  fallbackContextPlanForProfile,
   resolveAuxiliaryId,
   type ContextFallbackRisk,
   type ContextGranularity,
@@ -21,18 +22,37 @@ import {
   type RouterDiagnostics,
 } from './contextBuilder/auxiliaryRegistry'
 
-const CONTEXT_PLANNER_TIMEOUT_MS = 12_000
+const CONTEXT_PLANNER_TIMEOUT_MS = 60_000
 const CONTEXT_PLANNER_MAX_TOKENS = 1_200
+const CONTEXT_PLANNER_UTILITY_ATTEMPTS = 3
+const CONTEXT_PLANNER_CODE_ATTEMPTS = 1
 
 type ToolGroup = NonNullable<ContextPlan['toolGroups']>[number]
 
 export interface ContextPlanClassification {
   plan: ContextPlan
   source: 'model' | 'fallback'
+  modelTier?: 'utility' | 'code'
+  attempts?: number
   confidence: 'high' | 'medium' | 'low' | 'none'
   reason: string
   error?: string
+  fallbackReason?: string
   diagnostics?: RouterDiagnostics
+}
+
+export class ContextPlannerError extends Error {
+  diagnostics?: RouterDiagnostics
+  rawOutput?: string
+  fallbackReason?: string
+
+  constructor(message: string, options?: { diagnostics?: RouterDiagnostics; rawOutput?: string; fallbackReason?: string }) {
+    super(message)
+    this.name = 'ContextPlannerError'
+    this.diagnostics = options?.diagnostics
+    this.rawOutput = options?.rawOutput
+    this.fallbackReason = options?.fallbackReason
+  }
 }
 
 const VALID_CONTEXT_IDS = new Set(AUXILIARY_METAS.filter(m => m.phase === 1).map(m => m.id))
@@ -68,6 +88,8 @@ const CONTEXT_PLANNER_SYSTEM = [
   '- taskDomain must be a non-empty string and selectedContexts must be an array (empty is allowed). Missing or non-array selectedContexts is invalid.',
   '- Choose specific capability contexts before domain/project contexts.',
   '- Do not select project.structure_full unless files are unknown, architecture is broad, multiple modules/packages are involved, specific contexts failed, or dependency mapping spans areas.',
+  '- When the task is to find where behavior lives, locate a function/class/component/hook/handler/service, or the target file is unknown but a symbol name is likely, select project.symbol_index first.',
+  '- For locating functions/classes/components/hooks/handlers, prefer project.symbol_index before project.structure_overview/project.structure_full; it is only a navigation index, so the agent must still Read the exact range before editing.',
   '- For semantic tokens/theme work, prefer design_system.semantic_tokens and design_system.theme_config before any project structure.',
   '- For refactoring UI components that involve semantic tokens, spacing, or relative time/date formatting, select design_system.semantic_tokens and design_system.component_patterns. relative_time_formatting is a capability handled in code — do not load a context for it.',
   '- Add project.entrypoints (or project.structure_*) to selectedContexts ONLY when the target component file cannot be located from the request. Otherwise keep it out of selectedContexts; it may stay in candidateContexts as a fallback.',
@@ -88,39 +110,133 @@ export async function planContextWithModel(
   profile: PromptProfile,
   readOnly: boolean,
 ): Promise<ContextPlanClassification> {
-  const fallback = fallbackContextPlanForProfile(profile)
   const trimmed = userMessage.trim()
   if (!trimmed) {
-    return { plan: fallback, source: 'fallback', confidence: 'none', reason: 'empty user message', error: 'empty user message' }
+    throw new ContextPlannerError('empty user message')
   }
 
   const token = await FirebaseAuthService.getInstance().getIdToken()
   if (!token) {
-    return { plan: fallback, source: 'fallback', confidence: 'none', reason: 'auth token unavailable', error: 'no auth token' }
+    throw new ContextPlannerError('auth token unavailable')
   }
 
   const url = `${resolveAIWorkerUrl()}/v1/chat/completions`
+  const failures: Array<{ reason: string; diagnostics?: RouterDiagnostics; rawOutput?: string }> = []
+
+  for (let attempt = 1; attempt <= CONTEXT_PLANNER_UTILITY_ATTEMPTS; attempt++) {
+    const result = await runPlannerAttempt({
+      url,
+      token,
+      profile,
+      readOnly,
+      userMessage: trimmed,
+      modelTier: 'utility',
+      attempt,
+      jsonMode: attempt === 1,
+    })
+    if (result.ok) {
+      const parsed = {
+        ...result.parsed,
+        modelTier: 'utility' as const,
+        attempts: attempt,
+      }
+      logger.info('context-planner', `planned: tier=utility attempt=${attempt} domain=${parsed.plan.taskDomain} contexts=${parsed.plan.selectedContexts.join(',') || 'none'}`)
+      return parsed
+    }
+    failures.push(result.failure)
+    logger.warn('context-planner', `utility attempt ${attempt}/${CONTEXT_PLANNER_UTILITY_ATTEMPTS} failed: ${result.failure.reason}`, result.failure.diagnostics)
+  }
+
+  const utilityFailure = failures[failures.length - 1]?.reason ?? 'utility planner failed'
+  for (let attempt = 1; attempt <= CONTEXT_PLANNER_CODE_ATTEMPTS; attempt++) {
+    const result = await runPlannerAttempt({
+      url,
+      token,
+      profile,
+      readOnly,
+      userMessage: trimmed,
+      modelTier: 'code',
+      attempt,
+      fallbackReason: `utility planner failed after ${CONTEXT_PLANNER_UTILITY_ATTEMPTS} attempts: ${utilityFailure}`,
+      jsonMode: false,
+    })
+    if (result.ok) {
+      const parsed = {
+        ...result.parsed,
+        modelTier: 'code' as const,
+        attempts: CONTEXT_PLANNER_UTILITY_ATTEMPTS + attempt,
+        fallbackReason: `utility planner failed after ${CONTEXT_PLANNER_UTILITY_ATTEMPTS} attempts: ${utilityFailure}`,
+      }
+      logger.info('context-planner', `planned: tier=code attempt=${attempt} domain=${parsed.plan.taskDomain} contexts=${parsed.plan.selectedContexts.join(',') || 'none'}`)
+      return parsed
+    }
+    failures.push(result.failure)
+    logger.warn('context-planner', `code fallback attempt ${attempt}/${CONTEXT_PLANNER_CODE_ATTEMPTS} failed: ${result.failure.reason}`, result.failure.diagnostics)
+  }
+
+  const last = failures[failures.length - 1]
+  throw new ContextPlannerError(
+    `context planner failed after ${CONTEXT_PLANNER_UTILITY_ATTEMPTS} utility attempts and ${CONTEXT_PLANNER_CODE_ATTEMPTS} code-model fallback attempt`,
+    {
+      diagnostics: last?.diagnostics,
+      rawOutput: last?.rawOutput,
+      fallbackReason: `utility planner failed after ${CONTEXT_PLANNER_UTILITY_ATTEMPTS} attempts`,
+    },
+  )
+}
+
+type PlannerAttemptResult =
+  | { ok: true; parsed: ContextPlanClassification }
+  | { ok: false; failure: { reason: string; diagnostics?: RouterDiagnostics; rawOutput?: string } }
+
+async function runPlannerAttempt(options: {
+  url: string
+  token: string
+  profile: PromptProfile
+  readOnly: boolean
+  userMessage: string
+  modelTier: 'utility' | 'code'
+  attempt: number
+  fallbackReason?: string
+  jsonMode?: boolean
+}): Promise<PlannerAttemptResult> {
+  const { url, token, profile, readOnly, userMessage, modelTier, attempt, fallbackReason, jsonMode } = options
+  if (modelTier === 'code') {
+    const byokResult = await runActiveByokCodePlannerAttempt(options)
+    if (byokResult) return byokResult
+  }
   try {
     const appCheck = await getAppCheckHeader()
     const appCheckPresent = !!appCheck['X-Firebase-AppCheck']
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      ...appCheck,
+    }
+    if (modelTier === 'utility') {
+      headers['X-Request-Type'] = 'context-planner'
+    }
+
+    const body: Record<string, unknown> = {
+      stream: false,
+      temperature: 0,
+      max_tokens: CONTEXT_PLANNER_MAX_TOKENS,
+      messages: [
+        { role: 'system', content: CONTEXT_PLANNER_SYSTEM },
+        { role: 'user', content: JSON.stringify({ profile, readOnly, userMessage, modelTier, attempt, fallbackReason }) },
+      ],
+    }
+    if (jsonMode) {
+      body.response_format = { type: 'json_object' }
+    }
+    if (modelTier === 'code') {
+      body.model = 'tm-active-model'
+    }
+
     const res = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-        'X-Request-Type': 'context-planner',
-        ...appCheck,
-      },
-      body: JSON.stringify({
-        stream: false,
-        temperature: 0,
-        max_tokens: CONTEXT_PLANNER_MAX_TOKENS,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: CONTEXT_PLANNER_SYSTEM },
-          { role: 'user', content: JSON.stringify({ profile, readOnly, userMessage: trimmed }) },
-        ],
-      }),
+      headers,
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(CONTEXT_PLANNER_TIMEOUT_MS),
     })
 
@@ -136,31 +252,95 @@ export async function planContextWithModel(
     }
 
     if (!res.ok) {
-      logger.warn('context-planner', `planning failed: HTTP ${res.status}`, diagnostics)
-      return { plan: fallback, source: 'fallback', confidence: 'none', reason: `HTTP ${res.status}`, error: `HTTP ${res.status}`, diagnostics }
+      return { ok: false, failure: { reason: `HTTP ${res.status}`, diagnostics, rawOutput: rawBody } }
     }
 
-    let data: { choices?: Array<{ message?: { content?: string } }> } | null = null
+    let data: unknown = null
     try {
-      data = JSON.parse(rawBody) as { choices?: Array<{ message?: { content?: string } }> } | null
+      data = JSON.parse(rawBody) as unknown
     } catch (parseErr) {
       diagnostics.parseError = `body JSON parse failed: ${String(parseErr)}`
-      return { plan: fallback, source: 'fallback', confidence: 'none', reason: 'response body not JSON', error: 'body not JSON', diagnostics }
+      return { ok: false, failure: { reason: 'response body not JSON', diagnostics, rawOutput: rawBody } }
     }
 
-    const content = data?.choices?.[0]?.message?.content?.trim() ?? ''
+    const content = extractAssistantTextFromCompletion(data)
     diagnostics.contentPreview = content.slice(0, 500)
     const parsed = parseContextPlanJson(content, diagnostics)
     if (!parsed) {
-      return { plan: fallback, source: 'fallback', confidence: 'none', reason: 'invalid context plan JSON', error: 'invalid JSON', diagnostics }
+      return { ok: false, failure: { reason: diagnostics.parseError ?? 'invalid context plan JSON', diagnostics, rawOutput: content || rawBody } }
     }
 
-    logger.info('context-planner', `planned: domain=${parsed.plan.taskDomain} contexts=${parsed.plan.selectedContexts.join(',') || 'none'}`)
-    return parsed
+    return { ok: true, parsed }
   } catch (err) {
     const diagnostics: RouterDiagnostics = { url, appCheckPresent: false, httpStatus: 0, parseError: String(err) }
-    logger.warn('context-planner', 'planning threw:', err, diagnostics)
-    return { plan: fallback, source: 'fallback', confidence: 'none', reason: 'request error', error: String(err), diagnostics }
+    return { ok: false, failure: { reason: String(err), diagnostics } }
+  }
+}
+
+async function runActiveByokCodePlannerAttempt(options: {
+  profile: PromptProfile
+  readOnly: boolean
+  userMessage: string
+  modelTier: 'utility' | 'code'
+  attempt: number
+  fallbackReason?: string
+}): Promise<PlannerAttemptResult | null> {
+  const { profile, readOnly, userMessage, modelTier, attempt, fallbackReason } = options
+  if (modelTier !== 'code') return null
+  const [{ useChatStore }, { useByokStore }] = await Promise.all([
+    import('../../stores/chatStore'),
+    import('../../stores/byokStore'),
+  ])
+  const snapshot = useChatStore.getState().getActiveSession()?.byokSnapshot ?? null
+  const byokActive = !!snapshot && useByokStore.getState().enabled
+  if (!byokActive || !snapshot) return null
+  const { byokAuxCompletion } = await import('./byokRouting')
+
+  const diagnostics: RouterDiagnostics = {
+    url: snapshot.baseURL,
+    appCheckPresent: false,
+    httpStatus: 0,
+    servedModel: snapshot.modelId,
+    configKey: `byok:${snapshot.providerId}`,
+    contentType: undefined,
+  }
+
+  try {
+    const content = (await byokAuxCompletion(snapshot, {
+      maxTokens: CONTEXT_PLANNER_MAX_TOKENS,
+      temperature: 0,
+      jsonObject: false,
+      signal: AbortSignal.timeout(CONTEXT_PLANNER_TIMEOUT_MS),
+      messages: [
+        { role: 'system', content: CONTEXT_PLANNER_SYSTEM },
+        { role: 'user', content: JSON.stringify({ profile, readOnly, userMessage, modelTier, attempt, fallbackReason }) },
+      ],
+    }))?.trim() ?? ''
+    diagnostics.httpStatus = content ? 200 : 0
+    diagnostics.contentPreview = content.slice(0, 500)
+
+    const parsed = parseContextPlanJson(content, diagnostics)
+    if (!parsed) {
+      return {
+        ok: false,
+        failure: {
+          reason: diagnostics.parseError ?? 'invalid context plan JSON from BYOK code model',
+          diagnostics,
+          rawOutput: content,
+        },
+      }
+    }
+
+    return { ok: true, parsed }
+  } catch (err) {
+    diagnostics.parseError = String(err)
+    return {
+      ok: false,
+      failure: {
+        reason: String(err),
+        diagnostics,
+      },
+    }
   }
 }
 

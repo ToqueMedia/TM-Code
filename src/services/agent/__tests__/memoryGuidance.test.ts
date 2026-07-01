@@ -25,7 +25,7 @@ describe('buildMemoryGuidanceSection', () => {
     expect(guidance).toContain('## What NOT to save')
     expect(guidance).toContain('Code patterns, conventions, architecture')
     expect(guidance).toContain('Git history, recent changes')
-    expect(guidance).toContain('CLAUDE.md or TMS.md')
+    expect(guidance).toContain('TMS.md')
   })
 
   it('includes the When to access memories section', () => {

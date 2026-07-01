@@ -1535,8 +1535,8 @@ test('sidecar: X-Request-Type web_search routes to the published sidecar config'
   assert.equal(res.headers.get('x-tm-model'), 'qwen3.7-plus')
 })
 
-test('sidecar: memory-* and summarize share the utility sidecar', async () => {
-  for (const type of ['memory-extractor', 'memory-selector', 'memory-distiller', 'summarize', 'intent-router']) {
+test('sidecar: memory/planner/router and summarize share the utility sidecar', async () => {
+  for (const type of ['memory-extractor', 'memory-selector', 'memory-distiller', 'summarize', 'intent-router', 'context-planner']) {
     clearActiveConfigCache()
     const fetcher = fakeFetcher(Response.json({ ok: true }))
     const res = await handleRequest(
@@ -1548,11 +1548,12 @@ test('sidecar: memory-* and summarize share the utility sidecar', async () => {
   }
 })
 
-test('sidecar: unpublished specialized sidecar (vision/web_search/fim) returns 503 without an upstream call', async () => {
+test('sidecar: unpublished strict sidecar (vision/web_search/fim/context-planner) returns 503 without an upstream call', async () => {
   // Degradar visão/pesquisa/FIM para o modelo ativo GERAL produz 404 (imagem a
   // modelo de texto), alucinação (pesquisa sem motor) ou lixo (FIM sem template).
-  // O worker falha já com 503, sem o pedido upstream condenado.
-  for (const type of ['vision', 'web_search', 'fim']) {
+  // O context-planner exige JSON; degradar para active mascara o erro e devolve
+  // prosa ao parser. O worker falha já com 503 e o cliente usa fallback de código.
+  for (const type of ['vision', 'web_search', 'fim', 'context-planner']) {
     clearActiveConfigCache()
     const fetcher = fakeFetcher(Response.json({ ok: true }))
     const res = await handleRequest(typedRequest(type), kvEnv({}), { fetcher })

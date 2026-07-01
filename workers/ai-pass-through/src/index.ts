@@ -183,9 +183,10 @@ async function handleChatCompletions(
   const requestId = createRequestId(request)
   const startedAt = Date.now()
   const user = await authenticateUser(request, env)
-  // Sidecars (X-Request-Type → KV `sidecar:*`): web_search, vision, fim e a
-  // família memory-*/summarize correm em modelos baratos/especializados
-  // publicados pelo admin; sem sidecar publicado, segue a config ativa.
+  // Sidecars (X-Request-Type → KV `sidecar:*`): web_search, vision, fim,
+  // context-planner e a família memory-*/summarize correm em modelos baratos/
+  // especializados publicados pelo admin; alguns tipos podem degradar para a
+  // config ativa, outros têm contrato próprio e falham rápido.
   // O header NUNCA segue upstream (filtro em headers.ts) e a resposta leva
   // X-TM-Config-Key para o cliente saber quem serviu.
   const requestType = request.headers.get('x-request-type')
@@ -203,10 +204,15 @@ async function handleChatCompletions(
   // por isso o 503 dá o MESMO desfecho — só mais limpo, rápido e barato. O tipo
   // `vision` só é enviado quando o modelo ativo é cego (cliente verifica o
   // perfil antes), logo nunca há um modelo ativo com visão a ser bloqueado aqui.
-  // `utility`/`summarize` ficam de fora — o modelo ativo sabe resumir, degradam
-  // como desenhado.
+  // `context-planner` também não pode degradar silenciosamente: ele tem contrato
+  // JSON e o cliente já tem fallback explícito para o modelo de código quando o
+  // sidecar utilitário falha. `summarize`/memory ficam de fora — o modelo ativo
+  // sabe resumir/extrair, degradam como desenhado.
   const requestedSidecar = sidecarKeyForRequestType(requestType)
-  if (requestedSidecar && requestedSidecar !== 'sidecar:utility' && active.key !== requestedSidecar) {
+  const strictSidecarRequestType = ['vision', 'web_search', 'fim', 'context-planner'].includes(
+    requestType?.trim().toLowerCase() ?? '',
+  )
+  if (requestedSidecar && strictSidecarRequestType && active.key !== requestedSidecar) {
     return jsonError(
       503,
       'tm_sidecar_unavailable',

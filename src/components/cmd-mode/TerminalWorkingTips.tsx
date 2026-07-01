@@ -19,10 +19,10 @@ export const TerminalWorkingTips = memo(function TerminalWorkingTips() {
   const isStreaming = useChatStore(s => s.isStreaming)
 
   // "A trabalhar" espelha o isAgentActive() usado no resto do TerminalView:
-  // streaming OU qualquer status que não seja ocioso/erro. Como é um booleano,
+  // streaming OU qualquer status que não seja ocioso/parado/erro. Como é um booleano,
   // as transições internas de fase (reasoning→generating→applying…) não
   // reiniciam o intervalo — só reinicia quando o agente arranca/para de facto.
-  const working = isStreaming || (status !== 'idle' && status !== 'error')
+  const working = isStreaming || (status !== 'idle' && status !== 'cancelled' && status !== 'error')
 
   const pool = useMemo(() => buildTipPool(t), [t])
   const poolRef = useRef(pool)

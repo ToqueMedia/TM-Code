@@ -92,7 +92,8 @@ export async function stopAgent(): Promise<void> {
   usePermissionStore.getState().resetAutoApprove()
   AgentService.getInstance().cancelLoop()
   useChatStore.getState().finalizeAssistantMessage()
-  useAgentStore.getState().setStatus('idle')
+  useAgentStore.getState().setError(null)
+  useAgentStore.getState().setStatus('cancelled')
 }
 
 // ─── /new — Stop → Save → Clear queue → Create new session ───

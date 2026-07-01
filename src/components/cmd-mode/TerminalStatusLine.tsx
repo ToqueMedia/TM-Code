@@ -131,6 +131,12 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
           label: t("terminalMode.status.compacting"),
           pulse: true,
         };
+      case "cancelled":
+        return {
+          color: tokens.colors.text.disabled,
+          label: t("terminalMode.status.cancelled"),
+          pulse: false,
+        };
       case "error":
         return {
           color: tokens.colors.accent.red,

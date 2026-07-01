@@ -427,8 +427,8 @@ export const useProjectStore = create<ProjectStore>()(
           // Check for TMS.md — suggest /init only when (a) it's missing AND
           // (b) the project actually has content to analyze. Suggesting it on
           // a freshly-opened empty folder is noise: there is nothing to
-          // memorize and the agent's first natural turn will start TMS.md
-          // organically as work happens.
+          // memorize. Missing TMS.md is optional context, so the next agent
+          // turn should continue the user's task instead of forcing bootstrap.
           //
           // The "meaningful content" rule lives in projectHasContent.ts — it
           // rejects dot-files (.toquemedia/, .git/, .DS_Store, .gitignore,
@@ -443,7 +443,9 @@ export const useProjectStore = create<ProjectStore>()(
             // TMS.md exists — ensure flag is cleared (covers re-open after bootstrap)
             set({ noTmsFile: false });
           } catch {
-            // TMS.md not found — show system message suggesting /init.
+            // TMS.md not found — keep only state so the UI can suggest /init.
+            // The agent preflight treats absence as optional context and lets
+            // the user's next request proceed normally.
             const { projectHasMeaningfulContent } = await import('../utils/projectHasContent');
             let hasContent = false;
             try {
@@ -456,22 +458,6 @@ export const useProjectStore = create<ProjectStore>()(
               hasContent = false;
             }
             set({ noTmsFile: hasContent });
-            if (hasContent) {
-              const { t } = await import('../i18n');
-              // The session is created async by App.tsx (restoreLastSession →
-              // createNewSession). A fixed 600ms timeout races with session
-              // creation — poll for activeSessionId instead.
-              const deadline = Date.now() + 5000
-              const poll = () => {
-                const chatState = useChatStore.getState()
-                if (chatState.activeSessionId) {
-                  chatState.addSystemMessage(t('common.noTmsFile'))
-                } else if (Date.now() < deadline) {
-                  setTimeout(poll, 100)
-                }
-              }
-              setTimeout(poll, 100)
-            }
           }
         } catch (error: unknown) {
           set({

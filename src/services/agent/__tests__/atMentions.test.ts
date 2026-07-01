@@ -177,7 +177,7 @@ describe('resolveMentionContext', () => {
 
   it('falls back to a truncated read + meta note for oversized files', async () => {
     mockExecutor.executeForMention
-      .mockResolvedValueOnce('Error: File is 1024.0 KB which exceeds the 256 KB read cap. Use `offset` + `limit` to read a line range, or use search_files / glob to locate specific content.')
+      .mockResolvedValueOnce('Error: File is 1024.0 KB which exceeds the 256 KB read cap. Use Read with `offset` + `limit` to read a line range, or use Grep / Glob to locate specific content.')
       .mockResolvedValueOnce('line1\nline2')
     const r = await resolveMentionContext('see @big.ts')
 

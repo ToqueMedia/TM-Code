@@ -42,7 +42,7 @@ import type { FileContentSignature, FileStateCache } from './fileStateCache'
  * on its own — no silent data loss.
  */
 export const FILE_UNCHANGED_STUB =
-  'File unchanged since last read. The content you previously read is still current — use your existing knowledge of this file rather than requesting it again.'
+  'File unchanged since last Read. The content you previously read is still current in the conversation/cache; use that existing knowledge rather than requesting it again. Do not work around this with execute_command/cat/head/tail/sed. If you need different lines, call Read only for the missing range. If compaction removed the exact text from context and you truly need the same range again, call Read once with force: true.'
 
 // ── Dedup check ─────────────────────────────────────────────────────────
 

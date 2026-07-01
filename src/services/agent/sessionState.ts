@@ -11,6 +11,7 @@
 
 import type { FileAccessEntry, ToolFailureEntry } from './types'
 import { clearMentionContextTracker } from './mentionContextTracker'
+import { canonicalToolName } from './toolNames'
 
 // ── SessionState class ──
 
@@ -55,7 +56,8 @@ export class SessionState {
   // ── File access ──
 
   trackFileAccess(toolName: string, args: Record<string, unknown>): void {
-    const path = (args.file_path as string) || ''
+    toolName = canonicalToolName(toolName)
+    const path = ((args.file_path ?? args.path ?? args.directory) as string) || ''
     if (!path) return
 
     let action: 'read' | 'modified' | null = null

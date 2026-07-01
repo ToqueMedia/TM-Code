@@ -10,7 +10,7 @@ import { t } from '../../i18n/useTranslation'
 import AgentService from './agentService'
 import type { OpenAIContentPart } from './types'
 import ContextBuilder from './contextBuilder'
-import { classifyIntent } from './intentRouter'
+import { classifyIntent, type IntentClassification } from './intentRouter'
 import ToolExecutor from './toolExecutor'
 import MCPService from '../mcp/mcpService'
 import { browserSession } from '../browserSessionManager'
@@ -21,7 +21,15 @@ import { dequeueAllMatching, isSlashCommand, joinPromptValues } from './messageQ
 import { describeImagesViaSidecar } from './visionSidecar'
 import { MODEL_PROFILES, getProfileForPlan } from './modelProfiles'
 import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from './atMentions'
-import type { Attachment, PromptBlock } from '../../types/chat'
+import {
+  buildTmsBootstrapOnlyPrompt,
+  getTmsBootstrapCompleteMessageKey,
+  getTmsBootstrapStartMessageKey,
+  runTmsPreflight,
+  type TmsPreflightResult,
+} from './tmsBootstrap'
+import { getTmsTurnTelemetry, markOriginalTaskFailed } from './tmsContext'
+import type { Attachment, ConversationMessage, PromptBlock } from '../../types/chat'
 
 interface RunAgentOptions {
   /** Whether to add a user message to the chat. Default: true */
@@ -73,6 +81,11 @@ interface RunAgentOptions {
    * runs "score" a goal. Default: false.
    */
   isBackgroundRun?: boolean
+  /** Explicit history to send to the model. Used when resuming the original
+   *  request after TMS bootstrap without duplicating the visible user bubble. */
+  conversationHistoryOverride?: ConversationMessage[]
+  /** Force a known task profile for internal slash-command flows. */
+  intentOverride?: IntentClassification
 }
 
 const APPROX_CHARS_PER_TOKEN = 4
@@ -158,6 +171,8 @@ async function runAgentInternal(
     systemPromptOverride,
     mentionText,
     isBackgroundRun = false,
+    conversationHistoryOverride,
+    intentOverride,
   } = options
 
   const chatStore = useChatStore.getState()
@@ -187,6 +202,8 @@ async function runAgentInternal(
   if (!sessionId) {
     sessionId = chatStore.createSession(cmdCwd || projectPath)
   }
+  const historyBeforeCurrentUser = conversationHistoryOverride
+    ?? useChatStore.getState().conversationHistory
 
   // Pull the agent service early so we can ask it about the upcoming turn
   // (specifically, whether reasoning is requested) before creating the
@@ -233,6 +250,22 @@ async function runAgentInternal(
     return
   }
 
+  let tmsPreflight: TmsPreflightResult | null = null
+  if (
+    projectPath &&
+    addUserMessage &&
+    !cmdOnlyMode &&
+    !isBackgroundRun &&
+    !useProjectStore.getState().tmsBootstrapping
+  ) {
+    tmsPreflight = await runTmsPreflight({
+      projectPath,
+      originalUserMessageDisplayed: true,
+      originalUserMessage: userMessageText ?? prompt,
+    })
+  }
+  const bootstrapOnly = tmsPreflight?.shouldBootstrap === true
+
   // Reset the per-request token counter at the START of each new request so
   // the chat indicator shows tokens for the CURRENT request only (not the
   // session-cumulative total). A "request" = one runAgentInternal invocation,
@@ -251,6 +284,10 @@ async function runAgentInternal(
     // didn't ask for them (BYOK reasoning models sometimes keep emitting
     // chain-of-thought even when the disable param is set correctly).
     chatStore.startAssistantMessage(agentService.isThinkingRequestedForNextTurn())
+  }
+  if (bootstrapOnly) {
+    appendTextDeltaBuffered(`${t(getTmsBootstrapStartMessageKey(tmsPreflight!))}\n\n`)
+    flushBufferedDeltas()
   }
   // 'awaiting_response': prompt is about to be sent; nothing has streamed yet.
   // Flips to 'reasoning' or 'generating' once the first delta lands.
@@ -313,7 +350,7 @@ async function runAgentInternal(
     // rules at turn 1 — same mechanism as chat mode. Without this, the
     // hashtag regex never fires in CMD and the model improvises auth from
     // training prior, producing scaffolds with placeholder credentials.
-    systemPrompt = await contextBuilder.buildCmdModeSystemPrompt(cmdCwd, cmdHomeDir, mcpToolSummaries, userMessageText)
+    systemPrompt = await contextBuilder.buildCmdModeSystemPrompt(cmdCwd, cmdHomeDir, mcpToolSummaries, userMessageText, intentOverride)
   } else {
     const projectType = currentProject?.projectType || 'unknown'
     // userMessageText carries the raw user input so contextBuilder can detect
@@ -329,20 +366,40 @@ async function runAgentInternal(
     // no-edit/read-only safety override in classifyIntent.
     // Never throws; on failure it falls back to { bugfix_local, readOnly:false }
     // and buildSystemPrompt uses a conservative no-auxiliary fallback.
+    const bootstrapUserMessageText = bootstrapOnly && tmsPreflight
+      ? buildTmsBootstrapOnlyPrompt(tmsPreflight, userMessageText ?? prompt)
+      : null
+    const promptForSystem = bootstrapUserMessageText ?? userMessageText
     const intentStart = Date.now()
-    const intent = await classifyIntent(userMessageText ?? '')
+    const intent = bootstrapOnly
+      ? {
+          profile: 'project_bootstrap' as const,
+          readOnly: false,
+          source: 'keyword' as const,
+          confidence: 'high' as const,
+          reason: 'TMS.md bootstrap preflight selected project_bootstrap before the original task',
+        }
+      : intentOverride
+        ? intentOverride
+      : await classifyIntent(userMessageText ?? '')
+    const effectiveIntent = intent
+    AgentService.getInstance().clearPostTmsBootstrapToolProfile()
     logger.info(
       'agent',
-      `→ Intent router: profile=${intent.profile} readOnly=${intent.readOnly} (${intent.source}, ${Date.now() - intentStart}ms) — ${intent.reason}`,
+      `→ Intent router: profile=${effectiveIntent.profile} readOnly=${effectiveIntent.readOnly} (${effectiveIntent.source}, ${Date.now() - intentStart}ms) — ${effectiveIntent.reason}`,
     )
-    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText, AgentService.getInstance().getAccessedFilePaths(), { profile: intent.profile, readOnly: intent.readOnly, reason: intent.reason, source: intent.source, confidence: intent.confidence, error: intent.error, diagnostics: intent.diagnostics })
+    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, promptForSystem, AgentService.getInstance().getAccessedFilePaths(), { profile: effectiveIntent.profile, readOnly: effectiveIntent.readOnly, reason: effectiveIntent.reason, source: effectiveIntent.source, confidence: effectiveIntent.confidence, error: effectiveIntent.error, diagnostics: effectiveIntent.diagnostics })
   }
   logger.info('agent', `✓ System prompt built (${systemPrompt.length} chars, ${Date.now() - promptBuildStart}ms)`)
 
   // Get conversation history
-  const rawHistory = useConversationHistory
-    ? useChatStore.getState().conversationHistory
-    : []
+  const rawHistory = bootstrapOnly
+    ? historyBeforeCurrentUser
+    : conversationHistoryOverride
+      ? conversationHistoryOverride
+      : useConversationHistory
+        ? useChatStore.getState().conversationHistory
+        : []
   logger.info('agent', `→ Conversation history: ${rawHistory.length} messages`)
 
   agentService.setSystemPrompt(systemPrompt)
@@ -361,10 +418,12 @@ async function runAgentInternal(
   const hasAnyAttachments = (userMessageAttachments?.length ?? 0) > 0
   const hasImageAttachments = userMessageAttachments?.some(a => a.type === 'image') ?? false
 
-  let userContent: string | OpenAIContentPart[] = prompt
+  let userContent: string | OpenAIContentPart[] = bootstrapOnly && tmsPreflight
+    ? buildTmsBootstrapOnlyPrompt(tmsPreflight, userMessageText ?? prompt)
+    : prompt
 
   const blocksForModel = modelMessageBlocks ?? userMessageBlocks
-  if (hasAnyAttachments && blocksForModel) {
+  if (!bootstrapOnly && hasAnyAttachments && blocksForModel) {
     const imageCount = userMessageAttachments?.filter(a => a.type === 'image').length ?? 0
     const fileCount = (userMessageAttachments?.length ?? 0) - imageCount
     logger.info('agent', `→ Processing attachments (${imageCount} images, ${fileCount} files)...`)
@@ -439,7 +498,7 @@ async function runAgentInternal(
     ?? (blocksForModel
       ? blocksForModel.filter(b => b.type === 'text').map(b => b.text).join('\n')
       : null)
-  try {
+  if (!bootstrapOnly) try {
     const mentionResolution = mentionSource
       ? await resolveMentionContext(mentionSource)
       : { contextText: '', imageParts: [], resolvedPaths: [] }
@@ -471,6 +530,7 @@ async function runAgentInternal(
   const loopStartTime = Date.now()
   let firstTextReceived = false
   let firstReasoningReceived = false
+  let streamedAssistantText = ''
   // Estimativas LOCAIS são apenas para o ctx-pill (chatStore) — a
   // contabilidade de billing é exclusiva do worker ai-pass-through (único
   // ponto de verdade): ele observa o `usage` real de cada resposta, aplica o
@@ -510,6 +570,7 @@ async function runAgentInternal(
         }
         agentStore.setStatus('generating')
         applyLiveTokenEstimate(0, estimateTokensFromText(delta))
+        streamedAssistantText += delta
         appendTextDeltaBuffered(delta)
       },
       onReasoningDelta: (delta) => {
@@ -561,8 +622,28 @@ async function runAgentInternal(
           useChatStore.getState().setProviderState(providerState)
         }
       },
-      onDone: () => {
+      onDone: (finalText) => {
         flushBufferedDeltas()
+        if (finalText && finalText !== streamedAssistantText) {
+          const suffix = finalText.startsWith(streamedAssistantText)
+            ? finalText.slice(streamedAssistantText.length)
+            : finalText
+          if (suffix) {
+            appendTextDeltaBuffered(suffix)
+            flushBufferedDeltas()
+          }
+        }
+        const keepAssistantOpenForOriginalTask =
+          !isBackgroundRun &&
+          bootstrapOnly &&
+          (() => {
+            const tms = getTmsTurnTelemetry()
+            return tms.tmsCreated || tms.tmsAlreadyExists
+          })()
+        if (keepAssistantOpenForOriginalTask) {
+          agentStore.setStatus('awaiting_response')
+          return
+        }
         if (!finalized) {
           finalized = true
           useChatStore.getState().finalizeAssistantMessage()
@@ -607,6 +688,16 @@ async function runAgentInternal(
         flushBufferedDeltas()
         resolveAllPendingDiffApprovals(false)
         agentStore.setCompactPhase('idle')
+        if (agentService.isAborted()) {
+          agentStore.setError(null)
+          agentStore.setStatus('cancelled')
+          logger.info('agent', `Agent run cancelled by user: ${error.message}`)
+          if (!finalized) {
+            finalized = true
+            useChatStore.getState().finalizeAssistantMessage()
+          }
+          return
+        }
         agentStore.setStatus('error')
         agentStore.setError(error.message)
         logger.info('agent', `✗ Agent error: ${error.message}`)
@@ -701,6 +792,29 @@ async function runAgentInternal(
             return text && text.trim().length > 0 ? text : display.text
           },
     })
+
+    if (!isBackgroundRun && bootstrapOnly) {
+      const tms = getTmsTurnTelemetry()
+      if (tms.tmsCreated || tms.tmsAlreadyExists) {
+        appendTextDeltaBuffered(`\n\n${t(getTmsBootstrapCompleteMessageKey(tms.tmsCreated))}\n\n`)
+        flushBufferedDeltas()
+        await runAgentInternal(prompt, {
+          ...options,
+          addUserMessage: false,
+          skipStartAssistantMessage: true,
+          conversationHistoryOverride: historyBeforeCurrentUser,
+        })
+      }
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (!bootstrapOnly) {
+      markOriginalTaskFailed(message)
+      if (!isBackgroundRun) {
+        useChatStore.getState().addSystemMessage(`A tarefa não pôde continuar: ${message}`, 'error')
+      }
+    }
+    throw err
   } finally {
     // Always restore IDE mode regardless of how the loop exited
     if (cmdOnlyMode && cmdCwd) {

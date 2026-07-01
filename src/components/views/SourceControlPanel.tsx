@@ -34,6 +34,7 @@ const COMMIT_TEXTAREA_MIN_HEIGHT = 48
 const COMMIT_TEXTAREA_MAX_HEIGHT = 200
 const COMMIT_MESSAGE_AI_TIMEOUT_MS = 90_000
 const COMMIT_MESSAGE_WORKER_TIMEOUT_SECS = Math.ceil(COMMIT_MESSAGE_AI_TIMEOUT_MS / 1000)
+const COMMIT_MESSAGE_AI_MAX_ATTEMPTS = 2
 
 // ── Styles (injected once) ──────────────────────────────────────────────
 
@@ -461,16 +462,27 @@ ${diffNotes || 'none'}`
       let aiMsg = ''
       const { resolveAuxByokRoute, byokAuxCompletion } = await import('../../services/agent/byokRouting')
       const auxRoute = resolveAuxByokRoute()
-      if (auxRoute) {
-        // Free + BYOK: generate the commit message on the user's own key.
-        aiMsg = ((await byokAuxCompletion(auxRoute.snapshot, {
-          messages: commitMessages,
-          maxTokens: 1200,
-          temperature: 0.2,
-          signal: aiAbort.signal,
-        })) ?? '').trim()
-        if (aiAbort.signal.aborted) throw new DOMException('Request aborted', 'AbortError')
-      } else {
+
+      const callAi = async (attempt: number): Promise<string> => {
+        const messages = attempt === 1
+          ? commitMessages
+          : [{
+              role: 'user',
+              content: `${promptContent}\n\nThe previous generation attempt returned empty content. Retry now and output a non-empty commit message only.`,
+            }]
+
+        if (auxRoute) {
+          // Free + BYOK: generate the commit message on the user's own key.
+          const content = ((await byokAuxCompletion(auxRoute.snapshot, {
+            messages,
+            maxTokens: 1200,
+            temperature: attempt === 1 ? 0.2 : 0.1,
+            signal: aiAbort.signal,
+          })) ?? '').trim()
+          if (aiAbort.signal.aborted) throw new DOMException('Request aborted', 'AbortError')
+          return content
+        }
+
         const FirebaseAuthService = (await import('../../services/auth/firebaseAuth')).default
         let token = await FirebaseAuthService.getInstance().getIdToken()
         if (!token) token = await FirebaseAuthService.getInstance().getIdToken(true)
@@ -481,12 +493,17 @@ ${diffNotes || 'none'}`
         const { tauriFetch } = await import('../../services/tauriFetch')
         const response = await tauriFetch(`${workerUrl}/v1/chat/completions`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+            'X-Request-Type': 'utility',
+          },
           timeoutSecs: COMMIT_MESSAGE_WORKER_TIMEOUT_SECS,
           signal: aiAbort.signal,
           body: JSON.stringify({
-            messages: commitMessages,
-            temperature: 0.2,
+            model: 'tm-active-model',
+            messages,
+            temperature: attempt === 1 ? 0.2 : 0.1,
             max_tokens: 1200,
             stream: false,
           }),
@@ -494,20 +511,35 @@ ${diffNotes || 'none'}`
 
         if (!response.ok) throw new Error(`API ${response.status}`)
         const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
-        aiMsg = data.choices?.[0]?.message?.content?.trim() || ''
+        return data.choices?.[0]?.message?.content?.trim() || ''
+      }
+
+      let lastError: unknown = null
+      for (let attempt = 1; attempt <= COMMIT_MESSAGE_AI_MAX_ATTEMPTS; attempt++) {
+        try {
+          aiMsg = await callAi(attempt)
+          if (aiMsg) break
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') throw err
+          lastError = err
+        }
+      }
+
+      if (!aiMsg && lastError) {
+        throw lastError
       }
 
       if (aiMsg) {
         setCommitMsg(cleanGeneratedCommitMessage(aiMsg))
         requestAnimationFrame(resizeTextarea)
       } else {
-        showFeedback('error', 'AI returned empty message')
+        showFeedback('error', `AI returned empty after ${COMMIT_MESSAGE_AI_MAX_ATTEMPTS} attempts`)
       }
     } catch (e) {
       const message = e instanceof DOMException && e.name === 'AbortError'
         ? `timed out after ${COMMIT_MESSAGE_WORKER_TIMEOUT_SECS}s`
         : e instanceof Error ? e.message : String(e)
-      showFeedback('error', `Generate failed: ${message}`)
+      showFeedback('error', `Generate failed after ${COMMIT_MESSAGE_AI_MAX_ATTEMPTS} attempts: ${message}`)
     } finally {
       clearTimeout(aiTimeout)
       setGenerating(false)

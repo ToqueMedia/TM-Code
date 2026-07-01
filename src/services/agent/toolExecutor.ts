@@ -35,7 +35,17 @@ import { devServerManager } from '../devServerManager'
 import { resolveWorkerUrl, resolveAIWorkerUrl } from '../../utils/devUrls'
 import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
-import { READ_FILE, WRITE_FILE, EDIT_FILE, STOP_DEV_SERVER } from './toolNames'
+import {
+  GLOB_ALIAS,
+  GREP_ALIAS,
+  LS_ALIAS,
+  READ_ALIAS,
+  WRITE_FILE,
+  EDIT_FILE,
+  STOP_DEV_SERVER,
+  canonicalToolName,
+  normalizeToolInputForCanonical,
+} from './toolNames'
 import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileStateCache } from './toolExecutor/fileStateCache'
 import { FILE_UNCHANGED_STUB } from './toolExecutor/readDedup'
 import { checkReadRangeOverlap, recordReadRange, clearReadRangeTracker } from './toolExecutor/readRangeTracker'
@@ -47,6 +57,7 @@ import { extractReadFilesFromMessages } from './toolExecutor/readStateRecovery'
 import { getLegacyProjectStateDir, getProjectStateDir } from '../projectStatePaths'
 import { getFsVersion, bumpFsVersion } from '../fsVersion'
 import CheckpointService from './checkpointService'
+import { markReadBeforeWriteBlocked, markTmsCreated, markTmsFullContextSent } from './tmsContext'
 import type { MCPTool } from '../mcp/mcpService'
 import type { AgentCallbacks } from './types'
 import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, hasPendingDiffApprovals } from '../../stores/chatStore'
@@ -105,6 +116,11 @@ interface ToolEntry {
 interface ReadFileWithSignatureResult {
   content: string
   signature: FileContentSignature
+}
+
+interface ReadVisibility {
+  range: { offset?: number; limit?: number } | null
+  partialView: boolean
 }
 
 interface AgentShellSession {
@@ -623,6 +639,19 @@ class ToolExecutor {
     return tool.execute(input)
   }
 
+  private recordReadBeforeWriteBlocked(
+    toolName: typeof WRITE_FILE | typeof EDIT_FILE,
+    reason: 'not_read' | 'partial_view' | 'modified_since_read',
+  ): void {
+    markReadBeforeWriteBlocked(toolName, reason)
+    void import('../../services/analytics').then(({ trackEvent }) => {
+      void trackEvent('read_before_write_blocked', {
+        tool: toolName,
+        reason,
+      })
+    }).catch(() => { /* analytics never blocks tool execution */ })
+  }
+
   /**
    * Large @mentions intentionally show only a compact outline/preview to the
    * model. The underlying read_file call still refreshes signatures and hashes,
@@ -744,6 +773,10 @@ class ToolExecutor {
     signal?: AbortSignal,
     memoryScope?: string | null,
   ): Promise<string> {
+    const requestedToolName = toolName
+    toolName = canonicalToolName(toolName)
+    input = normalizeToolInputForCanonical(requestedToolName, input)
+
     const tool = this.tools.get(toolName)
     if (!tool) {
       throw new Error(`Unknown tool: ${toolName}`)
@@ -1112,6 +1145,7 @@ class ToolExecutor {
    * likely to be needed verbatim on subsequent turns.
    */
   static getToolResultMaxChars(toolName: string): number {
+    toolName = canonicalToolName(toolName)
     switch (toolName) {
       case 'execute_command':
       case 'execute_command_background':
@@ -1127,6 +1161,65 @@ class ToolExecutor {
         return 12_000
       default:
         return 12_000
+    }
+  }
+
+  /**
+   * Compute the line range that actually enters the model context for Read.
+   * read_file results above the generic result cap are reduced later by
+   * truncateResult() to an 8K head preview. The read-range tracker must only
+   * record complete file lines in that preview, not the full internal disk
+   * read; otherwise a later Read can be falsely blocked for lines the model
+   * never saw.
+   */
+  private static getModelVisibleReadRange(input: {
+    result: string
+    fileBodyStart: number
+    fileBodyLength: number
+    startLine: number
+    requestedOffset: number | undefined
+    requestedLimit: number | undefined
+  }): ReadVisibility {
+    const maxChars = ToolExecutor.getToolResultMaxChars('read_file')
+    if (input.result.length <= maxChars) {
+      return {
+        range: { offset: input.requestedOffset, limit: input.requestedLimit },
+        partialView: false,
+      }
+    }
+
+    const previewBudget = 8_000
+    const lastNewline = input.result.lastIndexOf('\n', previewBudget)
+    const previewEnd = lastNewline >= previewBudget * 0.5
+      ? lastNewline + 1
+      : Math.min(previewBudget, input.result.length)
+
+    const fileStart = input.fileBodyStart
+    const fileEnd = fileStart + input.fileBodyLength
+    if (previewEnd <= fileStart || input.fileBodyLength <= 0) {
+      return { range: null, partialView: true }
+    }
+
+    const visibleFileEnd = Math.min(previewEnd, fileEnd)
+    const visibleFileText = input.result.slice(fileStart, visibleFileEnd)
+
+    // A hard char cut inside a line does not make that source line safe to
+    // mark as covered. The model saw only a prefix of the line.
+    if (visibleFileEnd < fileEnd && !visibleFileText.endsWith('\n')) {
+      return { range: null, partialView: true }
+    }
+
+    const visibleLineCount = visibleFileEnd >= fileEnd
+      ? input.fileBodyLength === 0 ? 0 : input.result.slice(fileStart, fileEnd).split(/\r?\n/).length
+      : (visibleFileText.match(/\n/g) ?? []).length
+
+    if (visibleLineCount <= 0) {
+      return { range: null, partialView: true }
+    }
+
+    return {
+      range: { offset: input.startLine, limit: visibleLineCount },
+      partialView: true,
     }
   }
 
@@ -2252,7 +2345,8 @@ ${preview}
           properties: {
             file_path: { type: 'string', description: 'Absolute path to the file to read' },
             offset: { type: 'number', description: '1-indexed line number to start from. Combine with `limit` to read a slice of a large file.' },
-            limit: { type: 'number', description: 'Maximum number of lines to read. Default: read to end of file.' }
+            limit: { type: 'number', description: 'Maximum number of lines to read. Default: read to end of file.' },
+            force: { type: 'boolean', description: 'Bypass duplicate-read suppression only when a previous Read range is no longer available after compaction/context loss. Do not use for normal navigation.' }
           },
           required: ['file_path']
         },
@@ -2270,6 +2364,7 @@ ${preview}
         let offset = offsetProvided ? Math.max(1, input.offset as number) : 1
         let limit = limitProvided ? Math.max(1, input.limit as number) : 0
         let sliceRequested = offsetProvided || limitProvided
+        const forceRead = input.force === true
         await this.requirePathAccess(filePath)
 
         const currentFsVersion = getFsVersion()
@@ -2288,7 +2383,6 @@ ${preview}
           let requestedOffset = offsetProvided ? offset : undefined
           let requestedLimit = limitProvided ? limit : undefined
           const existingState = this.readFileState.get(filePath)
-          let currentSignature: FileContentSignature | undefined
 
           // ── Pre-read stat: size guard + dedup freshness (claude-vaz parity) ──
           // claude-vaz does a single getFileModificationTimeAsync(path) stat
@@ -2322,7 +2416,7 @@ ${preview}
                 size_kb: Math.round(preStat.size / 1024),
               })
             }).catch(() => {})
-            return `Error: File is ${(preStat.size / 1024).toFixed(1)} KB which exceeds the 256 KB read cap. Use \`offset\` + \`limit\` to read a line range, or use search_files / glob to locate specific content. Reading the whole file would saturate the output budget for one call.`
+            return `Error: File is ${(preStat.size / 1024).toFixed(1)} KB which exceeds the 256 KB read cap. Use ${READ_ALIAS} with \`offset\` + \`limit\` to read a line range, or use ${GREP_ALIAS} / ${GLOB_ALIAS} to locate specific content. Reading the whole file would saturate the output budget for one call.`
           }
 
           // (b) Dedup freshness — claude-vaz FileReadTool.ts:523-573:
@@ -2331,6 +2425,7 @@ ${preview}
           // gate (it missed external edits). The cached mtime lives in the
           // FileContentSignature captured at the prior read.
           if (
+            !forceRead &&
             existingState?.source === 'read' &&
             !existingState.isPartialView &&
             existingState.offset === requestedOffset &&
@@ -2357,29 +2452,31 @@ ${preview}
           // `limit` omitted means read-to-EOF. A prior read-to-EOF range
           // fully covers later sub-ranges; a partially covered request is
           // narrowed to the first missing line range before the disk read.
-          const overlap = checkReadRangeOverlap(
-            filePath,
-            requestedOffset,
-            requestedLimit,
-            currentFsVersion,
-            preStat?.modifiedMs,
-          )
-          if (overlap.kind === 'fully_covered' && overlap.stub) {
-            return overlap.stub
-          }
-          if (overlap.kind === 'partially_covered' && overlap.adjustedRange) {
-            offset = overlap.adjustedRange.offset
-            limit = overlap.adjustedRange.limit ?? 0
-            offsetProvided = true
-            limitProvided = overlap.adjustedRange.limit !== undefined
-            sliceRequested = true
-            requestedOffset = offset
-            requestedLimit = overlap.adjustedRange.limit
+          if (!forceRead) {
+            const overlap = checkReadRangeOverlap(
+              filePath,
+              requestedOffset,
+              requestedLimit,
+              currentFsVersion,
+              preStat?.modifiedMs,
+            )
+            if (overlap.kind === 'fully_covered' && overlap.stub) {
+              return overlap.stub
+            }
+            if (overlap.kind === 'partially_covered' && overlap.adjustedRange) {
+              offset = overlap.adjustedRange.offset
+              limit = overlap.adjustedRange.limit ?? 0
+              offsetProvided = true
+              limitProvided = overlap.adjustedRange.limit !== undefined
+              sliceRequested = true
+              requestedOffset = offset
+              requestedLimit = overlap.adjustedRange.limit
+            }
           }
 
           const readResult = await invoke<ReadFileWithSignatureResult>('read_file_with_signature', { path: filePath })
           const fullContent = readResult.content
-          currentSignature = readResult.signature
+          const signatureForRead = readResult.signature
           const newHash = this.simpleHash(fullContent)
 
           // (Second-stage content dedup + post-read byte-size guard removed
@@ -2427,27 +2524,39 @@ ${preview}
           // truly-previous state.
           const now = Date.now()
           this.readFileTimestamps.set(filePath, { timestamp: now, hash: newHash })
+          if (/[\\/]TMS\.md$/i.test(filePath)) {
+            markTmsFullContextSent('read_file:TMS.md')
+          }
 
-          // ── Update content cache ────────────────────────────────────
-          // Store the file content in the cache for dedup and state recovery.
-          // offset/limit reflect what was actually requested so future dedup
-          // checks can match exact ranges. fsVersion is captured so downstream
-          // fsVersion-keyed caches (ipcCache, prompt cache) stay coherent.
-          this.readFileState.set(filePath, {
-            content: fullContent,
-            timestamp: now,
-            offset: requestedOffset,
-            limit: requestedLimit,
-            source: 'read',
-            signature: currentSignature,
-            hash: newHash,
-            fsVersion: currentFsVersion,
-          })
+          const commitReadState = (visibility: ReadVisibility): void => {
+            // Store the file content in the cache for dedup and state recovery.
+            // offset/limit describe the range that actually reached the model,
+            // not necessarily the whole internal disk read. This keeps exact
+            // dedup and overlap dedup aligned with model-visible context.
+            this.readFileState.set(filePath, {
+              content: fullContent,
+              timestamp: now,
+              offset: visibility.range?.offset,
+              limit: visibility.range?.limit,
+              source: 'read',
+              signature: signatureForRead,
+              hash: newHash,
+              fsVersion: currentFsVersion,
+              isPartialView: visibility.partialView || undefined,
+            })
 
-          // ── Record range in the overlap tracker ────────────────────
-          // `limit === undefined` means read-to-EOF, not a hidden default
-          // page size. The usage export marks those ranges with readToEnd.
-          recordReadRange(filePath, requestedOffset, requestedLimit, currentFsVersion, currentSignature.modifiedMs)
+            if (visibility.range) {
+              // `limit === undefined` means read-to-EOF, not a hidden default
+              // page size. The usage export marks those ranges with readToEnd.
+              recordReadRange(
+                filePath,
+                visibility.range.offset,
+                visibility.range.limit,
+                currentFsVersion,
+                signatureForRead.modifiedMs,
+              )
+            }
+          }
 
           // Empty content: distinguish "file is empty" (no slice requested,
           // file genuinely has no bytes) from "slice past EOF" (model paged
@@ -2456,9 +2565,27 @@ ${preview}
           if (content.length === 0) {
             if (sliceRequested && fullContent.length > 0) {
               const totalLines = fullContent.split('\n').length
-              return `<system-reminder>Warning: the file exists but is shorter than the provided offset (${offset}). The file has ${totalLines} lines.</system-reminder>`
+              const result = `<system-reminder>Warning: the file exists but is shorter than the provided offset (${offset}). The file has ${totalLines} lines.</system-reminder>`
+              commitReadState(ToolExecutor.getModelVisibleReadRange({
+                result,
+                fileBodyStart: 0,
+                fileBodyLength: 0,
+                startLine,
+                requestedOffset,
+                requestedLimit,
+              }))
+              return result
             }
-            return '<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>'
+            const result = '<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>'
+            commitReadState(ToolExecutor.getModelVisibleReadRange({
+              result,
+              fileBodyStart: 0,
+              fileBodyLength: 0,
+              startLine,
+              requestedOffset,
+              requestedLimit,
+            }))
+            return result
           }
 
           // cat -n line numbers (claude-vaz parity — addLineNumbers). The
@@ -2477,17 +2604,27 @@ ${preview}
           const displayContent =
             numbered.length < READ_TRUNCATION_THRESHOLD ? numbered : content
 
+          let reminder = ''
           if (externalChange) {
-            const reminder =
+            reminder =
               '<system-reminder>The contents of this file have changed since you last read it '
               + '(external modification — a formatter, git pull, dev server output, or manual edit '
               + 'touched it). Treat the content below as authoritative; assumptions from the previous '
               + 'read are stale and any planned edit must be reconciled against this new content.'
               + '</system-reminder>\n\n'
-            return reminder + displayContent + truncationSuffix
           }
 
-          return displayContent + truncationSuffix
+          const result = reminder + displayContent + truncationSuffix
+          commitReadState(ToolExecutor.getModelVisibleReadRange({
+            result,
+            fileBodyStart: reminder.length,
+            fileBodyLength: displayContent.length,
+            startLine,
+            requestedOffset,
+            requestedLimit,
+          }))
+
+          return result
         } catch (error) {
           // formatError handles Tauri's plain-object throws — the previous
           // `String(error)` could yield "[object Object]" which both swallowed
@@ -2518,15 +2655,21 @@ ${preview}
           type: 'object',
           properties: {
             file_path: { type: 'string', description: 'Absolute path to the directory to list' },
+            path: { type: 'string', description: 'Alias for file_path' },
+            directory: { type: 'string', description: 'Alias for file_path' },
             maxDepth: { type: 'number', description: 'Maximum depth to traverse. Default: 3' }
           },
-          required: ['file_path']
+          required: []
         },
         concurrencySafe: true,
       },
       execute: async (input) => {
-        await this.requirePathAccess(input.file_path as string)
-        const dirPath = this.resolveToAbsolute(input.file_path as string)
+        const requestedPath = (input.file_path ?? input.path ?? input.directory) as string | undefined
+        if (!requestedPath) {
+          return 'Error: list_directory requires file_path, path, or directory.'
+        }
+        await this.requirePathAccess(requestedPath)
+        const dirPath = this.resolveToAbsolute(requestedPath)
         const filter = { showHidden: false, maxDepth: (input.maxDepth as number) || 3 }
         const tree = await invoke('build_file_tree', { rootPath: dirPath, filter })
         return this.formatFileTreeCompact(tree as Record<string, unknown>)
@@ -2606,7 +2749,7 @@ ${preview}
     this.tools.set('write_file', {
       definition: {
         name: 'write_file',
-        description: 'Replace the entire content of an existing file, or create a new file. Always read_file first on existing files to understand what you are replacing. For creating new files, prefer create_file. For small edits (1–20 lines), prefer edit_file instead.',
+        description: 'Replace the entire content of an existing file, or create a new file. Always use Read first on existing files to understand what you are replacing. For creating new files, prefer create_file. For small edits (1-20 lines), prefer edit_file instead.',
         input_schema: {
           type: 'object',
           properties: {
@@ -2654,20 +2797,23 @@ ${preview}
         if (!isNewFile) {
           const readState = this.readFileTimestamps.get(path)
           if (!readState) {
-            return `Error: You must ${READ_FILE}("${path}") before overwriting it. Read the file first to understand its current content, then call ${WRITE_FILE}.`
+            this.recordReadBeforeWriteBlocked(WRITE_FILE, 'not_read')
+            return `Error: You must call ${READ_ALIAS} on "${path}" before overwriting it. Read the file first to understand its current content, then call ${WRITE_FILE}.`
           }
           // isPartialView: if the model only saw an auto-injected partial view
-          // (e.g. CLAUDE.md with stripped frontmatter), it must do a full Read
+          // (e.g. stripped/truncated project memory), it must do a full Read
           // first — the auto-injected content may not match what's on disk.
           const cachedState = this.readFileState.get(path)
           if (cachedState?.isPartialView) {
-            return `Error: You must ${READ_FILE}("${path}") before overwriting it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${WRITE_FILE}.`
+            this.recordReadBeforeWriteBlocked(WRITE_FILE, 'partial_view')
+            return `Error: You must call ${READ_ALIAS} on "${path}" before overwriting it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${WRITE_FILE}.`
           }
           // Concurrent modification detection: check if file changed on disk since the model read it
           const currentHash = this.simpleHash(oldContent)
           if (currentHash !== readState.hash) {
             this.readFileTimestamps.delete(path)
-            return `Error: File "${path}" has been modified since you last read it (by the developer, a formatter, or another process). Read it again with ${READ_FILE} before writing.`
+            this.recordReadBeforeWriteBlocked(WRITE_FILE, 'modified_since_read')
+            return `Error: File "${path}" has been modified since you last read it (by the developer, a formatter, or another process). Read it again with ${READ_ALIAS} before writing.`
           }
         }
 
@@ -2678,6 +2824,10 @@ ${preview}
           const dir = path.slice(0, path.lastIndexOf('/'))
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content: newContent })
+          if (/[\\/]TMS\.md$/i.test(path)) {
+            markTmsCreated(path)
+            useProjectStore.getState().setNoTmsFile(false)
+          }
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(newContent) })
           this.readFileState.set(path, { content: newContent, timestamp: Date.now(), offset: undefined, limit: undefined, source: 'write', hash: this.simpleHash(newContent), fsVersion: getFsVersion() })
           bumpFsVersion(`write:${path}`)
@@ -2962,14 +3112,16 @@ ${preview}
         // Mirrors claude-vaz FileEditTool.ts:275-287 (readFileState + isPartialView).
         const readState = this.readFileTimestamps.get(path)
         if (!readState) {
-          return `Error: You must ${READ_FILE}("${path}") before editing it. Read the file first to see the current content, then call ${EDIT_FILE}.`
+          this.recordReadBeforeWriteBlocked(EDIT_FILE, 'not_read')
+          return `Error: You must call ${READ_ALIAS} on "${path}" before editing it. Read the file first to see the current content, then call ${EDIT_FILE}.`
         }
         // isPartialView: if the model only saw an auto-injected partial view
-        // (e.g. CLAUDE.md with stripped frontmatter), it must do a full Read
+        // (e.g. stripped/truncated project memory), it must do a full Read
         // first — the auto-injected content may not match what's on disk.
         const readStateEntry = this.readFileState.get(path)
         if (readStateEntry?.isPartialView) {
-          return `Error: You must ${READ_FILE}("${path}") before editing it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${EDIT_FILE}.`
+          this.recordReadBeforeWriteBlocked(EDIT_FILE, 'partial_view')
+          return `Error: You must call ${READ_ALIAS} on "${path}" before editing it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${EDIT_FILE}.`
         }
 
         // Re-read from disk before generating the diff. `fsVersion` only tracks
@@ -2979,7 +3131,8 @@ ${preview}
         const currentHash = this.simpleHash(content)
         if (currentHash !== readState.hash) {
           this.readFileTimestamps.delete(path)
-          return `Error: File "${path}" has been modified since you last read it. Read it again with ${READ_FILE} before editing.`
+          this.recordReadBeforeWriteBlocked(EDIT_FILE, 'modified_since_read')
+          return `Error: File "${path}" has been modified since you last read it. Read it again with ${READ_ALIAS} before editing.`
         }
 
         const occurrences = content.split(oldStr).length - 1
@@ -2988,7 +3141,7 @@ ${preview}
           void import('../../services/analytics').then(({ trackEvent }) => {
             trackEvent('edit_file_error', { kind: 'not_found', wrong_name: '' })
           }).catch(() => {})
-          return `Error: old_string not found in ${path}. The content you're trying to replace doesn't exist in the file. Read the file first to see the current content.`
+          return `Error: old_string not found in ${path}. The content you're trying to replace doesn't exist in the file. Use ${READ_ALIAS} first to see the current content.`
         }
 
         if (occurrences > 1) {
@@ -3076,6 +3229,90 @@ ${preview}
 
         return result.join('\n')
       }
+    })
+
+    // === Claude-like read aliases ===
+    // These names match the tool surface models commonly learn from Claude
+    // Code. ToolExecutor.execute canonicalizes them before execution, so they
+    // reuse the internal read_file/search_files/glob/list_directory handlers.
+    this.tools.set(READ_ALIAS, {
+      definition: {
+        name: READ_ALIAS,
+        description: 'Read a file. Claude Code-compatible alias for TM Code read_file. Use offset + limit for line ranges instead of cat/head/tail/sed.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            file_path: { type: 'string', description: 'File path to read' },
+            path: { type: 'string', description: 'Alias for file_path' },
+            offset: { type: 'number', description: '1-indexed line number to start from' },
+            limit: { type: 'number', description: 'Maximum number of lines to read' },
+            force: { type: 'boolean', description: 'Bypass duplicate-read suppression only when a previous Read range is no longer available after compaction/context loss.' },
+          },
+          required: ['file_path'],
+        },
+        concurrencySafe: true,
+      },
+      execute: async () => 'Internal alias error: Read should be canonicalized to read_file before execution.',
+    })
+
+    this.tools.set(GREP_ALIAS, {
+      definition: {
+        name: GREP_ALIAS,
+        description: 'Search file contents. Claude Code-compatible alias for TM Code search_files. Use this instead of grep, rg, ack, or ag via shell.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            pattern: { type: 'string', description: 'Search pattern (text or regex)' },
+            query: { type: 'string', description: 'Alias for pattern' },
+            path: { type: 'string', description: 'Directory or file to search. Default: project root/current directory.' },
+            directory: { type: 'string', description: 'Alias for path' },
+            glob: { type: 'string', description: 'Optional include glob, e.g. "*.ts" or "**/*.tsx"' },
+            caseSensitive: { type: 'boolean', description: 'Case sensitive search. Default: false' },
+            useRegex: { type: 'boolean', description: 'Interpret pattern as regex. Default: false' },
+            includePatterns: { type: 'array', items: { type: 'string' }, description: 'Glob patterns to include' },
+          },
+          required: ['pattern'],
+        },
+        concurrencySafe: true,
+      },
+      execute: async () => 'Internal alias error: Grep should be canonicalized to search_files before execution.',
+    })
+
+    this.tools.set(GLOB_ALIAS, {
+      definition: {
+        name: GLOB_ALIAS,
+        description: 'Find files by glob pattern. Claude Code-compatible alias for TM Code glob. Use this instead of find or fd via shell.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            pattern: { type: 'string', description: 'Glob pattern, e.g. "**/*.tsx" or "**/package.json"' },
+            path: { type: 'string', description: 'Directory to search from. Default: project root.' },
+            directory: { type: 'string', description: 'Alias for path' },
+          },
+          required: ['pattern'],
+        },
+        concurrencySafe: true,
+      },
+      execute: async () => 'Internal alias error: Glob should be canonicalized to glob before execution.',
+    })
+
+    this.tools.set(LS_ALIAS, {
+      definition: {
+        name: LS_ALIAS,
+        description: 'List a directory. Claude Code-style alias for TM Code list_directory. Use this instead of ls or tree via shell.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Directory path to list. Default: project root/current directory.' },
+            file_path: { type: 'string', description: 'Alias for path' },
+            directory: { type: 'string', description: 'Alias for path' },
+            maxDepth: { type: 'number', description: 'Maximum depth to traverse. Default: 3' },
+          },
+          required: [],
+        },
+        concurrencySafe: true,
+      },
+      execute: async () => 'Internal alias error: LS should be canonicalized to list_directory before execution.',
     })
 
     // === web_search ===
@@ -3525,7 +3762,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('delegate', {
       definition: {
         name: 'delegate',
-        description: 'Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (glob, search_files, read_file, list_directory). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X", "what\'s the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn.\n  • If you have nothing else to do, end your turn. Team results will be available on your next interaction. Tell the user you delegated the task and will synthesize results when ready.\n  • Do NOT call collect_results immediately after spawning unless you need the results right now to continue your current work.\n\nWhen NOT to use:\n  • The task is a single read_file call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.',
+        description: `Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (${GLOB_ALIAS}, ${GREP_ALIAS}, ${READ_ALIAS}, ${LS_ALIAS}). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X", "what's the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn.\n  • If you have nothing else to do, end your turn. Team results will be available on your next interaction. Tell the user you delegated the task and will synthesize results when ready.\n  • Do NOT call collect_results immediately after spawning unless you need the results right now to continue your current work.\n\nWhen NOT to use:\n  • The task is a single ${READ_ALIAS} call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.`,
         input_schema: {
           type: 'object',
           properties: {

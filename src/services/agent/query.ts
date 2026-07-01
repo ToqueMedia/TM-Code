@@ -362,6 +362,10 @@ export interface QueryParams {
   toolsetSelector?: import('./toolsetSelector').ToolsetSelector;
   /** Auxiliary-context selection — core/auxiliary breakdown for the inspector. */
   auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection;
+  /** Execution phase for bootstrap/original-task telemetry and guardrails. */
+  executionPhase?: 'project_bootstrap' | 'original_task';
+  /** True when the original user request asks to implement/change/fix files. */
+  mutableTask?: boolean;
   /** Returns telemetry from the last delegate call, or null if delegate
    *  wasn't called this run. Populated by the ToolExecutor bridge. */
   getDelegateTelemetry?: () => {
@@ -386,6 +390,10 @@ export interface QueryTerminal {
   noEditGuardTriggered?: boolean;
   firstWriteTurn?: number;
   writeActionCount?: number;
+  originalTaskWriteActionCount?: number;
+  originalTaskFirstWriteTurn?: number;
+  noEditGuardReason?: string;
+  noEditRecoveryAction?: string;
   completionGuardDecision?: string;
   completionGuardReason?: string;
 }
@@ -897,6 +905,8 @@ export async function* query(
 
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  const executionPhase = params.executionPhase ?? 'original_task';
+  const mutableTask = params.mutableTask === true && executionPhase === 'original_task';
   const loopDetectorState = createLoopDetectorState();
   let thinkingOnlyRecoveryCount = 0;
 
@@ -914,6 +924,8 @@ export async function* query(
   let writeActionCount = 0;
   /** Set when the no-edit guardrail fires; reported on the NEXT request's usage entry. */
   let guardTriggeredLastTurn = false;
+  let noEditGuardReason: string | undefined;
+  let noEditRecoveryAction: string | undefined;
 
   // eslint-disable-next-line no-constant-condition
   queryLoop: while (true) {
@@ -1863,6 +1875,8 @@ export async function* query(
             ? crypto.randomUUID()
             : `${state.turnCount}-${Date.now()}`,
           turn: state.turnCount,
+          executionPhase,
+          mutableTask,
           model,
           inputTokens: turnUsage?.prompt_tokens ?? 0,
           outputTokens: turnUsage?.completion_tokens ?? 0,
@@ -1886,7 +1900,7 @@ export async function* query(
           // which profile the Intent Router chose, the core/auxiliary token
           // split, the savings, and which tools were expanded vs denied.
           selectedPromptProfile: auxiliarySelection?.profile,
-          selectedToolProfile: auxiliarySelection?.profile,
+          selectedToolProfile: toolsetSelector?.getProfile() ?? auxiliarySelection?.profile,
           coreContextTokens: payloadReport?.coreContextTokens,
           coreSystemTokens: payloadReport?.coreSystemTokens,
           onDemandIndexTokens: payloadReport?.onDemandIndexTokens,
@@ -1918,8 +1932,11 @@ export async function* query(
           routerDiagnostics: auxiliarySelection?.routerDiagnostics,
           // ── Context Planner telemetry (audit) ──
           contextPlannerStatus: auxiliarySelection?.contextPlannerStatus,
+          contextPlannerSource: auxiliarySelection?.contextPlannerSource,
+          contextPlannerModel: auxiliarySelection?.contextPlannerModel,
           contextPlannerError: auxiliarySelection?.contextPlannerError,
           contextPlannerRawOutput: auxiliarySelection?.contextPlannerRawOutput,
+          contextPlannerFallbackReason: auxiliarySelection?.contextPlannerFallbackReason,
           contextPlannerTaskDomain: auxiliarySelection?.contextPlan?.taskDomain,
           contextPlannerRequiredCapabilities: auxiliarySelection?.contextPlan?.requiredCapabilities,
           contextPlannerSelectedContexts: auxiliarySelection?.contextPlan?.selectedContexts,
@@ -1954,8 +1971,12 @@ export async function* query(
           runHasEdited,
           noEditRecoveryCount,
           noEditGuardTriggered: guardTriggeredLastTurn,
+          noEditGuardReason,
+          noEditRecoveryAction,
           firstWriteTurn,
           writeActionCount,
+          originalTaskWriteActionCount: executionPhase === 'original_task' ? writeActionCount : 0,
+          originalTaskFirstWriteTurn: executionPhase === 'original_task' ? firstWriteTurn : undefined,
           // ── Delegate/sub-agent telemetry ──
           // Read from the toolExecutor's last delegate call info. Populated
           // on the turn AFTER delegate was called (onRequestUsage fires before
@@ -2174,20 +2195,20 @@ export async function* query(
         }
       }
 
-      // Guardrail: bugfix_local (readOnly=false) that ends without a single
-      // file mutation. The model likely diagnosed the bug but deferred the
-      // fix ("No próximo turno, aplicarei…") — often because edit_file is
-      // intentionally excluded from the bugfix_local base toolset and the
-      // model didn't call request_tools to activate it. Give it one chance
-      // to continue; if it stops again without editing, let it end.
+      // Guardrail: mutable original-task run that ends without a single file
+      // mutation. The model likely diagnosed the work but deferred the edit.
+      // Give it one chance to continue; if it stops again without editing,
+      // let it end with explicit telemetry instead of looping on reads.
       if (
+        mutableTask &&
         !runHasEdited &&
         noEditRecoveryCount < 1 &&
         toolsetSelector &&
-        !toolsetSelector.isReadOnly() &&
-        toolsetSelector.getProfile() === "bugfix_local"
+        !toolsetSelector.isReadOnly()
       ) {
         const hasEditFile = toolsetSelector.isActive(EDIT_FILE);
+        noEditGuardReason = "mutable original_task attempted to stop without file edit";
+        noEditRecoveryAction = hasEditFile ? "apply_edit" : "request_tools:edit_file";
         state = {
           ...state,
           messages: [
@@ -2195,8 +2216,8 @@ export async function* query(
             {
               role: "user",
               content: hasEditFile
-                ? "You have edit_file available but have not applied any edit yet. Apply the fix now — do not defer to the next turn."
-                : "You have not applied any file edit yet. The edit_file tool is not in your active toolset — call request_tools to activate it, then apply the fix. Do not defer to the next turn — continue now.",
+                ? "You have edit_file available but have not applied any edit yet. Apply the requested change now — do not defer to the next turn."
+                : "You have not applied any file edit yet. The edit_file tool is not in your active toolset — call request_tools to activate it, then apply the requested change. Do not defer to the next turn — continue now.",
             },
           ],
           continuationCount: 0,
@@ -2219,6 +2240,10 @@ export async function* query(
         noEditGuardTriggered: noEditRecoveryCount > 0,
         firstWriteTurn,
         writeActionCount,
+        originalTaskWriteActionCount: executionPhase === 'original_task' ? writeActionCount : 0,
+        originalTaskFirstWriteTurn: executionPhase === 'original_task' ? firstWriteTurn : undefined,
+        noEditGuardReason,
+        noEditRecoveryAction,
         completionGuardDecision:
           noEditRecoveryCount > 0 && runHasEdited
             ? "recovered_then_completed"
@@ -2228,8 +2253,8 @@ export async function* query(
         completionGuardReason:
           noEditRecoveryCount > 0
             ? runHasEdited
-              ? "bugfix_local readOnly=false attempted to stop without edit; guardrail steered the model to request_tools + apply the fix"
-              : "bugfix_local readOnly=false attempted to stop without edit; guardrail fired but model did not recover"
+              ? "mutable original_task attempted to stop without edit; guardrail steered the model to request/edit and apply the change"
+              : "mutable original_task attempted to stop without edit; guardrail fired but model did not recover"
             : undefined,
       };
     }

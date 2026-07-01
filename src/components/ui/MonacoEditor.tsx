@@ -525,33 +525,19 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
       }
     }));
 
-    // Content change — autosave directly to disk, then refresh git gutter
-    // Uses pathRef.current (not boundPath) so it works across model swaps
-    let saveGeneration = 0;
+    // Content change — keep the editor store current for dirty-buffer recovery.
+    // explicit Save/Cmd+S remains the only path that writes the real file.
     disposablesRef.current.push(
       ed.onDidChangeModelContent(() => {
         dirtyRef.current = true;
-        saveGeneration++;
+        const currentPath = pathRef.current;
+        if (currentPath) {
+          const content = ed.getValue();
+          pendingRef.current = { path: currentPath, content };
+          pushContentToStore(currentPath, content);
+        }
         if (autoSaveRef.current) clearTimeout(autoSaveRef.current);
-        autoSaveRef.current = setTimeout(() => {
-          autoSaveRef.current = null;
-          const savePath = pathRef.current;
-          const inst = editorRef.current;
-          if (!inst || !savePath) return;
-          const gen = saveGeneration;
-          try {
-            const content = inst.getValue();
-            pendingRef.current = { path: savePath, content };
-            FileService.writeFile(savePath, content).then(() => {
-              if (gen === saveGeneration) {
-                dirtyRef.current = false;
-              }
-              if (editorRef.current) updateGitGutter(editorRef.current);
-            }).catch(e =>
-              logger.error('editor', 'Autosave failed', e)
-            );
-          } catch {}
-        }, 3000);
+        autoSaveRef.current = null;
       })
     );
 
@@ -761,15 +747,13 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
       disposablesRef.current.forEach(d => d.dispose());
       disposablesRef.current = [];
 
-      // Save content on unmount
+      // File autosave on unmount is temporarily disabled. Preserve the latest
+      // buffer in the editor store only; explicit Save writes the real file.
       if (inst && currentPath) {
         let content: string | null = null;
         try { content = inst.getValue() ?? null; } catch {}
         if (!content && pendingRef.current?.path === currentPath) content = pendingRef.current.content;
         if (content) {
-          FileService.writeFile(currentPath, content).catch(e =>
-            logger.error('editor', 'Save on unmount failed', e)
-          );
           pushContentToStore(currentPath, content);
         }
       }

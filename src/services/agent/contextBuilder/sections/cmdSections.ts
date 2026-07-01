@@ -15,11 +15,13 @@ import { buildMemoryGuidanceSection } from '../../memoryGuidance'
 import SkillService from '../../skillService'
 import {
   READ_FILE, SEARCH_FILES, LIST_DIRECTORY, GLOB,
+  READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   READ_SKILL,
   EXECUTE_COMMAND, EXECUTE_COMMAND_BACKGROUND,
   UPDATE_TASKS,
 } from '../../toolNames'
 import { sanitizeProjectContent, skillsFromHashtags } from '../helpers'
+import { markTmsStubSent } from '../../tmsContext'
 import {
   detectProjectType,
   detectProjectTypeFromFiles,
@@ -107,19 +109,19 @@ When you hit an obstacle, do NOT use destructive actions as a shortcut to make i
 // Verbatim structure from claude-vaz (constants/prompts.ts: getUsingYourToolsSection)
 // — "Do NOT use Bash..." imperative + bulleted dedicated-tool mappings + Task tool
 // discipline + parallel-call rule. Tool names mapped to TM Code's: BASH_TOOL_NAME →
-// execute_command, FILE_READ_TOOL_NAME → read_file, etc.
+// execute_command, FILE_READ_TOOL_NAME → Read/read_file, etc.
 export function getCmdToolsSection(): string {
   return `# Using your tools
 
  - Use the right tool for each task — prefer dedicated tools over shell equivalents:
-   - \`${READ_FILE}\` — read file contents (replaces \`cat\`, \`head\`, \`tail\`)
-   - \`${SEARCH_FILES}\` — search text/patterns in files (replaces \`grep\`, \`rg\`, \`ack\`)
-   - \`${LIST_DIRECTORY}\` — list directory contents (replaces \`ls\`, \`tree\`)
-   - \`${GLOB}\` — find files by pattern (replaces \`find\`, \`fd\`)
+   - \`${READ_ALIAS}\` — read file contents (internal \`${READ_FILE}\`; replaces \`cat\`, \`head\`, \`tail\`)
+   - \`${GREP_ALIAS}\` — search text/patterns in files (internal \`${SEARCH_FILES}\`; replaces \`grep\`, \`rg\`, \`ack\`)
+   - \`${LS_ALIAS}\` — list directory contents (internal \`${LIST_DIRECTORY}\`; replaces \`ls\`, \`tree\`)
+   - \`${GLOB_ALIAS}\` — find files by pattern (internal \`${GLOB}\`; replaces \`find\`, \`fd\`)
    - \`${EXECUTE_COMMAND}\` — run CLIs, tests, builds, package managers, git, curl, and system operations
  - Break down and manage your work with the \`${UPDATE_TASKS}\` tool. Mark each task as completed as soon as you are done with it.
 	 - \`${READ_SKILL}\`: load the full content of a skill listed in "Skills available". Call ONCE per skill when its topic is in scope — content stays in history afterward.
-	 - \`delegate\`: delegate a task to a team member. Returns immediately — the task runs in background. Team members: **Explore** (read-only codebase search), **Research** (web + skills), **Verify** (adversarial verification). All tasks run in parallel. After delegating, if you have no other work, end your turn — results will be available on next interaction. **Do NOT delegate trivial tasks** — if the answer is one \`read_file\`, \`glob\`, or \`search_files\` call away, just do it yourself. Delegation adds 30-60s of overhead; reserve it for multi-step research or verification.
+	 - \`delegate\`: delegate a task to a team member. Returns immediately — the task runs in background. Team members: **Explore** (read-only codebase search), **Research** (web + skills), **Verify** (adversarial verification). All tasks run in parallel. After delegating, if you have no other work, end your turn — results will be available on next interaction. **Do NOT delegate trivial tasks** — if the answer is one \`${READ_ALIAS}\`, \`${GLOB_ALIAS}\`, or \`${GREP_ALIAS}\` call away, just do it yourself. Delegation adds 30-60s of overhead; reserve it for multi-step research or verification.
 	 - \`collect_results\`: collect results from team members. Returns immediately with finished results — does NOT block. The system auto-wakes you when new results arrive.
 	 - \`execute_command_background\`: start long-running commands and continue useful work. The system auto-wakes you when the command exits.
 	 - \`check_background_commands\`: read background command output once after auto-wake or after doing other useful work. If the command is still running, do NOT call it repeatedly; end your turn and wait for auto-wake.`
@@ -245,11 +247,9 @@ export function getCmdGlobalMemorySection(ctx: CmdPromptContext): string | null 
  * Mirrors the chat-mode `getMemoryGuidanceSection` logic but adapted
  * for Terminal mode's higher autonomy (no diff approval, direct writes).
  *
- * Three paths:
+ * Two paths:
  *  1. TMS.md exists → keep it updated.
  *  2. TMS.md missing → create it after the first significant task.
- *  3. TMS.md missing + CLAUDE.md exists → still create TMS.md (CLAUDE.md
- *     is for instructions, TMS.md is for persistent memory / milestones).
  */
 export function getCmdTmsGuidanceSection(ctx: CmdPromptContext): string | null {
   if (ctx.tmsContent) {
@@ -275,10 +275,25 @@ Use your existing knowledge of the project (file reads, package.json, directory 
  */
 export function getCmdTmsContentSection(ctx: CmdPromptContext): string | null {
   if (!ctx.tmsContent) return null
-  const truncated = ctx.tmsContent.length > 6000
-    ? ctx.tmsContent.slice(0, 6000) + '\n\n[... truncated — read TMS.md for full content]'
-    : ctx.tmsContent
-  return `# Project memory\n${sanitizeProjectContent(truncated)}`
+  const headings = ctx.tmsContent
+    .split('\n')
+    .filter(line => /^#{1,3}\s+/.test(line.trim()))
+    .map(line => line.trim().replace(/^#+\s*/, ''))
+    .slice(0, 24)
+  const lastGeneratedAt =
+    ctx.tmsContent.match(/##\s+lastGeneratedAt\s*\n+([^\n]+)/i)?.[1]?.trim() ??
+    ctx.tmsContent.match(/lastGeneratedAt\s*:\s*([^\n]+)/i)?.[1]?.trim() ??
+    'unknown'
+  const stub = [
+    '# Project memory (TMS.md stub)',
+    `TMS.md exists at ${ctx.normalizedCwd}/TMS.md.`,
+    `lastGeneratedAt: ${lastGeneratedAt}`,
+    'Available sections:',
+    ...(headings.length ? headings.map(line => `- ${line}`) : ['- (section index unavailable)']),
+    'Do not inject full TMS.md by default. Read TMS.md only when the task needs a complete section.',
+  ].join('\n')
+  markTmsStubSent(stub)
+  return sanitizeProjectContent(stub)
 }
 
 /**
@@ -321,7 +336,7 @@ export function getCmdMemorySection(ctx: CmdPromptContext): string | null {
   if (ctx.memoryHasStale) {
     parts.push(
       `**Freshness:** some entries below are old. For entries that cite specific file paths, ` +
-      `function names, or flags, verify against current code (\`read_file\` / \`search_files\`) before recommending.`,
+      `function names, or flags, verify against current code (\`${READ_ALIAS}\` / \`${GREP_ALIAS}\`) before recommending.`,
     )
   }
 
@@ -388,7 +403,7 @@ export function getCmdReminderSection(loadedSkillNames: string[] = []): string {
 1. **COMPLETE** every task and run one highest-signal verification path before reporting done. If it passes, stop with summary + verification + next steps — do not keep re-checking. Say so when verification is not possible.
 2. File writes go to disk immediately — **DOUBLE-CHECK** paths and content.
 3. **AFTER** execute_command: **READ** full output. Exit code ≠ 0 → **FIX** the actual error and move on. **DO NOT BLINDLY RETRY** the exact same command.
-4. **For reading files**, use \`${READ_FILE}\`. **For searching**, use \`${SEARCH_FILES}\`. **For listing directories**, use \`${LIST_DIRECTORY}\`. **For finding files by pattern**, use \`${GLOB}\`. Use \`${EXECUTE_COMMAND}\` to run test runners (\`jest\`, \`vitest\`), scripts (\`ts-node\`, \`bun\`), and system commands.
+4. **For reading files**, use \`${READ_ALIAS}\` (internal \`${READ_FILE}\`). **For searching**, use \`${GREP_ALIAS}\` (internal \`${SEARCH_FILES}\`). **For listing directories**, use \`${LS_ALIAS}\` (internal \`${LIST_DIRECTORY}\`). **For finding files by pattern**, use \`${GLOB_ALIAS}\` (internal \`${GLOB}\`). Use \`${EXECUTE_COMMAND}\` to run test runners (\`jest\`, \`vitest\`), scripts (\`ts-node\`, \`bun\`), and system commands.
 5. **CONFIRM** dependencies are installed before importing. **INSTALL** first when missing.
 6. For destructive or shared-state actions: **CONFIRM** with the user first.
 7. ${sharedIdentityReminder()}
