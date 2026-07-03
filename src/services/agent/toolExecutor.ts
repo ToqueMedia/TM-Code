@@ -2198,21 +2198,71 @@ ${preview}
   // `this.simpleHash(...)` call sites.
   private simpleHash(str: string): number { return simpleHash(str) }
 
-  private validateCommand(command: string): void {
+  private splitCommandTokens(command: string): string[] {
+    return command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => {
+      if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+        return token.slice(1, -1)
+      }
+      return token
+    }) ?? []
+  }
+
+  private isEphemeralCurlOutputPath(pathValue: string): boolean {
+    return pathValue === '/dev/null'
+      || pathValue === '-'
+      || pathValue.startsWith('/tmp/')
+      || pathValue.startsWith('/private/tmp/')
+  }
+
+  private curlWritesOutsideEphemeralPath(command: string): boolean {
+    if (!/\bcurl\s/.test(command)) return false
+    const tokens = this.splitCommandTokens(command)
+
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i]
+
+      if (token === '--remote-name' || /^-[A-Za-z]*O[A-Za-z]*$/.test(token)) {
+        // Destination is derived from the URL and usually lands in CWD.
+        return true
+      }
+
+      let outputPath: string | undefined
+      if (token === '--output' || /^-[A-Za-z]*o$/.test(token)) {
+        outputPath = tokens[i + 1]
+      } else if (token.startsWith('--output=')) {
+        outputPath = token.slice('--output='.length)
+      } else {
+        const shortOutput = token.match(/^-[A-Za-z]*o(.+)$/)
+        if (shortOutput) outputPath = shortOutput[1]
+      }
+
+      if (outputPath !== undefined && !this.isEphemeralCurlOutputPath(outputPath)) {
+        return true
+      }
+    }
+
+    return false
+  }
+
+  private validateCommand(command: string, options: { allowDevServer?: boolean } = {}): void {
     // Read-only mode: block file-writing shell operations (verification agents).
-    // Allow common test/lint/typecheck commands even if they contain patterns
-    // that look like writes (e.g., npm test may use internal redirects).
     if (this.readOnlyMode) {
       // Strip common prefixes that don't affect read/write nature: cd ../ &&, env VAR=val, etc.
       const strippedCmd = command.replace(/^\s*(cd\s+\S+\s*&&\s*)+/, '').replace(/^\s*([\w]+=\S+\s+)+/, '').trim()
-      // Allowlist: commands that are safe diagnostic operations
-      const isAllowedDiagnostic = /^(npm\s+(test|run\s+(test|lint|typecheck|check|tsc|build))|npx\s+(tsc|eslint|jest|vitest|mocha|next\s+lint)|pnpm\s+(test|run\s+(test|lint|typecheck|check|tsc|build))|yarn\s+(test|run\s+(test|lint|typecheck|check|tsc|build))|bun\s+(test|run\s+(test|lint|typecheck|check|tsc|build))|ng\s+(test|lint|build)|curl\s|cat\s|head\s|tail\s|wc\s|grep\s|rg\s|find\s|ls\s|echo\s)/.test(strippedCmd)
+      const pipeToInterpreter = /\|\s*(?:sh|bash|zsh|fish|python3?|node|ruby|perl|php|deno|bun)\b/i.test(command)
+      const hasWritePattern = ToolExecutor.WRITE_COMMAND_PATTERNS.some((pattern) => pattern.test(command))
+      const curlWriteOutsideEphemeralPath = this.curlWritesOutsideEphemeralPath(command)
+      const mutatingCommand = this.matchStateMutatingCommand(command)
+      if (hasWritePattern || curlWriteOutsideEphemeralPath || mutatingCommand || pipeToInterpreter) {
+        throw new Error(`Command blocked: "${command}" would modify files or execute unsafe shell flow, but you are running in read-only verification mode. Only diagnostic commands (tests, linters, type checkers, curl) are allowed.`)
+      }
+
+      // Allowlist: commands that are safe diagnostic operations.
+      const isDevServerCommand = options.allowDevServer === true
+        && /^(npm\s+(start|run\s+(dev|start|serve))|npx\s+(vite|next\s+dev)|pnpm\s+(dev|start|serve|run\s+(dev|start|serve))|yarn\s+(dev|start|serve|run\s+(dev|start|serve))|bun\s+(dev|start|serve|run\s+(dev|start|serve))|vite\b|next\s+dev\b)/.test(strippedCmd)
+      const isAllowedDiagnostic = isDevServerCommand || /^(npm\s+(test|run\s+(test|lint|typecheck|check|tsc|build))|npx\s+(tsc|eslint|jest|vitest|mocha|next\s+lint)|pnpm\s+(test|build|lint|typecheck|tsc|run\s+(test|lint|typecheck|check|tsc|build))|yarn\s+(test|build|lint|typecheck|tsc|run\s+(test|lint|typecheck|check|tsc|build))|bun\s+(test|build|lint|typecheck|tsc|run\s+(test|lint|typecheck|check|tsc|build))|ng\s+(test|lint|build)|git\s+(status|diff|show|log|ls-files)\b|curl\s|cat\s|head\s|tail\s|wc\s|grep\s|rg\s|find\s|ls\s|echo\s|pwd\b|date\b|which\s|command\s+-v\s|ps\s)/.test(strippedCmd)
       if (!isAllowedDiagnostic) {
-        for (const pattern of ToolExecutor.WRITE_COMMAND_PATTERNS) {
-          if (pattern.test(command)) {
-            throw new Error(`Command blocked: "${command}" would modify files, but you are running in read-only verification mode. Only diagnostic commands (tests, linters, type checkers, curl) are allowed.`)
-          }
-        }
+        throw new Error(`Command blocked: "${command}" is not an approved diagnostic command in read-only verification mode. Use tests, linters, type checkers, curl, read-only inspection commands, or start_dev_server for supervised dev servers.`)
       }
     }
   }
@@ -3414,22 +3464,56 @@ ${preview}
         }
 
         if (!response.ok) {
-          return `Error: Failed to fetch ${url} (status: ${response.status})`
+          return `Error: Failed to fetch ${url} (status: ${response.status})\n\nDo not conclude the page is inaccessible from this fetch failure alone. If this is an official/current documentation page, try web_search for the canonical URL or an alternate docs path. If terminal access is available, use a browser-like fetch such as curl -L -A Mozilla/5.0 against the URL and extract the relevant text locally before reporting the docs as unavailable.`
         }
 
         const result = await response.json() as {
           url: string
           status: number
+          contentType?: string
+          strategy?: string
+          attempts?: Array<{
+            strategy: string
+            status: number
+            contentType?: string
+            finalUrl?: string
+            error?: string
+          }>
           content: string
           truncated: boolean
           error?: string
         }
 
+        const attemptsSummary = Array.isArray(result.attempts) && result.attempts.length > 0
+          ? result.attempts
+            .map((attempt) => {
+              const outcome = attempt.error ? `error=${attempt.error}` : `status=${attempt.status}`
+              const finalUrl = attempt.finalUrl && attempt.finalUrl !== result.url ? ` url=${attempt.finalUrl}` : ''
+              return `${attempt.strategy}(${outcome}${finalUrl})`
+            })
+            .join(' -> ')
+          : ''
+
         if (result.error) {
-          return `Error fetching ${url}: ${result.error}`
+          const attempts = attemptsSummary ? `\nFetch attempts: ${attemptsSummary}` : ''
+          return `Error fetching ${url}: ${result.error}${attempts}\n\nDo not conclude the page is inaccessible from this fetch failure alone. If this is an official/current documentation page, try web_search for the canonical URL or an alternate docs path. If terminal access is available, use a browser-like fetch such as curl -L -A Mozilla/5.0 against the URL and extract the relevant text locally before reporting the docs as unavailable.`
         }
 
-        let output = `URL: ${result.url}\nStatus: ${result.status}\n\n${result.content}`
+        let output = `URL: ${result.url}\nStatus: ${result.status}`
+
+        if (result.strategy) {
+          output += `\nFetch strategy: ${result.strategy}`
+        }
+
+        if (attemptsSummary) {
+          output += `\nFetch attempts: ${attemptsSummary}`
+        }
+
+        output += `\n\n${result.content}`
+
+        if (result.status >= 400) {
+          output += `\n\n[Fetch returned HTTP ${result.status}. For official/current documentation, verify with web_search for a canonical URL or a browser-like terminal fetch before concluding the page is unavailable.]`
+        }
 
         if (result.truncated) {
           output += '\n\n[Content was truncated to fit context window]'
@@ -3545,7 +3629,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         let projectKind = input.project_kind as 'frontend' | 'backend' | 'fullstack' | undefined
         const legacyServerType = input.server_type as 'frontend' | 'backend' | undefined
         const explicitHint = typeof input.frontend_port_hint === 'number' ? input.frontend_port_hint : undefined
-        this.validateCommand(command)
+        this.validateCommand(command, { allowDevServer: true })
         const projectRoot = this.getProjectRoot()
 
         // Legacy server_type maps to the new project_kind
@@ -3762,7 +3846,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('delegate', {
       definition: {
         name: 'delegate',
-        description: `Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (${GLOB_ALIAS}, ${GREP_ALIAS}, ${READ_ALIAS}, ${LS_ALIAS}). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X", "what's the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn.\n  • If you have nothing else to do, end your turn. Team results will be available on your next interaction. Tell the user you delegated the task and will synthesize results when ready.\n  • Do NOT call collect_results immediately after spawning unless you need the results right now to continue your current work.\n\nWhen NOT to use:\n  • The task is a single ${READ_ALIAS} call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.`,
+        description: `Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (${GLOB_ALIAS}, ${GREP_ALIAS}, ${READ_ALIAS}, ${LS_ALIAS}). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup + read-only diagnostics (web_search, web_fetch, read_skill, curl via execute_command). Use for "find the API docs for X", "what's the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn.\n  • If you have nothing else to do, end your turn. Team results will be available on your next interaction. Tell the user you delegated the task and will synthesize results when ready.\n  • Do NOT call collect_results immediately after spawning unless you need the results right now to continue your current work.\n\nWhen NOT to use:\n  • The task is a single ${READ_ALIAS} call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.`,
         input_schema: {
           type: 'object',
           properties: {

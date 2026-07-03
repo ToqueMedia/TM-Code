@@ -96,7 +96,7 @@ describe('BYOK direct routing — OpenAI-compatible (Gemini)', () => {
 })
 
 describe('BYOK direct routing — DashScope prompt cache', () => {
-  it('adds cache_control to the stable system prefix for supported DashScope models', async () => {
+  it('adds cache_control to the stable system prefix for Kimi K2.7 Code', async () => {
     const byokFetch = createByokFetch({
       expectedHost: 'dashscope-intl.aliyuncs.com',
       apiShape: 'openai_compat',
@@ -108,7 +108,7 @@ describe('BYOK direct routing — DashScope prompt cache', () => {
       method: 'POST',
       headers: { Authorization: 'Bearer DASHSCOPE_USER_KEY', 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'qwen3.6-plus',
+        model: 'kimi-k2.7-code',
         max_tokens: 100,
         stream: true,
         messages: [

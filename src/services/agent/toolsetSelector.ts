@@ -255,8 +255,8 @@ export function requestToolsDefinition(allInactiveNames: string[]): OpenAI.ChatC
         '(e.g. write_file, create_file, delegate, save_memory, provision_*). ' +
         'The requested tools will be available on the next model step, then may be dropped if not requested again. ' +
         'Call this ONCE with all the tools you need — do not call it repeatedly ' +
-        'for individual tools. After calling this, finish your current turn; ' +
-        'the tools will be active when you resume.',
+        'for individual tools. After calling this, wait for its tool result, then continue in the same run ' +
+        'using the activated tools on the next model step. Do not stop or defer the task just because you requested tools.',
       parameters: {
         type: 'object',
         properties: {

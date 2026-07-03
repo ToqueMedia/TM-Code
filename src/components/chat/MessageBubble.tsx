@@ -22,14 +22,12 @@ import CredentialRequestCard from './CredentialRequestCard'
 import { AskUserQuestionCard } from './AskUserQuestionCard'
 import SubAgentCard from './SubAgentCard'
 import {
-  buildRequestEfficiencyReport,
   sessionToJson,
   sessionToMarkdown,
   triggerDownload,
   defaultExportFilename,
   buildEnvironmentSnapshot,
 } from '../../utils/sessionExport'
-import type { RequestEfficiencyReport } from '../../utils/sessionExport'
 import { useToastStore } from '../../stores/toastStore'
 import { normalizeAssistantText } from '../../utils/normalizeAssistantText'
 import { tokens } from '@/theme/tokens'
@@ -74,47 +72,6 @@ function toggleReasoningPreservingScroll(anchor: HTMLElement, toggle: () => void
     if (frames++ < 12) requestAnimationFrame(stabilize)
   }
   requestAnimationFrame(stabilize)
-}
-
-function compactCount(value: number): string {
-  if (value >= 1000) {
-    const rounded = Math.round(value / 100) / 10
-    return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}k`
-  }
-  return String(value)
-}
-
-function formatEfficiencySummary(report: RequestEfficiencyReport | null): string | null {
-  if (!report || report.totalRequests === 0) return null
-
-  const parts = [
-    `idx ${compactCount(report.symbolIndexRequests)}`,
-    `read ${compactCount(report.finalReadRangeCount)}`,
-  ]
-  if (report.skippedOverlappingReads > 0) {
-    parts.push(`skip ${compactCount(report.skippedOverlappingReads)}`)
-  }
-  if (report.adjustedReadRanges > 0) {
-    parts.push(`adj ${compactCount(report.adjustedReadRanges)}`)
-  }
-  if (report.readBeforeWriteBlockCount > 0) {
-    parts.push(`gate ${compactCount(report.readBeforeWriteBlockCount)}`)
-  }
-  return parts.join(' / ')
-}
-
-function formatEfficiencyTitle(report: RequestEfficiencyReport | null): string | undefined {
-  if (!report) return undefined
-  const lines = [
-    `${t('chat.contextEfficiency')}:`,
-    `${t('chat.efficiencyRequests')}: ${report.totalRequests.toLocaleString()}`,
-    `${t('chat.efficiencySymbolIndex')}: ${report.symbolIndexRequests.toLocaleString()} (${report.symbolIndexEntries.toLocaleString()} symbols)`,
-    `${t('chat.efficiencyReadRanges')}: ${report.finalReadRangeCount.toLocaleString()} (${report.finalReadRangeFileCount.toLocaleString()} files)`,
-    `${t('chat.efficiencySkippedReads')}: ${report.skippedOverlappingReads.toLocaleString()}`,
-    `${t('chat.efficiencyAdjustedReads')}: ${report.adjustedReadRanges.toLocaleString()}`,
-    `${t('chat.efficiencyReadGates')}: ${report.readBeforeWriteBlockCount.toLocaleString()}`,
-  ]
-  return lines.join('\n')
 }
 
 interface MessageBubbleProps {
@@ -349,38 +306,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const updateCodeBlockStatus = useChatStore(s => s.updateCodeBlockStatus)
   const toggleReasoning = useChatStore(s => s.toggleReasoning)
   const toggleReasoningBlock = useChatStore(s => s.toggleReasoningBlock)
-  const requestUsageLog = useChatStore(s => {
-    if (!s.activeSessionId) return undefined
-    return s.sessions.get(s.activeSessionId)?.requestUsageLog
-  })
-  const latestAssistantMessageId = useChatStore(s => {
-    if (!s.activeSessionId) return null
-    const session = s.sessions.get(s.activeSessionId)
-    if (!session) return null
-    for (let i = session.messages.length - 1; i >= 0; i--) {
-      if (session.messages[i].role === 'assistant') return session.messages[i].id
-    }
-    return null
-  })
   const [messageCopied, setMessageCopied] = useState(false)
-  const efficiencyReport = useMemo(
-    () => buildRequestEfficiencyReport(requestUsageLog),
-    [requestUsageLog],
-  )
-  const efficiencySummary = useMemo(
-    () => formatEfficiencySummary(efficiencyReport),
-    [efficiencyReport],
-  )
-  const efficiencyTitle = useMemo(
-    () => formatEfficiencyTitle(efficiencyReport),
-    [efficiencyReport],
-  )
-  const showEfficiencySummary =
-    !isUser
-    && !isSystem
-    && !isStreaming
-    && message.id === latestAssistantMessageId
-    && efficiencySummary !== null
 
   // Single stable handler for both reasoning surfaces (legacy message-level
   // and per-block). MessageBubble used to build a fresh inline lambda inside
@@ -956,33 +882,6 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             as JSON or Markdown via the browser's save-as dialog. */}
         {!isUser && !isSystem && !isStreaming && copyableText() && (
           <Flex mt={2} justify="flex-end" gap={1} align="center">
-            {showEfficiencySummary && (
-              <Flex
-                align="center"
-                gap={1.5}
-                h="24px"
-                px={2}
-                borderRadius="6px"
-                border={`1px solid ${tokens.colors.border.glass}`}
-                bg={tokens.colors.bg.whiteMicro}
-                color={tokens.colors.text.disabled}
-                title={efficiencyTitle}
-                aria-label={t('chat.contextEfficiency')}
-              >
-                <FiCode size={11} />
-                <Text
-                  as="span"
-                  fontSize="10px"
-                  fontWeight={600}
-                  fontFamily={tokens.fontFamily.mono}
-                  lineHeight="1"
-                  whiteSpace="nowrap"
-                >
-                  {efficiencySummary}
-                </Text>
-              </Flex>
-            )}
-
             {/* Copy — opens a small menu so the user picks scope:
                 "Copiar conversa" → just this assistant reply
                 "Copiar sessão"   → full transcript as Markdown */}

@@ -1,4 +1,4 @@
-import { memo, lazy, Suspense, useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react'
+import { memo, useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react'
 import { Flex, Box, HStack, Text, VStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { FiSidebar, FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle, FiDatabase, FiEye } from 'react-icons/fi'
@@ -25,7 +25,6 @@ import SessionDropdown from './SessionDropdown'
 import ChatSuggestions from './ChatSuggestions'
 import { CollabShareControls } from '../collab/CollabShareControls'
 import { GoalCelebration } from '../celebration/GoalCelebration'
-const CheckpointPanel = lazy(() => import('../chat/CheckpointPanel'))
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -40,7 +39,8 @@ function ChatView() {
   const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPlanViewerOpen = useLayoutStore(s => s.isPlanViewerOpen)
-  const isSidebarMode = viewMode === 'preview' || isPlanViewerOpen
+  const isCheckpointDrawerOpen = useLayoutStore(s => s.isCheckpointDrawerOpen)
+  const isSidebarMode = viewMode === 'preview' || isPlanViewerOpen || isCheckpointDrawerOpen
   const mcpServers = useMcpStore(s => s.servers)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
@@ -695,9 +695,6 @@ function ChatView() {
                 ))}
                 <AgentActivityIndicator />
                 {postCompactSurveyPending && !isStreaming && <PostCompactSurvey />}
-                <Suspense fallback={null}>
-                  <CheckpointPanel />
-                </Suspense>
               </Box>
             )}
           </Box>

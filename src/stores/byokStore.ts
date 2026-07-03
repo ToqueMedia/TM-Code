@@ -235,7 +235,7 @@ function buildDirectValidationHeaders(provider: ByokProvider, apiKey: string): R
 //
 // BYOK is IDE → SDK → provider DIRECT (never the TM worker), so the catalog is
 // owned by the IDE — there is no server `/v1/byok/providers` fetch anymore.
-// Curated set: Google Gemini + DashScope/Alibaba + StepFun (OpenAI-compat),
+// Curated set: Google Gemini + DashScope/Alibaba (OpenAI-compat),
 // Custom (free-text OpenAI-compatible), and Anthropic (native Messages API).
 //
 // `contextWindow` here is only a DEFAULT — under BYOK the user declares the
@@ -273,28 +273,16 @@ const CLOUD_PROVIDERS: ByokProvider[] = [
     authHeader: 'Authorization',
     authPrefix: 'Bearer ',
     apiShape: 'openai_compat',
-    // supportsThinking:false by default — DashScope's `enable_thinking` only
-    // applies to some Qwen3 SKUs and errors on non-streaming; users opt in per
-    // model via "Other model" if they run a thinking SKU. The thinkingShape is
-    // still detected from the host (qwen_enable_thinking) when they do.
+    // Most DashScope presets stay supportsThinking:false unless docs confirm
+    // the model accepts `enable_thinking`. Kimi K2.7 Code is documented by
+    // DashScope with Deep Thinking, Visual Understanding, function calling,
+    // web search, structured output and cache support.
     models: [
+      { id: 'kimi-k2.7-code', label: 'Kimi K2.7 Code', capabilities: { images: true, audio: false, video: true, tools: true }, contextWindow: 262_144, supportsThinking: true, thinkingShape: 'qwen_enable_thinking' },
       { id: 'qwen3-max', label: 'Qwen3 Max', capabilities: { images: false, audio: false, video: false, tools: true }, contextWindow: 262_144, supportsThinking: false },
       { id: 'qwen3-coder-plus', label: 'Qwen3 Coder Plus', capabilities: { images: false, audio: false, video: false, tools: true }, contextWindow: 1_048_576, supportsThinking: false },
       { id: 'qwen-plus', label: 'Qwen Plus', capabilities: { images: false, audio: false, video: false, tools: true }, contextWindow: 131_072, supportsThinking: false },
       { id: 'qwen-max', label: 'Qwen Max', capabilities: { images: false, audio: false, video: false, tools: true }, contextWindow: 32_768, supportsThinking: false },
-    ],
-  },
-  {
-    id: 'stepfun',
-    name: 'StepFun',
-    enabled: true,
-    group: 'cloud',
-    defaultBaseURL: 'https://api.stepfun.ai/v1',
-    authHeader: 'Authorization',
-    authPrefix: 'Bearer ',
-    apiShape: 'openai_compat',
-    models: [
-      { id: 'step-3.7-flash', label: 'Step 3.7 Flash', capabilities: { images: true, audio: false, video: false, tools: true }, contextWindow: 262_144, supportsThinking: true, thinkingShape: 'openai_reasoning_effort' },
     ],
   },
   {

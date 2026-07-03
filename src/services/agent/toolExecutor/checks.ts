@@ -31,7 +31,8 @@ import {
 /**
  * `request_credentials` rejects fields whose IDs match any of these names —
  * those credentials live ONLY on the TM Code worker / are written by
- * provision_auth / provision_deploy. Asking the developer for them shows a
+ * provision_auth / provision_deploy, or are local TM Code defaults. Asking
+ * the developer for them shows a
  * dialog they cannot satisfy. The auth-proxy skill (hard rule #2) and the
  * publish-backend skill both forbid this in prose; this is the mechanical
  * enforcement after a real session (sess_1778931389233_p1v9ao, 2026-05-16)
@@ -55,12 +56,28 @@ export const PLATFORM_MANAGED_FIELD_IDS = new Set<string>([
   // Deploy / data layer (written by provision_deploy or never user-supplied)
   'APP_ID', 'FIREBASE_PROJECT_ID', 'FIREBASE_APP_ID',
   'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY',
-  // Database — the platform DB is reached via runtime IAM, no URL/key
-  'DATABASE_URL', 'FIRESTORE_EMULATOR_HOST',
+  // Database — DATABASE_URL is the local SQLite default; TMDB_* are deploy-injected
+  'DATABASE_URL', 'TMDB_URL', 'TMDB_TOKEN', 'FIRESTORE_EMULATOR_HOST',
 ])
 
 export function describePlatformManagedField(id: string): string | null {
   if (!PLATFORM_MANAGED_FIELD_IDS.has(id)) return null
+  if (id === 'DATABASE_URL') {
+    return (
+      `Blocked: "${id}" is a TM Code local development default, not a developer-owned secret. ` +
+      `Use DATABASE_URL=file:./dev.db for generated apps, or omit it and rely on the code fallback. ` +
+      `Do not ask the developer for it with request_credentials.\n\n` +
+      `Production does not receive the local SQLite file. Publish sends schema/migrations, provisions or reuses Turso, applies those migrations there, and injects TMDB_URL/TMDB_TOKEN into Cloud Run.`
+    )
+  }
+  if (id === 'TMDB_URL' || id === 'TMDB_TOKEN') {
+    return (
+      `Blocked: "${id}" is minted by the TM Code deploy/provisioning flow and injected into production by Cloud Run. ` +
+      `The developer does not own this value and should never be asked to paste it.\n\n` +
+      `Correct path: local development uses DATABASE_URL=file:./dev.db; Publish sends schema/migrations, provisions or reuses Turso, applies them, and injects TMDB_URL/TMDB_TOKEN. ` +
+      `Use provision_database only for an explicit production preflight/repair or PROD Data Viewer setup before publish.`
+    )
+  }
   return (
     `Blocked: "${id}" is a PLATFORM-MANAGED credential — never request it via this form. ` +
     `It is written automatically by provision_auth (auth/GIP credentials) or provision_deploy (deploy/DB credentials), ` +
@@ -252,7 +269,6 @@ export const WRITE_COMMAND_PATTERNS: readonly RegExp[] = [
   /\bchmod\s+/,       // change permissions
   /\bchown\s+/,       // change ownership
   /\bln\s+/,          // create links
-  /\bcurl\s+.*-[a-zA-Z]*o\b/, // curl -o writes to file
   /\bwget\s+/,        // wget downloads files
   /\bgit\s+(add|commit|push|checkout|reset|merge|rebase|stash|tag\s+-d)\b/, // git write ops
 ]

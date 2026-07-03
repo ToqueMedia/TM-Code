@@ -1,15 +1,15 @@
 import { memo, useState, useRef, useEffect, useCallback, lazy, Suspense } from 'react'
 import { Box, Flex, Text, HStack, Portal } from '@chakra-ui/react'
-import { FiLogOut, FiSettings, FiAlertCircle } from 'react-icons/fi'
+import { FiLogOut, FiSettings, FiAlertCircle, FiUploadCloud } from 'react-icons/fi'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { tokens } from '@/theme/tokens'
 import { useProjectStore } from '../stores/projectStore'
-import { useAgentStore } from '../stores/agentStore'
 import { useAuthStore } from '../stores/authStore'
-import { usePermissionStore } from '../stores/permissionStore'
 import { useLayoutStore } from '../stores/layoutStore'
 import { useChatStore } from '../stores/chatStore'
+import { useToastStore } from '../stores/toastStore'
 import FirebaseAuthService from '../services/auth/firebaseAuth'
+import { sendProjectToTmCodeWeb } from '../services/webExportService'
 import WindowControls from './ui/WindowControls'
 import MenuBar from './ui/titlebar/MenuBar'
 import { BrowserMissingDialog } from './dialogs/BrowserMissingDialog'
@@ -40,12 +40,10 @@ function getInitials(email: string | null, displayName: string | null): string {
 function MinimalTitleBar() {
   const currentProject = useProjectStore(s => s.currentProject)
   const cmdModeProjectPath = useProjectStore(s => s.cmdModeProjectPath)
-  const welcomeScreen = useProjectStore(s => s.welcomeScreen)
-  const status = useAgentStore(s => s.status)
   const user = useAuthStore(s => s.user)
-  const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showIssueReporter, setShowIssueReporter] = useState(false)
+  const [sendingToWeb, setSendingToWeb] = useState(false)
   const handleCloseIssueReporter = useCallback(() => setShowIssueReporter(false), [])
   const avatarRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -92,21 +90,6 @@ function MinimalTitleBar() {
   }, [showUserMenu])
 
   const t = useTranslation()
-
-  const statusConfig: Record<string, { color: string; label: string }> = {
-    idle: { color: tokens.colors.accent.green, label: t('titlebar.ready') },
-    awaiting_response: { color: tokens.colors.toolCall.runningText, label: t('titlebar.awaitingResponse') },
-    reasoning: { color: tokens.colors.accent.purple, label: t('titlebar.reasoning') },
-    generating: { color: tokens.colors.accent.primary, label: t('titlebar.generating') },
-    applying: { color: tokens.colors.accent.purple, label: t('titlebar.applying') },
-    compressing: { color: tokens.colors.accent.orange, label: t('titlebar.compressing') },
-    cancelled: { color: tokens.colors.text.disabled, label: t('titlebar.cancelled') },
-    error: { color: tokens.colors.accent.red, label: t('titlebar.error') },
-  }
-
-  const config = hasPendingPermission
-    ? { color: tokens.colors.toolCall.runningText, label: t('titlebar.awaitingPermission') }
-    : (statusConfig[status] || statusConfig.idle)
 
   async function handleClose() {
     try { await getCurrentWindow().close() } catch (e) { console.error('Window close failed:', e) }
@@ -177,9 +160,44 @@ function MinimalTitleBar() {
     await FirebaseAuthService.getInstance().signOut()
   }
 
+  function handleOpenSettings() {
+    setShowUserMenu(false)
+    const project = useProjectStore.getState()
+    if (!project.currentProject || project.cmdModeProjectPath) {
+      project.setWelcomeScreen(project.welcomeScreen === 'settings'
+        ? (project.cmdModeProjectPath ? null : 'hero')
+        : 'settings')
+      return
+    }
+
+    const layout = useLayoutStore.getState()
+    if (layout.viewMode === 'settings') {
+      layout.goBack()
+    } else {
+      layout.setViewMode('settings')
+    }
+  }
+
+  async function handleSendToWeb() {
+    if (!currentProject || sendingToWeb) return
+    setSendingToWeb(true)
+    useToastStore.getState().addToast('info', t('titlebar.sendToWebPreparing'))
+    try {
+      const result = await sendProjectToTmCodeWeb(currentProject)
+      useToastStore.getState().addToast('success', t('titlebar.sendToWebSent'))
+      const { openUrl } = await import('@tauri-apps/plugin-opener')
+      await openUrl(result.webUrl)
+    } catch (error) {
+      useToastStore.getState().addToast('error', error instanceof Error ? error.message : String(error))
+    } finally {
+      setSendingToWeb(false)
+    }
+  }
+
   const initials = user ? getInitials(user.email, user.displayName) : ''
-  const displayEmail = user?.email
-    ? (user.email.length > 24 ? user.email.substring(0, 22) + '...' : user.email)
+  const displayName = user?.displayName?.trim() || user?.email?.split('@')[0] || ''
+  const titlebarName = displayName
+    ? (displayName.length > 24 ? displayName.substring(0, 22) + '...' : displayName)
     : ''
 
   return (
@@ -227,67 +245,36 @@ function MinimalTitleBar() {
       {/* Center spacer */}
       <Flex flex={1} />
 
-      {/* Right: Agent status + User identity. The Publish button still lives
+      {/* Right: project actions + User identity. The Publish button still lives
           in the PreviewView toolbar and the Cmd/Ctrl+Shift+D shortcut keeps
           working — both routes open the same modal via layoutStore. */}
-      <HStack gap={3} flexShrink={0} pr={1} data-no-drag>
-        {/* Agent status */}
-        <HStack gap={1.5}>
-          <Box
-            w="7px"
-            h="7px"
-            borderRadius="full"
-            bg={config.color}
-            boxShadow={`0 0 6px ${config.color}40`}
-            css={status !== 'idle' && status !== 'cancelled' && status !== 'error' ? {
-              animation: 'pulse 1.5s ease-in-out infinite',
-              '@keyframes pulse': {
-                '0%, 100%': { opacity: 1 },
-                '50%': { opacity: 0.4 },
-              }
-            } : undefined}
-          />
-          <Text fontSize="11px" color={tokens.colors.text.secondary}>
-            {config.label}
-          </Text>
-        </HStack>
-
-        {/* Settings */}
-        <Flex
-          align="center"
-          justify="center"
-          w="28px"
-          h="28px"
-          borderRadius="6px"
-          cursor="pointer"
-          color={tokens.colors.text.secondary}
-          transition={`all ${tokens.transition.fast}`}
-          _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
-          role="button"
-          onClick={function () {
-            const project = useProjectStore.getState()
-            if (!project.currentProject || project.cmdModeProjectPath) {
-              project.setWelcomeScreen(project.welcomeScreen === 'settings'
-                ? (project.cmdModeProjectPath ? null : 'hero')
-                : 'settings')
-              return
-            }
-
-            const layout = useLayoutStore.getState()
-            if (layout.viewMode === 'settings') {
-              layout.goBack()
-            } else {
-              layout.setViewMode('settings')
-            }
-          }}
-        >
-          <FiSettings
-            size={14}
-            color={(cmdModeProjectPath || !currentProject) && welcomeScreen === 'settings'
-              ? tokens.colors.text.primary
-              : undefined}
-          />
-        </Flex>
+      <HStack gap={2} flexShrink={0} pr={1} data-no-drag>
+        {/* Send to TM Code Web */}
+        {currentProject && !cmdModeProjectPath && (
+          <Flex
+            align="center"
+            justify="center"
+            gap="6px"
+            px="9px"
+            h="28px"
+            borderRadius="6px"
+            cursor={sendingToWeb ? 'progress' : 'pointer'}
+            color={tokens.colors.text.secondary}
+            border={`1px solid ${tokens.colors.border.panel}`}
+            transition={`all ${tokens.transition.fast}`}
+            _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary, borderColor: tokens.colors.border.glass }}
+            role="button"
+            title={t('titlebar.sendToWebTitle')}
+            aria-label={t('titlebar.sendToWebTitle')}
+            opacity={sendingToWeb ? 0.6 : 1}
+            onClick={handleSendToWeb}
+          >
+            <FiUploadCloud size={14} />
+            <Text fontSize="11px" fontWeight="600" whiteSpace="nowrap">
+              {t('titlebar.sendToWebShort')}
+            </Text>
+          </Flex>
+        )}
 
         {/* User identity */}
         {user && (
@@ -318,8 +305,8 @@ function MinimalTitleBar() {
                   {initials}
                 </Text>
               </Flex>
-              <Text fontSize="11px" color={tokens.colors.text.secondary}>
-                {displayEmail}
+              <Text fontSize="11px" color={tokens.colors.text.secondary} maxW="130px" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">
+                {titlebarName}
               </Text>
             </Flex>
           </Box>
@@ -356,13 +343,26 @@ function MinimalTitleBar() {
           >
             <Box px={3} py={2} borderBottom={`1px solid ${tokens.colors.border.panel}`}>
               <Text fontSize="12px" color={tokens.colors.text.primary} fontWeight="500">
-                {user.displayName || user.email}
+                {displayName || t('activity.accounts')}
               </Text>
-              {user.displayName && (
-                <Text fontSize="11px" color={tokens.colors.text.secondary} mt={0.5}>
-                  {user.email}
-                </Text>
-              )}
+            </Box>
+            <Box
+              px={3}
+              py={1.5}
+              cursor="pointer"
+              display="flex"
+              alignItems="center"
+              gap={2}
+              role="button"
+              transition={`background ${tokens.transition.fast}`}
+              _hover={{ bg: tokens.colors.bg.whiteSubtle }}
+              css={{ '& *': { pointerEvents: 'none' } }}
+              onClick={handleOpenSettings}
+            >
+              <FiSettings size={13} color={tokens.colors.text.secondary} />
+              <Text fontSize="12px" color={tokens.colors.text.secondary}>
+                {t('menu.settings')}
+              </Text>
             </Box>
             <Box
               px={3}

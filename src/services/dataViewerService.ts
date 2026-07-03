@@ -94,12 +94,12 @@ export interface SourceDetectionResult {
  * Dev is always available (local SQLite database). The Rust command scans
  * for any *.db, *.sqlite, *.sqlite3 file in common subdirectories.
  *
- * Prod is only available when the project has a deploy configuration
- * (TMDB_URL + TMDB_TOKEN in .env).
+ * Prod is only available when the project has deploy/provisioned inspection
+ * credentials (TMDB_URL + TMDB_TOKEN in .env).
  */
 export async function detectSources(project: ProjectContext): Promise<SourceDetectionResult> {
-  // Dev is always available — the agent can create a database via provision_database.
-  // Prod is only available when the project has deploy config (TMDB_URL + TMDB_TOKEN).
+  // Dev is always available; generated apps use local SQLite (`file:./dev.db`).
+  // Prod is available after publish/deploy, or an explicit provision_database preflight.
   const env = await invoke<Record<string, string>>('read_env_vars', {
     projectPath: project.path,
     keys: ['TMDB_URL', 'TMDB_TOKEN'],
@@ -145,7 +145,7 @@ async function loadProdEnv(projectPath: string): Promise<ProdEnv> {
   })
   if (!env.TMDB_URL || !env.TMDB_TOKEN) {
     throw new Error(
-      'Database not provisioned. Run `provision_database` in chat, or switch the source to DEV.',
+      'Production database not available in this project. Publish/deploy it, run explicit `provision_database` preflight, or switch the source to DEV.',
     )
   }
   return { url: env.TMDB_URL, token: env.TMDB_TOKEN }

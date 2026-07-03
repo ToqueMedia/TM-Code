@@ -1,8 +1,8 @@
 /**
  * Research agent — web research + skill lookup.
  *
- * Sister to Explore: web_search + web_fetch + read_skill + read_file.
- * Cannot write files or execute commands.
+ * Sister to Explore: web_search + web_fetch + read_skill + read_file + read_large_result + execute_command.
+ * Cannot write files; execute_command runs under read-only diagnostics.
  */
 
 import type { SubAgentDefinition, SubAgentParentContext } from './types'
@@ -10,7 +10,7 @@ import type { SubAgentDefinition, SubAgentParentContext } from './types'
 export const RESEARCH_AGENT: SubAgentDefinition = {
   agentType: 'Research',
   whenToUse: 'Find API docs, external documentation, or technical information online',
-  tools: ['web_search', 'web_fetch', 'read_skill', 'read_file'],
+  tools: ['web_search', 'web_fetch', 'read_skill', 'read_file', 'read_large_result', 'execute_command'],
   maxTurns: 15,
   maxWallClockMs: 3 * 60 * 1000,
   color: '#a371f7',
@@ -37,11 +37,18 @@ ${depthGuide}
 - **web_fetch** — fetch the contents of a specific URL. Use to read the full content of a page you found via web_search.
 - **read_skill** — read a skill file from the project's skill directory. Use when you need context about a specific technology or framework.
 - **read_file** — read a file from the project. Use only when you need to cross-reference local code with external docs.
+- **read_large_result** — page through large web_fetch, command, or file outputs when a result was truncated.
+- **execute_command** — run read-only diagnostics such as curl/rg/cat. Use only after web_fetch/search cannot read an important official/current source.
 
 ## Typical flow
 1. Start with web_search to find relevant URLs
 2. web_fetch the most promising results to read their content
 3. Synthesize into a clear summary
+
+## Fetch Failure Policy
+- A failed web_fetch is only the primary fetch failing, not proof that the page is unavailable.
+- If an official or current documentation page fails, search for canonical docs URLs, renamed paths, changelog pages, cached mirrors, or source-backed references before giving up.
+- If the exact page still matters, verify with a browser-like read-only command such as curl -L -A Mozilla/5.0 <url> and inspect/extract the relevant text locally before concluding the docs are inaccessible.
 
 ## Rules
 - You are READ-ONLY. You cannot write, edit, create, or delete files.

@@ -66,6 +66,11 @@ export function sharedUiBaselineCore(): string {
 
 Design **state-first**. Before writing components, walk every state the page must render: empty, loading, error, populated, partially-populated. A polished-looking UI that breaks on empty data is not modern — it is auto-generated. Components render only as well as the worst state they ship.
 
+## Default web UI stack
+ - For **new web apps** where the developer did not explicitly choose a UI stack, use **Tailwind CSS + internal reusable components**. Create small local primitives such as \`Button\`, \`Card\`, \`Modal\`, \`Input\`, \`PageHeader\`, and \`EmptyState\`, then compose screens from those primitives.
+ - Keep those primitives in the project (for example \`src/components/ui/\`) and style them with Tailwind classes/tokens. Reuse them instead of inventing one-off button/card/input markup on every screen.
+ - Do not add or consult Chakra, MUI, Ant Design, Bootstrap, shadcn, or any other UI/component stack by default. Use another stack only when the developer asks for it or when maintaining an existing project that already uses it.
+
  - **Empty states GUIDE**: render a one-line message + a named call-to-action pointing to the next step ("No tasks yet — click + to add your first one"). An icon alone in dead space is not an empty state.
  - **Control groups render whole**: filter bars, segmented controls, tabs and toolbars show ALL their options together — disabled when not applicable, never just the matching one. A solo filter button with no siblings reads as broken.
  - **Hierarchy matches density**: heading weight tracks content weight. A 64px H1 above a small empty card creates visual dissonance — pick a heading size that fits what's underneath.
@@ -78,9 +83,9 @@ Design **state-first**. Before writing components, walk every state the page mus
 export function sharedTasteDefaults(): string {
   return `# Taste defaults (frontend/UI work)
 
-Default to **restraint over decoration**. When the developer hasn't named a visual style or invoked the \`frontend-design\` skill, lean toward a calm, neutral system — limited palette (one or two neutrals + one accent), intentional whitespace, single visual focus per surface, typographic hierarchy that reads as deliberate. The bar is "a paid product would ship this", not "looks like a demo". Avoid the auto-generated giveaways that brand a UI as AI-built on first glance: rainbow gradients, oversized hero \`<h1>\` floating over an empty card, three identical fake stat tiles, emoji used as decoration rather than meaning, leftover lorem-ipsum, drop shadows on everything. A boring well-spaced layout reads as confident; a flashy crowded one reads as a generator. Reach for the \`frontend-design\` skill only when the task explicitly calls for motion, micro-interactions, or distinctive typography — the taste defaults already cover the day-to-day case.
+Default to **restraint over decoration**. When the developer hasn't named a visual style, lean toward a calm, neutral system — limited palette (one or two neutrals + one accent), intentional whitespace, single visual focus per surface, typographic hierarchy that reads as deliberate. The bar is "a paid product would ship this", not "looks like a demo". Avoid the auto-generated giveaways that brand a UI as AI-built on first glance: rainbow gradients, oversized hero \`<h1>\` floating over an empty card, three identical fake stat tiles, emoji used as decoration rather than meaning, leftover lorem-ipsum, drop shadows on everything. A boring well-spaced layout reads as confident; a flashy crowded one reads as a generator. Use specialized design/UI skills only when the developer explicitly asks for a distinctive design direction, motion, micro-interactions, advanced typography, or a named UI stack.
 
-This is the FLOOR. The \`frontend-design\` skill, when invoked, layers more on top — motion, micro-interactions, advanced typography. These rules apply regardless: with or without the skill, a generated UI must clear this baseline AND the taste defaults above.`
+This is the FLOOR. Specialized design/UI skills, when explicitly invoked, layer more on top — motion, micro-interactions, advanced typography, or the requested component stack. These rules apply regardless: with or without a skill, a generated UI must clear this baseline AND the taste defaults above.`
 }
 
 export function sharedUiBaseline(): string {
@@ -267,7 +272,7 @@ User-facing output contains your final answer only — keep planning, deliberati
  * back toward the middle of the prompt.
  */
 export function sharedUiBaselineReminder(): string {
-  return `UI: state-first — design empty / loading / error / populated paths up front. Empty states GUIDE with a one-line message + named CTA. Render control groups whole. Anchor decoration to structure. Use the project's design tokens. **Taste default**: restraint over decoration — limited palette, intentional whitespace, no auto-generated giveaways (rainbow gradients, fake stat tiles, emoji-as-decoration). A paid product would ship it.`
+  return `UI: state-first — design empty / loading / error / populated paths up front. New web app default: Tailwind CSS + internal reusable components (Button, Card, Modal, Input, PageHeader, EmptyState); other UI stacks only if requested or already present. Empty states GUIDE with a one-line message + named CTA. Render control groups whole. Anchor decoration to structure. Use the project's design tokens. **Taste default**: restraint over decoration — limited palette, intentional whitespace, no auto-generated giveaways (rainbow gradients, fake stat tiles, emoji-as-decoration). A paid product would ship it.`
 }
 
 /** Compact identity reminder — fits in the Reminder section (recency). */

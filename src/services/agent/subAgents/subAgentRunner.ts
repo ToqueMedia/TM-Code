@@ -126,6 +126,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
 
   // ── Tool executor bridge ──
   const toolExecutor = ToolExecutor.getInstance().createIsolatedChild()
+  const readOnlyContextId = toolExecutor.enterReadOnlyMode()
 
   const executeTool: ToolExecutorFn = async (toolName, toolInput, toolUseId, signal) => {
     try {
@@ -347,6 +348,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
     } finally {
       clearTimeout(wallClockTimer)
       clearInterval(staleTimer)
+      toolExecutor.exitReadOnlyMode(readOnlyContextId)
       toolExecutor.disposeIsolatedChild()
     }
   })()

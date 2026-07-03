@@ -78,6 +78,8 @@ describe('Explore agent prompt', () => {
     expect(prompt).toContain('glob')
     expect(prompt).toContain('read_file')
     expect(prompt).toContain('list_directory')
+    expect(prompt).toContain('read_large_result')
+    expect(EXPLORE_AGENT.tools).toContain('read_large_result')
   })
 
   it('includes project root', () => {
@@ -107,6 +109,9 @@ describe('Research agent prompt', () => {
     expect(prompt).toContain('web_search')
     expect(prompt).toContain('web_fetch')
     expect(prompt).toContain('read_skill')
+    expect(prompt).toContain('read_large_result')
+    expect(prompt).toContain('execute_command')
+    expect(RESEARCH_AGENT.tools).toContain('read_large_result')
   })
 
   it('includes read-only rule', () => {
@@ -118,6 +123,13 @@ describe('Research agent prompt', () => {
     const prompt = RESEARCH_AGENT.getSystemPrompt(CHAT_CTX)
     expect(prompt).toContain('Typical flow')
     expect(prompt).toContain('web_search')
+  })
+
+  it('does not treat a failed web fetch as final proof of inaccessibility', () => {
+    const prompt = RESEARCH_AGENT.getSystemPrompt(CHAT_CTX)
+    expect(prompt).toContain('Fetch Failure Policy')
+    expect(prompt).toContain('primary fetch failing')
+    expect(prompt).toContain('curl -L -A Mozilla/5.0')
   })
 
   it('includes completion rule', () => {
@@ -135,6 +147,14 @@ describe('Verify agent prompt', () => {
   it('includes execute_command in tools', () => {
     const prompt = VERIFY_AGENT.getSystemPrompt(CHAT_CTX)
     expect(prompt).toContain('execute_command')
+  })
+
+  it('has supervised dev server tools for backend/API verification', () => {
+    expect(VERIFY_AGENT.tools).toContain('start_dev_server')
+    expect(VERIFY_AGENT.tools).toContain('stop_dev_server')
+    const prompt = VERIFY_AGENT.getSystemPrompt(CHAT_CTX)
+    expect(prompt).toContain('Use start_dev_server for dev servers')
+    expect(prompt).toContain('Do not run npm/yarn/pnpm dev servers through execute_command')
   })
 
   it('includes read-only modification warning', () => {

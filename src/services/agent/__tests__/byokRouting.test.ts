@@ -53,17 +53,6 @@ describe('buildByokThinkingConfig', () => {
     })
   })
 
-  it('uses high reasoning effort for Step 3.7 Flash', () => {
-    expect(buildByokThinkingConfig({
-      providerId: 'stepfun',
-      modelId: 'step-3.7-flash',
-      baseURL: 'https://api.stepfun.ai/v1',
-      custom: false,
-      supportsThinking: true,
-      thinkingShape: 'openai_reasoning_effort',
-    })).toEqual({ reasoning_effort: 'high' })
-  })
-
   it('keeps the existing medium default for other OpenAI-compatible reasoning models', () => {
     expect(buildByokThinkingConfig({
       providerId: 'openai',

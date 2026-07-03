@@ -229,13 +229,13 @@ describe('byokStore testKey — direct provider validation', () => {
   })
 })
 
-describe('byokStore catalog — StepFun', () => {
+describe('byokStore catalog — DashScope Kimi', () => {
   afterEach(() => {
     jest.resetModules()
     jest.clearAllMocks()
   })
 
-  it('includes Step 3.7 Flash as an OpenAI-compatible cloud model', async () => {
+  it('includes Kimi K2.7 Code as a DashScope OpenAI-compatible cloud model', async () => {
     jest.doMock('@/utils/invokeMetrics', () => ({
       invoke: jest.fn(async (command: string) => {
         if (command === 'byok_has_key') return false
@@ -249,20 +249,20 @@ describe('byokStore catalog — StepFun', () => {
     const { useByokStore } = await import('../byokStore')
     await useByokStore.getState().loadProviders()
 
-    const provider = useByokStore.getState().providers.find(p => p.id === 'stepfun')
+    const provider = useByokStore.getState().providers.find(p => p.id === 'dashscope')
     expect(provider).toMatchObject({
-      name: 'StepFun',
+      name: 'DashScope (Alibaba Cloud)',
       group: 'cloud',
-      defaultBaseURL: 'https://api.stepfun.ai/v1',
+      defaultBaseURL: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
       apiShape: 'openai_compat',
     })
     expect(provider?.models).toContainEqual({
-      id: 'step-3.7-flash',
-      label: 'Step 3.7 Flash',
-      capabilities: { images: true, audio: false, video: false, tools: true },
+      id: 'kimi-k2.7-code',
+      label: 'Kimi K2.7 Code',
+      capabilities: { images: true, audio: false, video: true, tools: true },
       contextWindow: 262_144,
       supportsThinking: true,
-      thinkingShape: 'openai_reasoning_effort',
+      thinkingShape: 'qwen_enable_thinking',
     })
   })
 })

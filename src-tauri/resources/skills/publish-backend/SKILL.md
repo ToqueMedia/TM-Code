@@ -1,6 +1,6 @@
 ---
 name: publish-backend
-description: Prepare a fullstack project (Vite/React/Vue/Svelte frontend + Express/Fastify/NestJS/Hono backend) for TM Code's Publish flow. Covers the data layer (Drizzle ORM + sqlite-proxy in prod, local SQLite file in dev), schema and migrations, file uploads / image / avatar / attachment / document storage via TM Code File Storage (R2-backed, never base64-in-DB), and the Dockerfile + build config. The platform mints all credentials (TMDB_*, TM_FILES_*, TM_AUTH_*) via provision_* tools — they never enter user code. Use full SQL semantics — no composite-index limitations, no per-document read billing, no client-side DB SDK.
+description: Prepare a fullstack project (Vite/React/Vue/Svelte frontend + Express/Fastify/NestJS/Hono backend) for TM Code's Publish flow. Covers the data layer (Drizzle ORM + sqlite-proxy in prod, local SQLite file in dev), schema and migrations, file uploads / image / avatar / attachment / document storage via TM Code File Storage (R2-backed, never base64-in-DB), and the Dockerfile + build config. Local dev uses SQLite `dev.db`; deploy sends schema/migrations, provisions Turso, applies those migrations there, and injects TMDB_* into Cloud Run. Use full SQL semantics — no composite-index limitations, no per-document read billing, no client-side DB SDK.
 license: MIT
 metadata:
   author: tm-code
@@ -14,15 +14,15 @@ This skill describes the **protocol** for making a fullstack project deployable 
 
 - Hosts the **frontend** on the platform edge — automatic.
 - Hosts the **backend** as a managed container on Cloud Run, named after the project.
-- Provides **TM Code Database** access via an HTTPS proxy on the TM Code Worker — your code only sees `TMDB_URL` + `TMDB_TOKEN`; the underlying libSQL endpoint and Turso credentials stay server-side.
+- Provides **TM Code Database** access in production via an HTTPS proxy on the TM Code Worker — deployed code sees Cloud Run-injected `TMDB_URL` + `TMDB_TOKEN`; the underlying libSQL endpoint and Turso credentials stay server-side.
 - Proxies `/api/*` from `<slug>.toquemedia.net` to the backend service URL.
 
-`provision_deploy` has already (when called by the dispatching flow):
-- Reserved the slug on toquemedia.net.
-- Reserved an `appId` for the user's data namespace.
-- Created a dedicated database `app-{appId}` on the TM Code Database.
-- Minted an app-scoped `TMDB_TOKEN` and registered the proxy URL.
-- Will inject `TMDB_URL`, `TMDB_TOKEN`, plus the existing `TM_*`/`GIP_*` auth env vars into Cloud Run at deploy time.
+The Publish/deploy flow will:
+- Reserve the slug on toquemedia.net.
+- Reserve an `appId` for the user's data namespace.
+- Provision/reuse a dedicated database `app-{appId}` on the TM Code Database.
+- Apply the bundled SQL migrations generated from the local schema.
+- Inject `TMDB_URL`, `TMDB_TOKEN`, plus the existing `TM_*`/`GIP_*` auth env vars into Cloud Run at deploy time.
 
 Your job: define the schema, wire the dev/prod connection, generate migrations, write SQL queries, write the container build.
 
@@ -41,15 +41,11 @@ npm install -D drizzle-kit
 
 ### CRITICAL — Never embed Turso URLs, libSQL connection strings, or DB tokens in user code
 
-Your project's `.env` must contain ONLY:
+Your project's local `.env` must contain ONLY local/dev values for the database:
 
 ```env
 # Local development — SQLite file alongside the project
 DATABASE_URL=file:./dev.db
-
-# Production — injected by the deploy pipeline (DO NOT hardcode in source)
-TMDB_URL=https://api-agents.toquemedia.net/v1/apps/{appId}/db
-TMDB_TOKEN=<32-byte app-scoped token>
 
 # Auth (unchanged from previous projects)
 TM_AUTH_KEY=...
@@ -57,7 +53,7 @@ TM_TENANT_ID=...
 TM_PROJECT_ID=...
 ```
 
-Zero references to `turso.io`, `libsql://`, or any Turso platform token. Those live exclusively in the TM Code Worker's secrets and KV store. If you find yourself writing `libsql://...turso.io` anywhere in the user's project, **stop and re-check this rule**.
+Zero references to `turso.io`, `libsql://`, `TMDB_URL`, `TMDB_TOKEN`, or any Turso platform token in local project env/source during scaffolding. Those live exclusively in the TM Code Worker's secrets/KV and Cloud Run deploy env. If you find yourself writing `libsql://...turso.io` anywhere in the user's project, **stop and re-check this rule**.
 
 ### CRITICAL — Multi-tenant isolation is the database, not the schema
 
@@ -143,26 +139,24 @@ await db.insert(products).values({
 
 If a value such as `"1.3"` is a version/code/SKU rather than math, the schema is wrong: store it as `text()`, generate a migration, and keep it a string.
 
-### CRITICAL — Call `provision_database` BEFORE writing `db.ts` (mechanical check)
+### CRITICAL — Do NOT provision Turso during local scaffolding
 
-The `db.ts` template below references `process.env.TMDB_URL` and `process.env.TMDB_TOKEN`. Those env vars do not exist by default — `provision_database` mints them. Forgetting the call leaves `db.ts` referencing variables that don't exist; the prod path throws `TMDB_URL must be set` on first request.
+The `db.ts` template below references `process.env.TMDB_URL` and `process.env.TMDB_TOKEN` only inside the production branch. Those env vars do not exist during local development and must not be written to the project `.env` as scaffolding defaults.
 
-**Run this mechanical check before any `write_file`/`create_file` on `db.ts`** — do not rely on inferring user intent from the prompt:
+**Run this mechanical check before any `write_file`/`create_file` on `db.ts`**:
 
 ```text
-1. Read `.env` (via read_env_vars or grep). Search for `TMDB_URL=` and `TMDB_TOKEN=`.
-2. If BOTH are present and non-empty → skip. Already provisioned.
-3. If EITHER is missing/empty → call `provision_database` NOW.
-   The tool is idempotent — calling when already provisioned returns the same
-   credentials, no duplicate billing, no destructive change. Cost of calling
-   redundantly: zero. Cost of skipping when missing: the project breaks at
-   runtime and you don't see it until the smoke test.
+1. Local database is `DATABASE_URL=file:./dev.db` (or the code fallback).
+2. Generate `schema.ts` and `migrations/*.sql`.
+3. Run local migrations against `dev.db`.
+4. Do NOT call `provision_database` just to write `db.ts`.
+5. Do NOT write or request `TMDB_URL` / `TMDB_TOKEN` locally; Publish injects them into Cloud Run.
 ```
 
-This applies to every backend that uses the prod-shaped Drizzle pattern from this skill (i.e. whenever you write `drizzle-orm/sqlite-proxy` in `db.ts`). It does NOT apply to projects deliberately staying file-only (no TMDB references in `db.ts` at all) — those use `drizzle-orm/libsql/node` with `DATABASE_URL=file:./dev.db` and no prod branch.
+This applies to every backend that uses the prod-shaped Drizzle pattern from this skill. `provision_database` is reserved for explicit production preflight/repair flows, not normal local development.
 
 **Forbidden paths**:
-- `request_credentials` for `TMDB_URL` / `TMDB_TOKEN` — they are platform-minted, not developer-supplied.
+- `request_credentials` for `TMDB_URL` / `TMDB_TOKEN` — they are platform-minted at deploy, not developer-supplied.
 - Hardcoding placeholder values in `.env.example` and asking the user to fill them — the user does not have these values.
 
 ## Step-by-step protocol
@@ -646,7 +640,7 @@ The frontend (`src/`, `public/`) is built separately by the platform. `dev.db` (
 
 ### 9.5. File storage — TM Code File Storage (R2-backed)
 
-TM Code provides per-app blob storage backed by Cloudflare R2 under the project's own slug subdomain. The data layer (TMDB) is for relational data; **TM Files** is for everything else — avatars, images, attachments, documents.
+TM Code provides per-app blob storage backed by Cloudflare R2 under the project's own slug subdomain. The data layer (TMDB) is for relational data; **TM Files** is for everything else — avatars, images, videos, audio, attachments, documents.
 
 **Critical rule**: NEVER write user-uploaded bytes to TMDB columns. No `avatarData TEXT`, no `imageBase64`, no `data:image/...` URLs in the DB. Base64-in-DB bloats rows 33%, kills query latency, has no CDN, and breaks at multi-MB. The pre-deploy lint catches the most common shape (Drizzle `db.insert/.update` within ~600 chars of `.toString('base64')` / `btoa(` / `data:image/`), but it's a safety net, not a fence — write code that never goes there.
 
@@ -696,13 +690,14 @@ function encodeKey(key: string): string {
 }
 
 /**
- * Upload bytes to the app's R2 prefix and return the public URL.
+ * Upload bytes/stream to the app's R2 prefix and return the public URL.
  * `key` is the path under `_files/`; supports nesting like `posts/cover.jpg`.
- * Max 10 MB per call — enforced by the Worker, validate client-side too.
+ * For large videos/audio, prefer uploadLargeFileFromPath() or the multipart
+ * helpers below instead of reading the whole file into memory.
  */
 export async function uploadFile(
   key: string,
-  body: ArrayBuffer | Uint8Array | Buffer,
+  body: BodyInit,
   contentType: string,
 ): Promise<UploadResult> {
   assertConfigured()
@@ -713,12 +708,137 @@ export async function uploadFile(
       'Content-Type': contentType,
     },
     body: body as BodyInit,
-  })
+    duplex: 'half',
+  } as RequestInit & { duplex: 'half' })
   if (!r.ok) {
     const errText = await r.text().catch(() => '')
     throw new Error(`TM Files upload failed (HTTP ${r.status}): ${errText.slice(0, 200)}`)
   }
   return (await r.json()) as UploadResult
+}
+
+export interface UploadedPart {
+  partNumber: number
+  etag: string
+}
+
+interface MultipartCreateResult {
+  uploadId: string
+  key: string
+  contentType: string
+  recommendedPartSize: number
+  maxParts: number
+  publicUrl: string
+}
+
+export async function createMultipartFile(
+  key: string,
+  contentType: string,
+): Promise<MultipartCreateResult> {
+  assertConfigured()
+  const r = await fetch(`${FILES_URL}/${encodeKey(key)}?multipart=create`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${FILES_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ contentType }),
+  })
+  if (!r.ok) {
+    const errText = await r.text().catch(() => '')
+    throw new Error(`TM Files multipart create failed (HTTP ${r.status}): ${errText.slice(0, 200)}`)
+  }
+  return (await r.json()) as MultipartCreateResult
+}
+
+export async function uploadFilePart(
+  key: string,
+  uploadId: string,
+  partNumber: number,
+  body: BodyInit,
+): Promise<UploadedPart> {
+  assertConfigured()
+  const qs = new URLSearchParams({
+    multipart: 'part',
+    uploadId,
+    partNumber: String(partNumber),
+  })
+  const r = await fetch(`${FILES_URL}/${encodeKey(key)}?${qs}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${FILES_TOKEN}` },
+    body,
+    duplex: 'half',
+  } as RequestInit & { duplex: 'half' })
+  if (!r.ok) {
+    const errText = await r.text().catch(() => '')
+    throw new Error(`TM Files part upload failed (HTTP ${r.status}): ${errText.slice(0, 200)}`)
+  }
+  const data = (await r.json()) as { part: UploadedPart }
+  return data.part
+}
+
+export async function completeMultipartFile(
+  key: string,
+  uploadId: string,
+  parts: UploadedPart[],
+): Promise<UploadResult> {
+  assertConfigured()
+  const qs = new URLSearchParams({ multipart: 'complete', uploadId })
+  const r = await fetch(`${FILES_URL}/${encodeKey(key)}?${qs}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${FILES_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ parts }),
+  })
+  if (!r.ok) {
+    const errText = await r.text().catch(() => '')
+    throw new Error(`TM Files multipart complete failed (HTTP ${r.status}): ${errText.slice(0, 200)}`)
+  }
+  return (await r.json()) as UploadResult
+}
+
+export async function abortMultipartFile(key: string, uploadId: string): Promise<void> {
+  assertConfigured()
+  const qs = new URLSearchParams({ multipart: 'abort', uploadId })
+  const r = await fetch(`${FILES_URL}/${encodeKey(key)}?${qs}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${FILES_TOKEN}` },
+  })
+  if (!r.ok) {
+    const errText = await r.text().catch(() => '')
+    throw new Error(`TM Files multipart abort failed (HTTP ${r.status}): ${errText.slice(0, 200)}`)
+  }
+}
+
+/** Upload a large file from disk in chunks. Use this for videos/audio after
+ *  accepting multipart/form-data into a temp file. Never use memoryStorage()
+ *  for video uploads. */
+export async function uploadLargeFileFromPath(
+  key: string,
+  filePath: string,
+  contentType: string,
+  partSize = 16 * 1024 * 1024,
+): Promise<UploadResult> {
+  const { createReadStream } = await import('node:fs')
+  const { stat } = await import('node:fs/promises')
+  const { size } = await stat(filePath)
+  const created = await createMultipartFile(key, contentType)
+  const parts: UploadedPart[] = []
+
+  try {
+    for (let offset = 0, partNumber = 1; offset < size; offset += partSize, partNumber++) {
+      const end = Math.min(offset + partSize, size) - 1
+      const stream = createReadStream(filePath, { start: offset, end })
+      const part = await uploadFilePart(key, created.uploadId, partNumber, stream as unknown as BodyInit)
+      parts.push(part)
+    }
+    return await completeMultipartFile(key, created.uploadId, parts)
+  } catch (err) {
+    await abortMultipartFile(key, created.uploadId).catch(() => {})
+    throw err
+  }
 }
 
 /** Delete a file from the app's R2 prefix. */
@@ -741,7 +861,9 @@ export function publicUrlFor(key: string): string {
 }
 ```
 
-#### Upload route example (Express, multer)
+#### Small upload route example (Express, multer)
+
+Use this pattern only for small images/documents. Do **not** use `multer.memoryStorage()` for videos/audio.
 
 ```ts
 // backend/src/routes/avatars.ts
@@ -755,7 +877,7 @@ import { verifyGipJwt } from '../lib/auth'
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB — match Worker cap
+  limits: { fileSize: 10 * 1024 * 1024 }, // avatar-only guard; not a TM Files limit
   fileFilter: (_req, file, cb) => {
     if (!/^image\/(png|jpe?g|webp|gif)$/.test(file.mimetype)) {
       return cb(new Error('Only image/png|jpeg|webp|gif allowed'))
@@ -780,6 +902,70 @@ avatars.post('/api/me/avatar', upload.single('avatar'), async (req, res) => {
   await db.update(users).set({ avatarUrl: publicUrl }).where(eq(users.uid, jwt.sub))
 
   res.json({ avatarUrl: publicUrl })
+})
+```
+
+#### Video/audio upload route example (Express, multer disk + multipart R2)
+
+For media projects, write the incoming multipart/form-data to a temp file and then call `uploadLargeFileFromPath()`. The DB stores metadata + `publicUrl`; the player uses that URL in `<video src={publicUrl}>`. The public read path supports HTTP Range / `206 Partial Content`.
+
+```ts
+// backend/src/routes/adminVideos.ts
+import { Router } from 'express'
+import multer from 'multer'
+import { mkdirSync } from 'node:fs'
+import { unlink } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { uploadLargeFileFromPath } from '../files'
+import { db } from '../db'
+import { videos } from '../db/schema'
+import { verifyAdminJwt } from '../lib/auth'
+
+const tmpDir = process.env.NODE_ENV === 'production'
+  ? '/tmp/tm-video-uploads'
+  : '.toquemedia/tmp-video-uploads'
+mkdirSync(tmpDir, { recursive: true })
+
+const videoUpload = multer({
+  storage: multer.diskStorage({
+    destination: tmpDir,
+    filename: (_req, file, cb) => cb(null, `${randomUUID()}-${file.originalname}`),
+  }),
+  limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // app quota guard; tune per plan
+  fileFilter: (_req, file, cb) => {
+    if (!/^video\/(mp4|webm|quicktime|x-m4v)$/.test(file.mimetype)) {
+      return cb(new Error('Only mp4, webm, mov, or m4v videos allowed'))
+    }
+    cb(null, true)
+  },
+})
+
+export const adminVideos = Router()
+
+adminVideos.post('/api/admin/videos', videoUpload.single('video'), async (req, res) => {
+  const jwt = await verifyAdminJwt(req.headers.authorization?.slice(7) ?? '')
+  if (!jwt) return res.status(401).json({ error: 'unauthenticated' })
+  if (!req.file) return res.status(400).json({ error: 'video field required' })
+
+  const ext = req.file.mimetype === 'video/quicktime'
+    ? 'mov'
+    : req.file.mimetype.split('/')[1].replace('x-m4v', 'm4v')
+  const key = `videos/${randomUUID()}.${ext}`
+
+  try {
+    const uploaded = await uploadLargeFileFromPath(key, req.file.path, req.file.mimetype)
+    const row = await db.insert(videos).values({
+      title: req.body.title ?? req.file.originalname,
+      publicUrl: uploaded.publicUrl,
+      storageKey: uploaded.key,
+      size: uploaded.size,
+      contentType: uploaded.contentType,
+    }).returning()
+
+    res.json({ video: row[0] })
+  } finally {
+    await unlink(req.file.path).catch(() => {})
+  }
 })
 ```
 
@@ -815,11 +1001,11 @@ await db.insert(posts).values({ coverImage: dataUrl })
 import { S3Client } from '@aws-sdk/client-s3'  // ✗
 ```
 
-#### When the user prompt mentions "upload" / "avatar" / "image" / "attachment"
+#### When the user prompt mentions "upload" / "avatar" / "image" / "video" / "audio" / "attachment"
 
 1. Read `.env` — if `TM_FILES_URL` missing, call `provision_files`.
 2. Generate `backend/src/files.ts` (verbatim recipe above).
-3. Wire the upload route using `uploadFile()`.
+3. Wire the upload route using `uploadFile()` for small files, or `uploadLargeFileFromPath()` / multipart helpers for video/audio.
 4. Store the returned `publicUrl` in the DB row.
 
 Do **not** ask the developer for R2/S3/Firebase credentials. TM Files is provisioned by the platform; no developer-supplied keys.
@@ -852,8 +1038,8 @@ Only env vars the server actually needs:
 
 | Var | Source | Purpose |
 |---|---|---|
-| `TMDB_URL` | provision_deploy → Cloud Run env | TM Code Database HTTPS proxy endpoint (per-app) |
-| `TMDB_TOKEN` | provision_deploy → Cloud Run env | App-scoped bearer token for TMDB |
+| `TMDB_URL` | Publish/deploy → Cloud Run env | TM Code Database HTTPS proxy endpoint (per-app) |
+| `TMDB_TOKEN` | Publish/deploy → Cloud Run env | App-scoped bearer token for TMDB |
 | `DATABASE_URL` | local `.env` only | Dev SQLite file path (e.g. `file:./dev.db`) |
 | `TM_AUTH_KEY` | provision_auth → .env | GIP REST calls (public client key) |
 | `TM_TENANT_ID` | provision_auth → .env | Per-app tenant scope for GIP |
@@ -970,7 +1156,7 @@ The full rule list is above. These are repeated at the end because a single viol
    `401 application/json` confirms the Vite proxy is wired AND the backend boots AND the auth middleware runs against the new data layer without throwing. **It is the smallest curl that meaningfully exercises the migration.**
 
    - `404 text/html` → Vite proxy missing.
-   - `500` → backend crashed in the auth middleware path. `read_dev_server_logs` for stack. Common causes: legacy `firebase-admin` import not removed, `no such table: users` (migration didn't apply against the connected DB), `TMDB_URL must be set` (env vars missing for prod path — see the `provision_database` CRITICAL above).
+   - `500` → backend crashed in the auth middleware path. `read_dev_server_logs` for stack. Common causes: legacy `firebase-admin` import not removed, `no such table: users` (migration didn't apply against the connected DB), `TMDB_URL must be set` (the app entered the prod branch without deploy-injected env vars — local dev should use `DATABASE_URL=file:./dev.db`; prod gets TMDB_* from Publish/deploy).
    - Anything else → regression. Fix before reporting complete.
 
    `curl /health` returning 200 does NOT replace this — it doesn't run middleware against the data layer.

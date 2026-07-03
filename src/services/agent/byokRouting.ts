@@ -36,7 +36,7 @@ type ByokReasoningEffort = NonNullable<ByokSessionSnapshot['reasoningEffort']>
 
 function defaultReasoningEffort(snapshot: ByokSessionSnapshot): ByokReasoningEffort {
   if (snapshot.reasoningEffort) return snapshot.reasoningEffort
-  return snapshot.modelId === 'step-3.7-flash' ? 'high' : 'medium'
+  return 'medium'
 }
 
 function openAICompatibleReasoningEffort(effort: ByokReasoningEffort): 'low' | 'medium' | 'high' {

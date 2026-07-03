@@ -293,11 +293,11 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
   })
 
   // === provision_database ===
-  // Reserves a per-app SQLite/libSQL database on the platform's Turso fleet
-  // and writes the two credentials user code needs (`TMDB_URL` +
-  // `TMDB_TOKEN`) to .env. The Turso platform token and the database's
-  // own JWT stay on the TM Code Worker — user code only sees the
-  // app-scoped TMDB token, which the worker validates per request.
+  // Explicit production preflight/repair tool. Normal local development uses
+  // file:./dev.db and the Publish flow provisions/reuses Turso from the
+  // project's schema+migrations. This tool is still useful when the developer
+  // explicitly asks to prepare/repair the production DB or enable the PROD data
+  // viewer before a full publish.
   //
   // The endpoint is idempotent (worker reuses an existing record when
   // present), so re-running on an already-provisioned project just
@@ -306,7 +306,7 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
     definition: {
       name: 'provision_database',
       description:
-        "Set up TM Code Database (per-app SQLite/libSQL on Turso) for the current project. Reserves the app's database on the platform, mints an app-scoped TMDB token, and writes TMDB_URL + TMDB_TOKEN to .env. The Turso platform token and per-DB JWT stay on the TM Code Worker — user code talks to the worker via HTTPS using the TMDB_TOKEN. Call when the project needs persistence in production (an auth user record, app state, anything that must survive container restarts). Local dev alone does not need this — db.ts can stay on `DATABASE_URL=file:./dev.db`. The endpoint is fully idempotent: calling on an already-provisioned project returns the same credentials with zero side-effect, so call it whenever the .env mechanical check (look for TMDB_URL and TMDB_TOKEN) shows either is missing — including after a transient failure where you're retrying. After a successful return, generate `server/db.ts` with the dev/prod connection switch from read_skill(\"publish-backend\") and `server/schema.ts` for Drizzle.",
+        "Explicitly provision/repair TM Code Database (per-app SQLite/libSQL on Turso) for the current project. Normal development MUST NOT call this: generated apps use local SQLite (`DATABASE_URL=file:./dev.db`) while the agent writes schema+migrations, and the Publish/deploy flow provisions/reuses Turso and applies those migrations in production. Use this tool only when the developer explicitly asks to preflight/repair the production database or to enable PROD data viewer before publish. It mints an app-scoped TMDB token and writes TMDB_URL + TMDB_TOKEN to .env for IDE-side PROD inspection; Cloud Run deploy still injects production TMDB_* worker-side. The Turso platform token and per-DB JWT stay on the TM Code Worker. Idempotent: calling on an already-provisioned project returns the same credentials with zero destructive side-effect.",
       input_schema: {
         type: 'object',
         properties: {},
@@ -346,7 +346,7 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
         return (
           `PROVISION_DATABASE FAILED — STOP DATA-LAYER WORK.\n\n` +
           `Network error reaching the database provisioning endpoint: ${err instanceof Error ? err.message : String(err)}\n\n` +
-          `Do NOT fall back to request_credentials for TMDB_URL, TMDB_TOKEN, DATABASE_URL — those credentials are minted by the platform and do not exist until provision_database succeeds.\n\n` +
+          `Do NOT fall back to request_credentials: TMDB_URL/TMDB_TOKEN are minted by the platform, and DATABASE_URL is the local SQLite default (\`file:./dev.db\`), not a developer-owned secret.\n\n` +
           `Required recovery: report the network error to the developer in chat, suggest checking their connection, and wait for them to decide whether to retry. Do not auto-retry.`
         )
       }
@@ -356,16 +356,16 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
         return (
           `PROVISION_DATABASE FAILED — STOP DATA-LAYER WORK.\n\n` +
           `Error from worker (HTTP ${provisionRes.status}): ${body.slice(0, 300)}\n\n` +
-          `What this means: the platform could not provision a per-app database. ` +
-          `Without it, TMDB_URL / TMDB_TOKEN do not exist and production persistence cannot be wired up.\n\n` +
+          `What this means: the platform could not provision a per-app production database. ` +
+          `Local development can still use DATABASE_URL=file:./dev.db, but PROD data viewer / production DB preflight is unavailable until this succeeds.\n\n` +
           `Wrong recovery paths (DO NOT TAKE):\n` +
-          `  ✗ request_credentials for TMDB_URL / TMDB_TOKEN / DATABASE_URL — the developer does not own these.\n` +
+          `  ✗ request_credentials for TMDB_URL / TMDB_TOKEN / DATABASE_URL — TMDB_* are platform-minted, and DATABASE_URL is a local SQLite default.\n` +
           `  ✗ swap to a different ORM/driver hoping it bypasses the platform — in Chat mode the harness rejects Prisma, mysql2, pg, sqlite3, better-sqlite3 on package.json writes; Terminal/CMD mode is stack-free and has no such restriction.\n\n` +
           `Required recovery:\n` +
-          `  1. STOP the data-layer task. Do not write db.ts / schema.ts / migrations.\n` +
+          `  1. Do not ask the developer for TMDB credentials and do not hardcode them.\n` +
           `  2. Tell the developer what happened — quote the error above verbatim.\n` +
           `  3. If the error says "group not found" / "HTTP 400" / "Turso ..." (any platform-side rejection): ask the developer to share the line that starts with \`[turso] createDatabase:\` from the TM Code Worker logs (\`wrangler tail\` or the dev terminal). That line shows the org + group + db-name the worker actually sent, which pinpoints whether it's a config issue (wrong group), a stale build (wrangler dev not restarted), or a true upstream outage.\n` +
-          `  4. Suggest one of: (a) retry provision_database in a new chat turn if transient, (b) report to TM Code support if it persists, (c) keep persistence local-dev-only by using DATABASE_URL=file:./dev.db without the prod branch.\n` +
+          `  4. Suggest one of: (a) retry provision_database in a new chat turn if transient, (b) report to TM Code support if it persists, (c) continue local development against DATABASE_URL=file:./dev.db and let Publish retry production provisioning later.\n` +
           `  5. Wait for the developer's decision. Do not auto-retry.`
         )
       }
@@ -395,19 +395,19 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
       const reusedSuffix = data.reused ? ' (reused existing)' : ''
       const lines: string[] = []
       lines.push(`Database ready: ${data.dbName}${reusedSuffix}.`)
-      lines.push(`.env written: TMDB_URL, TMDB_TOKEN.`)
+      lines.push(`.env written for IDE-side PROD inspection: TMDB_URL, TMDB_TOKEN.`)
       lines.push('')
       lines.push('## Database contract (do not improvise)')
       lines.push('')
       lines.push('### Connection switch (server/db.ts)')
       lines.push('  - Dev (`NODE_ENV !== "production"`): `drizzle-orm/libsql/node` with `createClient({ url: process.env.DATABASE_URL ?? "file:./dev.db" })`.')
-      lines.push('  - Prod (`NODE_ENV === "production"`): `drizzle-orm/sqlite-proxy` driver, forwarding queries to `${TMDB_URL}` over HTTPS with `Authorization: Bearer ${TMDB_TOKEN}`. The worker accepts `POST { sql, params, method }` for single queries and `POST { batch: [...] }` for transactions.')
+      lines.push('  - Prod (`NODE_ENV === "production"`): `drizzle-orm/sqlite-proxy` driver, forwarding queries to deploy-injected `${TMDB_URL}` over HTTPS with `Authorization: Bearer ${TMDB_TOKEN}`. The worker accepts `POST { sql, params, method }` for single queries and `POST { batch: [...] }` for transactions.')
       lines.push('  - The user code MUST NOT import `@libsql/client` directly in production — the worker is the only path to Turso. Direct libsql connections from Cloud Run will fail (no platform token in user env).')
       lines.push('')
       lines.push('### Schema (server/schema.ts)')
       lines.push('  - Drizzle table definitions in TypeScript. Add `index().on(field)` for query hot paths.')
       lines.push('  - Generate migrations with `drizzle-kit generate --config=drizzle.config.ts` after schema changes.')
-      lines.push('  - The deploy pipeline reapplies migration SQL against the app\'s TMDB on publish. Local dev runs `drizzle-kit push` or `drizzle-kit migrate` against the file:./dev.db, never against TMDB.')
+      lines.push('  - The deploy pipeline sends schema/migrations, provisions/reuses Turso, and reapplies migration SQL against the app\'s TMDB on publish. Local dev runs `drizzle-kit push` or `drizzle-kit migrate` against file:./dev.db, never against TMDB.')
       lines.push('')
       lines.push('### Route writes')
       lines.push('  - Treat request JSON/FormData as untrusted and stringly typed. Never write `db.insert(table).values(body)`, `db.update(table).set(body)`, or `{ amount: body.amount }` for numeric Drizzle columns.')
@@ -415,7 +415,7 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
       lines.push('')
       lines.push('### Forbidden')
       lines.push('  - `@prisma/client`, `prisma`, `better-sqlite3`, `sqlite3`, `mysql2`, `pg` — the write_file harness rejects these on package.json edits **in Chat mode only**. Terminal/CMD mode is stack-free — no harness restriction on database drivers. The reason for Chat mode: Prisma needs a persistent connection (incompatible with Cloud Run scale-to-zero + worker HTTPS proxy); native-bound SQLite drivers and non-SQLite dialects don\'t round-trip through the worker.')
-      lines.push('  - Hard-coding TMDB_URL or TMDB_TOKEN in any committed file. They live ONLY in .env.')
+      lines.push('  - Hard-coding TMDB_URL or TMDB_TOKEN in any committed file. They are deploy-injected; if explicit preflight writes them for IDE-side PROD inspection, keep them only in local .env and never commit them.')
       lines.push('')
       lines.push('### Next steps')
       lines.push('  1. read_skill("publish-backend") for the full db.ts template + sqlite-proxy fetcher.')
@@ -443,7 +443,7 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
     definition: {
       name: 'provision_files',
       description:
-        "Set up TM Code File Storage for the current project. Tries R2 via the platform Worker first; on failure, falls back to LOCAL filesystem (.toquemedia/uploads/). Writes TM_FILES_URL + TM_FILES_TOKEN + TM_FILES_PUBLIC_BASE to .env (R2 mode) or TM_FILES_MODE=local (local mode). Use ONCE when the project needs to handle user uploads (avatars, images, attachments, documents). **Required before writing any upload route** — the alternative (base64 in DB) is forbidden: it bloats the DB, kills query latency, and has no CDN. After provisioning, generate the files helper from read_skill(\"publish-backend\") §9.5 at `backend/src/files.ts` (or `server/src/files.ts`). In your files.ts, check `process.env.TM_FILES_MODE === 'local'` to switch between R2 (Worker PUT) and local (fs.writeFile). Idempotent: second call returns the same credentials.",
+        "Set up TM Code File Storage for the current project. Tries R2 via the platform Worker first; on failure, falls back to LOCAL filesystem (.toquemedia/uploads/) for development only. Writes TM_FILES_URL + TM_FILES_TOKEN + TM_FILES_PUBLIC_BASE to .env (R2 mode) or TM_FILES_MODE=local (local mode). Use ONCE when the project needs to handle user uploads (avatars, images, videos, audio, attachments, documents). **Required before writing any upload route** — the alternative (base64 in DB) is forbidden: it bloats the DB, kills query latency, and has no CDN. After provisioning, generate the files helper from read_skill(\"publish-backend\") §9.5 at `backend/src/files.ts` (or `server/src/files.ts`). For large media, use the multipart helper/actions from that skill; never buffer videos in memory. In your files.ts, check `process.env.TM_FILES_MODE === 'local'` only for local development fallback. Idempotent: second call returns the same credentials.",
       input_schema: {
         type: 'object',
         properties: {},
@@ -576,14 +576,15 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
       lines.push('## Storage contract (do not improvise)')
       lines.push('')
       lines.push('### Write path (server/files.ts)')
-      lines.push('  - PUT to `${TM_FILES_URL}/{key}` with `Authorization: Bearer ${TM_FILES_TOKEN}` and the file body as the request body.')
+      lines.push('  - Simple upload: PUT to `${TM_FILES_URL}/{key}` with `Authorization: Bearer ${TM_FILES_TOKEN}` and the file body as the request body. The Worker streams the body to R2; do not base64 encode or read videos into memory.')
+      lines.push('  - Large media upload: use the multipart actions on the same key: `?multipart=create`, `?multipart=part&uploadId=...&partNumber=...`, `?multipart=complete&uploadId=...`, and abort with DELETE `?multipart=abort&uploadId=...`.')
       lines.push('  - Response: `{ publicUrl, key, size, contentType }`. Store the `publicUrl` in your DB row — never the bytes themselves.')
-      lines.push('  - Max 10 MB per upload. The Worker enforces this — your route should also pre-validate to reject early.')
+      lines.push('  - For video/audio, validate MIME type and quota in your route, but use stream or multipart upload rather than `multer.memoryStorage()`.')
       lines.push('  - Keys allow nested paths (`posts/cover.jpg`). Forbidden: `..`, leading `/`, control chars.')
       lines.push('')
       lines.push('### Read path')
       lines.push('  - Public URL is `${TM_FILES_PUBLIC_BASE}/_files/{key}` — same origin as your frontend, no CORS. Cloudflare serves it directly from R2, zero Worker invocations on the read path.')
-      lines.push('  - Embed in `<img src=...>` / `<video src=...>` etc. with normal browser caching.')
+      lines.push('  - Embed in `<img src=...>` / `<video src=...>` etc. with normal browser caching. Media playback supports HTTP Range / 206 partial responses.')
       lines.push('')
       lines.push('### Delete path')
       lines.push('  - DELETE on `${TM_FILES_URL}/{key}` with the same bearer. Returns `{ deleted: key }`.')

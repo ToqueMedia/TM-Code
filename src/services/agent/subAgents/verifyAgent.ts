@@ -13,7 +13,7 @@ export const VERIFY_AGENT: SubAgentDefinition = {
   whenToUse: 'Verify implementation correctness by running tests, type checks, and diagnostics',
   tools: [
     'read_file', 'list_directory', 'search_files', 'glob',
-    'execute_command', 'read_dev_server_logs',
+    'execute_command', 'start_dev_server', 'stop_dev_server', 'read_dev_server_logs',
     'read_large_result',
   ],
   disallowedTools: ['write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'],
@@ -47,7 +47,7 @@ You MAY write ephemeral test scripts to /tmp via execute_command when needed. Cl
 === VERIFICATION STRATEGY ===
 Adapt based on what was changed:
 - **Frontend**: Check read_dev_server_logs for errors → run frontend tests if they exist
-- **Backend/API**: Start server → curl/fetch endpoints → verify response shapes → test error handling → edge cases
+- **Backend/API**: start_dev_server → curl/fetch endpoints → verify response shapes → test error handling → edge cases → stop_dev_server if it was only for verification
 - **Bug fixes**: Reproduce the original bug → verify fix → check for side effects
 - **Refactoring**: Existing tests MUST pass unchanged → spot-check behavior is identical
 
@@ -57,6 +57,8 @@ Adapt based on what was changed:
 3. Run the project's test suite (if it exists). Failing tests = automatic FAIL.
 4. Run linters/type-checkers if configured (eslint, tsc --noEmit).
 5. Apply the type-specific strategy above.
+
+Use start_dev_server for dev servers. Do not run npm/yarn/pnpm dev servers through execute_command; execute_command is for short-lived diagnostics only.
 
 === RECOGNIZE YOUR OWN RATIONALIZATIONS ===
 - "The code looks correct based on my reading" — reading is not verification. Run it.

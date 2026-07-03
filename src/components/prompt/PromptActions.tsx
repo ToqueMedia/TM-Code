@@ -1,9 +1,11 @@
 import { memo, useMemo } from 'react'
 import { Flex, IconButton, Text } from '@chakra-ui/react'
-import { FiSend, FiSquare, FiCode, FiImage } from 'react-icons/fi'
+import { FiSend, FiSquare, FiCode, FiImage, FiClock } from 'react-icons/fi'
 import { useBillingStore } from '../../stores/billingStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useByokStore } from '../../stores/byokStore'
+import { useCheckpointStore } from '../../stores/checkpointStore'
+import { useLayoutStore } from '../../stores/layoutStore'
 import ContextWindowIndicator from '../chat/ContextWindowIndicator'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
@@ -30,6 +32,9 @@ function PromptActions({
   attachmentCount,
 }: PromptActionsProps) {
   const billingPlan = useBillingStore(s => s.plan)
+  const checkpointCount = useCheckpointStore(s => s.checkpoints.length)
+  const isCheckpointDrawerOpen = useLayoutStore(s => s.isCheckpointDrawerOpen)
+  const toggleCheckpointDrawer = useLayoutStore(s => s.toggleCheckpointDrawer)
   // Plan label via i18n — falls back to raw plan name for unknown plans.
   const planLabel = t(`prompt.planLabel.${billingPlan}` as any) || billingPlan
 
@@ -153,11 +158,42 @@ function PromptActions({
           <FiCode size={14} />
           <Text fontSize="11px" fontWeight="500">{t('prompt.sourceCode')}</Text>
         </Flex>
+
+        <Flex
+          align="center"
+          gap="4px"
+          px="8px"
+          h="28px"
+          borderRadius="8px"
+          cursor="pointer"
+          color={isCheckpointDrawerOpen ? tokens.colors.accent.primary : tokens.colors.text.secondary}
+          transition={`all ${tokens.transition.fast}`}
+          _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
+          onClick={event => {
+            event.stopPropagation()
+            toggleCheckpointDrawer()
+          }}
+          aria-label={t('checkpoint.title')}
+          role="button"
+          title={t('checkpoint.title')}
+        >
+          <FiClock size={14} />
+          <Text fontSize="11px" fontWeight="500">{t('checkpoint.title')}</Text>
+          {checkpointCount > 0 && (
+            <Text
+              fontSize="9px"
+              fontFamily={tokens.fontFamily.mono}
+              color={isCheckpointDrawerOpen ? tokens.colors.accent.primary : tokens.colors.text.disabled}
+            >
+              {checkpointCount}
+            </Text>
+          )}
+        </Flex>
       </Flex>
 
       {/* Per-turn context-pressure pill + Send / Stop / Queue button.
           The context indicator lives here (not the header) so it sits on the
-          same line as the plan/source-code controls, next to send. */}
+          same line as the plan/source-code/checkpoint controls, next to send. */}
       <Flex align="center" gap={2}>
         <ContextWindowIndicator popoverPlacement="top" />
         {isStreaming && hasInput ? (

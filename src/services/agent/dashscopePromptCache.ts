@@ -22,6 +22,7 @@ const DASHSCOPE_EXPLICIT_CACHE_MODELS = new Set([
   'qwen3-vl-plus',
   'qwen3-vl-flash',
   'deepseek-v3.2',
+  'kimi-k2.7-code',
   'kimi-k2.6',
   'kimi-k2.5',
 ])

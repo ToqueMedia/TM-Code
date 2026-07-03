@@ -18,6 +18,7 @@ import PreviewView from './views/PreviewView'
 import EditorView from './views/EditorView'
 import PermissionDialog from './chat/PermissionDialog'
 import PlanViewerPanel from './chat/PlanViewerPanel'
+import CheckpointDrawerPanel from './chat/CheckpointDrawerPanel'
 import { useTranslation } from '@/i18n'
 import ProjectsSidebar from './chat/ProjectsSidebar'
 import { ErrorBoundary } from './ErrorBoundary'
@@ -525,6 +526,7 @@ function MainLayout() {
 
           {/* Plan Viewer side panel — 600px, full height, pushes everything left */}
           <PlanViewerPanel />
+          <CheckpointDrawerPanel />
         </Flex>
       </Flex>
 

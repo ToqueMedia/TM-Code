@@ -87,6 +87,8 @@ interface LayoutState {
   isPlanViewerOpen: boolean
   /** Concrete plan file path currently shown by the Plan Viewer. */
   planViewerPath: string | null
+  /** True when the Checkpoints drawer is open */
+  isCheckpointDrawerOpen: boolean
   /**
    * Reference count of open overlays that must cover the native preview webview.
    * On Windows/Linux the wry child webview is an OS child window that sits ABOVE
@@ -152,6 +154,8 @@ interface LayoutActions {
   setSettingsInitialSection: (section: string | null) => void
   togglePlanViewer: () => void
   setPlanViewerOpen: (open: boolean, planPath?: string | null) => void
+  toggleCheckpointDrawer: () => void
+  setCheckpointDrawerOpen: (open: boolean) => void
   /** Drop the pending section so a subsequent Settings open defaults to Profile. */
   clearSettingsInitialSection: () => void
 }
@@ -181,6 +185,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   previewServerTimedOut: false,
   isPlanViewerOpen: false,
   planViewerPath: null,
+  isCheckpointDrawerOpen: false,
   devServerLogs: [],
   isConsoleVisible: false,
   overlayCount: 0,
@@ -391,6 +396,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
     set(state => ({
       isPlanViewerOpen: !state.isPlanViewerOpen,
       planViewerPath: state.isPlanViewerOpen ? null : state.planViewerPath,
+      isCheckpointDrawerOpen: state.isPlanViewerOpen ? state.isCheckpointDrawerOpen : false,
     }))
   },
 
@@ -398,6 +404,23 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
     set(state => ({
       isPlanViewerOpen: open,
       planViewerPath: open ? (planPath ?? state.planViewerPath) : null,
+      isCheckpointDrawerOpen: open ? false : state.isCheckpointDrawerOpen,
+    }))
+  },
+
+  toggleCheckpointDrawer: () => {
+    set(state => ({
+      isCheckpointDrawerOpen: !state.isCheckpointDrawerOpen,
+      isPlanViewerOpen: state.isCheckpointDrawerOpen ? state.isPlanViewerOpen : false,
+      planViewerPath: state.isCheckpointDrawerOpen ? state.planViewerPath : null,
+    }))
+  },
+
+  setCheckpointDrawerOpen: (open: boolean) => {
+    set(state => ({
+      isCheckpointDrawerOpen: open,
+      isPlanViewerOpen: open ? false : state.isPlanViewerOpen,
+      planViewerPath: open ? null : state.planViewerPath,
     }))
   },
 

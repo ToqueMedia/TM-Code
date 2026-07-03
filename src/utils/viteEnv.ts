@@ -41,8 +41,17 @@ export const DEFAULT_COLLAB_SIGNALING_URL = 'ws://localhost:8789'
 /** Production collab signaling Worker (WebSocket) endpoint. */
 export const PRODUCTION_COLLAB_SIGNALING_URL = 'wss://collab-signaling-worker.geral-871.workers.dev'
 
+/** Default local TM Code Web URL used by "Send to Web" while the IDE runs in Vite dev. */
+export const DEFAULT_TM_CODE_WEB_URL = 'http://localhost:5173'
+
+/** Production TM Code Web URL. */
+export const PRODUCTION_TM_CODE_WEB_URL = 'https://code.toquemedia.net'
+
 /** Optional override for deploys (staging the pipeline). Undefined → use PRODUCTION_DEPLOY_URL. */
 export const VITE_DEPLOY_URL: string | undefined = import.meta.env.VITE_DEPLOY_URL as string | undefined
+
+/** Optional TM Code Web URL override for "Send to Web" target. */
+export const VITE_TM_CODE_WEB_URL: string | undefined = import.meta.env.VITE_TM_CODE_WEB_URL as string | undefined
 
 /** User-provided Ollama URL override (Vite env); undefined in Jest. */
 export const VITE_OLLAMA_URL: string | undefined = import.meta.env.VITE_OLLAMA_URL as string | undefined

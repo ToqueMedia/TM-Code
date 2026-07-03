@@ -98,7 +98,7 @@ function DataViewerView({ embedded = false }: DataViewerViewProps) {
         // A lista de fontes disponíveis acompanha o fallback: sem ela, uma
         // preferência 'prod' persistida de uma sessão anterior hidratava
         // mesmo com o .env já sem TMDB_* — e o viewer abria num erro
-        // "Database not provisioned" em vez de cair para dev.
+        // de base de dados de produção indisponível em vez de cair para dev.
         const available: DataSource[] = [
           ...(devDbExists ? (['dev'] as const) : []),
           ...(result.hasProdConfig ? (['prod'] as const) : []),
@@ -275,7 +275,7 @@ function DataViewerView({ embedded = false }: DataViewerViewProps) {
     // confirms before sending so we never auto-fire a tool call on their
     // behalf — they always retain veto.
     try {
-      useChatStore.getState().setDraftInput('Corre provision_database para preparar a base de dados em produção.')
+      useChatStore.getState().setDraftInput('Cria uma migração Drizzle para o dev.db local; a base de dados de produção deve ser provisionada no Publish/deploy.')
       useLayoutStore.getState().setViewMode('chat')
     } catch {
       // setDraftInput may not exist on older builds — fail open and just
