@@ -74,7 +74,7 @@ describe('slash command vs hashtag precedence', () => {
 
   // Documentation test — the dispatch order must be slash → hashtag → normal.
   // This isn't enforceable from outside handleSend without mounting the full
-  // chat-mode stack; the integration test in planCommandIntegration.test.ts
+  // full prompt stack; the integration test in planCommandIntegration.test.ts
   // covers the slash → executePlan path. This describe block exists so the
   // expectation is captured in tests rather than only in the source comment.
   test('the dispatch contract: slash wins when both detectors fire', () => {

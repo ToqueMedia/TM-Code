@@ -440,7 +440,7 @@ function CheckpointPanel({ surface = 'inline' }: CheckpointPanelProps) {
             </Flex>
           ) : (
             <Box
-              maxH="150px"
+              maxH={isDrawer ? '220px' : '150px'}
               h={isDrawer ? '220px' : undefined}
               overflowY="auto"
               borderRadius={tokens.radius.lg}

@@ -6,8 +6,8 @@ interface UseHashtagMenuOptions {
   /** Textarea owning the cursor — used to read selectionStart and to refocus after insert. */
   textareaRef: RefObject<HTMLTextAreaElement | null>
   /**
-   * Imperative setter for the textarea's text. Chat-mode wires to
-   * `useChatStore.setDraftInput`, cmd-mode wires to its local `setInput`.
+   * Imperative setter for the textarea's text. The main prompt wires to
+   * `useChatStore.setDraftInput`; local prompt inputs wire to `setInput`.
    * The hook never touches the underlying store — it just calls back.
    */
   setInputValue: (next: string) => void

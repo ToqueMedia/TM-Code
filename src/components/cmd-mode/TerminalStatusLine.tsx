@@ -1,5 +1,5 @@
 /**
- * TerminalStatusLine — bottom status bar for CMD mode.
+ * TerminalStatusLine — bottom status bar for the cwd-scoped workspace surface.
  * Shows: agent status dot + label · info segments · elapsed · tokens · stop button
  * Also renders the agent task list above the status bar when tasks are present.
  *
@@ -42,7 +42,7 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
   // Foreground-only, STABLE context size — read straight off the active
   // session's persisted lastPromptTokens/lastResponseTokens (the real wire
   // size of the most recent foreground turn). Keeps the terminal ctx % in
-  // lockstep with the chat-mode pill. We no longer read the global
+  // lockstep with the main prompt pill. We no longer read the global
   // currentPrompt/currentResponse counters: those are zeroed every request and
   // clobbered by invisible background/auto-wake runs, which made the % jump
   // "sem razão aparente". See chatStore.addTokenUsage.
@@ -166,10 +166,10 @@ export const TerminalStatusLine = memo(function TerminalStatusLine() {
     status === "generating" || status === "reasoning" || status === "applying";
 
   // Context-window percentage for the active model. Same telemetry as the
-  // ContextWindowIndicator in ChatView, rendered terminal-style (text only,
-  // no progress bar) to fit CMD mode's monospace aesthetic.
+  // ContextWindowIndicator in ChatView, rendered shell-style (text only,
+  // no progress bar) to fit the monospace aesthetic.
   //
-  // Source of truth matches the chat-mode pill:
+  // Source of truth matches the main prompt pill:
   //   • pressureTokens = currentPromptTokens (= session.lastPromptTokens, the
   //     monotonic peak of the wire prompt — includes all past history).
   //     INPUT-ONLY, claude-vaz parity (utils/context.ts:130-136). We deliberately

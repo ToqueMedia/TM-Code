@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import ContextBuilder from '../contextBuilder'
+import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../contextBuilder/helpers'
 
 // contextBuilder → contextPlanner → firebaseAuth, which reads
 // import.meta.env at module load (Jest cannot parse import.meta). Stub it
@@ -16,6 +17,7 @@ jest.mock('../../auth/firebaseAuth', () => ({
 
 // invoke is already mocked in setupTests.ts
 const mockedInvoke = invoke as jest.MockedFunction<typeof invoke>
+const LEGACY_TERMINAL_HEADING = ['**Mode:', 'TERMINAL**'].join(' ')
 
 function completionEnvelope(content: string): string {
   return JSON.stringify({
@@ -344,24 +346,89 @@ describe('ContextBuilder', () => {
       expect(prompt).toContain('click the **Preview** button at the top-right of Chat')
     })
 
-    it('includes terminal-style loop guidance in Chat mode', async () => {
+    it('includes shell execution loop guidance', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('# Terminal-style agent loop')
-      expect(prompt).toContain('Operate like an interactive terminal operator')
+      expect(prompt).toContain('# Shell execution loop')
+      expect(prompt).toContain('Operate like an interactive shell operator')
       expect(prompt).toContain('execute_command_background')
       expect(prompt).toContain('check_background_commands')
     })
 
-    it('includes terminal-style loop guidance in Terminal mode', async () => {
+    it('keeps selected auxiliary content below the dynamic boundary', async () => {
+      const plannerJson = JSON.stringify({
+        taskDomain: 'test/auxiliary-boundary',
+        requiredCapabilities: ['scaffold_workflow', 'vision', 'auth', 'dev_server', 'semantic_tokens'],
+        minimumContextNeeded: 'summary',
+        candidateContexts: [
+          'scaffold.workflow',
+          'vision.image_rules',
+          'auth_database.provision',
+          'delivery.dev_server',
+          'design_system.semantic_tokens',
+        ],
+        selectedContexts: [
+          'scaffold.workflow',
+          'vision.image_rules',
+          'auth_database.provision',
+          'delivery.dev_server',
+          'design_system.semantic_tokens',
+        ],
+        toolGroups: ['FILE_OPS', 'SHELL'],
+        fallbackRisk: 'medium',
+        reason: 'exercise dynamic-boundary placement',
+      })
+      const fetchMock = jest.fn().mockResolvedValue(mockResponse(completionEnvelope(plannerJson)) as never)
+      Object.defineProperty(globalThis, 'fetch', {
+        value: fetchMock,
+        configurable: true,
+        writable: true,
+      })
+
+      const prompt = await builder.buildSystemPrompt(
+        '/test/project',
+        'web',
+        [],
+        20,
+        'Create a new React app with auth from a screenshot',
+        [],
+        {
+          profile: 'scaffold_project',
+          readOnly: false,
+          source: 'model',
+          confidence: 'high',
+          reason: 'boundary regression test',
+        },
+      )
+
+      const boundaryIndex = prompt.indexOf(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+      expect(boundaryIndex).toBeGreaterThan(-1)
+
+      const beforeBoundary = prompt.slice(0, boundaryIndex)
+      const afterBoundary = prompt.slice(boundaryIndex + SYSTEM_PROMPT_DYNAMIC_BOUNDARY.length)
+      const dynamicAuxiliaryMarkers = [
+        '## Scaffolding workflow — REQUIRED for new projects',
+        '## Vision (images)',
+        '## Authentication',
+        '## Dev servers',
+        '# Design system: semantic tokens',
+      ]
+
+      for (const marker of dynamicAuxiliaryMarkers) {
+        expect(afterBoundary).toContain(marker)
+        expect(beforeBoundary).not.toContain(marker)
+      }
+    })
+
+    it('includes shell execution loop guidance in cwd-scoped prompts', async () => {
       const prompt = await builder.buildCmdModeSystemPrompt('/test/project', '/test/home')
-      expect(prompt).toContain('**Mode: TERMINAL**')
-      expect(prompt).toContain('# Terminal-style agent loop')
-      expect(prompt).toContain('Operate like an interactive terminal operator')
+      expect(prompt).not.toContain(LEGACY_TERMINAL_HEADING)
+      expect(prompt).toContain('# Shell execution loop')
+      expect(prompt).toContain('Operate like an interactive shell operator')
       expect(prompt).toContain('execute_command_background')
       expect(prompt).toContain('check_background_commands')
     })
 
-    it('applies explicit profile overrides in Terminal mode', async () => {
+    it('applies explicit profile overrides in cwd-scoped prompts', async () => {
       const prompt = await builder.buildCmdModeSystemPrompt(
         '/test/project',
         '/test/home',
@@ -377,13 +444,13 @@ describe('ContextBuilder', () => {
       )
       const selection = builder.getLastAuxiliarySelection()
 
-      expect(prompt).toContain('**Mode: TERMINAL**')
+      expect(prompt).not.toContain(LEGACY_TERMINAL_HEADING)
       expect(selection?.profile).toBe('project_bootstrap')
       expect(selection?.readOnly).toBe(false)
       expect(selection?.contextPlan.taskDomain).toBe('project_bootstrap')
     })
 
-    it('clears Terminal-mode auxiliary selection when no override is provided', async () => {
+    it('clears cwd-scoped auxiliary selection when no override is provided', async () => {
       await builder.buildCmdModeSystemPrompt('/test/project', '/test/home', [], '/init', {
         profile: 'project_bootstrap',
         readOnly: false,
@@ -427,25 +494,30 @@ describe('ContextBuilder', () => {
       expect(typeof prompt).toBe('string')
     })
 
-    describe('fsVersion-aware cache', () => {
-      // Pins the contract that a filesystem mutation (anywhere) invalidates
-      // the cached system prompt. Without this, turn N+1 would see the file
-      // tree as it was at the start of turn N — exactly the regression the
-      // fsVersion counter was introduced to fix.
+    describe('dynamic prompt cache', () => {
+      // The cache key includes a signature of dynamic prompt content. Even if
+      // fsVersion does not move, a newly observed tree/memory/tracker snapshot
+      // must not reuse a stale full prompt.
 
-      it('cache hits when fsVersion is unchanged between builds', async () => {
-        let buildCount = 0
-        mockedInvoke.mockImplementation(async (cmd: string) => {
-          if (cmd === 'build_file_tree') {
-            buildCount++
-            return { name: 'root', children: [] }
-          }
-          throw new Error('not found')
-        })
-        await builder.buildSystemPrompt('/p', 'web')
-        await builder.buildSystemPrompt('/p', 'web')
-        // Second call should hit cache → no new file-tree build.
-        expect(buildCount).toBe(1)
+      it('does not serve stale session memory when dynamic content changes without fsVersion', async () => {
+        const { useChatStore } = await import('../../../stores/chatStore')
+        useChatStore.getState().createSession('/p')
+        const intentOverride = {
+          profile: 'bugfix_local' as const,
+          readOnly: false,
+          reason: 'test',
+          source: 'keyword' as const,
+          confidence: 'high' as const,
+        }
+
+        useChatStore.getState().setSessionMemory('first session note')
+        const first = await builder.buildSystemPrompt('/p', 'web', [], 20, 'fix it', [], intentOverride)
+        useChatStore.getState().setSessionMemory('second session note')
+        const second = await builder.buildSystemPrompt('/p', 'web', [], 20, 'fix it', [], intentOverride)
+
+        expect(first).toContain('first session note')
+        expect(second).toContain('second session note')
+        expect(second).not.toContain('first session note')
       })
 
       it('cache misses after bumpFsVersion (write happened between builds)', async () => {

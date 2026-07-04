@@ -6,13 +6,13 @@ import { buildGoalFrames, GOAL_FRAME_INTERVAL_MS } from '../celebration/goalFram
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n/useTranslation'
 
-// Terminal-mode goal celebration. Honours the refined-terminal contract: a
+// Shell-styled goal celebration. Honours the refined-shell contract: a
 // monospace, single-accent (purple) overlay that steps through ASCII frames as
 // discrete hard-steps — NO framer-motion, NO smooth tween, NO confetti palette
 // (those belong to the GUI surfaces). Plays once per goal then clears.
 //
 // Positioned absolute over the bottom of the scrollback (above the status line
-// / prompt), pointer-events none. The host (TerminalView's cmd-mode root) sets
+// / prompt), pointer-events none. The host root sets
 // position="relative".
 export function TerminalGoalCelebration() {
   const t = useTranslation()

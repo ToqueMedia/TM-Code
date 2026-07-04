@@ -88,7 +88,7 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
           if (hasEmailAuth) evidence.push(...(detected.evidence['auth.email-password'] ?? []))
           if (hasGoogleAuth) evidence.push(...(detected.evidence['auth.google'] ?? []))
           // Telemetry for the agent-initiated re-provision path. The
-          // smart-router (chat-mode + cmd-mode) covers user-initiated
+          // smart-router covers user-initiated
           // hashtag re-runs; this captures the case where the model
           // reaches for provision_auth on its own despite the system-
           // prompt section. High frequency = system prompt isn't being
@@ -264,7 +264,7 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
       lines.push('  - Only `onAuthStateChanged` is importable from firebase/auth. NEVER signInWithPopup, GoogleAuthProvider, signInWithEmailAndPassword, etc. — popup is silently blocked in the IDE preview webview.')
       lines.push('')
       lines.push('### Data layer — publish-ready by DEFAULT (TM Code Database)')
-      lines.push('  - Use `drizzle-orm` + `@libsql/client` for persistence. The harness rejects incompatible-shape deps (`@prisma/client`, `prisma`, `better-sqlite3`, `sqlite3`, `mysql2`, `pg`) on writes to package.json in **Chat mode only** — Prisma needs a persistent connection (incompatible with Cloud Run scale-to-zero + worker HTTPS proxy); native-bound SQLite drivers and non-SQLite dialects don\'t round-trip through the worker. **Terminal/CMD mode is stack-free**: no harness restriction on database drivers — you may freely install mysql2, pg, Prisma, etc.')
+      lines.push('  - Use `drizzle-orm` + `@libsql/client` for TM Code-managed persistence. General Chat projects are stack-free; this default is required only when the project is meant to keep TM Code deploy/provision capabilities without extra adapters.')
       lines.push('  - Generate `server/db.ts` with the dev/prod connection switch: `drizzle-orm/libsql/node` against `DATABASE_URL=file:./dev.db` in dev, `drizzle-orm/sqlite-proxy` against `TMDB_URL` + `TMDB_TOKEN` in prod. The libSQL endpoint and Turso credentials stay in the TM Code Worker — never in user code or `.env`.')
       lines.push('  - Schema in TypeScript via `server/schema.ts`. Generate migrations with `drizzle-kit generate`; the deploy pipeline reapplies them against the app\'s TMDB at publish time.')
       lines.push('  - Full SQL ergonomics — `where + orderBy` on different fields, multi-where, JOINs, aggregations, transactions. No composite-index trap. Performance indexes via `index().on(...)` in Drizzle schema.')
@@ -276,7 +276,7 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
       lines.push('  - Skip `cloudbuild.yaml` — the platform build pipeline runs an inline spec server-side; a file at the project root is unused.')
       lines.push('')
       lines.push('### Existing-project rule')
-      lines.push('  - When you find legacy `firebase-admin/firestore` or Prisma in the project, port it to Drizzle + libSQL first, before adding auth code. A hybrid persistence layer breaks Publish.')
+      lines.push('  - When the project is keeping TM Code-managed deploy capabilities and you find legacy `firebase-admin/firestore` or Prisma, port it to Drizzle + libSQL before adding auth code. If the developer explicitly chose Prisma or another DB, preserve that choice and mark deploy capability honestly in the project manifest.')
       lines.push('  - `firebase-admin/auth` stays — it\'s used for GIP JWT verification, separate from the data layer. Only the `/firestore` and `/database` imports are removed.')
       lines.push('  - For the auth-proxy boilerplate, `read_skill("auth-proxy")` covers Express, Fastify, NestJS, Hono, FastAPI.')
       lines.push('')
@@ -360,7 +360,7 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
           `Local development can still use DATABASE_URL=file:./dev.db, but PROD data viewer / production DB preflight is unavailable until this succeeds.\n\n` +
           `Wrong recovery paths (DO NOT TAKE):\n` +
           `  ✗ request_credentials for TMDB_URL / TMDB_TOKEN / DATABASE_URL — TMDB_* are platform-minted, and DATABASE_URL is a local SQLite default.\n` +
-          `  ✗ swap to a different ORM/driver hoping it bypasses the platform — in Chat mode the harness rejects Prisma, mysql2, pg, sqlite3, better-sqlite3 on package.json writes; Terminal/CMD mode is stack-free and has no such restriction.\n\n` +
+          `  ✗ swap to a different ORM/driver as an automatic recovery — general Chat projects may use any stack, but TM Code-managed production provisioning still depends on the manifest/data-layer contract.\n\n` +
           `Required recovery:\n` +
           `  1. Do not ask the developer for TMDB credentials and do not hardcode them.\n` +
           `  2. Tell the developer what happened — quote the error above verbatim.\n` +
@@ -414,7 +414,7 @@ export function registerProvisionTools(ctx: ToolRegistrationContext): void {
       lines.push('  - Use a route schema (`z.coerce.number().finite()` for `integer()` / `real()` columns) and write the parsed object. The prod sqlite-proxy rejects JSON string params like `"1.3"` for f64 even when local SQLite appears to coerce them.')
       lines.push('')
       lines.push('### Forbidden')
-      lines.push('  - `@prisma/client`, `prisma`, `better-sqlite3`, `sqlite3`, `mysql2`, `pg` — the write_file harness rejects these on package.json edits **in Chat mode only**. Terminal/CMD mode is stack-free — no harness restriction on database drivers. The reason for Chat mode: Prisma needs a persistent connection (incompatible with Cloud Run scale-to-zero + worker HTTPS proxy); native-bound SQLite drivers and non-SQLite dialects don\'t round-trip through the worker.')
+      lines.push('  - `@prisma/client`, `prisma`, `better-sqlite3`, `sqlite3`, `mysql2`, `pg` are allowed when the developer explicitly chooses them. They are not compatible with the TM Code-managed DB/deploy default unless the project manifest and deploy adapter say otherwise.')
       lines.push('  - Hard-coding TMDB_URL or TMDB_TOKEN in any committed file. They are deploy-injected; if explicit preflight writes them for IDE-side PROD inspection, keep them only in local .env and never commit them.')
       lines.push('')
       lines.push('### Next steps')

@@ -45,9 +45,9 @@ interface RunAgentOptions {
   /** Use existing conversation history instead of empty. Default: false */
   useConversationHistory?: boolean
   /**
-   * Run in CLI/CMD-only mode: no project required, file writes go directly to
-   * disk without diff approval, CWD is the user's home directory.
-   * Must be set explicitly by the caller — never derived implicitly from project state.
+   * Run with cwd-scoped tools: no project-store entry required, file writes go
+   * directly to disk without diff approval, and CWD defaults to the project
+   * path or the user's home directory. Must be set explicitly by the caller.
    */
   cmdOnlyMode?: boolean
   /**
@@ -68,7 +68,7 @@ interface RunAgentOptions {
   systemPromptOverride?: string
   /**
    * Raw USER-TYPED text to resolve @-mentions from (atMentions.ts). Set by
-   * callers that forward real user input (CMD mode executePrompt). When
+   * callers that forward real user input from a prompt surface. When
    * unset, mentions resolve from the text blocks of `modelMessageBlocks` /
    * `userMessageBlocks` if present — system-generated prompts (autoWake,
    * compaction, slash internals) carry neither and get NO mention
@@ -109,7 +109,7 @@ function estimateTokensFromValue(value: unknown): number {
  * Serialization chain — each invocation awaits the previous one to fully
  * settle before starting. We *cannot* simply drop concurrent calls: the
  * message queue dispatches a queued prompt as soon as `queryGuard` reports
- * idle, but the previous invocation's `finally` (cleanup, CMD-mode disable)
+ * idle, but the previous invocation's `finally` (cleanup, cwd-scope disable)
  * may still be running. With a boolean "running" guard the queued prompt
  * would be dropped silently and never appear in the message list. Chaining
  * ensures every call actually runs while still preventing overlap.
@@ -124,13 +124,10 @@ let lastRun: Promise<void> = Promise.resolve()
  * slash command — from both clearing `tryStart()` in the reserve→tryStart
  * window and one losing as "concurrent runAgentLoop detected".
  *
- * Chat-mode queued messages were starved precisely because they dispatched
- * `runAgentLoop` DIRECTLY (off this chain) while auto-wake ran on it: the queued
- * prompt kept colliding and being rejected until all background activity ceased
- * ("only at session end"). Terminal mode already routes every dispatch through
- * here (via runAgentWithCallbacks), which is why it behaved as expected.
- * Routing the Chat queue through `enqueueSerializedRun` too restores per-turn
- * draining.
+ * Queued messages were starved when one dispatch path called `runAgentLoop`
+ * directly while auto-wake ran on this chain: the queued prompt kept colliding
+ * and being rejected until all background activity ceased. Routing every agent
+ * dispatch through `enqueueSerializedRun` restores per-turn draining.
  */
 export function enqueueSerializedRun<T>(task: () => Promise<T>): Promise<T> {
   const prev = lastRun
@@ -182,9 +179,9 @@ async function runAgentInternal(
   const cmdModePath = projectStore.cmdModeProjectPath
   const projectPath = currentProject?.path || cmdModePath || ''
 
-  // Resolve CWD and home directory for CLI-only mode.
+  // Resolve CWD and home directory for cwd-scoped tool execution.
   // Prefer the open project path so the agent operates in context;
-  // fall back to home directory when CMD mode is launched without a project.
+  // fall back to home directory when launched without a project.
   let cmdCwd = ''
   let cmdHomeDir: string | null = null
   if (cmdOnlyMode) {
@@ -265,6 +262,17 @@ async function runAgentInternal(
     })
   }
   const bootstrapOnly = tmsPreflight?.shouldBootstrap === true
+  const rawHistory = bootstrapOnly
+    ? historyBeforeCurrentUser
+    : conversationHistoryOverride
+      ? conversationHistoryOverride
+      : useConversationHistory
+        ? useChatStore.getState().conversationHistory
+        : []
+  const hasImageForIntent =
+    (userMessageAttachments?.some(a => a.type === 'image') ?? false) ||
+    (userMessageBlocks?.some(block => block.type === 'attachment' && block.attachment.type === 'image') ?? false) ||
+    (modelMessageBlocks?.some(block => block.type === 'attachment' && block.attachment.type === 'image') ?? false)
 
   // Reset the per-request token counter at the START of each new request so
   // the chat indicator shows tokens for the CURRENT request only (not the
@@ -323,11 +331,12 @@ async function runAgentInternal(
     }
   }
 
-  // Enable CLI mode on the executor — direct disk writes, CWD-scoped path validation.
+  // Enable cwd-scoped execution on the executor — direct disk writes,
+  // cwd-scoped path validation.
   // Always paired with disableCmdMode() in the finally block below.
   if (cmdOnlyMode && cmdCwd) {
     toolExecutor.enableCmdMode(cmdCwd)
-    logger.info('agent', `→ CMD mode enabled: ${cmdCwd}`)
+    logger.info('agent', `→ cwd-scoped execution enabled: ${cmdCwd}`)
   }
 
   // Build system prompt with MCP tool info
@@ -345,11 +354,11 @@ async function runAgentInternal(
   if (systemPromptOverride) {
     systemPrompt = systemPromptOverride
   } else if (cmdOnlyMode && cmdCwd) {
-    // userMessageText is forwarded so CMD mode can detect skill-trigger
-    // hashtags (#auth-google etc.) and inline the corresponding CRITICAL
-    // rules at turn 1 — same mechanism as chat mode. Without this, the
-    // hashtag regex never fires in CMD and the model improvises auth from
-    // training prior, producing scaffolds with placeholder credentials.
+    // userMessageText is forwarded so cwd-scoped prompt builds can detect
+    // skill-trigger hashtags (#auth-google etc.) and inline the corresponding
+    // CRITICAL rules at turn 1. Without this, the hashtag regex never fires and
+    // the model improvises auth from training prior, producing placeholder
+    // credentials.
     systemPrompt = await contextBuilder.buildCmdModeSystemPrompt(cmdCwd, cmdHomeDir, mcpToolSummaries, userMessageText, intentOverride)
   } else {
     const projectType = currentProject?.projectType || 'unknown'
@@ -358,8 +367,9 @@ async function runAgentInternal(
     // CRITICAL rules at turn 1.
     //
     // Intent Router: a lightweight model call (qwen3.7-plus, no tools,
-    // non-streaming) classifies the user's intent into a PromptProfile + a
-    // readOnly flag BEFORE the system prompt is assembled. The result feeds
+    // non-streaming) classifies the user's intent into a PromptProfile,
+    // readOnly flag, and requiresMutation flag BEFORE the system prompt is
+    // assembled. The result feeds
     // the context builder (prompt profile + on-demand auxiliaries) and — via
     // lastAuxiliarySelection — the ToolsetSelector (starter toolset). User-text
     // inference stays in the model router/planner except for the local
@@ -375,31 +385,28 @@ async function runAgentInternal(
       ? {
           profile: 'project_bootstrap' as const,
           readOnly: false,
+          requiresMutation: true,
           source: 'keyword' as const,
           confidence: 'high' as const,
           reason: 'TMS.md bootstrap preflight selected project_bootstrap before the original task',
         }
       : intentOverride
         ? intentOverride
-      : await classifyIntent(userMessageText ?? '')
+      : await classifyIntent(userMessageText ?? '', {
+          hasImage: hasImageForIntent,
+          conversationHistory: rawHistory,
+        })
     const effectiveIntent = intent
     AgentService.getInstance().clearPostTmsBootstrapToolProfile()
     logger.info(
       'agent',
-      `→ Intent router: profile=${effectiveIntent.profile} readOnly=${effectiveIntent.readOnly} (${effectiveIntent.source}, ${Date.now() - intentStart}ms) — ${effectiveIntent.reason}`,
+      `→ Intent router: profile=${effectiveIntent.profile} readOnly=${effectiveIntent.readOnly} requiresMutation=${effectiveIntent.requiresMutation} (${effectiveIntent.source}, ${Date.now() - intentStart}ms) — ${effectiveIntent.reason}`,
     )
-    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, promptForSystem, AgentService.getInstance().getAccessedFilePaths(), { profile: effectiveIntent.profile, readOnly: effectiveIntent.readOnly, reason: effectiveIntent.reason, source: effectiveIntent.source, confidence: effectiveIntent.confidence, error: effectiveIntent.error, diagnostics: effectiveIntent.diagnostics })
+    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, promptForSystem, AgentService.getInstance().getAccessedFilePaths(), { profile: effectiveIntent.profile, readOnly: effectiveIntent.readOnly, requiresMutation: effectiveIntent.requiresMutation, reason: effectiveIntent.reason, source: effectiveIntent.source, confidence: effectiveIntent.confidence, error: effectiveIntent.error, diagnostics: effectiveIntent.diagnostics })
   }
   logger.info('agent', `✓ System prompt built (${systemPrompt.length} chars, ${Date.now() - promptBuildStart}ms)`)
 
   // Get conversation history
-  const rawHistory = bootstrapOnly
-    ? historyBeforeCurrentUser
-    : conversationHistoryOverride
-      ? conversationHistoryOverride
-      : useConversationHistory
-        ? useChatStore.getState().conversationHistory
-        : []
   logger.info('agent', `→ Conversation history: ${rawHistory.length} messages`)
 
   agentService.setSystemPrompt(systemPrompt)

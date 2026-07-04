@@ -1,9 +1,9 @@
-// terminalSpinner.ts — the ONE sanctioned "activity" animation for Terminal Mode.
+// terminalSpinner.ts — the ONE sanctioned "activity" animation for shell-styled surfaces.
 //
 // Refined-terminal contract: native terminals never rotate a glyph or sweep a
 // gradient across text — they animate by swapping a CHARACTER at a fixed cell,
 // frame by frame (the classic braille/line spinner of ora, npm, cargo, etc.).
-// Every eased/looping CSS animation in cmd-mode (toolSpin rotation,
+// Every eased/looping CSS animation in this surface (toolSpin rotation,
 // terminalThinkingShimmer gradient-clip, the breathing pulse dots) is replaced
 // by this hook so the whole surface shares one hard-step idiom — matching the
 // already-correct `blink` (cursor) and `logDotBlink` keyframes.

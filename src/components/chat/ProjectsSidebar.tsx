@@ -1,14 +1,11 @@
 import { memo, useEffect, useCallback } from 'react'
 import { Box, Flex, Text, VStack } from '@chakra-ui/react'
 import { FiPlus, FiFolder, FiCode, FiClock } from 'react-icons/fi'
-import { Menu, MenuItem, PredefinedMenuItem } from '@tauri-apps/api/menu'
-import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { useProjectStore } from '../../stores/projectStore'
-import { useLayoutStore } from '../../stores/layoutStore'
-import { useChatStore } from '../../stores/chatStore'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import type { RecentProject } from '../../types/project'
+import { openProjectInEditor, showProjectContextMenu } from '../projectContextMenu'
 
 function formatTimeAgo(dateStr: string): string {
   if (!dateStr) return ''
@@ -32,11 +29,10 @@ function getProjectInitial(name: string): string {
   return name.charAt(0).toUpperCase()
 }
 
-const isMac = /Mac/.test(navigator.platform || '')
-
 async function switchProject(projectPath: string) {
   const currentProject = useProjectStore.getState().currentProject
   if (currentProject?.path === projectPath) return
+  const { useChatStore } = await import('../../stores/chatStore')
   const chatStore = useChatStore.getState()
   if (currentProject) {
     await chatStore.cleanupOnExit(currentProject.path).catch(() => {})
@@ -44,61 +40,10 @@ async function switchProject(projectPath: string) {
   await useProjectStore.getState().openProject(projectPath)
 }
 
-async function switchAndOpenEditor(projectPath: string) {
-  await switchProject(projectPath)
-  useLayoutStore.getState().setViewMode('editor')
-}
-
-async function showProjectContextMenu(project: RecentProject) {
-  // Build all menu items in parallel to reduce IPC round-trips
-  const [openEditorItem, revealItem, separator1, removeItem, separator2, deleteItem] =
-    await Promise.all([
-      MenuItem.new({
-        text: t('misc.openInEditorMenu'),
-        action: () => switchAndOpenEditor(project.path),
-      }),
-      MenuItem.new({
-        text: isMac ? t('misc.revealInFinder') : t('misc.revealInExplorer'),
-        action: () => { revealItemInDir(project.path).catch(() => {}) },
-      }),
-      PredefinedMenuItem.new({ item: 'Separator' }),
-      MenuItem.new({
-        text: t('misc.removeFromRecent'),
-        action: () => {
-          useProjectStore.getState().removeFromRecent(project.id).catch(() => {})
-        },
-      }),
-      PredefinedMenuItem.new({ item: 'Separator' }),
-      MenuItem.new({
-        text: t('misc.deleteProject'),
-        action: () => {
-          useProjectStore.getState().deleteProject(project.id, project.path).catch(() => {})
-        },
-      }),
-    ])
-
-  const menu = await Menu.new({
-    items: [openEditorItem, revealItem, separator1, removeItem, separator2, deleteItem],
-  })
-
-  await menu.popup()
-}
-
 function ProjectsSidebar() {
-  const allRecentProjects = useProjectStore(s => s.recentProjects)
-  const cmdModeProjectPaths = useProjectStore(s => s.cmdModeProjectPaths)
+  const recentProjects = useProjectStore(s => s.recentProjects)
   const currentProject = useProjectStore(s => s.currentProject)
   const loadRecentProjects = useProjectStore(s => s.loadRecentProjects)
-
-  // CMD mode projects are terminal-only — exclude them from the IDE sidebar
-  // UNLESS one is currently open in the IDE. Without this carve-out, a project
-  // that was once opened in CMD mode (so it lives in cmdModeProjectPaths) and
-  // is now being used in IDE/chat mode disappears from the sidebar — the user
-  // sees the empty pane even though they have a project loaded.
-  const cmdPathSet = new Set(cmdModeProjectPaths)
-  const recentProjects = allRecentProjects.filter(
-    p => !cmdPathSet.has(p.path) || p.path === currentProject?.path,
-  )
 
   useEffect(() => {
     loadRecentProjects()
@@ -106,7 +51,7 @@ function ProjectsSidebar() {
 
   const handleOpenInEditor = useCallback((e: React.MouseEvent, path: string) => {
     e.stopPropagation()
-    switchAndOpenEditor(path)
+    openProjectInEditor(path)
   }, [])
 
   const handleContextMenu = useCallback((e: React.MouseEvent, project: RecentProject) => {

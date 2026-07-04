@@ -221,7 +221,8 @@ class SkillService {
    * @param mode 'chat' (default) loads code-pattern skills relevant to projectType.
    *             'cmd' loads rich-artifact skills (pdf/docx/xlsx/pptx/html) plus
    *             frontend-design when applicable. Code-pattern skills are skipped
-   *             in cmd mode since CMD is for cross-cutting tasks, not codebase work.
+   *             in cwd-scoped prompts since those are for cross-cutting tasks,
+   *             not only codebase work.
    */
   async loadSkills(
     projectPath: string,
@@ -517,8 +518,8 @@ ${lines.join('\n')}`
    * Decide whether a bundled skill makes it into the system-prompt index.
    *
    * Design principle: keep this gate MINIMAL. It exists to filter out skills
-   * whose tool surface doesn't match the active mode (e.g. CMD-only PDF
-   * authoring in a chat-mode prompt) — NOT to second-guess relevance. The
+   * whose tool surface doesn't match the active prompt surface (e.g. PDF
+   * authoring without direct disk-write support) — NOT to second-guess relevance. The
    * skill description in the index is self-explanatory; the model decides
    * via `read_skill` whether to load the body. We add ~150B per skill in
    * the index — trivial cost vs the real cost of silently dropping a useful
@@ -541,9 +542,9 @@ ${lines.join('\n')}`
     // general-coding is always relevant — cross-cutting hygiene.
     if (skillName === 'general-coding') return true
 
-    // Rich-artifact skills (PDF, Word, Excel, PPT, HTML) are CMD-only — they
-    // assume direct disk writes and a tool surface that chat mode doesn't
-    // expose. This is a real capabilities gate, not a relevance heuristic.
+    // Rich-artifact skills (PDF, Word, Excel, PPT, HTML) require direct disk
+    // writes and the full local tool surface. This is a real capabilities gate,
+    // not a relevance heuristic.
     if (RICH_ARTIFACT_SKILLS.has(skillName)) {
       return mode === 'cmd'
     }
@@ -562,8 +563,8 @@ ${lines.join('\n')}`
     // `#design` is still the strongest signal: authCommand inlines the skill
     // body verbatim, planCommand pins it in Platform Requirements.
 
-    // Auth-scaffolding skills (auth-proxy, google-signin) — chat-only
-    // (CMD has no dev-server preview, the recipe doesn't apply there). No
+    // Auth-scaffolding skills (auth-proxy, google-signin) need the preview
+    // workflow, so the recipe does not apply to the cwd-scoped surface. No
     // projectType gate: empty projects are exactly when the agent is about
     // to scaffold auth, so the index entry must be visible. The model picks
     // it up only when the user asks for login/auth.

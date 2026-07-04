@@ -1,5 +1,5 @@
 /**
- * Memory tools — save_memory, forget_memory, read_memory, distill_memory.
+ * Memory tools — persistent memory plus session memory.
  *
  * Extracted from toolExecutor.ts as part of the SOLID decomposition.
  * These tools manage the persistent memory system (memdir) across
@@ -8,6 +8,7 @@
 
 import { invoke } from '@/utils/invokeMetrics'
 import { useProjectStore } from '../../../stores/projectStore'
+import { READ_SESSION_MEMORY, UPDATE_SESSION_MEMORY } from '../toolNames'
 import type { ToolRegistrationContext } from './context'
 
 export function registerMemoryTools(ctx: ToolRegistrationContext): void {
@@ -384,9 +385,9 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
   })
 
   // === update_session_memory ===
-  ctx.tools.set('update_session_memory', {
+  ctx.tools.set(UPDATE_SESSION_MEMORY, {
     definition: {
-      name: 'update_session_memory',
+      name: UPDATE_SESSION_MEMORY,
       description: 'Update session-scoped memory notes that survive context compaction but do not persist across sessions. Use for: in-progress work state, decisions made this session, partial results, things to remember after compact. The notes are injected into the system prompt after compaction so you can resume without loss. Write in bullet-point markdown. Each call REPLACES the previous notes (not appends).',
       input_schema: {
         type: 'object',
@@ -414,9 +415,9 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
   })
 
   // === read_session_memory ===
-  ctx.tools.set('read_session_memory', {
+  ctx.tools.set(READ_SESSION_MEMORY, {
     definition: {
-      name: 'read_session_memory',
+      name: READ_SESSION_MEMORY,
       description: 'Read the current session memory notes. Use to check what was recorded earlier in this session — especially useful after compaction when earlier conversation context was summarized.',
       input_schema: {
         type: 'object',

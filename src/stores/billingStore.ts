@@ -78,7 +78,7 @@ export interface MeResponse {
 // do TM Speed e comita increments atómicos ao Firestore — a IDE não estima,
 // não corrige e não persiste consumo (o antigo `persistTokensConsumed` +
 // `addEstimatedUsage` foram removidos; eram a fonte das inconsistências:
-// chat-mode sem billing, correção por turno errada, write absoluto
+// prompt sem billing, correção por turno errada, write absoluto
 // last-writer-wins a esmagar o cycle-reset do servidor).
 //
 // O store recebe dados de:

@@ -201,6 +201,21 @@ export function extractCriticalSectionsWithStats(content: string): CriticalExtra
 export const PROMPT_CACHE_TTL_MS = 30_000
 
 /**
+ * Small deterministic string hash for cache signatures. This is not a
+ * security primitive; it only keeps volatile prompt inputs out of cache keys
+ * while still invalidating on content changes.
+ */
+export function stablePromptHash(input: string | null | undefined): string {
+  const text = input ?? ''
+  let hash = 2166136261
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+/**
  * Static/dynamic boundary marker. Inserted as a literal sentinel between the
  * sections of the system prompt that are stable across sessions (role,
  * tools, doing-tasks rules) and the sections that vary per-session

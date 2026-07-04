@@ -9,7 +9,7 @@ import { useLayoutStore } from '../stores/layoutStore'
 import { useChatStore } from '../stores/chatStore'
 import { useToastStore } from '../stores/toastStore'
 import FirebaseAuthService from '../services/auth/firebaseAuth'
-import { sendProjectToTmCodeWeb } from '../services/webExportService'
+import { prepareProjectWebExport, sendProjectToTmCodeWeb, type WebExportSummary } from '../services/webExportService'
 import WindowControls from './ui/WindowControls'
 import MenuBar from './ui/titlebar/MenuBar'
 import { BrowserMissingDialog } from './dialogs/BrowserMissingDialog'
@@ -35,6 +35,30 @@ function getInitials(email: string | null, displayName: string | null): string {
     return local.substring(0, 2).toUpperCase()
   }
   return '?'
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  const precision = unitIndex === 0 || value >= 10 ? 0 : 1
+  return `${value.toFixed(precision)} ${units[unitIndex]}`
+}
+
+function buildSendToWebConfirmMessage(template: string, summary: WebExportSummary): string {
+  const skipped = summary.skippedGenerated +
+    summary.skippedHidden +
+    summary.skippedSensitive +
+    summary.skippedUnsupported
+  return template
+    .replace('{files}', String(summary.fileCount))
+    .replace('{size}', formatBytes(summary.totalBytes))
+    .replace('{skipped}', String(skipped))
 }
 
 function MinimalTitleBar() {
@@ -183,7 +207,13 @@ function MinimalTitleBar() {
     setSendingToWeb(true)
     useToastStore.getState().addToast('info', t('titlebar.sendToWebPreparing'))
     try {
-      const result = await sendProjectToTmCodeWeb(currentProject)
+      const prepared = await prepareProjectWebExport(currentProject)
+      const confirmed = window.confirm(
+        buildSendToWebConfirmMessage(t('titlebar.sendToWebConfirm'), prepared.summary),
+      )
+      if (!confirmed) return
+
+      const result = await sendProjectToTmCodeWeb(currentProject, prepared)
       useToastStore.getState().addToast('success', t('titlebar.sendToWebSent'))
       const { openUrl } = await import('@tauri-apps/plugin-opener')
       await openUrl(result.webUrl)
@@ -252,27 +282,76 @@ function MinimalTitleBar() {
         {/* Send to TM Code Web */}
         {currentProject && !cmdModeProjectPath && (
           <Flex
+            as="button"
             align="center"
             justify="center"
-            gap="6px"
-            px="9px"
+            gap="7px"
+            px="10px"
             h="28px"
-            borderRadius="6px"
+            minW="28px"
+            borderRadius="9px"
             cursor={sendingToWeb ? 'progress' : 'pointer'}
-            color={tokens.colors.text.secondary}
-            border={`1px solid ${tokens.colors.border.panel}`}
-            transition={`all ${tokens.transition.fast}`}
-            _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary, borderColor: tokens.colors.border.glass }}
-            role="button"
+            color={sendingToWeb ? tokens.colors.accent.primary : tokens.colors.text.primary}
+            bg={sendingToWeb ? 'rgba(254, 16, 99, 0.12)' : 'rgba(254, 16, 99, 0.075)'}
+            border={sendingToWeb ? '1px solid rgba(254, 16, 99, 0.35)' : '1px solid rgba(254, 16, 99, 0.24)'}
+            boxShadow={sendingToWeb ? '0 0 0 1px rgba(254,16,99,0.06), 0 8px 22px rgba(254,16,99,0.12)' : '0 0 0 1px rgba(254,16,99,0.03)'}
+            transition="background 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease"
+            _hover={{
+              bg: 'rgba(254, 16, 99, 0.13)',
+              color: tokens.colors.text.inverse,
+              borderColor: 'rgba(254, 16, 99, 0.42)',
+              boxShadow: '0 10px 26px rgba(254,16,99,0.16), 0 0 0 1px rgba(254,16,99,0.06)',
+              transform: sendingToWeb ? 'none' : 'translateY(-1px)',
+            }}
+            _active={{ transform: 'translateY(0) scale(0.98)' }}
+            _focusVisible={{ outline: '2px solid rgba(254, 16, 99, 0.45)', outlineOffset: '2px' }}
             title={t('titlebar.sendToWebTitle')}
             aria-label={t('titlebar.sendToWebTitle')}
-            opacity={sendingToWeb ? 0.6 : 1}
+            aria-disabled={sendingToWeb}
+            opacity={sendingToWeb ? 0.82 : 1}
             onClick={handleSendToWeb}
+            css={{
+              '@media (max-width: 860px)': {
+                '& [data-send-web-label]': { display: 'none' },
+              },
+              '@keyframes tmSendToWebSpin': {
+                to: { transform: 'rotate(360deg)' },
+              },
+            }}
           >
-            <FiUploadCloud size={14} />
-            <Text fontSize="11px" fontWeight="600" whiteSpace="nowrap">
+            <Box
+              as="span"
+              display="inline-flex"
+              alignItems="center"
+              justifyContent="center"
+              color="currentColor"
+              css={sendingToWeb ? { animation: 'tmSendToWebSpin 0.9s linear infinite' } : undefined}
+            >
+              <FiUploadCloud size={14} />
+            </Box>
+            <Text data-send-web-label fontSize="11px" fontWeight="700" whiteSpace="nowrap">
               {t('titlebar.sendToWebShort')}
             </Text>
+          </Flex>
+        )}
+
+        {user && (
+          <Flex
+            align="center"
+            justify="center"
+            w="28px"
+            h="28px"
+            borderRadius="6px"
+            cursor="pointer"
+            color={tokens.colors.text.secondary}
+            transition={`all ${tokens.transition.fast}`}
+            _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
+            role="button"
+            title={t('menu.settings')}
+            aria-label={t('menu.settings')}
+            onClick={handleOpenSettings}
+          >
+            <FiSettings size={14} />
           </Flex>
         )}
 

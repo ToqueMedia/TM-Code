@@ -5,7 +5,7 @@ import { tokens } from '@/theme/tokens'
 import { canShareCode, useCollabStore } from '@/stores/collabStore'
 
 /**
- * Terminal-style unread-team-chat banner. Sits just above the prompt (chrome,
+ * Shell-style unread-team-chat banner. Sits just above the prompt (chrome,
  * not scrollback) while the team chat panel is CLOSED and there are unread
  * messages — so a teammate's message is never silent. Clicking opens the chat
  * (which clears the unread count). Briefly flashes the accent when a new message

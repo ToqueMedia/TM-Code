@@ -43,6 +43,7 @@ import {
   WEB_FETCH,
   DELEGATE, COLLECT_RESULTS,
   SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,
+  UPDATE_SESSION_MEMORY, READ_SESSION_MEMORY,
   PROVISION_AUTH, PROVISION_DATABASE, PROVISION_FILES, PROVISION_DEPLOY,
   REQUEST_CREDENTIALS,
 } from './toolNames'
@@ -54,7 +55,7 @@ import type { PromptProfile } from './contextBuilder/auxiliaryRegistry'
 export const CORE_TOOLS = [
   GREP_ALIAS, READ_ALIAS, GLOB_ALIAS, LS_ALIAS,
   SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE, GLOB,
-  EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
+  EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS, UPDATE_SESSION_MEMORY,
 ] as const
 
 /** File operations beyond edit_file (create, delete, rename, list, glob, skills). */
@@ -77,7 +78,10 @@ export const WEB_TOOLS = [WEB_FETCH] as const
 export const SUBAGENT_TOOLS = [DELEGATE, COLLECT_RESULTS] as const
 
 /** Persistent memory tools. */
-export const MEMORY_TOOLS = [SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY] as const
+export const MEMORY_TOOLS = [
+  SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,
+  UPDATE_SESSION_MEMORY, READ_SESSION_MEMORY,
+] as const
 
 /** Platform provisioning tools (auth, database, files, deploy, credentials). */
 export const PROVISION_TOOLS = [
@@ -108,7 +112,7 @@ const GROUP_TOOLS: Record<ToolsetGroupName, readonly string[]> = {
 const READONLY_BASE = [
   READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   READ_FILE, SEARCH_FILES, GLOB, LIST_DIRECTORY, READ_LARGE_RESULT,
-  READ_SKILL, ASK_USER_QUESTION,
+  READ_SKILL, ASK_USER_QUESTION, UPDATE_SESSION_MEMORY,
 ] as const
 
 /** Project bootstrap for TMS.md: inspect focused files, then write only the
@@ -116,7 +120,7 @@ const READONLY_BASE = [
 const PROJECT_BOOTSTRAP_BASE = [
   LS_ALIAS, GLOB_ALIAS, GREP_ALIAS, READ_ALIAS,
   LIST_DIRECTORY, GLOB, SEARCH_FILES, READ_FILE, WRITE_FILE, CREATE_FILE,
-  ASK_USER_QUESTION,
+  ASK_USER_QUESTION, UPDATE_SESSION_MEMORY,
 ] as const
 
 /** Localised bugfix — reading + execute + ask (Parte B). edit_file is
@@ -125,7 +129,7 @@ const PROJECT_BOOTSTRAP_BASE = [
 const BUGFIX_BASE = [
   READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   READ_FILE, SEARCH_FILES, GLOB, READ_LARGE_RESULT, EXECUTE_COMMAND,
-  ASK_USER_QUESTION,
+  ASK_USER_QUESTION, UPDATE_SESSION_MEMORY,
 ] as const
 /** Exported for tests + the usage-log to reference the bugfix base set. */
 export { BUGFIX_BASE, READONLY_BASE }

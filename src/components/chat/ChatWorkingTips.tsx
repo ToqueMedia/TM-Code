@@ -63,17 +63,18 @@ export const ChatWorkingTips = memo(function ChatWorkingTips() {
   return (
     // Outer wrapper centres the hint on the SAME 900px column as the transcript
     // and the PromptBar, so it stops breaking out to the window's left edge.
-    <Flex flexShrink={0} w="100%" justify="center" px={4} pb="6px" data-ui-chrome>
+    <Flex flexShrink={0} w="100%" justify="center" px={4} pb="7px" data-ui-chrome>
       <Flex
-        maxW="900px"
+        maxW="980px"
         w="100%"
         align="center"
         gap={2}
         px={3}
-        py="6px"
-        borderRadius={tokens.radius.md}
-        bg="rgba(163, 113, 247, 0.06)"
-        border="1px solid rgba(163, 113, 247, 0.16)"
+        py="7px"
+        borderRadius="9px"
+        bg="rgba(163, 113, 247, 0.045)"
+        border="1px solid rgba(163, 113, 247, 0.14)"
+        boxShadow="inset 2px 0 0 rgba(163, 113, 247, 0.42)"
       >
         <Box color={tokens.colors.accent.purple} flexShrink={0} display="flex">
           <FiZap size={11} />

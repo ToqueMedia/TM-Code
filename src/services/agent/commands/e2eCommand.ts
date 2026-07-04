@@ -173,8 +173,8 @@ export async function executeE2E(
       // Bubbles already created above — don't duplicate.
       addUserMessage: false,
       skipStartAssistantMessage: true,
-      // CMD mode → cwd-scoped tool executor so read_dev_server_logs /
-      // browser controls / project reads resolve against the CMD project.
+      // Cwd-scoped tool executor so read_dev_server_logs / browser controls /
+      // project reads resolve against the active workspace root.
       cmdOnlyMode: mode === 'terminal',
     })
   } finally {

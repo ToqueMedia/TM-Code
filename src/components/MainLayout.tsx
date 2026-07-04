@@ -19,6 +19,7 @@ import EditorView from './views/EditorView'
 import PermissionDialog from './chat/PermissionDialog'
 import PlanViewerPanel from './chat/PlanViewerPanel'
 import CheckpointDrawerPanel from './chat/CheckpointDrawerPanel'
+import TerminalDrawerPanel from './cmd-mode/TerminalDrawerPanel'
 import { useTranslation } from '@/i18n'
 import ProjectsSidebar from './chat/ProjectsSidebar'
 import { ErrorBoundary } from './ErrorBoundary'
@@ -34,14 +35,21 @@ import { TeamChatPanel } from './collab/TeamChatPanel'
 import { useCollabSession } from '@/hooks/useCollabSession'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
+import { GoalCelebration } from './celebration/GoalCelebration'
+import MonacoBridge from '../utils/monacoBridge'
 
-function MainLayout() {
+interface MainLayoutProps {
+  embedded?: boolean
+}
+
+function MainLayout({ embedded = false }: MainLayoutProps) {
   const t = useTranslation()
   useCollabSession()
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewFullscreen = useLayoutStore(s => s.isPreviewFullscreen)
   const isSidebarVisible = useLayoutStore(s => s.isSidebarVisible)
   const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
+  const previewFillsWorkspace = embedded && viewMode === 'preview'
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
   const approve = usePermissionStore(s => s.approve)
   const approveAlwaysInProject = usePermissionStore(s => s.approveAlwaysInProject)
@@ -190,6 +198,12 @@ function MainLayout() {
       // 3. Save page: Cmd+S, Ctrl+S (avoid native browser html saving)
       if (isMeta && key === 's' && !isShift && !isAlt) {
         e.preventDefault()
+        const currentEditor = MonacoBridge.getInstance().getCurrentEditor()
+        const saveAction = currentEditor?.getAction('tmcode.save')
+        if (saveAction) {
+          saveAction.run().catch(() => {})
+          return
+        }
         const editorRepo = useEditorRepository.getState()
         if (editorRepo.activeFile) {
           editorRepo.saveFile(editorRepo.activeFile).catch(() => {})
@@ -335,24 +349,46 @@ function MainLayout() {
     return () => unlisten?.()
   }, [])
 
-  if (!currentProject) return null
+  if (!currentProject) {
+    if (!embedded) return null
+    return (
+      <Flex
+        direction="column"
+        flex="1"
+        width="100%"
+        height="100%"
+        bg="transparent"
+        color={tokens.colors.text.primary}
+        overflow="hidden"
+        fontFamily={tokens.fontFamily.ui}
+        position="relative"
+      >
+        <GoalCelebration />
+        <ChatView />
+      </Flex>
+    )
+  }
 
   return (
     <Flex
       direction="column"
-      height="100vh"
+      flex={embedded ? '1' : undefined}
+      width="100%"
+      height={embedded ? '100%' : '100vh'}
       bg="transparent"
       color={tokens.colors.text.primary}
       overflow="hidden"
       fontFamily={tokens.fontFamily.ui}
+      position="relative"
     >
-      <MinimalTitleBar />
+      <GoalCelebration />
+      {!embedded && <MinimalTitleBar />}
 
       {/* Main area below title bar: optional projects sidebar + content column */}
       <Flex flex="1" overflow="hidden">
         {/* Projects sidebar — full height from title bar to bottom */}
         <AnimatePresence>
-          {isProjectsSidebarVisible && viewMode !== 'editor' && (
+          {!embedded && isProjectsSidebarVisible && viewMode !== 'editor' && (
             <motion.div
               key="projects-sidebar"
               initial={{ width: 0, opacity: 0 }}
@@ -435,13 +471,13 @@ function MainLayout() {
                 ) : (
                   <Flex flex="1" overflow="hidden">
                     <Box
-                      w={viewMode === 'preview'
+                      w={previewFillsWorkspace ? '0px' : viewMode === 'preview'
                         ? (isPreviewFullscreen ? '0px' : `${previewChatWidth}px`)
                         : '100%'}
                       h="100%"
                       flexShrink={0}
                       overflow="hidden"
-                      display="flex"
+                      display={previewFillsWorkspace ? 'none' : 'flex'}
                       flexDirection="column"
                       transition={isResizing ? 'none' : 'width 0.3s ease'}
                     >
@@ -466,7 +502,7 @@ function MainLayout() {
                         )
                       )}
                     </Box>
-                    {viewMode === 'preview' && !isPreviewFullscreen && (
+                    {viewMode === 'preview' && !isPreviewFullscreen && !previewFillsWorkspace && (
                       <Box
                         ref={resizeHandleRef}
                         role="separator"
@@ -527,6 +563,7 @@ function MainLayout() {
           {/* Plan Viewer side panel — 600px, full height, pushes everything left */}
           <PlanViewerPanel />
           <CheckpointDrawerPanel />
+          <TerminalDrawerPanel />
         </Flex>
       </Flex>
 

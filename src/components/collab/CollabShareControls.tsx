@@ -56,7 +56,7 @@ export function CollabShareControls({ compact = false }: { compact?: boolean }) 
   }
 
   return (
-    <Flex align="center" gap={1} position="relative">
+    <Flex align="center" gap={1} position="relative" flexShrink={0}>
       {/* Live Preview — starts + shares on click; shows a stop dropdown while
           live. While sharing it carries a pulsing LIVE badge so the user always
           sees that their preview is being broadcast. */}
@@ -256,6 +256,7 @@ function Chip({
       gap="5px"
       h="24px"
       px="7px"
+      flexShrink={0}
       borderRadius="6px"
       position="relative"
       color={active ? tokens.colors.accent.primary : tokens.colors.text.secondary}
@@ -295,12 +296,20 @@ function Chip({
         )}
       </Box>
       {live && liveLabel ? (
-        <Text fontSize="9px" fontWeight="700" letterSpacing="0.06em" fontFamily={tokens.fontFamily.mono} color={tokens.colors.accent.primary} whiteSpace="nowrap">
+        <Text
+          data-chat-toolbar-secondary-label
+          fontSize="9px"
+          fontWeight="700"
+          letterSpacing="0.06em"
+          fontFamily={tokens.fontFamily.mono}
+          color={tokens.colors.accent.primary}
+          whiteSpace="nowrap"
+        >
           {liveLabel}
         </Text>
       ) : (
         label && (
-          <Text fontSize="11px" fontWeight="500" whiteSpace="nowrap">
+          <Text data-chat-toolbar-secondary-label fontSize="11px" fontWeight="500" whiteSpace="nowrap">
             {label}
           </Text>
         )

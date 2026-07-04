@@ -48,7 +48,7 @@ export const TerminalGreeting = memo(function TerminalGreeting({ projectPath }: 
   }, [projectPath])
 
   // Pool de dicas: cada comando vira uma dica individual + as dicas fixas de
-  // navegação. Uma dica aleatória por montagem — abrir o Terminal Mode várias
+  // navegação. Uma dica aleatória por montagem — abrir esta superfície várias
   // vezes vai expondo o catálogo inteiro sem nunca despejar a lista completa.
   const tip = useMemo(() => {
     const pool = buildTipPool(t)

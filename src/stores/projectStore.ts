@@ -24,7 +24,7 @@ import { logger } from '../utils/logger';
  * Dedupe a recent-projects list by `path`. Rust's `get_recent_projects`
  * returns entries sorted by lastOpened DESC; the same project can appear
  * twice when the registry stores it with two different IDs (e.g. opened
- * once via CMD-mode auto-create and once via "Open folder"). Keeping the
+ * once via cwd-scoped auto-create and once via "Open folder"). Keeping the
  * FIRST occurrence preserves the most recent timestamp and matches what
  * the UI expects ("Recents" should be distinct projects, not entries).
  *
@@ -49,7 +49,7 @@ interface ProjectStore {
   loading: boolean;
   error: string | null;
   cmdModeProjectPath: string | null;
-  /** Paths that have been opened at least once in CMD mode — persisted. */
+  /** Paths that have been opened at least once through the cwd-scoped surface — persisted. */
   cmdModeProjectPaths: string[];
   /**
    * Where the user was on the Welcome screen the last time the app quit.
@@ -92,7 +92,7 @@ interface ProjectStore {
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
   setCmdModeProjectPath: (path: string | null) => void;
-  /** Remove a path from the CMD mode paths list (e.g. user promotes it to an IDE project). */
+  /** Remove a path from the cwd-scoped paths list (e.g. user promotes it to an IDE project). */
   removeCmdModePath: (path: string) => void;
   /** Mirror a just-opened project into the in-memory recents list (no IPC). */
   upsertRecentProject: (info: ProjectInfo) => void;
@@ -202,10 +202,9 @@ export const useProjectStore = create<ProjectStore>()(
 
       setCmdModeProjectPath: (path: string | null) => {
         if (path) {
-          // Record that this path was opened in CMD mode (deduplicated, max 20)
+          // Record that this path was opened through the cwd-scoped surface (deduplicated, max 20)
           const existing = get().cmdModeProjectPaths.filter(p => p !== path)
-          // Entering CMD mode clears the Welcome sub-screen marker — the
-          // next app start should restore CMD, not Welcome.
+          // Entering the cwd-scoped surface clears the Welcome sub-screen marker.
           set({ cmdModeProjectPath: path, cmdModeProjectPaths: [path, ...existing].slice(0, 20), welcomeScreen: null })
         } else {
           // Leaving CMD back to Welcome — remember that's where the user is.
@@ -221,9 +220,8 @@ export const useProjectStore = create<ProjectStore>()(
 
       // Rust's open_project persists the recents FILE, but the Welcome
       // "Recents" list renders the in-memory array, which only re-reads disk
-      // on mount. Terminal Mode bypasses openProject() (it invokes
-      // open_project directly in TerminalView), so without this mirror a
-      // folder opened in CMD mode never appeared in Recents until an app
+      // on mount. The cwd-scoped workspace invokes open_project directly, so
+      // without this mirror a folder opened there never appeared in Recents until an app
       // restart (user report, 2026-06-12). Same no-extra-IPC pattern as the
       // freshEntry construction inside openProject.
       upsertRecentProject: (info: ProjectInfo) => {
@@ -283,10 +281,10 @@ export const useProjectStore = create<ProjectStore>()(
             path: projectInfo.path,
             lastOpened: projectInfo.lastOpened,
           };
-          // Most-recent-mode wins: opening in chat/IDE removes the path from the
-          // CMD-mode list. Without this, a folder once opened in CMD stays
-          // tagged as "Terminal" in WelcomeSidebar forever — even after it's
-          // re-opened via "Open Folder" / "New Project" for chat use.
+          // Most-recent surface wins: opening in the IDE removes the path from
+          // the cwd-scoped list. Without this, a folder once opened there stays
+          // tagged in WelcomeSidebar after it is reopened via "Open Folder" /
+          // "New Project".
           set(state => ({
             currentProject: projectInfo,
             recentProjects: dedupeRecentProjects([freshEntry, ...state.recentProjects]),

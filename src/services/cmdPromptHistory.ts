@@ -1,5 +1,5 @@
 /**
- * Per-project CMD-mode prompt history, persisted to IndexedDB.
+ * Per-project prompt history for the cwd-scoped workspace surface, persisted to IndexedDB.
  *
  * Performance strategy:
  *   - The hook keeps the **in-memory** array as the source of truth for

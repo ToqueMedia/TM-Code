@@ -1,4 +1,4 @@
-// goalFrames.ts — the ASCII "GOAL!" animation for Terminal Mode.
+// goalFrames.ts — the ASCII "GOAL!" animation for shell-styled surfaces.
 //
 // Refined-terminal contract (see terminalSpinner.ts): native terminals animate
 // by swapping a CHARACTER at a fixed cell, frame by frame — never a smooth

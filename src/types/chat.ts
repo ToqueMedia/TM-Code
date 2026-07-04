@@ -13,7 +13,7 @@ export interface Attachment {
   base64?: string
   /**
    * Número do chip `[Image #N]` (paridade claude-vaz, history.ts:59) —
-   * atribuído quando uma imagem é colada/anexada no CMD mode. O mesmo texto
+   * atribuído quando uma imagem é colada/anexada no prompt local. O mesmo texto
    * é inserido no input; no submit, a imagem só é enviada se o placeholder
    * ainda estiver no texto (apagar o texto remove a imagem — claude-vaz
    * handlePromptSubmit.ts:178). Estável após atribuição: remoções de outros

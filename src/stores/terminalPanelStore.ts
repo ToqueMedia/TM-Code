@@ -96,7 +96,7 @@ export const useTerminalPanelStore = create<TerminalPanelState & TerminalPanelAc
   },
 
   killAll: () => {
-    // Hide panel + kill every PTY session. Use only on /exit (leaving CMD mode).
+    // Hide panel + kill every PTY session. Use only on /exit.
     const { instances } = get()
     for (const inst of instances) {
       invoke('kill_pty_session', { sessionId: inst.id }).catch(() => {})

@@ -30,9 +30,9 @@ interface PromptTextareaProps {
 // Shared text styles used by BOTH the textarea and the overlay so glyph
 // metrics line up exactly (any drift between the two ruins the highlight).
 const TEXT_STYLE: React.CSSProperties = {
-  fontSize: tokens.fontSize.lg,
+  fontSize: '15px',
   fontFamily: tokens.fontFamily.ui,
-  lineHeight: '24px',
+  lineHeight: '23px',
   whiteSpace: 'pre-wrap',
   wordBreak: 'break-word',
   margin: 0,
@@ -81,7 +81,7 @@ function PromptTextarea({ textareaRef, onChange, onKeyDown, onBlur, onPaste, dis
     // Height first — auto + scrollHeight measure, then transform sync so the
     // overlay tracks any new scrollTop the browser set after the height change.
     ta.style.height = 'auto'
-    const maxHeight = 6 * 24
+    const maxHeight = 7 * 23
     ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`
     if (ov) {
       ov.style.transform = `translateY(-${ta.scrollTop}px)`
@@ -89,7 +89,7 @@ function PromptTextarea({ textareaRef, onChange, onKeyDown, onBlur, onPaste, dis
   }, [value, textareaRef])
 
   return (
-    <Box px={4} pt={3} pb={1}>
+    <Box px={{ base: 3.5, md: 4 }} pt={3.5} pb={1}>
       <Box
         position="relative"
         // CRITICAL: clipping must live on the parent (not the overlay) so the
@@ -184,7 +184,7 @@ function PromptTextarea({ textareaRef, onChange, onKeyDown, onBlur, onPaste, dis
             color: 'transparent',
             caretColor: tokens.colors.text.primary,
             resize: 'none',
-            maxHeight: `${6 * 24}px`,
+            maxHeight: `${7 * 23}px`,
             overflowY: 'auto',
             opacity: disabled ? 0.5 : 1,
             position: 'relative',
@@ -206,7 +206,7 @@ function PromptTextarea({ textareaRef, onChange, onKeyDown, onBlur, onPaste, dis
  *
  * Mirrors the `/loop [interval] [prompt]` CLI placeholder pattern from
  * the screenshot in the user feedback. Replicated in `CmdModePromptInput`
- * via the same `resolveInlineArgHint` helper so chat and CMD parity is
+ * via the same `resolveInlineArgHint` helper so prompt parity is
  * mechanical, not duplicated.
  */
 const InlineArgHint = memo(function InlineArgHint({ value }: { value: string }) {

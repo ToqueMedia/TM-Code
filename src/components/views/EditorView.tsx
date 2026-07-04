@@ -165,7 +165,12 @@ function EditorView() {
   if (!currentProject) return null
 
   return (
-    <Flex direction="column" flex="1" overflow="hidden">
+    <Flex
+      direction="column"
+      flex="1"
+      overflow="hidden"
+      bg="linear-gradient(180deg, rgba(255,255,255,0.018), rgba(0,0,0,0) 160px), #0a0a0a"
+    >
       {/* Full-height layout: Toolbar + Sidebar + Editor column */}
       <Flex flex="1" overflow="hidden">
         {/* Left toolbar — full height from top to status bar */}
@@ -193,9 +198,15 @@ function EditorView() {
         )}
 
         {/* Right column: Editor (with split support) + Terminal */}
-        <Flex flex="1" direction="column" minW={0}>
+        <Flex
+          flex="1"
+          direction="column"
+          minW={0}
+          bg="rgba(8, 8, 9, 0.96)"
+          borderLeft={activeSidebarPanel ? '1px solid rgba(255,255,255,0.045)' : undefined}
+        >
           {/* Editor area */}
-          <Flex flex="1" overflow="hidden">
+          <Flex flex="1" overflow="hidden" p={{ base: 0, md: '6px 6px 0 6px' }}>
             {hasOpenFilesInAnyGroup ? (
               <SplitEditorLayout
                 projectPath={currentProject.path}

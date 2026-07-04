@@ -131,24 +131,78 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
   }, [addedTotal, removedTotal])
 
   return (
-    <Box mt="2px" mb={1}>
-      {/* Summary line */}
-      {summary && (
-        <Flex align="center" gap={1.5} mb="2px">
-          <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} userSelect="none">└</Text>
-          <Text fontSize="11px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono}>
-            {summary}
-          </Text>
-        </Flex>
-      )}
+    <Box
+      mt={2}
+      mb={2}
+      border="1px solid rgba(255,255,255,0.075)"
+      borderRadius="10px"
+      overflow="hidden"
+      bg="rgba(0,0,0,0.28)"
+    >
+      <Flex
+        align="center"
+        justify="space-between"
+        gap={2}
+        px={3}
+        py="7px"
+        bg="rgba(255,255,255,0.032)"
+        borderBottom="1px solid rgba(255,255,255,0.06)"
+      >
+        <Text
+          fontSize="11px"
+          color={tokens.colors.text.secondary}
+          fontFamily={tokens.fontFamily.mono}
+          fontWeight="600"
+          overflow="hidden"
+          textOverflow="ellipsis"
+          whiteSpace="nowrap"
+        >
+          {filePath}
+        </Text>
+        {summary && (
+          <Flex align="center" gap={1.5} flexShrink={0}>
+            {addedTotal > 0 && (
+              <Text
+                fontSize="10px"
+                color={tokens.colors.diff.addedText}
+                fontFamily={tokens.fontFamily.mono}
+                fontWeight="700"
+                bg="rgba(46, 160, 67, 0.105)"
+                border="1px solid rgba(46, 160, 67, 0.18)"
+                px="6px"
+                py="2px"
+                borderRadius="999px"
+                lineHeight="1"
+              >
+                +{addedTotal}
+              </Text>
+            )}
+            {removedTotal > 0 && (
+              <Text
+                fontSize="10px"
+                color={tokens.colors.diff.removedText}
+                fontFamily={tokens.fontFamily.mono}
+                fontWeight="700"
+                bg="rgba(248, 81, 73, 0.105)"
+                border="1px solid rgba(248, 81, 73, 0.18)"
+                px="6px"
+                py="2px"
+                borderRadius="999px"
+                lineHeight="1"
+              >
+                -{removedTotal}
+              </Text>
+            )}
+          </Flex>
+        )}
+      </Flex>
 
-      {/* Diff body — flat: no card border/radius/fill. The per-row green/red
-          backgrounds and the left gutter are the only structure (refined-terminal). */}
       <Box
         overflow="hidden"
         fontFamily={tokens.fontFamily.mono}
         fontSize="12px"
-        lineHeight="1.5"
+        lineHeight="1.55"
+        bg="rgba(0,0,0,0.18)"
       >
         {rows.map((row, i) => {
           if (row.kind === 'hunkHeader') {
@@ -157,11 +211,11 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
                 key={`h-${i}`}
                 px={2}
                 py="2px"
-                borderTop={i === 0 ? undefined : '1px solid rgba(255,255,255,0.04)'}
-                borderBottom="1px solid rgba(255,255,255,0.04)"
+                bg="rgba(255,255,255,0.025)"
+                borderTop={i === 0 ? undefined : '1px solid rgba(255,255,255,0.05)'}
+                borderBottom="1px solid rgba(255,255,255,0.05)"
               >
-                {/* Dim neutral hunk line — no colored band (refined-terminal). */}
-                <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} letterSpacing="0.02em">
+                <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
                   {row.label}
                 </Text>
               </Box>
@@ -181,7 +235,16 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
               : row.newNo
 
           return (
-            <Flex key={i} bg={bg} align="stretch">
+            <Flex
+              key={i}
+              bg={bg}
+              align="stretch"
+              boxShadow={isAdd
+                ? 'inset 2px 0 0 rgba(46, 160, 67, 0.52)'
+                : isRemove
+                  ? 'inset 2px 0 0 rgba(248, 81, 73, 0.52)'
+                  : 'none'}
+            >
               <Text
                 w={`calc(${gutterDigits}ch + 0.75rem)`}
                 pl={1}
@@ -223,8 +286,7 @@ export const TerminalStructuredDiff = memo(function TerminalStructuredDiff({
 
       {/* Hidden lines notice — only for new-file creates */}
       {hiddenCount > 0 && (
-        <Flex align="center" gap={1.5} mt="2px">
-          <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} userSelect="none">└</Text>
+        <Flex align="center" gap={1.5} px={3} py="6px" borderTop="1px solid rgba(255,255,255,0.055)" bg="rgba(255,255,255,0.018)">
           <Text fontSize="11px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
             … +{hiddenCount} {hiddenCount === 1 ? 'line' : 'lines'}
           </Text>

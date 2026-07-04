@@ -37,17 +37,11 @@ export const FORBIDDEN_FIREBASE_AUTH_NAMES = /\b(signInWithPopup|signInWithRedir
  *    (better-sqlite3 / sqlite3 — these only work as a process-local
  *    driver, so they break the prod proxy path entirely).
  *
- *  **CHAT-MODE ONLY** — the mechanical enforcement in `toolExecutor` skips
- *  this check when `cmdModeCwd` is set (CMD/Terminal mode). Terminal mode
- *  is stack-free: the developer can use any database driver (mysql2, pg,
- *  Prisma, etc.) without restriction. The publish-flow constraint only
- *  applies in Chat mode because Chat scaffolds projects destined for the
- *  platform's Publish pipeline; Terminal mode is a general-purpose coding
- *  agent with no platform deployment obligation.
- *
- *  Adding any of these to a package.json `dependencies` / `devDependencies`
- *  block on a project that didn't already have them is rejected at write
- *  time — but ONLY in Chat mode. */
+ *  Legacy package taxonomy kept for diagnostics and older tests. Projects are
+ *  stack-free: these packages are no longer mechanically rejected. TM Code
+ *  Database remains the default only when the developer did not choose a
+ *  different data layer or when a project manifest explicitly opts into
+ *  TM Code-managed deploy capabilities. */
 export const FORBIDDEN_DATA_LAYER_DEPS = [
   '@prisma/client',
   'prisma',
@@ -123,8 +117,8 @@ export const REJECTION_REASONS = {
   dataLayerDeps: (path: string, newlyAdded: readonly string[]) =>
     `Write rejected — ${path} adds [${newlyAdded.join(', ')}] to dependencies. ` +
     `The platform data layer uses \`drizzle-orm\` + \`@libsql/client\` (Publishing section, system prompt). ` +
-    `This restriction applies in Chat mode only (projects destined for the Publish pipeline). ` +
-    `In Terminal/CMD mode, you are free to use any database driver or ORM. ` +
+    `This legacy restriction should only be enabled for projects that explicitly opt into TM Code-managed deploy defaults. ` +
+    `General Chat projects may use any database driver or ORM. ` +
     `Recovery: drop those entries from dependencies, install \`drizzle-orm\` + \`@libsql/client\` instead, ` +
     `and use the Drizzle schema pattern from the system prompt's data layer section.`,
 

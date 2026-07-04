@@ -1,7 +1,7 @@
 /**
  * SubAgentCard — collapsed-by-default card showing sub-agent team activity.
  *
- * Renders inside MessageBubble (chat-mode) and TerminalMessageRenderer (cmd-mode)
+ * Renders inside MessageBubble and TerminalMessageRenderer
  * when the message has subAgentRunIds. Each run is an individual sub-agent card
  * inside a collapsible container.
  */

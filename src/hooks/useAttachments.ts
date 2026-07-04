@@ -8,11 +8,10 @@ import type { Attachment } from '../types/chat'
 
 /**
  * Centralized attachment handling — paste, drop, file picker, billing validation.
- * Shared by both the regular PromptBar (chat mode) and CmdModePromptInput (CMD mode).
+ * Shared by both prompt input surfaces.
  *
  * By default, delegates storage to chatStore.draftAttachments (same as before).
- * Pass `localState: true` to use hook-local state instead (for CMD mode, which
- * manages its own attachment lifecycle independently of chatStore).
+ * Pass `localState: true` to use hook-local state instead of chatStore.
  */
 interface UseAttachmentsOptions {
   /** Use hook-local state instead of chatStore.draftAttachments. */
@@ -63,7 +62,7 @@ export function useAttachments(options: UseAttachmentsOptions = {}) {
 
   const addAttachment = useCallback((att: Attachment) => {
     if (localState) {
-      // CMD mode + imagem: paridade claude-vaz — atribui o número do chip
+      // Local input + imagem: paridade claude-vaz — atribui o número do chip
       // `[Image #N]` (estável; nunca renumera) e insere o MESMO texto no
       // input via evento (o estado do input vive em useCmdPromptLogic).
       // No submit, a imagem só é enviada se o placeholder ainda estiver no
@@ -97,8 +96,9 @@ export function useAttachments(options: UseAttachmentsOptions = {}) {
   const showImageWarning = hasImages && !supportsImages
 
   // ─── Drag state ───
-  // CMD mode uses the shared store (outer frame + inner input must stay in sync).
-  // Chat mode uses local React state — a single component owns the overlay.
+  // Local-state inputs use the shared attachment store so outer-frame drops
+  // and inner-input pastes stay in sync. Store-backed inputs keep drag state
+  // local to the component that owns the overlay.
   const dragCounterRef = useRef(0)
   const [chatDragging, setChatDragging] = useState(false)
   const isDragging = localState ? cmdIsDragging : chatDragging

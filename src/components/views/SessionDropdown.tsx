@@ -74,7 +74,7 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
   }, [projectPath, isStreaming])
 
   return (
-    <Flex align="center" gap={2}>
+    <Flex align="center" gap={2} minW={0} flexShrink={0}>
       {/* Home Button */}
       {projectPath && (
         <Box
@@ -85,6 +85,7 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
           justifyContent="center"
           w="28px"
           h="28px"
+          flexShrink={0}
           borderRadius="8px"
           border={`1px solid ${tokens.colors.border.panel}`}
           color={tokens.colors.text.secondary}
@@ -108,14 +109,16 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
         aria-label={t("view.newChat")}
         display="flex"
         alignItems="center"
+        flexShrink={0}
         gap="6px"
+        h="34px"
         px={2.5}
-        py={1.5}
         bg="transparent"
         border={`1px solid ${tokens.colors.border.panel}`}
         borderRadius="8px"
         color={tokens.colors.text.secondary}
         fontSize={tokens.fontSize.sm}
+        whiteSpace="nowrap"
         cursor={isStreaming ? 'not-allowed' : 'pointer'}
         opacity={isStreaming ? 0.5 : 1}
         transition={`all ${tokens.transition.fast}`}
@@ -126,10 +129,14 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
         } : {}}
         onClick={handleNewChat}
       >
-        <FiPlus size={13} />{t("view.newChat")}      </Box>
+        <FiPlus size={13} />
+        <Text as="span" whiteSpace="nowrap" lineHeight="1">
+          {t("view.newChat")}
+        </Text>
+      </Box>
 
       {/* Sessions dropdown */}
-      <Box position="relative" ref={sessionsRef}>
+      <Box position="relative" ref={sessionsRef} flexShrink={0}>
         <Box
           as="button"
           aria-label={t("view.toggleSessions")}
@@ -137,14 +144,16 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
           aria-haspopup="listbox"
           display="flex"
           alignItems="center"
+          flexShrink={0}
           gap="6px"
+          h="34px"
           px={2.5}
-          py={1.5}
           bg="transparent"
           border={`1px solid ${tokens.colors.border.panel}`}
           borderRadius="8px"
           color={tokens.colors.text.secondary}
           fontSize={tokens.fontSize.sm}
+          whiteSpace="nowrap"
           cursor="pointer"
           transition={`all ${tokens.transition.fast}`}
           _hover={{
@@ -155,7 +164,9 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
           onClick={handleToggleSessions}
         >
           <FiClock size={13} />
-          Sessions
+          <Text as="span" whiteSpace="nowrap" lineHeight="1">
+            Sessions
+          </Text>
           <FiChevronDown size={11} />
         </Box>
 

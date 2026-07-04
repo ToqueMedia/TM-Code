@@ -51,11 +51,13 @@ export function getCompletionContractSection(): string {
 
 // ── 2. Role ────────────────────────────────────────────────────
 export function getRoleSection(ctx: PromptContext): string {
-  return `**Mode: CHAT** (project context, diff approval required, dev server supervised by the IDE)
+  return `**TM Code agent workspace** (project context, shell/tool access, IDE safety checkpoints for risky actions)
 
 # Role
 
 Senior software engineer. Autonomous coding agent inside TM Code — an agent-first IDE where the developer interacts through chat. Your code changes appear as diffs for the developer to approve or reject. You write complete, production-quality code.
+TM Code is NOT limited to a curated stack: the developer may choose any stack, runtime, database, framework, or deployment target. When the developer is not specific, default to TM Code-managed choices because they unlock the smoothest preview/deploy path. When the developer is specific, follow their stack and clearly communicate any preview/deploy limitations instead of forcing a rewrite.
+Shell operations are first-class: use \`${EXECUTE_COMMAND}\`, \`${EXECUTE_COMMAND_BACKGROUND}\`, persistent shell tools, package managers, test runners, git diagnostics, and curl whenever they are the right way to complete or verify the task.
 If a task is ambiguous or you lack information to proceed safely, use \`ask_user_question\` for structured clarification — present 2-4 options with labels and descriptions, plus an "Other" alternative for free-text. Do NOT guess on decisions that materially affect the architecture (database choice, auth provider, API design). Minor details and style preferences: proceed autonomously and state your assumption.${ctx.langInstruction ? `\n${ctx.langInstruction}` : ''}`
 }
 
@@ -96,15 +98,10 @@ export function getSystemSection(): string {
 }
 
 // ── 4. Doing tasks ─────────────────────────────────────────────
-// `scaffoldingInstall` is the auxiliary "Installing dependencies + Scaffolding
-// workflow" block, injected only when the task profile calls for it
-// (scaffold_project) or a trigger matched. When null/absent the Doing-tasks
-// section stays lean — a localised bugfix doesn't need the new-project
-// scaffolding sequence. See contextBuilder/auxiliaryRegistry.ts.
-export function getDoingTasksSection(
-  ctx: PromptContext,
-  opts?: { scaffoldingInstall?: string | null },
-): string {
+// Base task guidance is stable and cacheable. New-project/scaffolding workflow
+// auxiliaries are injected below SYSTEM_PROMPT_DYNAMIC_BOUNDARY in
+// contextBuilder.ts via dynamicSection('scaffold_workflow', ...).
+export function getDoingTasksSection(ctx: PromptContext): string {
   return `# Doing tasks
 
 ${sharedDoingTasksCore('developer', 'software engineering tasks: solving bugs, adding features, refactoring, explaining code')}
@@ -127,8 +124,6 @@ Every import **MUST** point to a package already listed in the dependency manife
  - **STEP 2b (missing, single package during editing)**: Run \`${ctx.pmDetected} add <package>\` via \`${EXECUTE_COMMAND}\`, confirm exit code 0, THEN write the import. Batch missing packages into one command: \`${ctx.pmDetected} add a b c\`.
  - **STEP 2b (missing, new project / scaffolding)**: Do NOT use \`${EXECUTE_COMMAND}\` — use the background pattern below instead.
  - When the IDE blocks a write with "package imported but not installed", **DO NOT** retry the same write. **DO** install the package first, then retry. Repeating without installing repeats the block.
-
-${opts?.scaffoldingInstall ?? ''}
 
 ## Verification — required before declaring done
 
@@ -334,6 +329,46 @@ export async function getBackgroundCommandsSection(): Promise<string | null> {
 
 // ── 9. Template context (conditional) ──────────────────────────
 export function getTemplateContextSection(ctx: PromptContext): string | null {
+  if (ctx.projectManifest) {
+    const m = ctx.projectManifest
+    const lines = [
+      '# Project manifest',
+      '',
+      `Stack: ${m.stack.name} (${m.stack.framework}, ${m.stack.runtime})`,
+      `Managed defaults: ${m.stack.managedDefaults ? 'yes — use TM Code defaults only when the developer is not specific' : 'no — preserve explicit project choices'}`,
+    ]
+    const commands = [
+      m.commands.install ? `install=${m.commands.install}` : null,
+      m.commands.dev ? `dev=${m.commands.dev}` : null,
+      m.commands.build ? `build=${m.commands.build}` : null,
+      m.commands.test ? `test=${m.commands.test}` : null,
+    ].filter(Boolean)
+    if (commands.length) lines.push(`Commands: ${commands.join(' | ')}`)
+
+    const caps = [
+      `preview=${m.capabilities.preview.supported ? 'supported' : 'unsupported'}`,
+      `deploy=${m.capabilities.deploy.supported ? 'supported' : 'unsupported'}`,
+      `check=${m.capabilities.check.supported ? 'supported' : 'unsupported'}`,
+    ]
+    lines.push(`Capabilities: ${caps.join(' | ')}`)
+    if (m.capabilities.preview.frontendPort) {
+      lines.push(`Preview frontend port hint: ${m.capabilities.preview.frontendPort}`)
+    }
+    const warnings = [
+      ...m.compatibility.warnings,
+      ...(m.capabilities.preview.warnings ?? []),
+      ...(m.capabilities.deploy.warnings ?? []),
+    ]
+    const blockers = [
+      ...m.compatibility.blockers,
+      ...(m.capabilities.preview.blockers ?? []),
+      ...(m.capabilities.deploy.blockers ?? []),
+    ]
+    if (warnings.length) lines.push(`Warnings: ${warnings.join(' ')}`)
+    if (blockers.length) lines.push(`Blockers: ${blockers.join(' ')}`)
+    return lines.join('\n')
+  }
+
   if (!ctx.templateManifest) return null
   const m = ctx.templateManifest
   return `# Template context
@@ -389,7 +424,8 @@ export function getEnvironmentSection(ctx: PromptContext): string {
  * Chat-mode preview (iframe) and/or the deploy pipeline. The agent
  * should surface these to the developer early — ideally on the first
  * turn after project open — so they can decide whether to adapt the
- * project or switch to Terminal mode.
+ * project manifest, keep working with limited preview/deploy, or use an
+ * external runtime for unsupported stacks.
  *
  * Returns null for fully-compatible projects (React+Vite, Vue+Vite,
  * Svelte+Vite, Astro) — no noise when everything works.
@@ -426,6 +462,38 @@ function extractSyntheticType(devDeps: string[]): string | undefined {
 
 export function getPreviewCompatibilitySection(ctx: PromptContext): string | null {
   const projectPath = ctx.projectPath
+  if (ctx.projectManifest) {
+    const manifest = ctx.projectManifest
+    const preview = manifest.capabilities.preview
+    const deploy = manifest.capabilities.deploy
+    const warnings = [
+      ...manifest.compatibility.warnings,
+      ...(preview.warnings ?? []),
+      ...(deploy.warnings ?? []),
+    ]
+    const blockers = [
+      ...manifest.compatibility.blockers,
+      ...(preview.supported ? [] : (preview.blockers ?? ['Preview is not supported by this project manifest.'])),
+      ...(deploy.supported ? [] : (deploy.blockers ?? ['Deploy is not supported by this project manifest.'])),
+    ]
+    if (preview.supported && deploy.supported && warnings.length === 0 && blockers.length === 0) return null
+    if (_compatWarnedProjects.has(projectPath)) return null
+    _compatWarnedProjects.add(projectPath)
+
+    return [
+      '# Project compatibility',
+      '',
+      `The project manifest declares preview=${preview.supported ? 'supported' : 'unsupported'} and deploy=${deploy.supported ? 'supported' : 'unsupported'}.`,
+      '',
+      ...(warnings.length ? ['**Warnings:**', ...warnings.map(w => `- ${w}`), ''] : []),
+      ...(blockers.length ? ['**Current blockers:**', ...blockers.map(b => `- ${b}`), ''] : []),
+      '**How to proceed in Chat:**',
+      '- Continue editing, testing, and running commands normally.',
+      '- If preview/deploy is required, adapt the project and update `.toquemedia/project.json` so the manifest names the supported command/output.',
+      '- If the stack is intentionally native/desktop/mobile, say clearly that TM Code can edit it but cannot preview/deploy it through the web pipeline.',
+    ].join('\n')
+  }
+
   const rawPt = ctx.projectType
   const deps = ctx.pkgSummary
     ? [...ctx.pkgSummary.dependencies, ...ctx.pkgSummary.devDependencies]
@@ -450,7 +518,7 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
       '',
       '**Options:**',
       '1. Tell the agent the command to start your project — it will use `start_dev_server` with that command.',
-      '2. Use Terminal mode for full control over build and serve commands.',
+      '2. Add `.toquemedia/project.json` with preview/deploy capabilities so future runs know the project contract.',
       '3. If the project is in a subdirectory, reopen it at the correct path.',
     ].join('\n')
   }
@@ -479,16 +547,16 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
     return [
       '# Project compatibility',
       '',
-      `Detected project type: **${pt}**. This project is not JavaScript/TypeScript-based, so the Chat-mode preview (live iframe) cannot start a dev server automatically.`,
+      `Detected project type: **${pt}**. This project is not JavaScript/TypeScript-based, so the browser preview cannot start a dev server automatically unless the project manifest declares a compatible command.`,
       '',
-      '**What works in Chat mode:** file editing, code analysis, Terminal commands, and the HTTP Client panel (if you start the server manually).',
+      '**What works in Chat:** file editing, code analysis, commands, and the HTTP Client panel (if you start the server manually).',
       '',
       '**What does NOT work:** the live preview iframe — there is no `npm run dev` equivalent the IDE can auto-detect.',
       '',
       '**Options for the developer:**',
       `1. **Tell the agent your start command** — e.g. ${commands[pt] || '`./your-server`'}. The agent can call \`start_dev_server\` with any command; once it is ready, the developer opens it manually with the Preview button.`,
-      '2. **Stay in Chat mode** — the agent can still edit files, run tests, and use the Terminal. Start the server manually and use the HTTP Client or an external browser to verify changes.',
-      '3. **Switch to Terminal mode** — full freedom to run any build/serve command without IDE constraints.',
+      '2. **Stay in Chat** — the agent can still edit files, run tests, and use commands. Start the server manually and use the HTTP Client or an external browser to verify changes.',
+      '3. **Add a project manifest** if this project has a repeatable preview/deploy contract.',
     ].join('\n')
   }
 
@@ -540,7 +608,7 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
     return [
       '# Project compatibility',
       '',
-      'Detected a **backend-only** Node.js project. The Chat mode opens the **HTTP Client panel** (not an iframe preview) — this is by design.',
+      'Detected a **backend-only** Node.js project. Chat opens the **HTTP Client panel** (not an iframe preview) — this is by design.',
       '',
       '**What works:** HTTP Client for testing API endpoints, file editing, Terminal, all agent tools.',
       '',
@@ -567,7 +635,7 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
         '**Options:**',
         '1. Add a `"dev"` script to `package.json` that starts your development server.',
         '2. Tell the agent what command starts the server — it can use `start_dev_server` with a custom command.',
-        '3. Use Terminal mode to run the server manually.',
+      '3. Add a project manifest when the start/build/deploy contract is known.',
       ].join('\n')
     }
   }
@@ -612,17 +680,14 @@ export function getAppliedScaffoldingSection(ctx: PromptContext): string | null 
 }
 
 /**
- * Shared composer used by both chat (`getAppliedScaffoldingSection`) and
- * CMD mode (`getCmdAppliedScaffoldingSection`). Detection inputs are
- * computed per-mode (chat has them in PromptContext; CMD computes them
- * inline at prompt-build time), then this function turns them into the
+ * Shared composer used by both project and cwd-scoped prompt builders.
+ * Detection inputs come from either PromptContext or prompt-build-time
+ * filesystem checks, then this function turns them into the
  * scaffolding-aware framing + sticky CRITICAL inline blocks.
  *
  * The function depends on the SkillService cache being warm (the caller
  * must have run loadSkills earlier in the same prompt-build pass). Both
- * call sites satisfy this — chat does it during PromptContext gather,
- * CMD does it in `getCmdAppliedScaffoldingSection` right before calling
- * this composer.
+ * call sites satisfy this during their prompt-build pass.
  */
 export function composeScaffoldingAwareSection(
   applied: string[],
@@ -1106,14 +1171,10 @@ export function getDevServerRulesSection(): string {
 }
 
 // ── 14c. Constraints ────────────────────────────────────────────
-// `publishing` / `vision` / `auth` are auxiliary blocks injected only when the
-// task profile calls for them. When null/absent the Constraints section stays
-// lean — a localised bugfix doesn't need publishing/deploy rules, vision, or
-// auth smoke-test guidance. See contextBuilder/auxiliaryRegistry.ts.
-export function getConstraintsSection(
-  ctx: PromptContext,
-  opts?: { publishing?: string | null; vision?: string | null; auth?: string | null; devServer?: string | null },
-): string {
+// Base constraints are stable and cacheable. Intent/project-specific
+// constraint auxiliaries are injected below SYSTEM_PROMPT_DYNAMIC_BOUNDARY in
+// contextBuilder.ts via dynamicSection('additional_constraints', ...).
+export function getConstraintsSection(ctx: PromptContext): string {
   const vanillaWebRule = ctx.isVanillaWeb
     ? `\n**Vanilla web projects**: **USE** \`index.html\` as entry point. **LINK** CSS/JS via relative paths — the IDE inlines them for preview.\n`
     : ''
@@ -1124,7 +1185,7 @@ export function getConstraintsSection(
  - \`create_file\` is for new files ONLY. **USE** \`write_file\` to overwrite existing files.
 
 ## Safety
- - \`.env\` files are mechanically blocked — you CANNOT read, write, edit, or delete them. The developer also cannot edit \`.env\` directly through the IDE. The ONLY write path is the secure form rendered by \`request_credentials\`. (In Terminal mode, \`.env\` reads are allowed with explicit user authorization — but \`request_credentials\` is still preferred for project-integrated vars.)
+ - \`.env\` files are mechanically blocked — you CANNOT read, write, edit, or delete them. The developer also cannot edit \`.env\` directly through the IDE. The ONLY write path is the secure form rendered by \`request_credentials\`.
  - **A submitted \`request_credentials\` form IS the confirmation — do NOT try to verify it.** When the tool returns "Credentials saved to .env for X: KEY", that key is now in \`.env\`, full stop. The \`.env\` read-block is by design and is NEVER evidence that a key is missing — so do not attempt to read \`.env\` to "double-check", do not re-request a key already collected this session, and do not tell the developer to add it by hand. Treat a saved key exactly as if you had read it back successfully, and continue the implementation.
  - **TRIGGER — call \`request_credentials\` in the SAME turn**: whenever you write code that reads \`process.env.X\`, \`import.meta.env.X\`, \`Deno.env.get('X')\`, or any equivalent for a **third-party service the developer is integrating** (LLM provider like Mercury/OpenAI/Anthropic, payment processor, email API, analytics, webhook secrets, DB connection strings, etc.), you MUST call \`request_credentials\` for that key in the same agent turn. Do NOT generate the code first and "leave .env for the developer to fill later" — they cannot fill it without the form. Skipping this leaves the project broken at runtime even though every file looks correct.
  - \`.env.example\` is supplementary documentation, NOT a collection mechanism. Writing \`.env.example\` without also calling \`request_credentials\` for every key it documents is incomplete work — finish by collecting the values.
@@ -1138,14 +1199,6 @@ export function getConstraintsSection(
    Calling \`request_credentials\` for any of these is incorrect — the developer doesn't own those tokens, the form will block on platform-managed field IDs anyway, and you'll waste a turn.
  - \`.pem\`, \`.key\`, \`credentials.json\`, \`.npmrc\`, \`*_secret*\` files require explicit developer authorization.
  - **KEEP** secrets out of text output and tool arguments.
-
-${opts?.vision ?? ''}
-
-${opts?.auth ?? ''}
-
-${opts?.devServer ?? ''}
-
-${opts?.publishing ?? ''}
 
 ## Commands
  - **USE** \`${ctx.pmDetected}\` for all install/run/add commands.

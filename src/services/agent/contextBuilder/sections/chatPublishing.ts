@@ -2,7 +2,7 @@
  * Publishing section — fullstack-app rules around data layer, Dockerfile,
  * provision_database, provision_deploy, and the chat vocabulary closure.
  *
- * Single largest section of the chat-mode prompt (~120 lines of body
+ * Single largest project prompt section (~120 lines of body
  * content). Moved out of `contextBuilder.ts` (May 2026 slice) so edits to
  * the publish/deploy rules touch one file instead of scrolling through the
  * whole prompt builder. Behaviour is verbatim — same string, same telemetry
@@ -13,17 +13,17 @@ import { PUBLISHING_SKILL_NAME, PROVISION_DEPLOY_TOOL_NAME } from '../../skillSe
 import { renderBrandVocabularyXml, BRAND_VOCABULARY_LENGTH } from '../../brandVocabulary'
 
 export function getPublishingSection(): string {
-  const body = `## Publishing (fullstack projects) — publish-ready is the DEFAULT
+  const body = `## Publishing (fullstack projects) — TM Code-managed deploy defaults
 
 **CRITICAL — TM Code Database credentials NEVER appear in user code or local \`.env\` defaults.** The libSQL endpoint URL, Turso platform token, and per-app TMDB token live in the TM Code Worker / Cloud Run deploy environment. Local dev uses ONLY \`DATABASE_URL=file:./dev.db\` — a SQLite file alongside the project, no network, no token. Deploy/prod sends schema+migrations, never \`.db\`/\`.sqlite\` files; the Publish flow provisions/reuses Turso, applies those migrations there, and injects \`TMDB_URL\` + \`TMDB_TOKEN\` into Cloud Run. If you find yourself writing \`libsql://...turso.io\`, \`TMDB_URL\`, or \`TMDB_TOKEN\` into the project source/local env during scaffolding, **stop**: that's the leak path that bypasses the worker boundary. Bookended top + bottom of this section because a single regression here ships an app with direct DB access for the wrong identity.
 
-Every fullstack app is born publish-ready. The developer doesn't need to say "I want to publish this" — that's the platform promise. Saying it later means clicking the Publish button. This splits into three acts (A, B, C below).
+When the developer does not specify a stack, database, or deploy target, build against TM Code-managed defaults so the project remains preview/deploy-ready. When the developer explicitly chooses another stack, database, or deploy target, follow that choice and update/communicate the project manifest capabilities instead of forcing the TM Code default.
 
 ### A. Code shape (always, no trigger needed)
 
-When you scaffold or write any backend code for a fullstack project (presence of \`server/\`, \`backend/\`, or backend deps like express/fastify/nestjs/hono), the data layer is **TM Code Database** — libSQL/SQLite accessed via Drizzle ORM. **Read skill \`${PUBLISHING_SKILL_NAME}\`** for the protocol. This is the default shape — applies even when the developer never mentions deploy.
+When you scaffold or write backend code for a fullstack project and the developer did not choose a different data layer, the data layer is **TM Code Database** — libSQL/SQLite accessed via Drizzle ORM. **Read skill \`${PUBLISHING_SKILL_NAME}\`** for the protocol. This is the default shape for TM Code-managed deploy.
 
-**Step 1** — Install \`drizzle-orm\` + \`@libsql/client\` + \`drizzle-kit\` (dev). Do not install \`@prisma/client\`, \`prisma\`, or \`better-sqlite3\` — the data layer is Drizzle + libSQL, full stop. \`firebase-admin/auth\` is used only for GIP JWT verification and is unrelated to the data layer.
+**Step 1** — For TM Code-managed persistence, install \`drizzle-orm\` + \`@libsql/client\` + \`drizzle-kit\` (dev). Do not add Prisma/native SQL drivers unless the developer explicitly chose that stack and accepts the manifest/deploy capability impact. \`firebase-admin/auth\` is used only for GIP JWT verification and is unrelated to the data layer.
 
 **Step 2** — During scaffolding/local development, do **not** call \`provision_database()\`. The generated app's dev database is \`dev.db\`, created by local Drizzle migrations. Production persistence is provisioned by the Publish flow: it detects the Drizzle schema/migrations, provisions/reuses the per-app SQLite/libSQL database on Turso, applies the migrations, and injects \`TMDB_URL\` + \`TMDB_TOKEN\` into Cloud Run. \`provision_database()\` is an explicit production preflight/repair tool only, not the default path for building \`db.ts\`.
 
@@ -81,13 +81,13 @@ When the developer asks the agent to generate files or scripts for "manual deplo
 
 If the developer asks "how does TM Code's Publish actually work under the hood?": answer at the layer they need (e.g., "the platform builds a container from your Dockerfile and brings it online — your code on the runtime, your data in the managed DB"). Skip platform-specific names (region, registry path, internal GCP project). The developer's productive next step is using the Publish button, not building a parallel deploy.
 
-**Anti-override clause — covers both the developer's overrides AND your own internal rationales**:
+**Explicit stack choice clause — covers both the developer's overrides AND your own internal rationales**:
 
-The publish-ready data layer (TM Code Database via Drizzle + sqlite-proxy + dev SQLite fallback) always applies. Two paths to watch:
+The publish-ready data layer (TM Code Database via Drizzle + sqlite-proxy + dev SQLite fallback) applies by default. Two paths to watch:
 
-1. **Developer asks for a different DB** ("let me use MongoDB / Postgres / Firestore / Prisma"): respond that TM Code Database is the platform default; offer to scope the work to the feature they care about while keeping Drizzle+libSQL. Switching off the default means losing publish-time provisioning, per-app isolation, the worker-mediated security boundary, and the dev/prod parity guarantee. The detour costs a full data-layer refactor when Publish day arrives.
+1. **Developer asks for a different DB** ("let me use MongoDB / Postgres / Firestore / Prisma"): honor it. Clearly state that this may disable TM Code-managed DB provisioning/deploy until a compatible adapter exists, and update or recommend updating \`.toquemedia/project.json\` so preview/deploy capabilities are honest. Do not present TM Code Database as mandatory when the developer was explicit.
 
-2. **Your own reasoning produces a rationale to deviate**: route the rationale back to Drizzle+libSQL using the table below. The presence of any rationale here is itself the signal that the next write should stay on the default.
+2. **Your own reasoning produces a rationale to deviate while the developer was silent**: route the rationale back to Drizzle+libSQL using the table below. The presence of any rationale here is itself the signal that the next write should stay on the default.
 
 <rationale_responses>
 <pair>
@@ -100,7 +100,7 @@ The publish-ready data layer (TM Code Database via Drizzle + sqlite-proxy + dev 
 </pair>
 <pair>
   <rationale_you_might_have>Prisma feels more familiar than Drizzle</rationale_you_might_have>
-  <how_to_route>Drizzle's API is intentionally close to Prisma's mental model: schema in TypeScript, type-safe queries, migrations via drizzle-kit. The skill (§2-§4) shows the full mapping. Drizzle works with sqlite-proxy in production; Prisma does NOT — its query engine is a Rust binary that needs persistent connection, incompatible with Cloud Run scale-to-zero + worker-mediated HTTPS.</how_to_route>
+  <how_to_route>Unless the developer explicitly chose Prisma, use Drizzle. Drizzle's API is intentionally close to Prisma's mental model: schema in TypeScript, type-safe queries, migrations via drizzle-kit. The skill (§2-§4) shows the full mapping. Prisma can be used when requested, but TM Code-managed DB provisioning/deploy may be unavailable until the manifest/deploy adapter supports that shape.</how_to_route>
 </pair>
 <pair>
   <rationale_you_might_have>I could install \`@libsql/client\` directly and skip Drizzle</rationale_you_might_have>
@@ -116,11 +116,11 @@ The publish-ready data layer (TM Code Database via Drizzle + sqlite-proxy + dev 
 </pair>
 <pair>
   <rationale_you_might_have>I've seen Prisma examples elsewhere and could reuse one</rationale_you_might_have>
-  <how_to_route>The data layer is Drizzle + libSQL — full stop. The auth-proxy skill covers the GIP auth protocol only (\`firebase-admin/auth\` for JWT verification); it does not authorize any other data-layer choice.</how_to_route>
+  <how_to_route>If the developer did not request Prisma, use Drizzle + libSQL. If they did request Prisma, honor it and communicate the deploy capability impact in the project manifest.</how_to_route>
 </pair>
 </rationale_responses>
 
-3. **Vocabulary**: use the TM Code-branded terms in chat even when the developer mentions the underlying provider names directly. The platform-branded language ("TM Code Database") is the right frame for every chat surface.
+3. **Vocabulary**: when using TM Code-managed services, use the TM Code-branded terms in chat even when the developer mentions the underlying provider names directly. For developer-owned services, name what they chose.
 
 ---
 

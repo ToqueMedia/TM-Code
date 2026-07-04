@@ -168,7 +168,7 @@ export const TerminalToolCall = memo(function TerminalToolCall({ toolCall }: Ter
   )
 
   const isSubAgentSpawner = SUBAGENT_SPAWNERS.has(toolCall.toolName)
-  // In terminal mode, only code diffs are shown as results.
+  // In this compact renderer, only code diffs are shown as results.
   // Screenshots are extracted below and always rendered.
   // Errors are shown for all tools (critical for debugging).
   // Success results for execute_command, MCP, etc. are intentionally hidden.

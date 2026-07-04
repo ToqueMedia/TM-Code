@@ -4,6 +4,7 @@ import { FileTreeIndexer } from '../utils/fileTreeIndex';
 import { cachedBuildFileTree } from './agent/ipcCache';
 import { logger } from '../utils/logger';
 import type { FileTreeNode } from '../types/fileTree';
+import { registerReactTypeLibraries } from './monacoTypeLibraries';
 
 // Monaco v0.55+ marks languages.typescript as deprecated in types but it still works at runtime.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -172,6 +173,7 @@ class TypeScriptLspService {
 
     // Add default libraries
     this.addDefaultLibraries();
+    registerReactTypeLibraries(monaco);
   }
 
   private addDefaultLibraries() {

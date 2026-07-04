@@ -218,7 +218,7 @@ describe('executePlan call sequence', () => {
       originalArgs: 'build inventory',
       planPath: '/projects/foo/PLAN.md',
       planFileName: 'PLAN.md',
-      mode: 'chat',
+      mode: 'terminal',
     }))
     expect(mockSetPlanResumePending).not.toHaveBeenCalledWith(null)
     expect(mockAddSystemMessage).toHaveBeenCalled()
@@ -253,6 +253,22 @@ describe('executePlan call sequence', () => {
     expect(capturedOptions?.userMessageText).toBe('/plan xyz')
   })
 
+  test('uses free-form planning by default', async () => {
+    let capturedOptions: Record<string, unknown> | undefined
+    mockRunAgentWithCallbacks.mockImplementation(async (_prompt: string, opts: Record<string, unknown>) => {
+      capturedOptions = opts
+    })
+
+    await executePlan('build anything with any backend', '/projects/foo')
+
+    expect(capturedOptions?.cmdOnlyMode).toBe(true)
+    const sysPrompt = capturedOptions?.systemPromptOverride as string
+    expect(sysPrompt).toContain('Stack choice — free, with explicit trade-offs')
+    expect(sysPrompt).toContain('There are NO')
+    expect(sysPrompt).toContain('dependencies or deploy artefacts')
+    expect(sysPrompt).not.toContain('Stack baseline (the parts the architect still chooses)')
+  })
+
   test('resume continues the interrupted plan with architect prompt and same artefact', async () => {
     let capturedPrompt: string | undefined
     let capturedOptions: Record<string, unknown> | undefined
@@ -282,6 +298,7 @@ describe('executePlan call sequence', () => {
     expect(capturedPrompt).toContain('Status: DRAFT')
     expect(capturedOptions?.userMessageText).toBe('prossegue')
     expect(capturedOptions?.systemPromptOverride as string).toContain('Software Architect')
+    expect(capturedOptions?.cmdOnlyMode).toBe(true)
     expect(mockSetPlanResumePending).toHaveBeenLastCalledWith(null)
   })
 
@@ -312,6 +329,7 @@ describe('executePlan call sequence', () => {
     }, [attachment as never], userBlocks as never)
 
     expect(capturedOptions?.userMessageBlocks).toBe(userBlocks)
+    expect(capturedOptions?.cmdOnlyMode).toBe(true)
     const modelBlocks = capturedOptions?.modelMessageBlocks as Array<{ type: string; text?: string; attachment?: unknown }>
     expect(modelBlocks[0]?.type).toBe('text')
     expect(modelBlocks[0]?.text).toContain('Resume an interrupted /plan architect run')

@@ -5,11 +5,13 @@ import { getCmdMemoryToolsGuidanceSection } from '../contextBuilder/sections/cmd
 describe('buildMemoryGuidanceSection', () => {
   const guidance = buildMemoryGuidanceSection()
 
-  it('opens with the persistent memory header', () => {
-    expect(guidance).toContain('# Persistent memory')
+  it('opens with the memory header and lists memory tools', () => {
+    expect(guidance).toContain('# Memory')
     expect(guidance).toContain('save_memory')
     expect(guidance).toContain('forget_memory')
     expect(guidance).toContain('read_memory')
+    expect(guidance).toContain('update_session_memory')
+    expect(guidance).toContain('read_session_memory')
   })
 
   it('contains all four memory types in the <types> block', () => {
@@ -60,7 +62,7 @@ describe('buildMemoryGuidanceSection', () => {
   })
 })
 
-describe('chat/CMD guidance parity', () => {
+describe('memory guidance parity', () => {
   it('getMemoryToolsGuidanceSection returns the same content as buildMemoryGuidanceSection', () => {
     expect(getMemoryToolsGuidanceSection()).toBe(buildMemoryGuidanceSection())
   })
@@ -69,7 +71,7 @@ describe('chat/CMD guidance parity', () => {
     expect(getCmdMemoryToolsGuidanceSection()).toBe(buildMemoryGuidanceSection())
   })
 
-  it('chat and CMD guidance are identical', () => {
+  it('project and cwd-scoped guidance are identical', () => {
     expect(getMemoryToolsGuidanceSection()).toBe(getCmdMemoryToolsGuidanceSection())
   })
 })

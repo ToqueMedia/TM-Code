@@ -57,8 +57,8 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, isPrevi
 				alignItems="center"
 				px={2.5}
 				py={0}
-				bg={isActive ? tokens.colors.bg.app : 'transparent'}
-				borderRight={`1px solid ${tokens.colors.border.subtle}`}
+				bg={isActive ? 'rgba(255,255,255,0.075)' : 'rgba(255,255,255,0.025)'}
+				border={isActive ? '1px solid rgba(255,255,255,0.105)' : '1px solid rgba(255,255,255,0.045)'}
 				fontSize="12px"
 				cursor="pointer"
 				onClick={onClick}
@@ -66,27 +66,29 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, isPrevi
 				position="relative"
 				overflow="hidden"
 				_hover={{
-					bg: isActive ? tokens.colors.bg.app : tokens.colors.bg.hoverSubtle,
+					bg: isActive ? 'rgba(255,255,255,0.09)' : 'rgba(255,255,255,0.055)',
+					borderColor: isActive ? 'rgba(255,255,255,0.14)' : 'rgba(255,255,255,0.08)',
 					'& .tab-close': {
 						opacity: 0.7
 					}
 				}}
-				transition={`background 0.1s ease, color 0.1s ease`}
+				transition="background 0.14s ease, border-color 0.14s ease, color 0.14s ease"
 				role="tab"
 				aria-selected={isActive}
 				data-path={path}
-				borderRadius="0"
-				height="30px"
+				borderRadius="8px"
+				height="28px"
 				minW="0"
 				maxW="200px"
 				color={isActive ? tokens.colors.text.primary : tokens.colors.text.muted}
 				_after={{
 					content: '""',
 					position: 'absolute',
-					bottom: 0,
-					left: 0,
-					right: 0,
+					bottom: '3px',
+					left: '10px',
+					right: '10px',
 					height: '2px',
+					borderRadius: '999px',
 					bg: isActive ? tokens.colors.accent.primary : 'transparent',
 				}}
 			>
@@ -114,14 +116,14 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, isPrevi
 					)}
 					<Text
 						fontSize="11.5px"
-						fontWeight={isActive ? '500' : '400'}
+						fontWeight={isActive ? '650' : '500'}
 						fontStyle={isPreview ? 'italic' : 'normal'}
 						maxW="140px"
 						whiteSpace="nowrap"
 						overflow="hidden"
 						textOverflow="ellipsis"
 						fontFamily={tokens.fontFamily.ui}
-						letterSpacing="-0.01em"
+						letterSpacing="0"
 						pointerEvents="none"
 					>
 						{name}
@@ -132,6 +134,7 @@ const EditorTab = memo<EditorTabProps>(({ path, name, isDirty, isActive, isPrevi
 							h="6px"
 							borderRadius="full"
 							bg={tokens.colors.accent.primary}
+							boxShadow="0 0 0 3px rgba(254,16,99,0.12)"
 							flexShrink={0}
 						/>
 					)}

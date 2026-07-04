@@ -32,6 +32,7 @@ import { useToastStore } from '../../stores/toastStore'
 import { normalizeAssistantText } from '../../utils/normalizeAssistantText'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
+import { canonicalToolName, normalizeToolInputForCanonical } from '@/services/agent/toolNames'
 
 /**
  * Toggle a reasoning block while keeping the clicked header in the SAME
@@ -90,7 +91,7 @@ export const markdownStyles = {
     lineHeight: '1.75',
     fontSize: '13.5px',
     color: tokens.colors.text.primary,
-    letterSpacing: '-0.005em',
+    letterSpacing: '0',
   },
   '& p:last-child': { marginBottom: 0 },
   '& strong': { color: '#ffffff', fontWeight: 600 },
@@ -133,7 +134,7 @@ export const markdownStyles = {
   '& h1, & h2, & h3, & h4': {
     color: '#ffffff',
     fontWeight: 600,
-    letterSpacing: '-0.02em',
+    letterSpacing: '0',
   },
   '& h1': { fontSize: '20px', margin: '20px 0 10px' },
   '& h2': { fontSize: '17px', margin: '18px 0 8px' },
@@ -185,17 +186,21 @@ function CopyButton({ code }: { code: string }) {
       display="flex"
       alignItems="center"
       gap="5px"
-      px="8px"
-      py="3px"
-      borderRadius="5px"
+      px="9px"
+      py="6px"
+      borderRadius="8px"
       bg="transparent"
+      border="1px solid rgba(255,255,255,0.075)"
       color={copied ? tokens.colors.accent.green : tokens.colors.text.disabled}
       fontSize="11px"
       fontFamily={tokens.fontFamily.ui}
+      fontWeight="650"
       cursor="pointer"
-      transition="all 0.15s"
-      _hover={{ bg: 'rgba(255,255,255,0.06)', color: tokens.colors.text.secondary }}
+      transition="all 0.15s ease"
+      _hover={{ bg: 'rgba(255,255,255,0.06)', color: tokens.colors.text.secondary, borderColor: 'rgba(255,255,255,0.14)', transform: 'translateY(-1px)' }}
+      _active={{ transform: 'translateY(0) scale(0.98)' }}
       onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleCopy() }}
+      aria-label={copied ? t('chat.copied') : t('chat.copy')}
     >
       {copied ? <FiCheck size={11} /> : <FiCopy size={11} />}
       {copied ? t('chat.copied') : t('chat.copy')}
@@ -245,25 +250,34 @@ export const markdownComponents: React.ComponentProps<typeof ReactMarkdown>['com
     if (match) {
       return (
         <Box
-          borderRadius="10px"
+          borderRadius="12px"
           overflow="hidden"
           my={3}
-          border="1px solid rgba(255, 255, 255, 0.06)"
-          bg={tokens.colors.bg.codeBlock}
+          border="1px solid rgba(255, 255, 255, 0.09)"
+          bg="rgba(10, 10, 10, 0.94)"
+          boxShadow="0 16px 38px rgba(0,0,0,0.26)"
         >
           <Flex
             align="center"
             justify="space-between"
-            px={3}
-            py="6px"
-            bg="rgba(255, 255, 255, 0.03)"
-            borderBottom="1px solid rgba(255, 255, 255, 0.05)"
+            gap={3}
+            px={{ base: 3, md: 4 }}
+            py="8px"
+            bg="linear-gradient(180deg, rgba(255,255,255,0.052), rgba(255,255,255,0.022))"
+            borderBottom="1px solid rgba(255, 255, 255, 0.075)"
           >
             <Text
-              fontSize="11px"
+              fontSize="10px"
               color={tokens.colors.text.disabled}
               fontFamily={tokens.fontFamily.mono}
-              textTransform="lowercase"
+              textTransform="uppercase"
+              fontWeight="700"
+              bg="rgba(255,255,255,0.045)"
+              border="1px solid rgba(255,255,255,0.07)"
+              borderRadius="999px"
+              px="7px"
+              py="2px"
+              lineHeight="1"
             >
               {match[1]}
             </Text>
@@ -274,11 +288,13 @@ export const markdownComponents: React.ComponentProps<typeof ReactMarkdown>['com
             language={match[1]}
             customStyle={{
               margin: 0,
-              padding: '14px 16px',
+              padding: '16px 18px',
               fontSize: '12.5px',
-              lineHeight: '1.65',
+              lineHeight: '1.68',
               background: 'transparent',
               borderRadius: 0,
+              maxWidth: '100%',
+              overflowX: 'auto',
             }}
           >
             {codeString}
@@ -570,36 +586,41 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   return (
     <Box
       py={isUser ? 3 : 4}
-      px={3}
-      bg={isUser ? 'rgba(255, 255, 255, 0.02)' : 'transparent'}
-      borderRadius="12px"
-      mb={1}
+      px={{ base: 2, md: 3 }}
+      bg={isUser ? 'rgba(255, 255, 255, 0.025)' : 'transparent'}
+      border={isUser ? '1px solid rgba(255, 255, 255, 0.055)' : '1px solid transparent'}
+      borderRadius="10px"
+      mb={2}
       className="group"
       minW={0}
       overflow="hidden"
+      transition="background 0.15s ease, border-color 0.15s ease"
+      _hover={isUser ? { bg: 'rgba(255, 255, 255, 0.035)', borderColor: 'rgba(255, 255, 255, 0.08)' } : undefined}
     >
       {/* Role header */}
       <Flex align="center" gap={2.5} mb={isUser ? 1.5 : 2.5}>
         {isUser ? (
           <Flex
-            w="22px"
-            h="22px"
-            borderRadius="6px"
-            bg="rgba(255, 255, 255, 0.08)"
+            w="24px"
+            h="24px"
+            borderRadius="7px"
+            bg="rgba(254, 16, 99, 0.1)"
+            border="1px solid rgba(254, 16, 99, 0.18)"
             align="center"
             justify="center"
             flexShrink={0}
           >
-            <FiUser size={11} color={tokens.colors.text.secondary} />
+            <FiUser size={12} color={tokens.colors.accent.primary} />
           </Flex>
         ) : (
-          <AgentLogo size={22} glow />
+          <AgentLogo size={24} glow />
         )}
         <Text
-          fontSize="13px"
-          fontWeight="600"
-          color={tokens.colors.text.primary}
-          letterSpacing="-0.01em"
+          fontSize="12px"
+          fontWeight="700"
+          color={isUser ? tokens.colors.accent.primary : tokens.colors.text.primary}
+          letterSpacing="0.02em"
+          textTransform={isUser ? 'uppercase' : 'none'}
         >
           {isUser ? 'You' : 'TM Code'}
         </Text>
@@ -624,9 +645,9 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       </Flex>
 
       {/* Content area */}
-      <Box pl="34px">
+      <Box pl={{ base: '0px', md: '36px' }}>
         {/* No bare "thinking dots" placeholder here on purpose. Whenever this
-            branch would fire (streaming, no content/tools yet) the sticky
+            branch would fire (streaming, no content/tools yet) the inline
             AgentActivityIndicator below the transcript is ALREADY showing the
             live state — "A raciocinar… · 9s" — so a second dots indicator
             inside the empty bubble was redundant and read as amateurish (two
@@ -726,18 +747,23 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                   // Leituras CONSECUTIVAS do mesmo ficheiro colapsam numa
                   // linha só — renderiza apenas a ÚLTIMA da sequência, a
                   // linha "substitui-se" a cada novo offset em vez de
-                  // empilhar o mesmo path (paridade com o CMD mode,
+                  // empilhar o mesmo path (paridade com a vista compacta,
                   // verbosidade reportada 2026-06-12).
-                  if (tc.toolName === 'read_file') {
-                    const path = typeof tc.input?.file_path === 'string' ? tc.input.file_path : null
+                  if (canonicalToolName(tc.toolName) === 'read_file') {
+                    const input = normalizeToolInputForCanonical(tc.toolName, tc.input)
+                    const path = typeof input.file_path === 'string' ? input.file_path : null
                     const next = message.contentBlocks?.[idx + 1]
                     const nextCall = next?.type === 'tool_call'
                       ? message.toolCalls?.find(t => t.id === next.toolCallId)
                       : null
+                    const nextInput = nextCall
+                      ? normalizeToolInputForCanonical(nextCall.toolName, nextCall.input)
+                      : null
                     if (
                       path &&
-                      nextCall?.toolName === 'read_file' &&
-                      nextCall.input?.file_path === path
+                      nextCall &&
+                      canonicalToolName(nextCall.toolName) === 'read_file' &&
+                      nextInput?.file_path === path
                     ) {
                       return null
                     }
@@ -783,7 +809,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                   fontSize={tokens.fontSize.lg}
                   fontFamily={tokens.fontFamily.ui}
                   color={tokens.colors.text.primary}
-                  lineHeight="1.5"
+                  lineHeight="1.58"
                   whiteSpace="pre-wrap"
                   wordBreak="break-word"
                 >
@@ -799,7 +825,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             )}
             {/* User-message attachments: image thumbnails + filename chips.
                 Without this block, screenshots and other attached files were
-                invisible in chat-mode (only cmd-mode's TerminalMessageRenderer
+                invisible in the main message bubble (TerminalMessageRenderer
                 had the equivalent rendering). The data was always on
                 `message.attachments`; the bug was missing UI. */}
             {isUser && message.attachments && message.attachments.length > 0 && (
@@ -815,9 +841,9 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                       pl={hasPreview ? 0 : 2}
                       pr={3}
                       py={hasPreview ? 0 : '4px'}
-                      bg="rgba(255, 255, 255, 0.04)"
-                      border="1px solid rgba(255, 255, 255, 0.08)"
-                      borderRadius="6px"
+                      bg="rgba(255, 255, 255, 0.035)"
+                      border="1px solid rgba(255, 255, 255, 0.075)"
+                      borderRadius="8px"
                       maxW="280px"
                       overflow="hidden"
                     >

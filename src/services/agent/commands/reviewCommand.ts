@@ -80,11 +80,9 @@ export async function executeReview(
   const agentStore = useAgentStore.getState()
   const trimmed = args.trim()
 
-  // Pre-condition: a project must be open. We trust the projectPath the
-  // dispatcher passed in (resolved from currentProject?.path ||
-  // cmdModeProjectPath) so the check works in both chat and CMD modes —
-  // previously this read useProjectStore.currentProject directly and
-  // failed in CMD mode where currentProject is never populated.
+  // Pre-condition: a project must be open. Trust the dispatcher-provided
+  // projectPath (resolved from currentProject?.path || cmdModeProjectPath)
+  // so cwd-scoped runs do not depend on useProjectStore.currentProject.
   if (!projectPath) {
     chatStore.addSystemMessage(t('review.noProject'))
     return
@@ -162,10 +160,8 @@ export async function executeReview(
   // which checks cmdModeCwd first, then falls back to currentProject.path.
   // /review goes through createLightweight + runAgentLoop directly (not
   // through runAgentWithCallbacks), so the standard cmdOnlyMode wiring in
-  // agentRunner.ts doesn't apply — we enable cmdMode ourselves here when
-  // dispatched from CMD, and the finally block below clears it. Matches
-  // chat-mode behaviour exactly: in chat the fallback to currentProject is
-  // enough; in CMD currentProject is empty and we need the cwd.
+  // agentRunner.ts doesn't apply. Enable cwd-scoped execution ourselves here
+  // when needed, and clear it in the finally block below.
   const enabledCmdModeHere = mode === 'terminal'
   if (enabledCmdModeHere) {
     toolExecutor.enableCmdMode(projectPath)

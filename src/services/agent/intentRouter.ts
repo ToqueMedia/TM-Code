@@ -1,7 +1,7 @@
 /**
  * Intent Router — a lightweight, non-streaming model call that classifies
- * the user's request into a `PromptProfile` + a `readOnly` flag BEFORE the
- * main agent loop starts.
+ * the user's request into a `PromptProfile`, a `readOnly` flag, and whether
+ * the turn requires file mutation BEFORE the main agent loop starts.
  *
  * Routing: the worker picks the utility model (MiMo V2.5) by the
  * `X-Request-Type: intent-router` header — we send NO `model` in the body
@@ -17,8 +17,11 @@ import { resolveAIWorkerUrl } from '../../utils/devUrls'
 import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
 import { logger } from '../../utils/logger'
 import type { PromptProfile, RouterDiagnostics } from './contextBuilder/auxiliaryRegistry'
+import type { ContentBlockAPI, ConversationMessage } from '../../types/chat'
 
 const INTENT_ROUTER_TIMEOUT_MS = 12_000
+const INTENT_HISTORY_LIMIT = 8
+const INTENT_HISTORY_TEXT_LIMIT = 900
 
 /** Full diagnostics captured on every router call — exported so a failed
  *  run shows exactly what the worker returned (raw body, headers, parse error).
@@ -28,6 +31,8 @@ export type { RouterDiagnostics }
 export interface IntentClassification {
   profile: PromptProfile
   readOnly: boolean
+  /** True when this turn should ultimately mutate project files/state. */
+  requiresMutation: boolean
   /** 'model' when classified by the router LLM; 'keyword' for local safety overrides; 'fallback' when it fell back. */
   source: 'model' | 'fallback' | 'keyword'
   /** Router self-reported confidence ('high'|'medium'|'low'); 'none' on fallback. */
@@ -43,6 +48,7 @@ export interface IntentClassification {
 const FALLBACK: IntentClassification = {
   profile: 'bugfix_local',
   readOnly: false,
+  requiresMutation: false,
   source: 'fallback',
   confidence: 'none',
   reason: 'intent router unavailable',
@@ -84,8 +90,9 @@ const VALID_PROFILES: ReadonlySet<PromptProfile> = new Set<PromptProfile>([
 
 const INTENT_ROUTER_SYSTEM =
   'You are an intent router for a coding agent. Classify the user\'s request.\n\n' +
+  'The user message is JSON with currentUserMessage, hasImage, and recentConversation. Use recentConversation to resolve short follow-ups like "continue", "continua", "retoma", "go on", or "where you left off".\n\n' +
   'Return ONLY a JSON object (no markdown fences, no prose):\n' +
-  '{"profile": "<one of the profiles>", "readOnly": <true|false>, "confidence": "<high|medium|low>", "reason": "<short reason>"}\n\n' +
+  '{"profile": "<one of the profiles>", "readOnly": <true|false>, "requiresMutation": <true|false>, "confidence": "<high|medium|low>", "reason": "<short reason>"}\n\n' +
   'Profiles:\n' +
   '- "analysis_readonly": the user wants a verification/audit/inspection WITHOUT editing files (e.g. "check if X is configured", "don\'t edit, just confirm", "sem editar, apenas confirme", "where is this defined").\n' +
   '- "bugfix_local": a localised fix/edit in existing files (default for code work).\n' +
@@ -104,8 +111,82 @@ const INTENT_ROUTER_SYSTEM =
   '- When the user asks to VERIFY/CHECK/CONFIRM something WITHOUT editing, prefer "analysis_readonly" with readOnly true — even if the subject is UI/dialogs/components.\n' +
   '- For task profiles (deploy/auth/scaffold/frontend), readOnly true means "do the task but don\'t write files" (e.g. "deploy without editing").\n' +
   '- When in doubt, readOnly false.\n\n' +
+  'requiresMutation rules:\n' +
+  '- Set "requiresMutation": true when the current request asks the coding agent to create, edit, fix, refactor, remove, configure, scaffold, deploy/publish, update docs, run an implementation plan, or otherwise change project files/state.\n' +
+  '- Set "requiresMutation": false for pure explanation, diagnosis, root-cause analysis, review, audit, search, comparison, or questions where a text answer can satisfy the request.\n' +
+  '- If readOnly is true, requiresMutation MUST be false.\n' +
+  '- For short continuation requests, inherit requiresMutation/profile from the most recent substantive user task in recentConversation unless the current message explicitly changes scope.\n' +
+  '- "Continue", "Continue onde paraste", "continua", "retoma", "avança", and similar messages are contextual, not standalone analysis requests.\n\n' +
   'confidence: how sure you are of the profile choice (high/medium/low).\n\n' +
-  'Decide the single best profile. Prefer the most specific. If an image is attached, always "vision".'
+  'Decide the single best profile. Prefer the most specific. If hasImage is true, always use profile "vision" while still classifying requiresMutation from the text/context.'
+
+export interface IntentRouterSignals {
+  hasImage?: boolean
+  conversationHistory?: readonly ConversationMessage[]
+}
+
+interface IntentRouterHistoryItem {
+  role: 'user' | 'assistant'
+  text: string
+}
+
+function truncateIntentText(text: string, limit = INTENT_HISTORY_TEXT_LIMIT): string {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= limit) return normalized
+  return `${normalized.slice(0, limit - 1)}…`
+}
+
+function contentToIntentText(content: string | ContentBlockAPI[] | null): string {
+  if (content == null) return ''
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return String(content)
+
+  return content
+    .map((block) => {
+      switch (block.type) {
+        case 'text':
+          return block.text ?? ''
+        case 'tool_call':
+          return `[tool_call ${block.name}]`
+        case 'image_url':
+          return '[image]'
+        case 'thinking':
+        case 'tool_result':
+          return ''
+        default:
+          return ''
+      }
+    })
+    .filter(Boolean)
+    .join('\n')
+}
+
+export function summarizeIntentHistory(
+  history: readonly ConversationMessage[] | undefined,
+): IntentRouterHistoryItem[] {
+  if (!history?.length) return []
+
+  const recent: IntentRouterHistoryItem[] = []
+  for (let i = history.length - 1; i >= 0 && recent.length < INTENT_HISTORY_LIMIT; i--) {
+    const msg = history[i]
+    if (!msg || (msg.role !== 'user' && msg.role !== 'assistant')) continue
+    const text = truncateIntentText(contentToIntentText(msg.content))
+    if (!text) continue
+    recent.push({ role: msg.role, text })
+  }
+  return recent.reverse()
+}
+
+function buildRouterUserPayload(
+  currentUserMessage: string,
+  signals?: IntentRouterSignals,
+): string {
+  return JSON.stringify({
+    currentUserMessage,
+    hasImage: signals?.hasImage === true,
+    recentConversation: summarizeIntentHistory(signals?.conversationHistory),
+  })
+}
 
 /** Build a diagnostics object from a Response (headers + status). The raw
  *  body is read separately by the caller (it can only be consumed once). */
@@ -132,13 +213,15 @@ function diagnosticsFromResponse(
  */
 export async function classifyIntent(
   userMessage: string,
-  signals?: { hasImage?: boolean },
+  signals?: IntentRouterSignals,
 ): Promise<IntentClassification> {
-  // Image present is a structural signal — skip the model call entirely.
-  if (signals?.hasImage) {
+  // Image-only turns are structurally vision requests; text/image turns still
+  // go through the router so it can decide whether the screenshot implies edits.
+  if (!userMessage.trim() && signals?.hasImage) {
     return {
       profile: 'vision',
       readOnly: false,
+      requiresMutation: false,
       source: 'model',
       confidence: 'high',
       reason: 'image attachment present',
@@ -154,6 +237,7 @@ export async function classifyIntent(
     return {
       profile: 'analysis_readonly',
       readOnly: true,
+      requiresMutation: false,
       source: 'keyword',
       confidence: 'high',
       reason: 'explicit no-edit/read-only instruction',
@@ -185,11 +269,11 @@ export async function classifyIntent(
         // No `model` — the worker picks the utility model by X-Request-Type.
         stream: false,
         temperature: 0,
-        max_tokens: 200,
+        max_tokens: 300,
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: INTENT_ROUTER_SYSTEM },
-          { role: 'user', content: trimmed },
+          { role: 'user', content: buildRouterUserPayload(trimmed, signals) },
         ],
       }),
       signal: AbortSignal.timeout(INTENT_ROUTER_TIMEOUT_MS),
@@ -233,11 +317,12 @@ export async function classifyIntent(
     if (parsed) {
       logger.info(
         'intent-router',
-        `classified: profile=${parsed.profile} readOnly=${parsed.readOnly} confidence=${parsed.confidence} (model)`,
+        `classified: profile=${parsed.profile} readOnly=${parsed.readOnly} requiresMutation=${parsed.requiresMutation} confidence=${parsed.confidence} (model)`,
       )
       return {
         profile: parsed.profile,
         readOnly: parsed.readOnly,
+        requiresMutation: parsed.requiresMutation,
         source: 'model',
         confidence: parsed.confidence,
         reason: parsed.reason ?? 'model classification',
@@ -261,7 +346,7 @@ export async function classifyIntent(
 function parseIntentJson(
   text: string,
   diag?: RouterDiagnostics,
-): { profile: PromptProfile; readOnly: boolean; confidence: 'high' | 'medium' | 'low'; reason?: string } | null {
+): { profile: PromptProfile; readOnly: boolean; requiresMutation: boolean; confidence: 'high' | 'medium' | 'low'; reason?: string } | null {
   let cleaned = text.trim()
 
   // Strip a leading markdown code fence (```json or ```) without regex.
@@ -287,6 +372,7 @@ function parseIntentJson(
     const obj = JSON.parse(cleaned.slice(start, end + 1)) as {
       profile?: string
       readOnly?: boolean
+      requiresMutation?: boolean
       confidence?: string
       reason?: string
     }
@@ -301,6 +387,7 @@ function parseIntentJson(
     return {
       profile,
       readOnly: obj.readOnly === true,
+      requiresMutation: obj.readOnly === true ? false : obj.requiresMutation === true,
       confidence,
       reason: typeof obj.reason === 'string' ? obj.reason : undefined,
     }

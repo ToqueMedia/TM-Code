@@ -5,7 +5,7 @@ description: Generate PDF files (reports, invoices, briefs, articles) via pandoc
 
 # PDF Document Generation
 
-Create PDF files (reports, invoices, briefs, articles). CMD-mode skill — applies when the user asks for "PDF", "gera em PDF", "exporta para PDF", or similar.
+Create PDF files (reports, invoices, briefs, articles) when the user asks for "PDF", "gera em PDF", "exporta para PDF", or similar.
 
 ## Tooling — preference order
 

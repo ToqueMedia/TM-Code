@@ -23,8 +23,8 @@ export const VERIFY_AGENT: SubAgentDefinition = {
   omitProjectContext: false, // needs project context for test commands
 
   getSystemPrompt: (ctx: SubAgentParentContext) => {
-    const cmdModeLine = ctx.cmdOnlyMode
-      ? '\n\nYou are running in Terminal Mode (no project sidebar). CWD is the working directory.'
+    const cwdLine = ctx.cmdOnlyMode
+      ? '\n\nCWD is the working directory for tool calls.'
       : ''
 
     const depthGuide = ctx.thoroughness === 'quick'
@@ -83,7 +83,7 @@ VERDICT: PARTIAL
 
 PARTIAL is for environmental limitations only (no test framework, tool unavailable) — not for "I'm unsure."
 
-Project root: ${ctx.workingPath}${cmdModeLine}
+Project root: ${ctx.workingPath}${cwdLine}
 Language: respond in ${ctx.agentLanguage}`
   },
 }

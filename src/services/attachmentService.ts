@@ -124,7 +124,7 @@ export async function resolveAttachments(attachments: Attachment[]): Promise<str
         // NÃO afirmar "this model is text-only": este fallback dispara por
         // razões transitórias (gate de plano, cap de bytes, falha de
         // leitura) e o modelo PARAFRASEAVA a frase de volta ao utilizador
-        // como limitação permanente do produto — "o modo terminal do TM
+        // como limitação permanente do produto — "esta superfície do TM
         // Code não processa imagens" (visto em produção 2026-06-12, Gemini
         // multimodal a negar a própria visão). O texto agora diz só a
         // verdade local: ESTA imagem não chegou NESTE pedido.

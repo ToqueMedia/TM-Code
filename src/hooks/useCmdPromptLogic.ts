@@ -37,7 +37,7 @@ import type { ContentBlock, PromptValue, QueuedCommand } from '../types/messageQ
 const MENTION_MENU_LIMIT = 50
 
 /**
- * CMD-mode prompt logic — slash commands, message queue, @mention support.
+ * Cwd-scoped prompt logic — slash commands, message queue, @mention support.
  */
 const NO_ARG_COMMANDS = new Set(['/exit', '/new', '/clear', '/init', '/terminal', '/settings', '/resume', '/team-chat', '/live-preview'])
 
@@ -80,7 +80,7 @@ export function useCmdPromptLogic() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   // #hashtag menu — closed-vocabulary skill triggers (e.g. #auth-google).
-  // State + handlers live in the shared hook (also used by chat-mode).
+  // State + handlers live in the shared hook used by the main prompt.
   // Declared after textareaRef because the hook captures the ref at call time.
   const hashtagMenu = useHashtagMenu({
     textareaRef,
@@ -101,7 +101,7 @@ export function useCmdPromptLogic() {
   const historyRef = useRef<string[]>([])
   const historyIndexRef = useRef(-1)
   // Track which project the loaded history belongs to — when the user switches
-  // CMD-mode projects (same hook instance on remount is typical, but guard
+  // cwd-scoped projects (same hook instance on remount is typical, but guard
   // anyway), we reload to avoid mixing histories.
   const historyLoadedForRef = useRef<string | null>(null)
 
@@ -112,7 +112,7 @@ export function useCmdPromptLogic() {
 
   const queuedCommands = useSyncExternalStore(subscribeToCommandQueue, getCommandQueueSnapshot)
 
-  // Attachment handling — uses local state (CMD mode manages its own lifecycle)
+  // Attachment handling — uses local state for this input lifecycle.
   const {
     attachments: draftAttachments,
     removeAttachment,
@@ -263,10 +263,10 @@ export function useCmdPromptLogic() {
       return
     }
 
-    // ── /terminal: local CMD-mode control, not an agent slash command ──
+    // ── /terminal: local shell-panel control, not an agent slash command ──
     //
     // Keep this as an explicit fast path instead of relying only on
-    // CMD_MODE_COMMANDS lookup. The terminal panel is UI state owned by CMD mode,
+    // CMD_MODE_COMMANDS lookup. The terminal panel is local UI state,
     // so it should toggle even if the global slash registry/menu changes.
     if (isTerminalToggleCommand(textPrompt)) {
       useTerminalPanelStore.getState().toggle()
@@ -274,9 +274,9 @@ export function useCmdPromptLogic() {
     }
 
     // ── Interrupted /plan resume ──
-    // Same contract as chat PromptBar: while PLAN*.md is incomplete, any
+    // Same contract as the main PromptBar: while PLAN*.md is incomplete, any
     // plain follow-up remains an architect-mode continuation. Falling through
-    // here would rebuild the default CMD coding prompt and allow source-file
+    // here would rebuild the default coding prompt and allow source-file
     // implementation before the approval card exists.
     const planResumePending = useChatStore.getState().planResumePending
     if (planResumePending && !textPrompt.trim().startsWith('/')) {
@@ -315,7 +315,7 @@ export function useCmdPromptLogic() {
         )
         return
       }
-      // Smart router for /payments — same parity as chat-mode usePromptBar.
+      // Smart router for /payments — same parity as the main PromptBar.
       // The hashtag/slash flows are first-time scaffolding; subsequent fixes
       // go through verbal requests so the agent's appliedScaffolding system-
       // prompt section routes to fix-mode rather than re-running fetches.
@@ -325,7 +325,7 @@ export function useCmdPromptLogic() {
           path,
           ['payments.momenu'],
           () => buildCmdPaymentsReapplyMessage(),
-          () => { /* cmd-mode has no draftInput state to clear */ },
+          () => { /* this input has no draftInput state to clear */ },
         )
         if (blocked) return
       }
@@ -356,8 +356,7 @@ export function useCmdPromptLogic() {
       }
 
       // Smart router: if any requested auth provider is already applied,
-      // block the re-scaffold flow with explanatory system message. Same
-      // parity as chat-mode usePromptBar.
+      // block the re-scaffold flow with explanatory system message.
       if (pre.authProviders.length > 0) {
         const { guardScaffoldReapply } = await import('../components/prompt/scaffoldReapplyGuard')
         const requestedKeys: import('../services/scaffoldingDetector').ScaffoldKey[] =
@@ -366,7 +365,7 @@ export function useCmdPromptLogic() {
           path,
           requestedKeys,
           (applied) => buildCmdAuthReapplyMessage(applied),
-          () => { /* cmd-mode has no draftInput state to clear */ },
+          () => { /* this input has no draftInput state to clear */ },
         )
         if (blocked) return
       }
@@ -380,11 +379,9 @@ export function useCmdPromptLogic() {
       // signal for no behavioural gain.
       const bubbleText = textPrompt
 
-      // cmdOnlyMode=true so runAgentWithCallbacks calls toolExecutor.enableCmdMode(cwd).
-      // Without this, hashtag flows in CMD mode fail every tool call with
-      // "No project is open" — the executor falls back to useProjectStore.currentProject,
-      // which TerminalView never populates (it invokes Rust open_project directly
-      // instead of going through useProjectStore.openProject).
+      // cmdOnlyMode=true makes runAgentWithCallbacks scope tool execution to cwd.
+      // Without this, hashtag flows fail every tool call with "No project is open"
+      // because this surface does not populate useProjectStore.currentProject.
       if (pre.authProviders.length > 0) {
         await runAuthFlow(pre.authProviders, pre.cleanedText, bubbleText, pre.hasDesign, true)
       } else {
@@ -433,7 +430,7 @@ export function useCmdPromptLogic() {
     chatStore.addUserMessage(textPrompt, attachments, promptBlocks)
 
     // @-mentions resolve inside agentRunner (atMentions.ts, claude-vaz
-    // parity) — AFTER enableCmdMode so path scoping matches CMD mode.
+    // parity) — AFTER enableCmdMode so path scoping matches cwd.
     // Resolving here (as the old <mentioned_files> flow did) would validate
     // against the wrong scope and skip the readFileState bookkeeping.
     await runAgentWithCallbacks(textPrompt, {
@@ -451,7 +448,7 @@ export function useCmdPromptLogic() {
 
   const executeQueuedInput = useCallback(async (commands: QueuedCommand[]): Promise<void> => {
     // Reserva o QueryGuard SINCRONAMENTE antes de qualquer await — mesma
-    // proteção do chat-mode (usePromptBar.executeQueuedInput). Sem isto, o
+    // proteção do main PromptBar (usePromptBar.executeQueuedInput). Sem isto, o
     // executePrompt tem vários awaits antes do tryStart() e, nessa janela,
     // o useQueueProcessor re-dispara com isQueryActive=false e despacha um
     // SEGUNDO runAgentLoop concorrente — dois loops a mutar a mesma mensagem
@@ -626,7 +623,7 @@ export function useCmdPromptLogic() {
       return
     }
 
-    // Paid-plan gate at selection time — parity with chat-mode usePromptBar.
+    // Paid-plan gate at selection time — parity with usePromptBar.
     // The menu's mouse onClick refuses paywalled rows, but keyboard Enter
     // routes here directly; without this a free user could pick a Pro/Max
     // row (e.g. /speed) and have it land in the input or run. Refuse and
@@ -1059,8 +1056,8 @@ export function useCmdPromptLogic() {
   }
 }
 
-// ── Scaffold-reapply system messages (cmd-mode parity with chat-mode) ──
-// Same wording as chat-mode usePromptBar so the UX is consistent. Pure
+// ── Scaffold-reapply system messages ──
+// Same wording as usePromptBar so the UX is consistent. Pure
 // builders; resolved through i18n at call time.
 
 function buildCmdAuthReapplyMessage(

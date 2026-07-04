@@ -75,9 +75,9 @@ function selfIdentity(): { uid: string; name: string; email: string } {
   }
 }
 
-/** Project path that works in BOTH Chat mode (currentProject) and Terminal mode
- *  (cmdModeProjectPath) — Terminal mode never populates `currentProject`, so the
- *  chat history would otherwise neither load nor persist there. */
+/** Project path that works from either the open-project store or the
+ *  cwd-scoped project path. Without the fallback, chat history would neither
+ *  load nor persist for cwd-scoped sessions. */
 function activeProjectPath(): string | null {
   const ps = useProjectStore.getState()
   return ps.currentProject?.path ?? ps.cmdModeProjectPath ?? null

@@ -1,5 +1,5 @@
 /**
- * Shared section snippets — used by BOTH chat-mode and cmd-mode prompts.
+ * Shared section snippets — used by project and cwd-scoped prompts.
  *
  * These return static strings (no project state, no `this`); they were class
  * methods on `ContextBuilder` until the May 2026 slice. Behaviour preserved
@@ -184,32 +184,32 @@ export function sharedMcpIndexBlock(mcpTools: MCPToolSummary[]): string | null {
   ].join('\n')
 }
 
-// Verbatim from claude-vaz (SUMMARIZE_TOOL_RESULTS_SECTION).
+// Context-preservation guidance for compaction boundaries.
 export function sharedContextPreservation(): string {
-  return `When working with tool results, write down any important information you might need later in your response, as the original tool result may be cleared later.`
+  return `When working with tool results, preserve information you will need after compaction. Use \`update_session_memory\` for in-progress work state, decisions made, blockers, and next steps. Put only user-relevant conclusions in visible responses; do not use the chat reply as a scratchpad for resumable state.`
 }
 
 /**
- * Terminal-style agent loop — shared by Chat and Terminal modes.
+ * Shell execution loop.
  *
- * Chat mode still has diff approval + supervised dev-server semantics; Terminal
- * mode still writes directly to disk. This section only governs how the agent
- * uses shell execution: short observable actions, then read the output before
- * deciding the next step.
+ * This section governs how the agent uses shell execution: short observable
+ * actions, then read the output before deciding the next step. Runtime
+ * permission prompts may still appear for risky actions, but shell operations
+ * are a normal capability.
  */
-export function sharedTerminalAgentLoop(mode: 'chat' | 'cmd'): string {
+export function sharedShellExecutionLoop(mode: 'chat' | 'cmd'): string {
   const actor = mode === 'chat' ? 'developer' : 'user'
   const backgroundGuidance = mode === 'chat'
     ? `Use \`${EXECUTE_COMMAND_BACKGROUND}\` for long-running one-shot work such as installs, builds, type checks, and large compiles; observe it later with \`${CHECK_BACKGROUND_COMMANDS}\` before relying on the result.`
     : `Use \`${EXECUTE_COMMAND_BACKGROUND}\` for long-running one-shot work such as builds, type checks, and large compiles; observe it later with \`${CHECK_BACKGROUND_COMMANDS}\` before relying on the result.`
 
-  return `# Terminal-style agent loop
+  return `# Shell execution loop
 
-Operate like an interactive terminal operator, not a script generator.
+Operate like an interactive shell operator, not a script generator.
 
  - **Act atomically**: prefer one purposeful command, observe its stdout/stderr/exit code, then decide the next command. Avoid \`&&\`, \`||\`, \`;\`, and pipes as workflow glue because they hide the failing step and remove your feedback loop.
  - **Use persistent shell for interactive state**: when you need to stay inside a shell, SSH session, REPL, or stateful CLI, call \`${AGENT_SHELL_START}\`, then send one input line at a time with \`${AGENT_SHELL_WRITE}\`, observe with \`${AGENT_SHELL_READ}\`, and finish with \`${AGENT_SHELL_STOP}\`. The start result includes \`platform\` and \`command_style\`; obey it. On Windows, \`command_style: posix\` means Git Bash is active and POSIX commands are appropriate; \`powershell\` or \`cmd\` means use native Windows syntax until you enter a remote Unix shell. Example: start shell → write \`ssh root@host\` → read prompt → write \`apt-get update\` → read → write \`DEBIAN_FRONTEND=noninteractive apt-get upgrade -yq\`.
- - **Use shell for terminal work only**: use dedicated tools for file/code exploration, and \`${EXECUTE_COMMAND}\` for everything else. Prefer the Claude-like aliases; TM Code maps them internally:
+ - **Use shell for shell work only**: use dedicated tools for file/code exploration, and \`${EXECUTE_COMMAND}\` for everything else. Prefer the Claude-like aliases; TM Code maps them internally:
    - \`${READ_ALIAS}\` — read file contents (internal \`${READ_FILE}\`; replaces \`cat\`, \`head\`, \`tail\`, \`sed -n\`)
    - \`${GREP_ALIAS}\` — search text/patterns in files (internal \`${SEARCH_FILES}\`; replaces \`grep\`, \`rg\`, \`ack\`)
    - \`${LS_ALIAS}\` — list directory contents (internal \`${LIST_DIRECTORY}\`; replaces \`ls\`, \`tree\`)
@@ -222,7 +222,7 @@ Operate like an interactive terminal operator, not a script generator.
 }
 
 /**
- * Identity hardening — fixed self-description used in chat, CMD, and
+ * Identity hardening — fixed self-description used in all prompt surfaces and
  * minimal prompts. Personas were removed from the product; the agent
  * presents itself uniformly as the TM Code coding agent regardless of
  * which underlying model is routed for the current plan.

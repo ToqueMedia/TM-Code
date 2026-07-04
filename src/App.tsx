@@ -2,7 +2,6 @@
 import './utils/platformPatches'
 import './utils/monacoEnv'
 import WelcomeScreen from './components/WelcomeScreen';
-import MainLayout from './components/MainLayout';
 import FileViewer from './components/FileViewer';
 import LoginScreen from './components/auth/LoginScreen';
 import OnboardingFlow from './components/onboarding/OnboardingFlow';
@@ -30,7 +29,6 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useNativeMenu } from './hooks/useNativeMenu';
 import { useBillingRefresh } from './hooks/useBillingRefresh';
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { flushSync } from 'react-dom';
 import { Box, Flex } from '@chakra-ui/react';
 import { LoadingSpinner } from './components/ui/LoadingSpinner';
 import { RequirementsErrorScreen } from './components/ui/RequirementsErrorScreen';
@@ -90,7 +88,6 @@ function App() {
 	// True while openProject is in-flight. Keeps the spinner visible even after
 	// setInitializing(false) fires — prevents WelcomeScreen from showing while a
 	// project is actively loading (both on startup auto-open and manual opens).
-	const [isOpeningProject, setIsOpeningProject] = useState(false);
 	const prevProjectRef = useRef<string | null>(null);
 	// Guards against concurrent initializeApp invocations (dependency re-runs while async in progress,
 	// or React StrictMode double-fire). Without this, openProject can be called twice in parallel.
@@ -126,7 +123,7 @@ function App() {
 	// Detect the mandatory external tools (git/node/python) once the app is up,
 	// and re-check on window focus. Prompt sending is blocked while any is
 	// missing (see requiredToolsStore + the handleSend gates). Best-effort;
-	// covers every view (cmd + chat), not just Terminal mode.
+	// covers every view, not just the shell-styled surface.
 	useEffect(() => {
 		const refresh = () => {
 			import('./stores/requiredToolsStore').then(({ useRequiredToolsStore }) => {
@@ -481,13 +478,10 @@ function App() {
 			if (!proj && !cmd && !welcomeScreen && recent.length > 0) {
 				const lastProject = recent[0];
 				if (lastProject.path) {
-					setIsOpeningProject(true);
 					try {
 						await openProject(lastProject.path);
 					} catch (error) {
 						logger.error('app', 'Failed to open last project:', error);
-					} finally {
-						setIsOpeningProject(false);
 					}
 				}
 			}
@@ -798,28 +792,19 @@ function App() {
 
 	const handleOpenProject = async (path?: string, options?: { initGit?: boolean }) => {
 		if (!path) return;
-		// flushSync forces React to paint the spinner BEFORE openProject starts.
-		// Without it, React 18 automatic batching groups setIsOpeningProject(true)
-		// and setIsOpeningProject(false) into one render — the intermediate spinner
-		// state never paints and WelcomeScreen appears frozen.
-		flushSync(() => setIsOpeningProject(true));
 		try {
 			await openProject(path, options);
 		} catch (error) {
 			logger.error('app', 'Failed to open project:', error);
 			const { useToastStore } = await import('./stores/toastStore');
 			useToastStore.getState().addToast('error', t('app.failedOpenProject').replace('{message}', (error as Error).message || t('error.unknown')));
-		} finally {
-			setIsOpeningProject(false);
 		}
 	};
 
 	// Show loading state while:
 	// - app is bootstrapping (initializing)
 	// - Firebase auth is still resolving and we have no persisted auth
-	// - a project is actively being opened (prevents WelcomeScreen flash while
-	//   openProject is in-flight — both on startup auto-open and manual opens)
-	if (initializing || (authLoading && !isAuthenticated) || isOpeningProject) {
+	if (initializing || (authLoading && !isAuthenticated)) {
 		return (
 			<Flex
 				justify="center"
@@ -898,14 +883,12 @@ function App() {
 			/>
 
 			<Box position="relative" zIndex={1}>
-				{/* Conta suspensa → só o Welcome (MainLayout, que hospeda
-				    Chat/Terminal, nunca renderiza enquanto bloqueado). */}
+				{/* Conta suspensa → só o Welcome, sem workspace activo. */}
 				{isBlocked ? (
 					<WelcomeScreen
 						onOpenProject={handleOpenProject}
 					/>
-				) : currentProject ? <MainLayout /> :
-					standaloneFiles.length > 0 ? (
+				) : standaloneFiles.length > 0 && !currentProject ? (
 						<FileViewer
 							filePath={standaloneFiles[0]}
 							onClose={() => setStandaloneFiles([])}

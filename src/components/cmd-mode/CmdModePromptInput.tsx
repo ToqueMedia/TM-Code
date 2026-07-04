@@ -36,7 +36,7 @@ export interface CmdModePromptInputRef {
   clearAttachments: () => void
 }
 
-// ─── Terminal-style queued messages ───
+// ─── Shell-style queued messages ───
 
 function previewText(value: QueuedCommand['value']): string {
   if (typeof value === 'string') return value
@@ -384,7 +384,7 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
               opacity: 1,
             },
             // Transparent text would also hide the selection — restore it so
-            // copy/paste in CMD mode actually shows what's selected.
+            // copy/paste in this input actually shows what's selected.
             '& > textarea::selection': {
               color: tokens.colors.terminal.foreground,
               WebkitTextFillColor: tokens.colors.terminal.foreground,
@@ -414,7 +414,7 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
             {renderHighlightedPrompt(input)}
             {(() => {
               // Inline argument hint for slash commands \u2014 same UX as
-              // chat mode's PromptTextarea via the shared
+              // the main PromptTextarea via the shared
               // resolveInlineArgHint helper. Pure visual; the textarea
               // value is unchanged. Cheap enough to compute inline (one
               // startsWith + Map lookup per render).
@@ -444,7 +444,7 @@ const CmdModePromptInput = memo(forwardRef<CmdModePromptInputRef>(function CmdMo
             onBlur={handleBlur}
             onScroll={handleScroll}
             placeholder={isStreaming ? '' : 'Type a command or message…'}
-            aria-label="Terminal Mode input"
+            aria-label="Agent input"
             rows={1}
             autoComplete="off"
             autoCorrect="off"

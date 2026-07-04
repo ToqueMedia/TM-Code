@@ -39,13 +39,14 @@ export async function executeInit(
     intentOverride: {
       profile: 'project_bootstrap',
       readOnly: false,
+      requiresMutation: true,
       source: 'keyword',
       confidence: 'high',
       reason: '/init selected project_bootstrap to create or refresh TMS.md',
     },
-    // CMD mode never populates useProjectStore.currentProject; without this,
-    // the tool executor's getProjectRoot falls back to that store and every
-    // file tool fails with "No project is open." See agentRunner.ts:179.
+    // Cwd-scoped execution may not populate useProjectStore.currentProject;
+    // without this, the tool executor's getProjectRoot can fall back to an
+    // empty store and every file tool fails with "No project is open."
     cmdOnlyMode: mode === 'terminal',
   })
 }

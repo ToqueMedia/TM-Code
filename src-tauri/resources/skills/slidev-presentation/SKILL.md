@@ -5,7 +5,7 @@ description: Developer-grade presentations as markdown + Vue (Slidev). Primary p
 
 # Slidev Presentation (dev-first decks)
 
-Author developer-grade presentations as Markdown + Vue. CMD-mode skill — primary path for technical decks (architecture reviews, demos, conference talks, internal walkthroughs). Free, offline, version-controllable.
+Author developer-grade presentations as Markdown + Vue. Primary path for technical decks (architecture reviews, demos, conference talks, internal walkthroughs). Free, offline, version-controllable.
 
 ## When this beats the alternatives
 

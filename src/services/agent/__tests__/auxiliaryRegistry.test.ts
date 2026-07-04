@@ -345,6 +345,7 @@ describe('auxiliaryRegistry', () => {
           reason: 'test',
         },
         readOnly: false,
+        requiresMutation: false,
         reason: 'test',
         routerSource: 'keyword' as const,
         routerConfidence: 'none' as const,

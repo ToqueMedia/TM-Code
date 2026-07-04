@@ -53,9 +53,8 @@ function saveAutoApproveDiffs(value: boolean) {
 
 /** Fire-and-forget write of `approvedScopes` + `projectToolAllowlist` to
  *  the current project's app-managed state. Uses the store's own
- *  `projectPath` so it works in both Chat Mode (set by
- *  projectStore.openProject) and Terminal Mode (set by TerminalView)
- *  without depending on projectStore. */
+ *  `projectPath` so it works from either projectStore.openProject or the
+ *  cwd-scoped workspace path without depending on projectStore. */
 function persistPermissions(): void {
   const { projectPath, approvedScopes, projectToolAllowlist, additionalDirectories } = usePermissionStore.getState()
   if (!projectPath) return
@@ -96,7 +95,7 @@ function saveGlobalToolAllowlist(tools: Set<string>): void {
  *  function rather than a store action so the projectStore hook can call
  *  it without round-tripping through React's update queue.
  *  Also sets `projectPath` so `persistPermissions` writes to the
- *  correct project in both Chat Mode and Terminal Mode. */
+ *  correct project across prompt surfaces. */
 export function hydrateApprovedScopes(
   scopes: Set<'core' | 'mcp'>,
   projectPath?: string,
@@ -191,7 +190,7 @@ interface PendingPermission {
 
 interface PermissionState {
   /** Current project path — set by whoever opens a project (projectStore
-   *  in Chat Mode, TerminalView in CMD Mode) so persistPermissions
+   *  or TerminalView) so persistPermissions
    *  writes to the correct project without depending on projectStore. */
   projectPath: string | null
   /** Scopes where user clicked "Accept All" — 'core' and 'mcp' are independent */

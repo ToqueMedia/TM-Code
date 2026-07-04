@@ -32,13 +32,13 @@ function AttachmentChips({ attachments, onRemove }: AttachmentChipsProps) {
       {showTextOnlyWarning && (
         <Flex
           px={3}
-          py={1.5}
+          py={2}
           mx={3}
           mb={1}
           align="center"
           gap={2}
-          bg="rgba(247, 127, 0, 0.08)"
-          border={`1px solid rgba(247, 127, 0, 0.2)`}
+          bg="rgba(247, 127, 0, 0.07)"
+          border="1px solid rgba(247, 127, 0, 0.18)"
           borderRadius="8px"
         >
           <Box color={tokens.colors.accent.orange} flexShrink={0} display="flex" alignItems="center">
@@ -49,7 +49,7 @@ function AttachmentChips({ attachments, onRemove }: AttachmentChipsProps) {
           </Text>
         </Flex>
       )}
-      <Flex px={3} pb={1} pt={0.5} gap={1.5} flexWrap="wrap">
+      <Flex px={3} pb={1.5} pt={0.5} gap={1.5} flexWrap="wrap">
       {attachments.map(att => {
         const Icon = typeIcons[att.type]
         return (
@@ -57,19 +57,19 @@ function AttachmentChips({ attachments, onRemove }: AttachmentChipsProps) {
             key={att.id}
             align="center"
             gap={1.5}
-            px={2}
-            py="3px"
-            bg={tokens.colors.bg.card}
-            border={`1px solid ${tokens.colors.border.glass}`}
+            px={att.type === 'image' && att.base64 ? '4px' : 2}
+            py={att.type === 'image' && att.base64 ? '4px' : '5px'}
+            bg="rgba(255, 255, 255, 0.035)"
+            border="1px solid rgba(255, 255, 255, 0.07)"
             borderRadius="8px"
-            maxW="200px"
-            transition="all 0.15s"
-            _hover={{ borderColor: tokens.colors.border.subtle }}
+            maxW={{ base: '160px', md: '220px' }}
+            transition={`border-color ${tokens.transition.fast}, background ${tokens.transition.fast}`}
+            _hover={{ bg: 'rgba(255, 255, 255, 0.055)', borderColor: 'rgba(255, 255, 255, 0.12)' }}
           >
             {att.type === 'image' && att.base64 ? (
               <Box
-                w="18px"
-                h="18px"
+                w="24px"
+                h="24px"
                 borderRadius="4px"
                 overflow="hidden"
                 flexShrink={0}
@@ -87,7 +87,8 @@ function AttachmentChips({ attachments, onRemove }: AttachmentChipsProps) {
               fontSize="11.5px"
               color={tokens.colors.text.secondary}
               truncate
-              maxW="140px"
+              maxW={{ base: '96px', md: '150px' }}
+              fontWeight="500"
             >
               {att.name}
             </Text>
@@ -108,6 +109,7 @@ function AttachmentChips({ attachments, onRemove }: AttachmentChipsProps) {
                 e.stopPropagation()
                 onRemove(att.id)
               }}
+              aria-label={t('terminalMode.removeAttachment')}
             >
               <FiX size={11} />
             </Box>

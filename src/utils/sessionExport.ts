@@ -690,7 +690,7 @@ export async function buildEnvironmentSnapshot(session: ChatSession): Promise<En
     else out.projectType = 'node'
   } catch { /* not a Node project, or no package.json — leave as 'unknown' */ }
 
-  // Skills available for this project + chat mode. loadSkills is cached, so
+  // Skills available for this project prompt. loadSkills is cached, so
   // calling it here doesn't double-cost when the live agent already ran.
   try {
     const { default: SkillService } = await import('../services/agent/skillService')

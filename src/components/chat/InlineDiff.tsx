@@ -91,6 +91,14 @@ function InlineDiff({
 
   const addedCount = allLines.filter(l => l.type === 'added').length
   const removedCount = allLines.filter(l => l.type === 'removed').length
+  const diffBorderColor = status === 'approved'
+    ? 'rgba(46, 160, 67, 0.28)'
+    : status === 'denied'
+      ? 'rgba(248, 81, 73, 0.24)'
+      : 'rgba(254, 16, 99, 0.22)'
+  const diffShadow = status === 'pending'
+    ? '0 18px 42px rgba(0,0,0,0.34), 0 0 0 1px rgba(254,16,99,0.04)'
+    : '0 12px 30px rgba(0,0,0,0.22)'
 
   // Unified-diff style hunks with CONTEXT_LINES of surrounding context
   // around each changed block. Overlapping or adjacent ranges are merged
@@ -149,31 +157,42 @@ function InlineDiff({
 
   return (
     <Box
-      border={`1px solid ${isResolved ? 'rgba(255,255,255,0.05)' : 'rgba(255, 255, 255, 0.08)'}`}
-      borderRadius="8px"
+      border={`1px solid ${diffBorderColor}`}
+      borderRadius="12px"
       overflow="hidden"
       my={2}
-      bg={tokens.colors.bg.codeBlock}
-      boxShadow={isResolved ? 'none' : '0 10px 28px rgba(0,0,0,0.18)'}
-      transition="border-color 0.2s, box-shadow 0.2s"
+      bg="rgba(10, 10, 10, 0.94)"
+      boxShadow={diffShadow}
+      transition="border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease"
     >
-      {/* Header */}
       <Flex
         align="center"
         justify="space-between"
-        px={3}
-        minH="34px"
-        py="6px"
-        bg="rgba(255, 255, 255, 0.025)"
-        borderBottom="1px solid rgba(255, 255, 255, 0.06)"
+        gap={3}
+        px={{ base: 3, md: 4 }}
+        minH="44px"
+        py="8px"
+        bg="linear-gradient(180deg, rgba(255,255,255,0.052), rgba(255,255,255,0.022))"
+        borderBottom="1px solid rgba(255, 255, 255, 0.075)"
       >
-        <Flex align="center" gap={2} minW={0}>
-          <Image src={getFileIconUrl(filePath)} alt="" w="15px" h="15px" flexShrink={0} />
+        <Flex align="center" gap={2.5} minW={0}>
+          <Flex
+            w="26px"
+            h="26px"
+            align="center"
+            justify="center"
+            borderRadius="7px"
+            bg="rgba(255,255,255,0.045)"
+            border="1px solid rgba(255,255,255,0.07)"
+            flexShrink={0}
+          >
+            <Image src={getFileIconUrl(filePath)} alt="" w="15px" h="15px" flexShrink={0} />
+          </Flex>
           <Text
-            fontSize="12px"
-            color={tokens.colors.accent.primary}
+            fontSize={{ base: '12px', md: '13px' }}
+            color={tokens.colors.text.primary}
             fontFamily={tokens.fontFamily.mono}
-            fontWeight="500"
+            fontWeight="600"
             overflow="hidden"
             textOverflow="ellipsis"
             whiteSpace="nowrap"
@@ -184,13 +203,14 @@ function InlineDiff({
             <Text
               fontSize="10px"
               color={tokens.colors.accent.green}
-              fontWeight="600"
-              bg="rgba(46, 160, 67, 0.1)"
-              px="6px"
-              py="1px"
-              borderRadius="4px"
+              fontWeight="700"
+              bg="rgba(46, 160, 67, 0.12)"
+              border="1px solid rgba(46, 160, 67, 0.22)"
+              px="7px"
+              py="2px"
+              borderRadius="999px"
               textTransform="uppercase"
-              letterSpacing="0.03em"
+              lineHeight="1"
             >
               new
             </Text>
@@ -198,12 +218,34 @@ function InlineDiff({
           {!isNewFile && (
             <Flex align="center" gap={1.5}>
               {addedCount > 0 && (
-                <Text fontSize="10px" color={tokens.colors.diff.addedText} fontFamily={tokens.fontFamily.mono}>
+                <Text
+                  fontSize="10px"
+                  color={tokens.colors.diff.addedText}
+                  fontFamily={tokens.fontFamily.mono}
+                  fontWeight="700"
+                  bg="rgba(46, 160, 67, 0.105)"
+                  border="1px solid rgba(46, 160, 67, 0.18)"
+                  px="6px"
+                  py="2px"
+                  borderRadius="999px"
+                  lineHeight="1"
+                >
                   +{addedCount}
                 </Text>
               )}
               {removedCount > 0 && (
-                <Text fontSize="10px" color={tokens.colors.diff.removedText} fontFamily={tokens.fontFamily.mono}>
+                <Text
+                  fontSize="10px"
+                  color={tokens.colors.diff.removedText}
+                  fontFamily={tokens.fontFamily.mono}
+                  fontWeight="700"
+                  bg="rgba(248, 81, 73, 0.105)"
+                  border="1px solid rgba(248, 81, 73, 0.18)"
+                  px="6px"
+                  py="2px"
+                  borderRadius="999px"
+                  lineHeight="1"
+                >
                   -{removedCount}
                 </Text>
               )}
@@ -214,10 +256,12 @@ function InlineDiff({
               fontSize="10px"
               fontWeight="600"
               color={status === 'approved' ? tokens.colors.accent.green : tokens.colors.accent.red}
-              bg={status === 'approved' ? 'rgba(46, 160, 67, 0.1)' : 'rgba(248, 81, 73, 0.1)'}
-              px="6px"
-              py="1px"
-              borderRadius="4px"
+              bg={status === 'approved' ? 'rgba(46, 160, 67, 0.12)' : 'rgba(248, 81, 73, 0.12)'}
+              border={status === 'approved' ? '1px solid rgba(46, 160, 67, 0.2)' : '1px solid rgba(248, 81, 73, 0.2)'}
+              px="7px"
+              py="2px"
+              borderRadius="999px"
+              lineHeight="1"
             >
               {status === 'approved' ? 'accepted' : 'rejected'}
             </Text>
@@ -229,12 +273,18 @@ function InlineDiff({
           column, while fixed gutter columns keep line numbers aligned. */}
       <Box
         overflowX="hidden"
-        fontSize="12px"
+        fontSize={{ base: '11.5px', md: '12px' }}
         fontFamily={tokens.fontFamily.mono}
-        lineHeight="20px"
+        lineHeight="21px"
+        bg="rgba(0,0,0,0.16)"
         css={{
           '&::-webkit-scrollbar': { width: '4px', height: '4px' },
-          '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.1)', borderRadius: '2px' },
+          '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.14)', borderRadius: '2px' },
+          '@media (max-width: 560px)': {
+            '& [data-diff-row], & [data-diff-gap]': {
+              gridTemplateColumns: '34px 34px 18px minmax(0, 1fr)',
+            },
+          },
         }}
       >
         {displayHunks.length === 0 ? (
@@ -248,10 +298,11 @@ function InlineDiff({
             <Box key={`hunk-${hi}`}>
               {hi > 0 && (
                 <Box
+                  data-diff-gap
                   h="16px"
-                  bg="rgba(255,255,255,0.015)"
-                  borderTop="1px dashed rgba(255,255,255,0.06)"
-                  borderBottom="1px dashed rgba(255,255,255,0.06)"
+                  bg="rgba(255,255,255,0.025)"
+                  borderTop="1px dashed rgba(255,255,255,0.075)"
+                  borderBottom="1px dashed rgba(255,255,255,0.075)"
                   userSelect="none"
                   display="grid"
                   alignItems="center"
@@ -267,10 +318,10 @@ function InlineDiff({
                 let bg = 'transparent'
                 let prefixChar = '\u00A0'
                 if (line.type === 'added') {
-                  bg = 'rgba(46, 160, 67, 0.08)'
+                  bg = 'rgba(46, 160, 67, 0.085)'
                   prefixChar = '+'
                 } else if (line.type === 'removed') {
-                  bg = 'rgba(248, 81, 73, 0.08)'
+                  bg = 'rgba(248, 81, 73, 0.085)'
                   prefixChar = '-'
                 }
                 const gutterBg = line.type === 'removed'
@@ -290,14 +341,20 @@ function InlineDiff({
                 return (
                   <Box
                     key={`${line.type}-${line.oldNum ?? 'n'}-${line.newNum ?? 'n'}`}
+                    data-diff-row
                     bg={bg}
-                    minH="20px"
+                    minH="21px"
                     display="grid"
                     gridTemplateColumns="44px 44px 22px minmax(0, 1fr)"
                     minW={0}
+                    boxShadow={line.type === 'added'
+                      ? 'inset 2px 0 0 rgba(46, 160, 67, 0.58)'
+                      : line.type === 'removed'
+                        ? 'inset 2px 0 0 rgba(248, 81, 73, 0.58)'
+                        : 'none'}
                   >
                     <Box
-                      minH="20px"
+                      minH="21px"
                       display="flex"
                       justifyContent="flex-end"
                       alignItems="flex-start"
@@ -306,12 +363,12 @@ function InlineDiff({
                       bg={gutterBg}
                       userSelect="none"
                     >
-                      <Text fontSize="10px" lineHeight="20px" color={gutterTextColor} whiteSpace="nowrap">
+                      <Text fontSize="10px" lineHeight="21px" color={gutterTextColor} whiteSpace="nowrap">
                         {line.oldNum ?? ''}
                       </Text>
                     </Box>
                     <Box
-                      minH="20px"
+                      minH="21px"
                       display="flex"
                       justifyContent="flex-end"
                       alignItems="flex-start"
@@ -321,14 +378,14 @@ function InlineDiff({
                       borderRight={`1px solid ${gutterBorder}`}
                       userSelect="none"
                     >
-                      <Text fontSize="10px" lineHeight="20px" color={gutterTextColor} whiteSpace="nowrap">
+                      <Text fontSize="10px" lineHeight="21px" color={gutterTextColor} whiteSpace="nowrap">
                         {line.newNum ?? ''}
                       </Text>
                     </Box>
-                    <Flex minH="20px" justify="center" align="flex-start" pt="2px" userSelect="none">
+                    <Flex minH="21px" justify="center" align="flex-start" pt="2px" userSelect="none">
                       <Text
                         fontSize="11px"
-                        lineHeight="20px"
+                        lineHeight="21px"
                         color={line.type === 'added'
                           ? tokens.colors.diff.addedText
                           : line.type === 'removed'
@@ -341,11 +398,11 @@ function InlineDiff({
                     </Flex>
                     <Box
                       minW={0}
-                      pr={4}
+                      pr={{ base: 3, md: 4 }}
                       whiteSpace="pre-wrap"
                       overflowWrap="anywhere"
-                      fontSize="12px"
-                      lineHeight="20px"
+                      fontSize={{ base: '11.5px', md: '12px' }}
+                      lineHeight="21px"
                     >
                       {lineTokens.map((token, ti) => (
                         <span key={ti} style={{ color: token.color }}>
@@ -365,15 +422,17 @@ function InlineDiff({
       {shouldTruncate && (
         <Box
           px={3}
-          py="6px"
-          borderTop="1px solid rgba(255, 255, 255, 0.05)"
-          bg="rgba(255, 255, 255, 0.02)"
+          py="8px"
+          borderTop="1px solid rgba(255, 255, 255, 0.065)"
+          bg="rgba(255, 255, 255, 0.025)"
         >
           <Text
+            as="button"
             fontSize="11px"
             color={tokens.colors.accent.primary}
             cursor="pointer"
-            _hover={{ textDecoration: 'underline' }}
+            fontWeight="600"
+            _hover={{ color: '#ff4f8c' }}
             onClick={() => setShowFull(true)}
           >
             Show {totalDisplayLines - MAX_LINES} more lines
@@ -385,10 +444,10 @@ function InlineDiff({
       {showActionButtons && (
         <Flex
           gap={2}
-          px={3}
-          py="8px"
-          borderTop="1px solid rgba(255, 255, 255, 0.05)"
-          bg="rgba(255, 255, 255, 0.02)"
+          px={{ base: 3, md: 4 }}
+          py="10px"
+          borderTop="1px solid rgba(255, 255, 255, 0.075)"
+          bg="rgba(255, 255, 255, 0.026)"
           flexWrap="wrap"
         >
           <Box
@@ -396,18 +455,18 @@ function InlineDiff({
             display="flex"
             alignItems="center"
             gap="5px"
-            px="10px"
-            py="4px"
-            bg="rgba(46, 160, 67, 0.1)"
-            border="1px solid rgba(46, 160, 67, 0.2)"
-            borderRadius="6px"
+            px="11px"
+            py="6px"
+            bg="rgba(46, 160, 67, 0.13)"
+            border="1px solid rgba(46, 160, 67, 0.24)"
+            borderRadius="8px"
             color={tokens.colors.accent.green}
             fontSize="11px"
-            fontWeight="500"
+            fontWeight="650"
             cursor="pointer"
             transition="all 0.15s"
-            _hover={{ bg: 'rgba(46, 160, 67, 0.18)', borderColor: 'rgba(46, 160, 67, 0.35)' }}
-            _active={{ transform: 'scale(0.97)' }}
+            _hover={{ bg: 'rgba(46, 160, 67, 0.2)', borderColor: 'rgba(46, 160, 67, 0.38)', transform: 'translateY(-1px)' }}
+            _active={{ transform: 'translateY(0) scale(0.98)' }}
             onClick={onApprove}
             aria-label={`Accept changes in ${fileName}`}
           >
@@ -420,18 +479,18 @@ function InlineDiff({
             display="flex"
             alignItems="center"
             gap="5px"
-            px="10px"
-            py="4px"
+            px="11px"
+            py="6px"
             bg="transparent"
-            border="1px solid rgba(46, 160, 67, 0.15)"
-            borderRadius="6px"
+            border="1px solid rgba(46, 160, 67, 0.18)"
+            borderRadius="8px"
             color={tokens.colors.accent.green}
             fontSize="11px"
-            fontWeight="500"
+            fontWeight="650"
             cursor="pointer"
             transition="all 0.15s"
-            _hover={{ bg: 'rgba(46, 160, 67, 0.08)', borderColor: 'rgba(46, 160, 67, 0.3)' }}
-            _active={{ transform: 'scale(0.97)' }}
+            _hover={{ bg: 'rgba(46, 160, 67, 0.1)', borderColor: 'rgba(46, 160, 67, 0.32)', transform: 'translateY(-1px)' }}
+            _active={{ transform: 'translateY(0) scale(0.98)' }}
             onClick={onApproveAll}
             aria-label="Accept all pending changes"
           >
@@ -444,18 +503,18 @@ function InlineDiff({
             display="flex"
             alignItems="center"
             gap="5px"
-            px="10px"
-            py="4px"
+            px="11px"
+            py="6px"
             bg="transparent"
-            border="1px solid rgba(248, 81, 73, 0.15)"
-            borderRadius="6px"
+            border="1px solid rgba(248, 81, 73, 0.18)"
+            borderRadius="8px"
             color={tokens.colors.accent.red}
             fontSize="11px"
-            fontWeight="500"
+            fontWeight="650"
             cursor="pointer"
             transition="all 0.15s"
-            _hover={{ bg: 'rgba(248, 81, 73, 0.08)', borderColor: 'rgba(248, 81, 73, 0.3)' }}
-            _active={{ transform: 'scale(0.97)' }}
+            _hover={{ bg: 'rgba(248, 81, 73, 0.1)', borderColor: 'rgba(248, 81, 73, 0.32)', transform: 'translateY(-1px)' }}
+            _active={{ transform: 'translateY(0) scale(0.98)' }}
             onClick={onDeny}
             aria-label={`Reject changes in ${fileName}`}
           >
@@ -468,18 +527,18 @@ function InlineDiff({
             display="flex"
             alignItems="center"
             gap="5px"
-            px="10px"
-            py="4px"
-            bg="rgba(248, 81, 73, 0.1)"
-            border="1px solid rgba(248, 81, 73, 0.2)"
-            borderRadius="6px"
+            px="11px"
+            py="6px"
+            bg="rgba(248, 81, 73, 0.13)"
+            border="1px solid rgba(248, 81, 73, 0.24)"
+            borderRadius="8px"
             color={tokens.colors.accent.red}
             fontSize="11px"
-            fontWeight="500"
+            fontWeight="650"
             cursor="pointer"
             transition="all 0.15s"
-            _hover={{ bg: 'rgba(248, 81, 73, 0.18)', borderColor: 'rgba(248, 81, 73, 0.35)' }}
-            _active={{ transform: 'scale(0.97)' }}
+            _hover={{ bg: 'rgba(248, 81, 73, 0.2)', borderColor: 'rgba(248, 81, 73, 0.38)', transform: 'translateY(-1px)' }}
+            _active={{ transform: 'translateY(0) scale(0.98)' }}
             onClick={onRejectAll}
             aria-label="Reject all pending changes"
           >
@@ -492,12 +551,12 @@ function InlineDiff({
 
       {/* File path footer */}
       <Box
-        px={3}
-        py="5px"
-        bg="rgba(255, 255, 255, 0.02)"
-        borderTop="1px solid rgba(255, 255, 255, 0.04)"
+        px={{ base: 3, md: 4 }}
+        py="7px"
+        bg="rgba(255, 255, 255, 0.018)"
+        borderTop="1px solid rgba(255, 255, 255, 0.055)"
       >
-        <Text fontSize="10px" color="rgba(255,255,255,0.2)" fontFamily={tokens.fontFamily.mono}>
+        <Text fontSize="10px" color="rgba(255,255,255,0.28)" fontFamily={tokens.fontFamily.mono} truncate>
           {filePath}
         </Text>
       </Box>

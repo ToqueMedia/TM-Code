@@ -17,6 +17,7 @@ import { FileService } from '../../services/fileService';
 import { GitService, type GitLineChange } from '../../services/gitService';
 import { FormatterService } from '../../services/formatterService';
 import AICompletionService from '../../services/aiCompletionService';
+import { registerReactTypeLibraries } from '../../services/monacoTypeLibraries';
 import { toqueMediaTheme, toqueMediaSoftTheme } from '../../themes/toqueMediaTheme';
 
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
@@ -149,6 +150,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
   const cursorCbRef = useRef(onCursorPositionChange);
   const pendingRef = useRef<{ path: string; content: string } | null>(null);
   const gutterCollectionRef = useRef<editor.IEditorDecorationsCollection | null>(null);
+  const applyingStoreUpdateRef = useRef(false);
 
   cursorCbRef.current = onCursorPositionChange;
   pathRef.current = path;
@@ -159,23 +161,23 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
 
   const options = useMemo((): editor.IStandaloneEditorConstructionOptions => ({
     automaticLayout: true,
-    padding: { top: 12, bottom: 12 },
+    padding: { top: 18, bottom: 24 },
     fixedOverflowWidgets: true,
-    fontSize: 13.5,
+    fontSize: 14,
     fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", "SF Mono", Monaco, Menlo, monospace',
     fontLigatures: true,
     fontWeight: '400',
-    lineHeight: 22,
-    letterSpacing: 0.3,
+    lineHeight: 23,
+    letterSpacing: 0,
     tabSize, insertSpaces, detectIndentation,
-    scrollBeyondLastLine: true,
+    scrollBeyondLastLine: false,
     smoothScrolling: true,
     mouseWheelScrollSensitivity: 1.5,
     fastScrollSensitivity: 5,
     wordWrap: 'on',
     wordWrapColumn: 120,
     wrappingIndent: 'indent',
-    minimap: { enabled: true, side: 'right', showSlider: 'mouseover', renderCharacters: false, maxColumn: 80, scale: 1 },
+    minimap: { enabled: true, side: 'right', showSlider: 'mouseover', renderCharacters: false, maxColumn: 80, scale: 0.9 },
     scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8, useShadows: false, verticalHasArrows: false, horizontalHasArrows: false },
     overviewRulerBorder: false,
     overviewRulerLanes: 2,
@@ -190,12 +192,12 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     foldingHighlight: true,
     foldingStrategy: 'auto',
     showFoldingControls: 'mouseover',
-    stickyScroll: { enabled: true, maxLineCount: 3 },
+    stickyScroll: { enabled: true, maxLineCount: 4 },
     lineNumbers: 'on',
     lineNumbersMinChars: 4,
     lineDecorationsWidth: 8,
     glyphMargin: true,
-    renderLineHighlight: 'all',
+    renderLineHighlight: 'line',
     quickSuggestions: { other: 'on', comments: 'off', strings: 'on' },
     suggestOnTriggerCharacters: true,
     acceptSuggestionOnEnter: 'on',
@@ -212,7 +214,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     autoSurround: 'languageDefined',
     formatOnPaste: false,
     formatOnType: false,
-    renderWhitespace: 'selection',
+    renderWhitespace: 'boundary',
     renderControlCharacters: true,
     links: true,
     colorDecorators: true,
@@ -361,7 +363,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
           target: monaco.languages.typescript.ScriptTarget.ES2016,
           module: monaco.languages.typescript.ModuleKind.ESNext,
           moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
-          jsx: monaco.languages.typescript.JsxEmit.React,
+          jsx: monaco.languages.typescript.JsxEmit.ReactJSX,
           allowNonTsExtensions: true,
           noEmit: true,
           esModuleInterop: true,
@@ -373,7 +375,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
           target: monaco.languages.typescript.ScriptTarget.ES2016,
           module: monaco.languages.typescript.ModuleKind.ESNext,
           moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
-          jsx: monaco.languages.typescript.JsxEmit.React,
+          jsx: monaco.languages.typescript.JsxEmit.ReactJSX,
           allowNonTsExtensions: true,
           allowJs: true,
           checkJs: false,
@@ -392,6 +394,8 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
           noSyntaxValidation: false,
           diagnosticCodesToIgnore: [1108, 2307, 2304, 7016, 8010],
         });
+
+        registerReactTypeLibraries(monaco);
 
         tsDefaults.setEagerModelSync(true);
         jsDefaults.setEagerModelSync(true);
@@ -487,14 +491,31 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
         try { await doFormat(); } catch {}
       }
 
+      const model = inst.getModel();
+      const saveVersion = model?.getAlternativeVersionId();
+
       try {
         const content = inst.getValue();
         pendingRef.current = { path: savePath, content };
+        pushContentToStore(savePath, content);
         await FileService.writeFile(savePath, content);
-        dirtyRef.current = false;
+        const currentModel = inst.getModel();
+        const unchangedSinceWrite =
+          !!currentModel &&
+          currentModel === model &&
+          typeof saveVersion === 'number' &&
+          currentModel.getAlternativeVersionId() === saveVersion &&
+          pathRef.current === savePath;
+
+        if (unchangedSinceWrite) {
+          dirtyRef.current = false;
+          pendingRef.current = null;
+          useEditorRepository.getState().markFileSaved(savePath, content);
+        }
       } catch (e) {
         logger.error('editor', 'Save failed', e);
         pendingRef.current = null;
+        dirtyRef.current = true;
       }
 
       // Refresh git gutter after save
@@ -529,6 +550,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     // explicit Save/Cmd+S remains the only path that writes the real file.
     disposablesRef.current.push(
       ed.onDidChangeModelContent(() => {
+        if (applyingStoreUpdateRef.current) return;
         dirtyRef.current = true;
         const currentPath = pathRef.current;
         if (currentPath) {
@@ -637,6 +659,15 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
       let model = monacoEditor.editor.getModel(uri);
       if (!model) {
         model = monacoEditor.editor.createModel(initialFile.content, initialFile.language, uri);
+      } else if (!initialFile.isDirty && model.getValue() !== initialFile.content) {
+        applyingStoreUpdateRef.current = true;
+        try {
+          model.setValue(initialFile.content);
+        } finally {
+          applyingStoreUpdateRef.current = false;
+        }
+      } else if (initialFile.isDirty && model.getValue() !== initialFile.content) {
+        pushContentToStore(boundPath, model.getValue());
       }
       ed.setModel(model);
     }
@@ -710,6 +741,15 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     let model = monacoEditor.editor.getModel(uri);
     if (!model) {
       model = monacoEditor.editor.createModel(file.content, file.language, uri);
+    } else if (!file.isDirty && model.getValue() !== file.content) {
+      applyingStoreUpdateRef.current = true;
+      try {
+        model.setValue(file.content);
+      } finally {
+        applyingStoreUpdateRef.current = false;
+      }
+    } else if (file.isDirty && model.getValue() !== file.content) {
+      pushContentToStore(path, model.getValue());
     }
 
     // Swap model (near-instant — no parsing, no re-tokenizing if cached)
@@ -838,14 +878,27 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
       const file = state.openFiles.find(f => f.path === currentPath);
       const prevFile = prevState.openFiles.find(f => f.path === currentPath);
       if (!file || !prevFile) return;
-      // Only sync if content changed in store and differs from model
+      // Only sync if content changed in store and differs from model.
+      // Dirty buffers are owned by the editor model and must not be replaced
+      // by watcher/agent/store refreshes; this mirrors VS Code's data-loss
+      // guard around resolving dirty text models.
       if (file.content !== prevFile.content) {
         const model = editorRef.current.getModel();
         if (model && model.getValue() !== file.content) {
+          if (file.isDirty) return;
           // Preserve cursor position across the update
           const pos = editorRef.current.getPosition();
-          model.setValue(file.content);
-          if (pos) editorRef.current.setPosition(pos);
+          applyingStoreUpdateRef.current = true;
+          try {
+            model.setValue(file.content);
+          } finally {
+            applyingStoreUpdateRef.current = false;
+          }
+          if (pos) {
+            const line = Math.min(pos.lineNumber, model.getLineCount());
+            const column = Math.min(pos.column, model.getLineMaxColumn(line));
+            editorRef.current.setPosition({ lineNumber: line, column });
+          }
         }
       }
     });

@@ -45,7 +45,6 @@ import type { ToolsetGroupName } from "./toolsetSelector";
 import type { PromptProfile } from "./contextBuilder/auxiliaryRegistry";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 import { classifyExecuteCommandPurpose, convertShellReadCommand } from "./commandPurpose";
-import { isMutableTask } from "./taskClassification";
 import { EDIT_FILE } from "./toolNames";
 import { formatShellReadRedirect } from "./shellReadRedirect";
 import {
@@ -249,11 +248,10 @@ class AgentService {
     import("../../stores/permissionStore")
       .then((m) => {
         // RACE FIX (2026-06-11): cancelar o loop tem de resolver + limpar o
-        // prompt de permissão pendente E a fila. Sem isto, o stop do CMD
-        // mode (stopAgent → cancelLoop) deixava o diálogo no ecrã; um
+        // prompt de permissão pendente E a fila. Sem isto, stopAgent →
+        // cancelLoop deixava o diálogo no ecrã; um
         // "Aprovar" tardio resolvia a Promise e a tool EXECUTAVA num run já
-        // morto (escrita de ficheiro/comando com a UI em idle). O chat mode
-        // já chamava clearPending no seu handleStop — isto centraliza para
+        // morto (escrita de ficheiro/comando com a UI em idle). Isto centraliza para
         // todos os caminhos de cancelamento (stop, switch de projeto, erro).
         m.usePermissionStore.getState().clearPending();
         m.usePermissionStore.getState().resetAutoApprove();
@@ -534,15 +532,12 @@ class AgentService {
     const executionPhase = auxiliarySelection?.profile === "project_bootstrap"
       ? "project_bootstrap"
       : "original_task";
-    const userMessageText = typeof userMessage === "string"
-      ? userMessage
-      : contentAsText(userMessage);
     const enforceReadOnly = auxiliarySelection?.readOnly === true &&
       auxiliarySelection.routerSource === "keyword";
     const mutableTask = executionPhase === "original_task" &&
       !this.lightweightOptions &&
       !enforceReadOnly &&
-      isMutableTask(userMessageText);
+      auxiliarySelection?.requiresMutation === true;
 
     const toolsetSelector = this.lightweightOptions
       ? null

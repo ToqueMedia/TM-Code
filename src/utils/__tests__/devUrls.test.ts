@@ -162,4 +162,10 @@ describe('buildTmCodeWebImportUrl', () => {
       'http://localhost:5173/account/code?importId=abc+123'
     )
   })
+
+  it('includes an import token when provided', () => {
+    expect(buildTmCodeWebImportUrl('abc-123', 'http://localhost:5173', { importToken: 'tok 123' })).toBe(
+      'http://localhost:5173/account/code?importId=abc-123#importToken=tok+123'
+    )
+  })
 })

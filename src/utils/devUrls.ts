@@ -133,9 +133,18 @@ export function resolveTmCodeWebUrl(): string {
   return url
 }
 
-export function buildTmCodeWebImportUrl(importId: string, baseUrl = resolveTmCodeWebUrl()): string {
+export function buildTmCodeWebImportUrl(
+  importId: string,
+  baseUrl = resolveTmCodeWebUrl(),
+  options?: { importToken?: string },
+): string {
   const url = new URL('/account/code', baseUrl)
   url.searchParams.set('importId', importId)
+  if (options?.importToken) {
+    const fragment = new URLSearchParams()
+    fragment.set('importToken', options.importToken)
+    url.hash = fragment.toString()
+  }
   return url.toString()
 }
 

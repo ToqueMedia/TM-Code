@@ -58,13 +58,14 @@ function PromptBar() {
 
   return (
     <Box
-      px={4}
-      py={3}
-      bg={tokens.colors.bg.mainLayout}
+      px={{ base: 3, md: 4 }}
+      py={{ base: 2.5, md: 3 }}
+      bg="rgba(10, 10, 10, 0.96)"
+      borderTop="1px solid rgba(255, 255, 255, 0.04)"
       flexShrink={0}
       position="relative"
     >
-      <Box maxW="900px" mx="auto" position="relative">
+      <Box maxW="980px" mx="auto" position="relative">
         {/* Slash command autocomplete menu */}
         {showCommandMenu && (
           <SlashCommandMenu
@@ -96,7 +97,7 @@ function PromptBar() {
           />
         )}
 
-        {/* Agent task list — same data CMD mode shows above its status bar.
+        {/* Agent task list — same update_tasks data used by the workspace status bar.
             Sits above the queue strip so it's the highest persistent context
             block: the user sees what the agent is doing now, then what's
             waiting next, then the input. */}
@@ -107,13 +108,14 @@ function PromptBar() {
 
         {/* Main input container */}
         <Box
-          bg={tokens.colors.bg.panel}
-          borderRadius="14px"
+          bg="rgba(17, 17, 17, 0.96)"
+          borderRadius="12px"
           border={`1px solid ${isDragging ? tokens.colors.accent.primary : tokens.colors.border.panel}`}
           outline={isDragging ? `1px dashed ${tokens.colors.accent.primary}` : 'none'}
           outlineOffset="-2px"
           overflow="visible"
-          transition={`border-color ${tokens.transition.normal}, box-shadow ${tokens.transition.normal}`}
+          boxShadow="0 16px 40px rgba(0, 0, 0, 0.22)"
+          transition={`border-color ${tokens.transition.normal}, box-shadow ${tokens.transition.normal}, background ${tokens.transition.normal}`}
           cursor="text"
           onClick={() => textareaRef.current?.focus()}
           onDragOver={handleDragOver}
@@ -122,6 +124,8 @@ function PromptBar() {
           onDrop={handleDrop}
           _focusWithin={{
             borderColor: tokens.colors.accent.primary,
+            boxShadow: `0 0 0 1px ${tokens.colors.accent.primaryMuted}, 0 18px 44px rgba(0, 0, 0, 0.32)`,
+            bg: 'rgba(20, 20, 20, 0.98)',
           }}
         >
           <PromptTextarea
@@ -154,20 +158,26 @@ function PromptBar() {
         </Box>
 
         {/* Hint */}
-        <Flex justify="center" align="center" gap={1.5} mt={1.5}>
+        <Flex justify="center" align="center" gap={1.5} mt={1.5} flexWrap="wrap" minH="19px">
           {isScaffolding ? (
             <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.settingUp')}</Text>
           ) : isDisabled ? (
             <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{hasPendingCredential ? t('prompt.completeCredentialForm') : t('prompt.awaitingPermission')}</Text>
           ) : isAgentBusy ? (
             <>
-              <KeyBindingDisplay binding={{ key: 'Enter', meta: true }} size="sm" />
+              <KeyBindingDisplay binding={{ key: 'Enter' }} size="sm" />
               <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.queueHint')}</Text>
+              <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>·</Text>
+              <KeyBindingDisplay binding={{ key: 'Enter', shift: true }} size="sm" />
+              <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.newLine')}</Text>
             </>
           ) : (
             <>
-              <KeyBindingDisplay binding={{ key: 'Enter', meta: true }} size="sm" />
+              <KeyBindingDisplay binding={{ key: 'Enter' }} size="sm" />
               <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.toSend')}</Text>
+              <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>·</Text>
+              <KeyBindingDisplay binding={{ key: 'Enter', shift: true }} size="sm" />
+              <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.newLine')}</Text>
             </>
           )}
         </Flex>

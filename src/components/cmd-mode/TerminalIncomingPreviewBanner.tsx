@@ -5,8 +5,8 @@ import { canShareCode, useCollabStore, type LivePreview } from '@/stores/collabS
 import { openPreview } from '@/services/collab/previewViewerService'
 
 /**
- * Terminal-style banner for INCOMING live previews — a teammate is sharing their
- * running app and this user (in Terminal mode) can open + test it. Without this
+ * Shell-style banner for INCOMING live previews — a teammate is sharing their
+ * running app and this user can open + test it. Without this
  * the only access was the strip inside the team-chat panel, which is hidden
  * unless the chat is open; the offer toast is transient. Sits in the prompt
  * chrome and is clickable (opens the preview window).

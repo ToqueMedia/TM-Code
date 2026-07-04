@@ -13,11 +13,11 @@ interface CommandLogViewerProps {
 }
 
 /**
- * Terminal-style log viewer for streaming command output (build, test, install,
+ * Shell-style log viewer for streaming command output (build, test, install,
  * lint, scripts). Renders in a monospace scrollable container with auto-scroll
  * and an expand/collapse toggle for long outputs.
  *
- * Used by both CMD mode (TerminalToolCall) and Chat mode (ToolCallDisplay).
+ * Used by both compact shell call rendering and ToolCallDisplay.
  */
 export const CommandLogViewer = memo(function CommandLogViewer({
   logs,

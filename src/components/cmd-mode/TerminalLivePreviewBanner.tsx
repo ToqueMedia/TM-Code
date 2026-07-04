@@ -5,10 +5,10 @@ import { canShareCode, useCollabStore } from '@/stores/collabStore'
 import { stopLivePreview } from '@/services/collab/collabSessionService'
 
 /**
- * Terminal-style banner shown while THIS user is sharing a Live Preview. Sits in
+ * Shell-style banner shown while THIS user is sharing a Live Preview. Sits in
  * the prompt chrome so the sharer always sees the share is live and how to stop
  * it: click the banner, or run `/live-preview` again. Also pairs with the
- * exit-block (you can't leave Terminal mode while sharing).
+ * exit-block (you can't leave the surface while sharing).
  */
 export function TerminalLivePreviewBanner() {
   const t = useTranslation()

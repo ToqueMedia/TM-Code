@@ -12,6 +12,7 @@ import { invoke } from '@/utils/invokeMetrics'
 import { cachedBuildFileTree, cachedSafeReadFile } from '../ipcCache'
 import { detectSystemPackageManager } from '../../packageManagerDetector'
 import type { TemplateManifest } from '../../templateService'
+import type { ProjectManifest } from '../../projectManifestService'
 import type { GitContext, PackageSummary, PathAlias, RecentFileEntry } from './types'
 
 // Goes through `ipcCache.cachedSafeReadFile` so the dozen-or-so calls a
@@ -183,6 +184,25 @@ export async function readTemplateManifest(projectPath: string): Promise<Templat
 
   try {
     return JSON.parse(raw) as TemplateManifest
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Reads the canonical TM Code project manifest. This supersedes
+ * `.toquemedia-template`: templates say where a project came from; this file
+ * says what the IDE can do with it now.
+ */
+export async function readProjectManifest(projectPath: string): Promise<ProjectManifest | null> {
+  const raw = await safeReadFile(`${projectPath}/.toquemedia/project.json`)
+  if (!raw) return null
+
+  try {
+    const parsed = JSON.parse(raw) as ProjectManifest
+    return parsed?.schemaVersion === 1 && parsed.projectKind === 'tm-code-project'
+      ? parsed
+      : null
   } catch {
     return null
   }

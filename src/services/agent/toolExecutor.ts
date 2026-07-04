@@ -27,7 +27,6 @@ import {
   checkForbiddenAuthImports,
   checkForbiddenItkV2,
   checkForbiddenServiceAccountImport,
-  checkForbiddenDataLayerDeps,
   checkForbiddenDockerfileShape,
 } from './toolExecutor/checks'
 import { tauriFetch } from '../tauriFetch'
@@ -278,9 +277,9 @@ class ToolExecutor {
    *  Mirrors claude-vaz's `FileStateCache` / `readFileState`. */
   private readFileState: FileStateCache = createFileStateCacheWithSizeLimit()
   /**
-   * CMD mode CWD — when set, the executor operates like Claude Code CLI:
-   * no project required, file writes go directly to disk (no diff/approval),
-   * and path validation is scoped to this directory instead of a project root.
+   * Cwd-scoped execution root. When set, no project-store entry is required,
+   * file writes go directly to disk, and path validation is scoped to this
+   * directory instead of the open-project root.
    */
   private cmdModeCwd: string | null = null
 
@@ -359,7 +358,7 @@ class ToolExecutor {
    * Create an isolated executor for a sub-agent run.
    *
    * The child gets its own read-file cache, large-result store, shell sessions,
-   * and memory scope state, while inheriting the parent execution mode. This
+   * and memory scope state, while inheriting the parent execution scope. This
    * mirrors the claude-vaz pattern of per-agent tool contexts without changing
    * the main-agent singleton contract.
    */
@@ -398,7 +397,7 @@ class ToolExecutor {
     return info
   }
 
-  /** Enable CLI/CMD mode: file ops write directly to disk, no project required. */
+  /** Enable cwd-scoped execution: file ops write directly to disk, no project required. */
   enableCmdMode(cwd: string): void {
     this.cmdModeCwd = cwd
   }
@@ -416,6 +415,7 @@ class ToolExecutor {
       getMemoryScopeAgentType: () => this.memoryScopeAgentType,
       getPlanMode: () => this.planMode,
       getPlanFileWritten: () => this.planFileWritten,
+      getPlanReadyForTaskSeed: () => this.isPlanReadyForTaskSeed(),
       setPlanTasksSeeded: (v: boolean) => { this.planTasksSeeded = v },
       truncateResult: (r, maxChars) => this.truncateResult(r, maxChars),
       trackShownRange: (id, o, e) => this.trackShownRange(id, o, e),
@@ -427,7 +427,7 @@ class ToolExecutor {
     }
   }
 
-  /** Disable CLI/CMD mode and return to IDE diff mode. */
+  /** Disable cwd-scoped execution and return to project diff approval flow. */
   disableCmdMode(): void {
     this.cmdModeCwd = null
   }
@@ -909,6 +909,9 @@ class ToolExecutor {
       // written plan the tasks have no source-of-truth to derive from.
       if (toolName === 'update_tasks' && !this.planFileWritten) {
         return `Blocked in /plan architect mode: ${toolName} must follow write_file('${this.planModePlanFileName}'). The task list mirrors ${this.planModePlanFileName}'s Implementation Phases — write the plan first, then derive tasks from its phase structure (one task per coherent unit of work, IDs like "1.1", "1.2", "2.1" matching the phase numbering). Calling update_tasks before write_file is a contract violation.`
+      }
+      if (toolName === 'update_tasks' && !(await this.isPlanReadyForTaskSeed())) {
+        return `Blocked in /plan architect mode: ${toolName} must follow the final edit that flips ${this.planModePlanFileName} to "Status: PENDING APPROVAL". The task list must derive from the completed plan, not from a draft scaffold. Finish every plan section, flip the status, then call update_tasks.`
       }
 
       // M5 — Strict STOP after both PLAN.md and update_tasks have completed.
@@ -1573,7 +1576,7 @@ ${preview}
     allOutput.push(data)
     if (!toolCallId) return
 
-    // Accumulate full output into commandLogs for the terminal-style log viewer.
+    // Accumulate full output into commandLogs for the shell log viewer.
     // Each chunk may contain multiple lines. Append in one store update to
     // avoid React/Zustand nested update explosions on verbose commands.
     const chunks = data.split('\n')
@@ -1794,9 +1797,8 @@ ${preview}
   private getProjectRoot(): string {
     const project = useProjectStore.getState().currentProject
     if (project?.path) return project.path
-    // CMD-mode fallback: TerminalView never populates currentProject
-    // (it invokes Rust open_project directly). cmdModeProjectPath is set
-    // by the WelcomeScreen and persists for the entire CMD session.
+    // Cwd-scoped fallback: this path may be opened without populating
+    // currentProject. cmdModeProjectPath preserves the active workspace root.
     const cmdPath = useProjectStore.getState().cmdModeProjectPath
     if (cmdPath) return cmdPath
     if (this.cmdModeCwd) return this.cmdModeCwd
@@ -1986,13 +1988,12 @@ ${preview}
     return checkForbiddenDockerfileShape(path, content)
   }
   private checkForbiddenDataLayerDeps(path: string, newContent: string, oldContent: string = ''): string | null {
-    // CMD/Terminal mode is stack-free — no data-layer restriction applies.
-    // The forbidden deps list (FORBIDDEN_DATA_LAYER_DEPS) is a Chat-mode /
-    // Publish-flow constraint only. Terminal mode must be able to install
-    // any database driver (mysql2, pg, Prisma, etc.) without mechanical
-    // rejection from the harness.
-    if (this.cmdModeCwd) return null
-    return checkForbiddenDataLayerDeps(path, newContent, oldContent)
+    void path
+    void newContent
+    void oldContent
+    // Stack choice is prompt-guided. TM Code-managed database defaults are
+    // guidance and manifest capabilities, not a hard package.json block.
+    return null
   }
   private isEnvFile(filePath: string): boolean {
     return isEnvFile(filePath)
@@ -2005,6 +2006,24 @@ ${preview}
    */
   private checkPlanModeAccess(toolName: string, filePath: string): string | null {
     return checkPlanModeAccess(toolName, filePath, this.getProjectRoot(), this.planModePlanFileName)
+  }
+
+  /**
+   * /plan may seed the task tracker only after the plan artifact is complete
+   * and has flipped from DRAFT to PENDING APPROVAL. `planFileWritten` alone is
+   * not enough: the scaffold write happens before the final status edit.
+   */
+  private async isPlanReadyForTaskSeed(): Promise<boolean> {
+    if (!this.planMode || !this.planFileWritten) return false
+    const root = this.getProjectRoot()
+    if (!root) return false
+    const planPath = `${root.replace(/[\\/]+$/, '')}/${this.planModePlanFileName}`
+    try {
+      const content = await invoke<string>('read_file', { path: planPath })
+      return /^\s*>?\s*Status:\s*PENDING APPROVAL\s*$/im.test(content)
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -2244,6 +2263,47 @@ ${preview}
     return false
   }
 
+  private curlUsesMutatingHttpRequest(command: string): boolean {
+    if (!/\bcurl\s/.test(command)) return false
+    const tokens = this.splitCommandTokens(command)
+    const mutatingMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i]
+
+      let method: string | undefined
+      if (token === '-X' || token === '--request') {
+        method = tokens[i + 1]
+      } else if (token.startsWith('--request=')) {
+        method = token.slice('--request='.length)
+      } else {
+        const shortRequest = token.match(/^-X(.+)$/)
+        if (shortRequest) method = shortRequest[1]
+      }
+
+      if (method && mutatingMethods.has(method.toUpperCase())) {
+        return true
+      }
+
+      if (
+        token === '-d' ||
+        token === '-F' ||
+        token === '-T' ||
+        /^-[A-Za-z]*[dFT].+/.test(token) ||
+        token === '--json' ||
+        token.startsWith('--json=') ||
+        token === '--upload-file' ||
+        token.startsWith('--upload-file=') ||
+        token.startsWith('--data') ||
+        token.startsWith('--form')
+      ) {
+        return true
+      }
+    }
+
+    return false
+  }
+
   private validateCommand(command: string, options: { allowDevServer?: boolean } = {}): void {
     // Read-only mode: block file-writing shell operations (verification agents).
     if (this.readOnlyMode) {
@@ -2252,8 +2312,9 @@ ${preview}
       const pipeToInterpreter = /\|\s*(?:sh|bash|zsh|fish|python3?|node|ruby|perl|php|deno|bun)\b/i.test(command)
       const hasWritePattern = ToolExecutor.WRITE_COMMAND_PATTERNS.some((pattern) => pattern.test(command))
       const curlWriteOutsideEphemeralPath = this.curlWritesOutsideEphemeralPath(command)
+      const curlMutatingHttpRequest = this.curlUsesMutatingHttpRequest(command)
       const mutatingCommand = this.matchStateMutatingCommand(command)
-      if (hasWritePattern || curlWriteOutsideEphemeralPath || mutatingCommand || pipeToInterpreter) {
+      if (hasWritePattern || curlWriteOutsideEphemeralPath || curlMutatingHttpRequest || mutatingCommand || pipeToInterpreter) {
         throw new Error(`Command blocked: "${command}" would modify files or execute unsafe shell flow, but you are running in read-only verification mode. Only diagnostic commands (tests, linters, type checkers, curl) are allowed.`)
       }
 
@@ -2867,8 +2928,8 @@ ${preview}
           }
         }
 
-        // CMD mode: write directly to disk, no approval needed — but still
-        // return diff JSON so the UI renders the before/after like in chat mode.
+        // Cwd-scoped execution: write directly to disk, no approval needed, but still
+        // return diff JSON so the UI renders the before/after consistently.
         // `alreadyApplied: true` tells chatStore to skip the approval queue.
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
@@ -2943,7 +3004,7 @@ ${preview}
           // File doesn't exist — good, proceed
         }
 
-        // CMD mode: write directly to disk, still return diff JSON so the UI
+        // Cwd-scoped execution: write directly to disk, still return diff JSON so the UI
         // renders the new file content. `alreadyApplied` skips approval queue.
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
@@ -3216,7 +3277,7 @@ ${preview}
         const dataLayerBlock = this.checkForbiddenDataLayerDeps(path, newContent, content)
         if (dataLayerBlock) return dataLayerBlock
 
-        // CMD mode: write directly to disk, still return diff JSON so the UI
+        // Cwd-scoped execution: write directly to disk, still return diff JSON so the UI
         // renders the before/after. `alreadyApplied` skips approval queue.
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
@@ -4132,7 +4193,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         input_schema: {
           type: 'object',
           properties: {
-            cwd: { type: 'string', description: 'Working directory. Defaults to project root or Terminal mode cwd.' },
+            cwd: { type: 'string', description: 'Working directory. Defaults to the project root or active workspace cwd.' },
             wait_ms: { type: 'number', description: 'How long to wait for the initial shell prompt/output. Default: 500. Max: 5000.' },
           },
           required: [],

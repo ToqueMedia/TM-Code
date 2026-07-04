@@ -48,7 +48,7 @@ export class WindowTitleManager {
 
       if (cmdModeProjectPath) {
         const folderName = cmdModeProjectPath.split(/[\/\\]/).pop() || cmdModeProjectPath;
-        document.title = `${folderName} [Terminal Mode] - ${t('window.baseTitle')}`;
+        document.title = `${folderName} - ${t('window.baseTitle')}`;
         return;
       }
 

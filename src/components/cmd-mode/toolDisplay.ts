@@ -1,5 +1,5 @@
 /**
- * Shared display helpers for CMD-mode tool calls.
+ * Shared display helpers for compact shell-styled tool calls.
  * Maps raw tool names to suggestive verbs and builds compact subtitles
  * (path, query, command) so the user sees intent at a glance instead
  * of a wall of underscored identifiers.

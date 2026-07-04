@@ -103,12 +103,10 @@ function AgentActivityIndicator() {
         direction="column"
         gap="7px"
         py="10px"
-        px={3}
-        position="sticky"
-        bottom={0}
-        bg={tokens.colors.bg.app}
+        px={4}
+        bg="rgba(10, 10, 10, 0.96)"
         zIndex={1}
-        borderTop="1px solid rgba(255, 255, 255, 0.04)"
+        borderTop="1px solid rgba(255, 255, 255, 0.05)"
       >
         <Flex align="center" gap="8px">
           <Box
@@ -231,12 +229,10 @@ function AgentActivityIndicator() {
       align="center"
       gap="6px"
       py="8px"
-      px={3}
-      position="sticky"
-      bottom={0}
-      bg={tokens.colors.bg.app}
+      px={4}
+      bg="rgba(10, 10, 10, 0.96)"
       zIndex={1}
-      borderTop="1px solid rgba(255, 255, 255, 0.04)"
+      borderTop="1px solid rgba(255, 255, 255, 0.05)"
     >
       {/* Pulsing dot */}
       <Box

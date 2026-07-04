@@ -42,12 +42,11 @@ export interface SubAgentDefinition {
 }
 
 export interface SubAgentParentContext {
-  /** False in Chat Mode (project open). True in Terminal Mode.
-   *  Sub-agents inherit this — the tool executor honours cmd-mode for
-   *  any file operation the sub-agent attempts. */
+  /** True when the parent run uses cwd-scoped tool execution instead of the
+   *  open-project store as its root. Sub-agents inherit the same scope. */
   cmdOnlyMode: boolean
 
-  /** Project root in chat mode, CWD in cmd mode. */
+  /** Project root or cwd that tools should treat as the working root. */
   workingPath: string
 
   /** Parent's settingsStore.agentLanguage. Sub-agent responds in same lang. */

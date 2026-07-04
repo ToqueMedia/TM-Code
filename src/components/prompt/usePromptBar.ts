@@ -1,5 +1,4 @@
 import { useState, useCallback, useRef, useEffect, useSyncExternalStore } from 'react'
-import { invoke } from '@/utils/invokeMetrics'
 import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals, generateId } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { MODEL_PROFILES, getProfileForPlan } from '../../services/agent/modelProfiles'
@@ -12,7 +11,7 @@ import { useAuthStore } from '../../stores/authStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
 import { useProblemsStore } from '../../stores/problemsStore'
-import { activatePreview } from '../../services/previewActivation'
+import { activatePreview, detectDevCommand } from '../../services/previewActivation'
 import AgentService from '../../services/agent/agentService'
 import ToolExecutor from '../../services/agent/toolExecutor'
 import ContextBuilder from '../../services/agent/contextBuilder'
@@ -80,34 +79,6 @@ const RECOVERABLE_UPSTREAM_CODES = new Set<string>([
   'STREAM_ERROR',     // SSE error event mid-turn
 ])
 
-/**
- * Detect the dev command for a project by checking manifest and package.json.
- * Extracted as a standalone function so it can be called both from the
- * useEffect (periodic re-detection) AND from togglePreview (just-in-time
- * when the user clicks the preview button before detection ran).
- */
-async function detectDevCommand(projectPath: string): Promise<string | null> {
-  // 1. Check .toquemedia-template manifest
-  try {
-    const raw = await invoke<string>('read_file', { path: `${projectPath}/.toquemedia-template` })
-    if (raw) {
-      const manifest = JSON.parse(raw)
-      if (manifest.devCommand) return manifest.devCommand
-    }
-  } catch { /* no manifest */ }
-
-  // 2. Check package.json for "dev" or "start" script
-  try {
-    const raw = await invoke<string>('read_file', { path: `${projectPath}/package.json` })
-    if (raw) {
-      const pkg = JSON.parse(raw)
-      if (pkg.scripts?.dev) return 'npm run dev'
-      if (pkg.scripts?.start) return 'npm start'
-    }
-  } catch { /* no package.json */ }
-
-  return null
-}
 import { logger } from '../../utils/logger'
 
 function resolveByokNativeVision(snapshot: ByokSessionSnapshot | null): boolean | null {
@@ -193,7 +164,7 @@ export function usePromptBar() {
   const mentionStartRef = useRef(-1)
 
   // #hashtag menu — closed-vocabulary skill triggers (e.g. #auth-google).
-  // State + handlers live in the shared hook (also used by cmd-mode).
+  // State + handlers live in the shared hook used by prompt inputs.
   const hashtagMenu = useHashtagMenu({
     textareaRef,
     setInputValue: (next) => useChatStore.getState().setDraftInput(next),
@@ -649,7 +620,7 @@ export function usePromptBar() {
     // Ensure a session exists SYNCHRONOUSLY so addUserMessage below has a
     // home for the bubble. We use sync createSession (not async
     // createNewSession) for the same reason agentRunner.ts:113 does in
-    // cmd-mode: any await between dequeue and addUserMessage leaves the
+    // Direct prompt path: any await between dequeue and addUserMessage leaves the
     // chat blank for the duration — the queued strip already emptied,
     // and the bubble hasn't been added yet, so the user sees the message
     // disappear. App.tsx already initialised persistence for this project
@@ -819,11 +790,15 @@ export function usePromptBar() {
       const userMessageText = bootstrapOnly && tmsPreflight
         ? buildTmsBootstrapOnlyPrompt(tmsPreflight, display.text)
         : display.text
+      const rawHistory = bootstrapOnly
+        ? historyBeforeCurrentUser
+        : (runOptions?.conversationHistoryOverride ?? useChatStore.getState().conversationHistory)
       // Intent Router: classify the user's intent via a lightweight model
       // call (qwen3.7-plus, no tools, non-streaming) BEFORE assembling the
       // system prompt. The result feeds the context builder (prompt profile +
       // on-demand auxiliaries) and — via lastAuxiliarySelection — the
-      // ToolsetSelector (bound toolset + readOnly). Replaces regex/keyword
+      // ToolsetSelector (bound toolset + readOnly + requiresMutation).
+      // Replaces regex/keyword
       // intent inference per the `no-regex-for-inference` rule. Never throws;
       // on failure it falls back to { bugfix_local, readOnly:false } and
       // buildSystemPrompt then uses the deterministic keyword classifier.
@@ -832,22 +807,23 @@ export function usePromptBar() {
         ? {
             profile: 'project_bootstrap' as const,
             readOnly: false,
+            requiresMutation: true,
             source: 'keyword' as const,
             confidence: 'high' as const,
             reason: 'TMS.md bootstrap preflight selected project_bootstrap before the original task',
           }
-        : await classifyIntent(userMessageText)
+        : await classifyIntent(userMessageText, {
+            hasImage: display.attachments.some(a => a.type === 'image'),
+            conversationHistory: rawHistory,
+          })
       const effectiveIntent = intent
       AgentService.getInstance().clearPostTmsBootstrapToolProfile()
       logger.info(
         'agent',
-        `→ Intent router: profile=${effectiveIntent.profile} readOnly=${effectiveIntent.readOnly} (${effectiveIntent.source}, ${Date.now() - intentStart}ms) — ${effectiveIntent.reason}`,
+        `→ Intent router: profile=${effectiveIntent.profile} readOnly=${effectiveIntent.readOnly} requiresMutation=${effectiveIntent.requiresMutation} (${effectiveIntent.source}, ${Date.now() - intentStart}ms) — ${effectiveIntent.reason}`,
       )
-      const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText, AgentService.getInstance().getAccessedFilePaths(), { profile: effectiveIntent.profile, readOnly: effectiveIntent.readOnly, reason: effectiveIntent.reason, source: effectiveIntent.source, confidence: effectiveIntent.confidence, error: effectiveIntent.error, diagnostics: effectiveIntent.diagnostics })
+      const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText, AgentService.getInstance().getAccessedFilePaths(), { profile: effectiveIntent.profile, readOnly: effectiveIntent.readOnly, requiresMutation: effectiveIntent.requiresMutation, reason: effectiveIntent.reason, source: effectiveIntent.source, confidence: effectiveIntent.confidence, error: effectiveIntent.error, diagnostics: effectiveIntent.diagnostics })
 
-      const rawHistory = bootstrapOnly
-        ? historyBeforeCurrentUser
-        : (runOptions?.conversationHistoryOverride ?? useChatStore.getState().conversationHistory)
       // The history is canonical (carries content parts when previous
       // turns had images). Downgrade to text if the active model is
       // text-only — its API cannot consume the array form.
@@ -958,9 +934,9 @@ export function usePromptBar() {
           useBillingStore.getState().addLastRequestTokens(inputTokens + outputTokens)
         },
         onRequestUsage: (entry) => {
-          // Persist per-provider-call usage for session export. Terminal/CMD mode
-          // already wires this through agentRunner; Chat mode calls AgentService
-          // directly, so it must bridge the callback here as well.
+          // Persist per-provider-call usage for session export. Serialized
+          // runs wire this through in agentRunner; this direct AgentService
+          // path must bridge the callback here as well.
           try { useChatStore.getState().addRequestUsage(entry) } catch { /* observability never blocks */ }
         },
         onContextCompression: (event) => {
@@ -981,9 +957,9 @@ export function usePromptBar() {
         // queue until the WHOLE run goes idle — because the idle drain
         // (useQueueProcessor) is gated on `!isQueryActive` and can't fire while
         // the QueryGuard is held. That was the "queued messages só entram no
-        // chat depois do agente terminar" bug: the Terminal/CMD runner wired
-        // this collector (agentRunner.ts) but this Chat dispatch path never did,
-        // so `agentService` got `collectQueuedSteering: undefined` and the
+        // chat depois do agente terminar" bug: one dispatch path wired this
+        // collector (agentRunner.ts) but this direct path did not, so
+        // `agentService` got `collectQueuedSteering: undefined` and the
         // per-turn drain in query.ts was a no-op. Draining here rides the
         // steered message onto the NEXT turn of the live run. This path is
         // always foreground (runAgentForPrompt), so there's no background gate.
@@ -1127,7 +1103,7 @@ export function usePromptBar() {
       clearDraftAttachments()
       try {
         const { executePlanRevision } = await import('../../services/agent/commands/planCommand')
-        await executePlanRevision(prompt, revisionTarget.projectPath, 'chat', revisionTarget.planPath)
+        await executePlanRevision(prompt, revisionTarget.projectPath, 'terminal', revisionTarget.planPath)
       } catch (err) {
         logger.error('prompt', 'executePlanRevision failed:', err)
         useChatStore.getState().addSystemMessage(
@@ -1207,12 +1183,11 @@ export function usePromptBar() {
       }
 
       const args = slashCommandRegistry.getArgs(prompt)
-      // 'chat' = platform-bound surface. /plan branches on this to inject
-      // the data-layer / Dockerfile / APP_ID-fallback invariants into the
-      // architect's system prompt so the PLAN.md it produces is shaped
-      // for the TM Code Publish pipeline (no Prisma/SQLite, firebase-admin
-      // baseline, Dockerfile + backend in the same scaffold turn).
-      await command.execute(args, projectPath ?? '', 'chat')
+      // /plan is free-form: any stack/backend/deploy target is allowed, with
+      // trade-offs recorded in PLAN.md instead of forcing the Publish pipeline
+      // defaults.
+      const commandMode = command.name === '/plan' ? 'terminal' : 'chat'
+      await command.execute(args, projectPath ?? '', commandMode)
       return
     }
 
@@ -1428,8 +1403,8 @@ export function usePromptBar() {
       // actually receives the message. Cancellation is owned by
       // AgentService.cancelLoop() (called from handleStop), which
       // propagates the abort down to the in-flight fetch.
-      // Route the dispatch through the SHARED `lastRun` serialization (same
-      // chain Terminal mode uses via runAgentWithCallbacks). This serializes the
+      // Route the dispatch through the SHARED `lastRun` serialization used by
+      // runAgentWithCallbacks. This serializes the
       // idle-drain dispatch against a pending auto-wake / background run: without
       // it, the chat queue ran `runAgentLoop` directly while those ran on the
       // chain, and both could clear `tryStart()` in the reserve→tryStart window,
@@ -1440,9 +1415,9 @@ export function usePromptBar() {
       // NOTE: this is NOT what makes a message queued MID-RUN drain per turn —
       // that is the query loop's steering collector (collectQueuedSteering),
       // which drains the queue at each turn boundary INSIDE the live run. Both
-      // dispatch paths now wire it: Terminal/CMD via agentRunner's
-      // collectSteeringMessages, and Chat via runAgentForPrompt's own
-      // collectSteeringMessages callback above. This path only handles items
+      // dispatch paths now wire it: serialized runs via agentRunner's
+      // collectSteeringMessages, and this direct path via runAgentForPrompt's
+      // own collectSteeringMessages callback above. This path only handles items
       // still queued once the run has gone idle.
       await enqueueSerializedRun(() => runAgentForPrompt(mergedValue, false))
     } finally {

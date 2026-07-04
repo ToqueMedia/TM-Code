@@ -5,7 +5,7 @@ description: Self-contained HTML/CSS deliverables — reports, briefs, email tem
 
 # HTML Rich Document
 
-Author self-contained HTML documents — reports, landing-style briefs, email templates, SVG-heavy deliverables. No build tooling required. CMD-mode skill — applies when the user asks for "página HTML", "email HTML", "SVG", "relatório web", "infográfico", or wants a visual deliverable that opens in a browser.
+Author self-contained HTML documents — reports, landing-style briefs, email templates, SVG-heavy deliverables. No build tooling required. Applies when the user asks for "página HTML", "email HTML", "SVG", "relatório web", "infográfico", or wants a visual deliverable that opens in a browser.
 
 ## Why HTML first
 

@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Box, Flex, useDialog } from '@chakra-ui/react'
+import { Flex, useDialog } from '@chakra-ui/react'
+import { AnimatePresence, motion } from 'framer-motion'
 import { useProjectStore } from '../stores/projectStore'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
-import { WelcomeSidebar, WelcomeHero, CloneDialog, StartupRequirementsBanner, PromoBanner } from './welcome'
+import { WelcomeSidebar, CloneDialog, StartupRequirementsBanner } from './welcome'
 import SettingsView from './views/SettingsView'
 import MinimalTitleBar from './MinimalTitleBar'
-import { TerminalView } from './cmd-mode'
 import { WindowTitleManager } from '../utils/windowTitleManager'
+import MainLayout from './MainLayout'
+import { LoadingSpinner } from './ui/LoadingSpinner'
+import { useLayoutStore } from '../stores/layoutStore'
 
 interface WelcomeScreenProps {
-  onOpenProject: (path?: string, options?: { initGit?: boolean }) => void
+  onOpenProject: (path?: string, options?: { initGit?: boolean }) => void | Promise<void>
 }
 
 const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
@@ -23,8 +26,15 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     closeOnEscape: !cloneBusy,
     closeOnInteractOutside: !cloneBusy,
   })
-  const { recentProjects, loadRecentProjects, cmdModeProjectPath, cmdModeProjectPaths, setCmdModeProjectPath, removeCmdModePath, clearAllRecent, welcomeScreen, setWelcomeScreen } = useProjectStore()
+  const { recentProjects, loadRecentProjects, cmdModeProjectPath, setCmdModeProjectPath, clearAllRecent, welcomeScreen, setWelcomeScreen } = useProjectStore()
+  const currentProject = useProjectStore(s => s.currentProject)
+  const viewMode = useLayoutStore(s => s.viewMode)
+  const isPreviewFullscreen = useLayoutStore(s => s.isPreviewFullscreen)
+  const [openingProjectPath, setOpeningProjectPath] = useState<string | null>(null)
   const showSettings = welcomeScreen === 'settings'
+  const previewOwnsWorkspace = Boolean(currentProject?.path) && !showSettings && viewMode === 'preview' && isPreviewFullscreen
+  const editorOwnsWorkspace = Boolean(currentProject?.path) && !showSettings && viewMode === 'editor'
+  const hideWorkspaceSidebar = previewOwnsWorkspace || editorOwnsWorkspace
 
   useEffect(() => {
     loadRecentProjects()
@@ -33,15 +43,21 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     return () => manager.stopManaging()
   }, [loadRecentProjects])
 
-  // Mark that the user is on the Welcome screen so the next app start
-  // returns here instead of auto-opening the most recent project. Null →
-  // 'hero' promotion is a no-op if cmdMode is active; the user is in that
-  // sub-screen instead and its own persistence covers that case.
+  // If a previous session persisted a cwd-scoped project, normalize back to
+  // the main entry.
   useEffect(() => {
-    if (!cmdModeProjectPath && welcomeScreen === null) {
+    if (cmdModeProjectPath) {
+      setCmdModeProjectPath(null)
+    }
+  }, [cmdModeProjectPath, setCmdModeProjectPath])
+
+  // Mark that the user is on the Welcome screen so the next app start
+  // returns here instead of auto-opening the most recent project.
+  useEffect(() => {
+    if (welcomeScreen === null) {
       setWelcomeScreen('hero')
     }
-  }, [cmdModeProjectPath, welcomeScreen, setWelcomeScreen])
+  }, [welcomeScreen, setWelcomeScreen])
 
   const handleOpenFolder = useCallback(async () => {
     try {
@@ -52,10 +68,14 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
         title: t('misc.selectProjectDir'),
       })
       if (selected) {
-        onOpenProject(selected as string)
+        const path = selected as string
+        setOpeningProjectPath(path)
+        await onOpenProject(path)
       }
     } catch (error: unknown) {
       logger.error('ui', 'Failed to open directory dialog:', error)
+    } finally {
+      setOpeningProjectPath(null)
     }
   }, [onOpenProject])
 
@@ -68,27 +88,26 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
         title: t('misc.chooseFolder'),
       })
       if (selected) {
-        onOpenProject(selected as string, { initGit: true })
+        const path = selected as string
+        setOpeningProjectPath(path)
+        await onOpenProject(path, { initGit: true })
       }
     } catch (error: unknown) {
       logger.error('ui', 'Failed to open directory dialog:', error)
+    } finally {
+      setOpeningProjectPath(null)
     }
   }, [onOpenProject])
 
-  const handleCmdMode = useCallback(async () => {
+  const handleOpenRecentProject = useCallback(async (path?: string) => {
+    if (!path) return
+    setOpeningProjectPath(path)
     try {
-      const { open } = await import('@tauri-apps/plugin-dialog')
-      const selected = await open({
-        directory: true,
-        title: t('misc.chooseFolder'),
-      })
-      if (selected) {
-        setCmdModeProjectPath(selected as string)
-      }
-    } catch (error: unknown) {
-      logger.error('ui', 'Failed to open directory dialog:', error)
+      await onOpenProject(path)
+    } finally {
+      setOpeningProjectPath(null)
     }
-  }, [setCmdModeProjectPath])
+  }, [onOpenProject])
 
   return (
     <Flex
@@ -103,46 +122,49 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
 
       {/* Main content area below the header */}
       <Flex flex="1" overflow="hidden" position="relative">
-        {!cmdModeProjectPath && (
-          <WelcomeSidebar
-            recentProjects={recentProjects}
-            cmdModeProjectPaths={cmdModeProjectPaths}
-            onOpenCmdProject={setCmdModeProjectPath}
-            onOpenCmdProjectAsIde={(path) => { removeCmdModePath(path); onOpenProject(path) }}
-            onOpenProject={onOpenProject}
-            onSettings={() => setWelcomeScreen('settings')}
-            onClearRecent={clearAllRecent}
-          />
-        )}
+        <AnimatePresence initial={false}>
+          {!hideWorkspaceSidebar && (
+            <motion.div
+              key="welcome-sidebar"
+              initial={{ width: 0, opacity: 0 }}
+              animate={{ width: 'clamp(200px, 30vw, 300px)', opacity: 1 }}
+              exit={{ width: 0, opacity: 0 }}
+              transition={{ duration: 0.22, ease: [0.32, 0.72, 0, 1] }}
+              style={{ height: '100%', overflow: 'hidden', flexShrink: 0 }}
+            >
+              <WelcomeSidebar
+                recentProjects={recentProjects}
+                onNewProject={handleNewProject}
+                onOpenFolder={handleOpenFolder}
+                onCloneRepository={() => cloneDialog.setOpen(true)}
+                onOpenProject={handleOpenRecentProject}
+                onSettings={() => setWelcomeScreen('settings')}
+                onClearRecent={clearAllRecent}
+                activeProjectPath={currentProject?.path ?? null}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {showSettings ? (
-          <SettingsView onBack={() => setWelcomeScreen(cmdModeProjectPath ? null : 'hero')} />
+          <SettingsView onBack={() => setWelcomeScreen('hero')} />
         ) : null}
 
-        {cmdModeProjectPath ? (
-          <Box flex="1" minH={0} display={showSettings ? 'none' : 'flex'} flexDirection="column">
-            <TerminalView
-              key={cmdModeProjectPath}
-              projectPath={cmdModeProjectPath}
-              onBack={() => setCmdModeProjectPath(null)}
-            />
-          </Box>
+        {!showSettings && openingProjectPath ? (
+          <Flex flex="1" minW={0} minH={0} align="center" justify="center" overflow="hidden">
+            <LoadingSpinner size="lg" label={t('welcome.openingProject')} />
+          </Flex>
         ) : !showSettings ? (
-          <WelcomeHero
-            onNewProject={handleNewProject}
-            onOpenFolder={handleOpenFolder}
-            onCloneRepository={() => cloneDialog.setOpen(true)}
-            onCmdMode={handleCmdMode}
-          >
-            <PromoBanner />
-          </WelcomeHero>
+          <Flex flex="1" minW={0} minH={0} overflow="hidden">
+            <MainLayout embedded />
+          </Flex>
         ) : null}
 
         <CloneDialog dialog={cloneDialog} onCloned={onOpenProject} onBusyChange={setCloneBusy} />
 
         {/* Non-blocking prereq banner — only shows when a tool is missing/outdated.
             Positioned absolute near the top so it doesn't reflow the hero layout. */}
-        {!cmdModeProjectPath && !showSettings && <StartupRequirementsBanner />}
+        {!showSettings && !hideWorkspaceSidebar && <StartupRequirementsBanner />}
       </Flex>
     </Flex>
   )

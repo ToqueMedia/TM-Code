@@ -47,8 +47,8 @@ interface TerminalViewProps {
 
 const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   const t = useTranslation()
-  // Drive the team collaboration mesh in Terminal mode too — without this the
-  // session only ran in Chat mode (MainLayout), so terminal-mode chat showed
+  // Drive the team collaboration mesh here too — without this the session only
+  // ran in MainLayout, so this chat showed
   // "0 online", messages never sent, and /live-preview had no mesh to share
   // over. MainLayout and TerminalView are mutually exclusive, so no double-run.
   useCollabSession()
@@ -67,7 +67,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
   const messages = session?.messages || []
   const [projectStateReady, setProjectStateReady] = useState(false)
 
-  // Guarded exit: while sharing a Live Preview, leaving Terminal mode would tear
+  // Guarded exit: while sharing a Live Preview, leaving this surface would tear
   // down the session and kill the shared dev server out from under the team.
   // Block every exit path (Escape, title-bar button) and explain why.
   const handleBack = useCallback(() => {
@@ -184,8 +184,8 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     return () => clearTimeout(t)
   }, [])
 
-  // Hydrate per-project state. Terminal Mode bypasses projectStore.openProject
-  // (it invokes Rust open_project directly), so we must clear stale state from
+  // Hydrate per-project state. This path invokes Rust open_project directly,
+  // so we must clear stale state from
   // the previous project and load the new project's data here — same logic as
   // projectStore.openProject lines ~300-329.
   useEffect(() => {
@@ -303,7 +303,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         const beforeHeight = scrollEl.scrollHeight
         const beforeTop = scrollEl.scrollTop
         loadMore()
-        // Double rAF — see ChatView. CMD mode uses `useStickToBottom`
+        // Double rAF — see ChatView. This surface uses `useStickToBottom`
         // (ResizeObserver-based) but the principle is the same: let the
         // follow logic settle before our manual scrollTop write.
         requestAnimationFrame(() => {
@@ -320,7 +320,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     return () => observer.disconnect()
   }, [canLoadMore, loadMore, scrollRef])
 
-  // Window-wide drop support — any area of CMD mode (header, banners, scroll
+  // Window-wide drop support — any area of this surface (header, banners, scroll
   // area) becomes a drop target. The visual overlay still lives in the prompt
   // input; both subscribe to the same cmdAttachmentStore so state stays in sync.
   const {
@@ -490,18 +490,18 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       // painel fecha-se com Esc quando o foco está fora dele, ou no toggle.
       if ((e.target as HTMLElement | null)?.closest?.('[data-pty-terminal]')) return
       if (pendingPermissionRef.current) return
-      // AskUserQuestion component handles its own Escape — don't exit CMD mode.
+      // AskUserQuestion component handles its own Escape — don't exit this surface.
       if (hasPendingAskUserQuestionRef.current) return
       // Picker's own onKeyDown also handles Esc, but a click elsewhere can
       // defocus the overlay — intercept here too so Escape never leaks out
-      // of CMD Mode while the picker is open.
+      // of this surface while the picker is open.
       if (sessionPickerOpenRef.current) {
         e.preventDefault()
         e.stopPropagation()
         useCmdOverlayStore.getState().closeSessionPicker()
         return
       }
-      // Close the plan viewer if open — don't exit CMD mode. TerminalView owns
+      // Close the plan viewer if open — don't exit this surface. TerminalView owns
       // Escape on a capture-phase listener, so the panel can't handle its own.
       if (useLayoutStore.getState().isPlanViewerOpen) {
         e.preventDefault()
@@ -509,7 +509,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         useLayoutStore.getState().setPlanViewerOpen(false)
         return
       }
-      // Close terminal panel first if open — don't exit CMD mode entirely.
+      // Close terminal panel first if open — don't exit this surface entirely.
       if (useTerminalPanelStore.getState().isOpen) {
         e.preventDefault()
         e.stopPropagation()
@@ -536,9 +536,9 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     return () => window.removeEventListener('keydown', handler, true)
   }, [handleBack])
 
-  // Close transient overlays automatically if the user leaves CMD Mode. The
+  // Close transient overlays automatically if the user leaves this surface. The
   // plan viewer lives in the shared layoutStore, so a left-open panel would
-  // otherwise leak into Chat mode on the next open.
+  // otherwise leak into the next open workspace.
   useEffect(() => {
     return () => {
       useCmdOverlayStore.getState().closeSessionPicker()
@@ -724,39 +724,39 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
     return {
       '--terminal-a11y-text-size': bodySize,
       '--terminal-a11y-code-size': codeSize,
-      '& [data-cmd-mode-root]': {
+      '& [data-agent-workspace-root]': {
         fontSize: 'var(--terminal-a11y-text-size)',
       },
-      '& [data-cmd-mode-root] :is(p, li, span, div, button, textarea, input, table, th, td):not([data-ui-chrome] *)': {
+      '& [data-agent-workspace-root] :is(p, li, span, div, button, textarea, input, table, th, td):not([data-ui-chrome] *)': {
         fontSize: 'var(--terminal-a11y-text-size) !important',
         lineHeight: '1.6',
       },
-      '& [data-cmd-mode-root] :is(code, pre, pre *):not([data-ui-chrome] *)': {
+      '& [data-agent-workspace-root] :is(code, pre, pre *):not([data-ui-chrome] *)': {
         fontSize: 'var(--terminal-a11y-code-size) !important',
         lineHeight: '1.6',
       },
-      '& [data-cmd-mode-root] :is(h1):not([data-ui-chrome] *)': {
+      '& [data-agent-workspace-root] :is(h1):not([data-ui-chrome] *)': {
         fontSize: `${chatTextFontSize + 4}px !important`,
         lineHeight: '1.35',
       },
-      '& [data-cmd-mode-root] :is(h2):not([data-ui-chrome] *)': {
+      '& [data-agent-workspace-root] :is(h2):not([data-ui-chrome] *)': {
         fontSize: `${chatTextFontSize + 2}px !important`,
         lineHeight: '1.4',
       },
-      '& [data-cmd-mode-root] :is(h3):not([data-ui-chrome] *)': {
+      '& [data-agent-workspace-root] :is(h3):not([data-ui-chrome] *)': {
         fontSize: `${chatTextFontSize + 1}px !important`,
         lineHeight: '1.45',
       },
-      '& [data-cmd-mode-root] :is(p, li, span, div, button, textarea, input, th, td, code, pre)': {
+      '& [data-agent-workspace-root] :is(p, li, span, div, button, textarea, input, th, td, code, pre)': {
         overflowWrap: 'anywhere',
         wordBreak: 'break-word',
       },
-      '& [data-cmd-mode-root] :is(button, [role="button"])': {
+      '& [data-agent-workspace-root] :is(button, [role="button"])': {
         whiteSpace: 'normal',
       },
       // Native terminal selection — muted accent wash instead of the browser
       // default blue, matching iTerm2/Terminal.app feel.
-      '& [data-cmd-mode-root] *::selection': {
+      '& [data-agent-workspace-root] *::selection': {
         background: 'rgba(163, 113, 247, 0.30)',
         color: 'inherit',
       },
@@ -805,7 +805,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       minW={0}
       minH={0}
       position="relative"
-      data-cmd-mode-root
+      data-agent-workspace-root
       onDragOver={onViewDragOver}
       onDragEnter={onViewDragEnter}
       onDragLeave={onViewDragLeave}
@@ -997,7 +997,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       </ErrorBoundary>
     </Flex>
 
-      {/* Plan viewer side panel (Terminal-styled) — push-from-right sibling, so
+      {/* Plan viewer side panel (shell-styled) — push-from-right sibling, so
           "Ver Plano Completo" / [v] in the approval card has somewhere to render.
           Self-gates on isPlanViewerOpen (collapses to width 0 when closed). */}
       <TerminalPlanViewerPanel projectPath={projectPath} />
@@ -1025,7 +1025,7 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
         </Flex>
       )}
 
-      {/* Team chat — terminal-style side panel (mIRC/Discord). Self-gates on
+      {/* Team chat — shell-style side panel (mIRC/Discord). Self-gates on
           chatOpen + team membership; renders nothing otherwise. Opened via
           the 💬 controls or the /team-chat command. */}
       <TerminalTeamChatPanel />

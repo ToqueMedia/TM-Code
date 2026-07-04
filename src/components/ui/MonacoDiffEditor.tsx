@@ -64,7 +64,7 @@ const MonacoDiffEditor: React.FC<MonacoDiffEditorProps> = ({
       fontLigatures: true,
       fontWeight: '400',
       lineHeight: 22,
-      letterSpacing: 0.3,
+      letterSpacing: 0,
       padding: { top: 8, bottom: 8 },
       minimap: { enabled: false },
       scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8, useShadows: false },

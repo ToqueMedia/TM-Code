@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import {
   Box,
   Flex,
@@ -10,14 +10,19 @@ import {
 } from '@chakra-ui/react'
 import {
   LuFolder,
+  LuFolderOpen,
+  LuGitBranch,
   LuClock,
   LuChevronRight,
   LuSettings,
   LuEraser,
+  LuPlus,
 } from 'react-icons/lu'
 import { getVersion } from '@tauri-apps/api/app'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
+import { showProjectContextMenu } from '@/components/projectContextMenu'
+import type { RecentProject } from '@/types/project'
 
 // Cache the version promise — it never changes during the session.
 let versionPromise: Promise<string> | null = null
@@ -56,41 +61,39 @@ function relativeTime(dateStr?: string): string | null {
   return then.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
-interface RecentProject {
-  id?: string
-  name: string
-  path: string
-  lastOpened?: string
-}
-
 interface WelcomeSidebarProps {
   recentProjects: RecentProject[]
-  /** Paths that have been opened in CMD mode — used to show the terminal icon */
-  cmdModeProjectPaths?: string[]
-  /** Open an existing CMD mode project directly (no dialog) */
-  onOpenCmdProject?: (path: string) => void
-  /** Promote a CMD mode project to the full IDE (removes from CMD list) */
-  onOpenCmdProjectAsIde?: (path: string) => void
+  onNewProject: () => void
+  onOpenFolder: () => void
+  onCloneRepository: () => void
   onOpenProject: (path?: string) => void
   onSettings?: () => void
-  /** Clear the entire recents list (both CMD and IDE). The caller handles
-   *  the confirmation dialog; this component just surfaces the button. */
+  activeProjectPath?: string | null
+  /** Clear the recent projects list. The caller handles the confirmation
+   *  dialog; this component just surfaces the button. */
   onClearRecent?: () => void
 }
 
 const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   recentProjects,
-  cmdModeProjectPaths = [],
-  onOpenCmdProject,
-  onOpenCmdProjectAsIde,
+  onNewProject,
+  onOpenFolder,
+  onCloneRepository,
   onOpenProject,
   onSettings,
+  activeProjectPath,
   onClearRecent,
 }) => {
   const [appVersion, setAppVersion] = useState('')
 
   useEffect(() => {
     getAppVersion().then(setAppVersion)
+  }, [])
+
+  const handleProjectContextMenu = useCallback((e: React.MouseEvent, project: RecentProject) => {
+    e.preventDefault()
+    e.stopPropagation()
+    showProjectContextMenu(project).catch(() => {})
   }, [])
 
   const truncatePath = (path: string, maxLen = 38) => {
@@ -101,27 +104,80 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
     return parts[0] + sep + '...' + sep + parts.slice(-2).join(sep)
   }
 
-  // Split recent projects into CMD mode and IDE mode groups
-  const cmdModePathSet = new Set(cmdModeProjectPaths)
-  const cmdProjects = recentProjects.filter(p => cmdModePathSet.has(p.path))
-  const ideProjects = recentProjects.filter(p => !cmdModePathSet.has(p.path))
-
   return (
     <Box
-      width="300px"
-      minWidth="300px"
+      width="clamp(200px, 30vw, 300px)"
+      minWidth="clamp(200px, 30vw, 300px)"
+      maxWidth="300px"
+      h="100%"
+      minH={0}
       bg="rgba(15, 15, 15, 0.95)"
       backdropFilter="blur(24px)"
       borderRight="1px solid"
       borderColor="rgba(254, 16, 99, 0.15)"
       display="flex"
       flexDirection="column"
-      py={8}
-      px={5}
-      pt={12}
+      py={{ base: 4, md: 8 }}
+      px={{ base: 3, md: 5 }}
+      pt={{ base: 8, md: 12 }}
       data-no-drag
       position="relative"
       overflow="hidden"
+      css={{
+        '@media (max-width: 520px)': {
+          '& [data-sidebar-logo]': {
+            marginBottom: '18px',
+          },
+          '& [data-sidebar-logo-mark]': {
+            width: '30px',
+            height: '30px',
+            marginRight: '10px',
+          },
+          '& [data-sidebar-logo-title]': {
+            fontSize: '16px',
+          },
+          '& [data-sidebar-actions]': {
+            marginBottom: '22px',
+          },
+          '& [data-sidebar-action]': {
+            gap: '9px',
+            paddingLeft: '9px',
+            paddingRight: '9px',
+            paddingTop: '8px',
+            paddingBottom: '8px',
+          },
+          '& [data-sidebar-action-icon]': {
+            width: '25px',
+            height: '25px',
+          },
+          '& [data-sidebar-action-label]': {
+            fontSize: '12px',
+          },
+          '& [data-sidebar-action-chevron]': {
+            display: 'none',
+          },
+          '& [data-sidebar-clear-label], & [data-sidebar-project-time], & [data-sidebar-project-arrow], & [data-sidebar-footer-powered]': {
+            display: 'none',
+          },
+          '& [data-sidebar-section-row]': {
+            paddingLeft: '4px',
+            paddingRight: '4px',
+          },
+          '& [data-sidebar-section-label]': {
+            fontSize: '10px',
+            letterSpacing: '0.08em',
+          },
+          '& [data-sidebar-project-row]': {
+            gap: '9px',
+            paddingLeft: '8px',
+            paddingRight: '8px',
+          },
+          '& [data-sidebar-project-icon]': {
+            width: '25px',
+            height: '25px',
+          },
+        },
+      }}
     >
       {/* Subtle glow at top */}
       <Box
@@ -136,8 +192,9 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
       />
 
       {/* Logo */}
-      <Flex alignItems="center" mb={10} position="relative">
+      <Flex data-sidebar-logo alignItems="center" mb={6} position="relative">
         <Box
+          data-sidebar-logo-mark
           width="36px"
           height="36px"
           mr={3}
@@ -151,6 +208,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
           />
         </Box>
         <Heading
+          data-sidebar-logo-title
           fontSize="18px"
           fontWeight="800"
           color="white"
@@ -160,14 +218,66 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
         </Heading>
       </Flex>
 
+      {/* Primary project actions */}
+      <VStack data-sidebar-actions align="stretch" gap={2} mb={8} position="relative">
+        {[
+          { icon: LuPlus, label: t('welcome.newProject'), onClick: onNewProject, color: tokens.colors.accent.primary },
+          { icon: LuFolderOpen, label: t('welcome.openProject'), onClick: onOpenFolder, color: tokens.colors.accent.greenBright },
+          { icon: LuGitBranch, label: t('welcome.cloneRepo'), onClick: onCloneRepository, color: tokens.colors.accent.purple },
+        ].map((action) => (
+          <Flex
+            data-sidebar-action
+            key={action.label}
+            as="button"
+            alignItems="center"
+            gap={3}
+            w="100%"
+            px={3}
+            py={2.5}
+            borderRadius="8px"
+            bg="rgba(255, 255, 255, 0.04)"
+            border="1px solid"
+            borderColor="rgba(255, 255, 255, 0.07)"
+            color={tokens.colors.text.primary}
+            cursor="pointer"
+            transition="all 0.18s ease"
+            textAlign="left"
+            _hover={{
+              bg: 'rgba(255, 255, 255, 0.07)',
+              borderColor: `${action.color}55`,
+              transform: 'translateY(-1px)',
+            }}
+            onClick={action.onClick}
+          >
+            <Flex
+              data-sidebar-action-icon
+              width="28px"
+              height="28px"
+              borderRadius="7px"
+              alignItems="center"
+              justifyContent="center"
+              bg={`${action.color}15`}
+              flexShrink={0}
+            >
+              <Icon as={action.icon} fontSize="14px" color={action.color} />
+            </Flex>
+            <Text data-sidebar-action-label fontSize="13px" fontWeight="600" flex={1} lineClamp={1}>
+              {action.label}
+            </Text>
+            <Icon data-sidebar-action-chevron as={LuChevronRight} fontSize="12px" color={tokens.colors.text.disabled} />
+          </Flex>
+        ))}
+      </VStack>
+
       {/* Recent projects */}
       <VStack align="stretch" flex={1} overflow="hidden" minH={0}>
-        <HStack px={2} mb={3} justify="space-between">
+        <HStack data-sidebar-section-row px={2} mb={3} justify="space-between">
           <HStack gap={2}>
             <Icon color={tokens.colors.text.muted} fontSize="12px">
               <LuClock />
             </Icon>
             <Text
+              data-sidebar-section-label
               fontSize="11px"
               fontWeight="700"
               textTransform="uppercase"
@@ -204,6 +314,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
                 <LuEraser />
               </Icon>
               <Text
+                data-sidebar-clear-label
                 fontSize="9px"
                 fontWeight="700"
                 textTransform="uppercase"
@@ -237,72 +348,30 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
             </Text>
           )}
 
-          {/* CMD mode projects */}
-          {cmdProjects.length > 0 && (
-            <>
-              <Text
-                fontSize="9px"
-                fontWeight="700"
-                textTransform="uppercase"
-                letterSpacing="0.1em"
-                color={tokens.colors.accent.purple}
-                px={3}
-                py="4px"
-                opacity={0.7}
-              >
-                {t('welcome.terminal')}
-              </Text>
-              {cmdProjects.map((project, index) => (
-                <ProjectRow
-                  key={project.id || `cmd-${index}`}
-                  project={project}
-                  isCmdMode
-                  truncatePath={truncatePath}
-                  onClick={() => project.path && (onOpenCmdProject ? onOpenCmdProject(project.path) : undefined)}
-                  onOpenAsIde={onOpenCmdProjectAsIde && project.path ? () => onOpenCmdProjectAsIde(project.path) : undefined}
-                />
-              ))}
-            </>
-          )}
-
-          {/* Divider between groups */}
-          {cmdProjects.length > 0 && ideProjects.length > 0 && (
-            <Box h="1px" bg="rgba(255,255,255,0.05)" mx={3} my={1} />
-          )}
-
-          {/* IDE projects */}
-          {ideProjects.length > 0 && (
-            <>
-              {cmdProjects.length > 0 && (
-                <Text
-                  fontSize="9px"
-                  fontWeight="700"
-                  textTransform="uppercase"
-                  letterSpacing="0.1em"
-                  color={tokens.colors.text.disabled}
-                  px={3}
-                  py="4px"
-                  opacity={0.7}
-                >
-                  {t('welcome.ide')}
-                </Text>
-              )}
-              {ideProjects.map((project, index) => (
-                <ProjectRow
-                  key={project.id || `ide-${index}`}
-                  project={project}
-                  isCmdMode={false}
-                  truncatePath={truncatePath}
-                  onClick={() => project.path && onOpenProject(project.path)}
-                />
-              ))}
-            </>
+          {recentProjects.length > 0 && (
+            recentProjects.map((project, index) => (
+              <ProjectRow
+                key={project.id || `project-${index}`}
+                project={project}
+                truncatePath={truncatePath}
+                isActive={activeProjectPath === project.path}
+                onClick={() => project.path && onOpenProject(project.path)}
+                onContextMenu={(e) => handleProjectContextMenu(e, project)}
+              />
+            ))
           )}
         </VStack>
       </VStack>
 
       {/* Footer — powered by + settings + version */}
-      <Flex direction="column" pt={4} mt={4} borderTop="1px solid rgba(255,255,255,0.05)" gap={3}>
+      <Flex
+        direction="column"
+        pt={{ base: 3, md: 4 }}
+        mt={{ base: 3, md: 4 }}
+        borderTop="1px solid rgba(255,255,255,0.05)"
+        gap={{ base: 2, md: 3 }}
+        flexShrink={0}
+      >
         <Flex alignItems="center" justifyContent="space-between" px={2}>
           <Flex
             width="28px"
@@ -324,6 +393,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
           </Text>
         </Flex>
         <Text
+          data-sidebar-footer-powered
           fontSize="9px"
           color={tokens.colors.text.disabled}
           opacity={0.4}
@@ -337,28 +407,28 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   )
 }
 
-// ─── Project row (shared between CMD and IDE lists) ─────────────────────
+// ─── Project row ────────────────────────────────────────────────────────
 
 interface ProjectRowProps {
   project: RecentProject
-  isCmdMode: boolean
   truncatePath: (path: string, maxLen?: number) => string
+  isActive?: boolean
   onClick: () => void
-  /** If provided, show an "Open in IDE" button */
-  onOpenAsIde?: () => void
+  onContextMenu: (e: React.MouseEvent) => void
 }
 
 const ProjectRow: React.FC<ProjectRowProps> = ({
   project,
-  isCmdMode,
   truncatePath,
+  isActive = false,
   onClick,
-  onOpenAsIde,
+  onContextMenu,
 }) => {
   const timeLabel = relativeTime(project.lastOpened)
 
   return (
     <Flex
+      data-sidebar-project-row
       alignItems="center"
       gap={3}
       px={3}
@@ -366,26 +436,31 @@ const ProjectRow: React.FC<ProjectRowProps> = ({
       borderRadius="8px"
       cursor="pointer"
       transition="all 0.2s ease"
+      bg={isActive ? 'rgba(254, 16, 99, 0.12)' : 'transparent'}
+      border="1px solid"
+      borderColor={isActive ? 'rgba(254, 16, 99, 0.35)' : 'transparent'}
       _hover={{
-        bg: 'rgba(255, 255, 255, 0.05)',
+        bg: isActive ? 'rgba(254, 16, 99, 0.16)' : 'rgba(255, 255, 255, 0.05)',
         transform: 'translateX(2px)',
       }}
       onClick={onClick}
+      onContextMenu={onContextMenu}
     >
       {/* Icon */}
       <Flex
+        data-sidebar-project-icon
         width="28px"
         height="28px"
         borderRadius="6px"
         alignItems="center"
         justifyContent="center"
-        bg={isCmdMode ? 'rgba(163, 113, 247, 0.12)' : 'rgba(255, 255, 255, 0.05)'}
+        bg={isActive ? 'rgba(254, 16, 99, 0.16)' : 'rgba(255, 255, 255, 0.05)'}
         flexShrink={0}
       >
         <Icon
           as={LuFolder}
           fontSize="14px"
-          color={isCmdMode ? tokens.colors.accent.purple : tokens.colors.text.secondary}
+          color={isActive ? tokens.colors.accent.primary : tokens.colors.text.secondary}
         />
       </Flex>
 
@@ -393,8 +468,8 @@ const ProjectRow: React.FC<ProjectRowProps> = ({
       <Box flex="1" minW={0}>
         <Text
           fontSize="13px"
-          fontWeight="500"
-          color={tokens.colors.text.primary}
+          fontWeight={isActive ? '650' : '500'}
+          color={isActive ? tokens.colors.accent.primary : tokens.colors.text.primary}
           lineClamp={1}
           overflow="hidden"
           textOverflow="ellipsis"
@@ -417,6 +492,7 @@ const ProjectRow: React.FC<ProjectRowProps> = ({
           </Text>
           {timeLabel && (
             <Text
+              data-sidebar-project-time
               fontSize="9px"
               color={tokens.colors.text.disabled}
               flexShrink={0}
@@ -429,24 +505,7 @@ const ProjectRow: React.FC<ProjectRowProps> = ({
       </Box>
 
       {/* Hover arrow */}
-      <Flex gap={1} alignItems="center" opacity={0.5} flexShrink={0}>
-        {onOpenAsIde && (
-          <Flex
-            alignItems="center"
-            justifyContent="center"
-            width="22px"
-            height="22px"
-            borderRadius="5px"
-            bg="rgba(254, 16, 99, 0.12)"
-            opacity={0}
-            _groupHover={{ opacity: 1 }}
-            transition="opacity 0.15s"
-            title={t('welcome.openInIde')}
-            onClick={(e: React.MouseEvent) => { e.stopPropagation(); onOpenAsIde() }}
-          >
-            <Icon as={LuFolder} fontSize="12px" color={tokens.colors.accent.primary} />
-          </Flex>
-        )}
+      <Flex data-sidebar-project-arrow gap={1} alignItems="center" opacity={0.5} flexShrink={0}>
         <Icon as={LuChevronRight} fontSize="12px" color={tokens.colors.text.disabled} />
       </Flex>
     </Flex>

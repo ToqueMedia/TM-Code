@@ -68,9 +68,11 @@ const EditorTabs = memo<EditorTabsProps>(({ openFiles, activeFile, onSetActiveFi
 
 	return (
 		<Flex
-			bg={tokens.colors.bg.panel}
+			bg="transparent"
 			position="relative"
-			h="auto"
+			h="36px"
+			align="center"
+			px="4px"
 			overflowX="auto"
 			overflowY="hidden"
 			css={{
@@ -95,6 +97,7 @@ const EditorTabs = memo<EditorTabsProps>(({ openFiles, activeFile, onSetActiveFi
 						margin: 0,
 						padding: 0,
 						alignItems: 'center',
+						gap: '4px',
 					}}
 				>
 					{renderOrder.map((path) => {

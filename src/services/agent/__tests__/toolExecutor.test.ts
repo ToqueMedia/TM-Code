@@ -2,7 +2,7 @@
  * Comprehensive regression tests for ToolExecutor (4419 lines).
  *
  * Tests the actual `execute()` orchestration path — permission flow, .env
- * blocking, plan mode, CMD mode, read-before-write enforcement, concurrent
+ * blocking, plan mode, cwd-scoped execution, read-before-write enforcement, concurrent
  * modification detection, truncation, read-only mode, tool definitions, and
  * path validation.
  *
@@ -578,7 +578,7 @@ describe('A: execute() orchestration', () => {
 
   it('skips truncation for diff results (JSON with type: diff)', async () => {
     const exec = freshExecutor()
-    // CMD mode: write_file writes directly and returns diff JSON with alreadyApplied.
+    // Cwd-scoped execution: write_file writes directly and returns diff JSON with alreadyApplied.
     // We need to read the file first (enforced by read-before-write).
     exec.enableCmdMode('/projects/test-app')
     mockInvokeImpl.mockImplementation(async (cmd: string) => {
@@ -738,14 +738,33 @@ describe('C: Plan mode', () => {
     expect(result).toContain('must follow write_file')
   })
 
-  it('allows update_tasks after PLAN.md is written', async () => {
+  it('blocks update_tasks while PLAN.md is still a draft', async () => {
+    const exec = freshExecutor()
+    exec.enablePlanMode()
+
+    exec.updateReadStateAfterWrite('/projects/test-app/PLAN.md', '> Status: DRAFT\n# Plan content')
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file') return '> Status: DRAFT\n# Plan content' as never
+      return undefined as never
+    })
+
+    const result = await exec.execute('update_tasks', { tasks: [{ id: '1', description: 'task', status: 'pending' }] })
+
+    expect(result).toContain('Blocked')
+    expect(result).toContain('PENDING APPROVAL')
+  })
+
+  it('allows update_tasks after PLAN.md is pending approval', async () => {
     const exec = freshExecutor()
     exec.enablePlanMode()
 
     // Simulate PLAN.md being written by calling updateReadStateAfterWrite
     // which sets planFileWritten = true when planMode is on and path is PLAN.md
-    exec.updateReadStateAfterWrite('/projects/test-app/PLAN.md', '# Plan content')
-    mockInvokeImpl.mockResolvedValue(undefined as never)
+    exec.updateReadStateAfterWrite('/projects/test-app/PLAN.md', '> Status: PENDING APPROVAL\n# Plan content')
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file') return '> Status: PENDING APPROVAL\n# Plan content' as never
+      return undefined as never
+    })
 
     const result = await exec.execute('update_tasks', { tasks: [{ id: '1', description: 'task', status: 'pending' }] })
 
@@ -756,8 +775,11 @@ describe('C: Plan mode', () => {
     const exec = freshExecutor()
     exec.enablePlanMode('PLAN-chat-export.md')
 
-    exec.updateReadStateAfterWrite('/projects/test-app/PLAN-chat-export.md', '# Plan content')
-    mockInvokeImpl.mockResolvedValue(undefined as never)
+    exec.updateReadStateAfterWrite('/projects/test-app/PLAN-chat-export.md', '> Status: PENDING APPROVAL\n# Plan content')
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file') return '> Status: PENDING APPROVAL\n# Plan content' as never
+      return undefined as never
+    })
 
     const result = await exec.execute('update_tasks', { tasks: [{ id: '1', description: 'task', status: 'pending' }] })
 
@@ -769,9 +791,12 @@ describe('C: Plan mode', () => {
     exec.enablePlanMode()
 
     // 1. Write PLAN.md
-    exec.updateReadStateAfterWrite('/projects/test-app/PLAN.md', '# Plan')
+    exec.updateReadStateAfterWrite('/projects/test-app/PLAN.md', '> Status: PENDING APPROVAL\n# Plan')
     // 2. Run update_tasks
-    mockInvokeImpl.mockResolvedValue(undefined as never)
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file') return '> Status: PENDING APPROVAL\n# Plan' as never
+      return undefined as never
+    })
     await exec.execute('update_tasks', { tasks: [{ id: '1', description: 'task', status: 'pending' }] })
 
     // 3. Now ANY tool should be blocked
@@ -783,8 +808,11 @@ describe('C: Plan mode', () => {
   it('resets plan progress flags on disablePlanMode', async () => {
     const exec = freshExecutor()
     exec.enablePlanMode()
-    exec.updateReadStateAfterWrite('/projects/test-app/PLAN.md', '# Plan')
-    mockInvokeImpl.mockResolvedValue(undefined as never)
+    exec.updateReadStateAfterWrite('/projects/test-app/PLAN.md', '> Status: PENDING APPROVAL\n# Plan')
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file') return '> Status: PENDING APPROVAL\n# Plan' as never
+      return undefined as never
+    })
     await exec.execute('update_tasks', { tasks: [{ id: '1', description: 'task', status: 'pending' }] })
 
     exec.disablePlanMode()
@@ -819,11 +847,11 @@ describe('C: Plan mode', () => {
 })
 
 // ═══════════════════════════════════════════════════════════════════════
-// D: CMD mode
+// D: Cwd-scoped execution
 // ═══════════════════════════════════════════════════════════════════════
 
-describe('D: CMD mode', () => {
-  it('write_file in CMD mode writes directly to disk (no diff/approval)', async () => {
+describe('D: cwd-scoped execution', () => {
+  it('write_file with cwd scope writes directly to disk (no diff/approval)', async () => {
     const exec = freshExecutor()
     exec.enableCmdMode('/projects/test-app')
     mockInvokeImpl.mockImplementation(async (cmd: string) => {
@@ -842,7 +870,7 @@ describe('D: CMD mode', () => {
     expect(parsed.newContent).toBe('new content')
   })
 
-  it('create_file in CMD mode writes directly and returns diff', async () => {
+  it('create_file with cwd scope writes directly and returns diff', async () => {
     const exec = freshExecutor()
     exec.enableCmdMode('/projects/test-app')
     // create_file calls invoke('read_file') to check existence — must throw
@@ -859,7 +887,7 @@ describe('D: CMD mode', () => {
     expect(parsed.isNewFile).toBe(true)
   })
 
-  it('path validation in CMD mode uses cmdModeCwd', async () => {
+  it('path validation with cwd scope uses cmdModeCwd', async () => {
     const exec = freshExecutor()
     exec.enableCmdMode('/projects/test-app')
 
@@ -902,13 +930,13 @@ describe('D: CMD mode', () => {
     exec.enableCmdMode('/projects/test-app')
     exec.disableCmdMode()
 
-    // After disabling CMD mode, path is validated against project root
+    // After disabling cwd scope, path is validated against project root.
     mockInvokeImpl.mockResolvedValue('content' as never)
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/app.tsx' })
     expect(result).toBe('     1→content')
   })
 
-  it('edit_file in CMD mode calls edit_literal_replace', async () => {
+  it('edit_file with cwd scope calls edit_literal_replace', async () => {
     const exec = freshExecutor()
     exec.enableCmdMode('/projects/test-app')
 
@@ -1367,6 +1395,29 @@ describe('H: Read-only mode', () => {
     exec.exitReadOnlyMode(id)
   })
 
+  it('blocks mutating curl HTTP requests in read-only mode', async () => {
+    const exec = freshExecutor()
+    const id = exec.enterReadOnlyMode()
+
+    await expect(
+      exec.execute('execute_command', { command: 'curl -X POST https://example.com/api' })
+    ).rejects.toThrow('read-only verification mode')
+
+    await expect(
+      exec.execute('execute_command', { command: 'curl --request=DELETE https://example.com/api/1' })
+    ).rejects.toThrow('read-only verification mode')
+
+    await expect(
+      exec.execute('execute_command', { command: 'curl --data \'{"ok":true}\' https://example.com/api' })
+    ).rejects.toThrow('read-only verification mode')
+
+    await expect(
+      exec.execute('execute_command', { command: 'curl --json \'{"ok":true}\' https://example.com/api' })
+    ).rejects.toThrow('read-only verification mode')
+
+    exec.exitReadOnlyMode(id)
+  })
+
   it('allows browser-like curl reads in read-only mode', async () => {
     const exec = freshExecutor()
     const id = exec.enterReadOnlyMode()
@@ -1592,8 +1643,8 @@ describe('J: Path validation', () => {
     expect(result).toBe('     1→content')
   })
 
-  it('CMD mode uses cmdModeCwd for path validation', async () => {
-    // In actual CMD mode, currentProject is null. Clear mockCurrentProject to simulate.
+  it('cwd-scoped execution uses cmdModeCwd for path validation', async () => {
+    // In cwd-scoped execution, currentProject can be null. Clear mockCurrentProject to simulate.
     const originalPath = mockCurrentProject.path
     mockCurrentProject.path = undefined as any
     try {
@@ -1608,8 +1659,8 @@ describe('J: Path validation', () => {
     }
   })
 
-  it('CMD mode rejects paths outside cmdModeCwd', async () => {
-    // In actual CMD mode, currentProject is null. Clear mockCurrentProject to simulate.
+  it('cwd-scoped execution rejects paths outside cmdModeCwd', async () => {
+    // In cwd-scoped execution, currentProject can be null. Clear mockCurrentProject to simulate.
     const originalPath = mockCurrentProject.path
     mockCurrentProject.path = undefined as any
     try {

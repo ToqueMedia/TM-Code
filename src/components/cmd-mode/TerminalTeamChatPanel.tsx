@@ -9,12 +9,12 @@ import { openPreview } from '@/services/collab/previewViewerService'
 import { useTeamTyping } from '@/hooks/useTeamTyping'
 import type { ChatMessage } from '@/services/collab/collabChat'
 
-// Terminal-style team chat — a side panel (mounted alongside the PTY
-// TerminalPanel in TerminalView) in the mIRC/Discord idiom: a single `#`
+// Shell-style team chat — a side panel (mounted alongside the PTY
+// TerminalPanel) in the mIRC/Discord idiom: a single `#`
 // channel, `HH:MM <nick> message` lines, monospace, flat + sharp, a single
 // purple accent, hard-step motion only (refined-terminal contract). Driven by
-// the same collab store as the floating chat used in Chat mode; the two never
-// render at once (Chat mode = MainLayout, Terminal mode = WelcomeScreen).
+// the same collab store as the floating chat used by the main layout; the two
+// never render at once.
 
 const PANEL_WIDTH = 360
 

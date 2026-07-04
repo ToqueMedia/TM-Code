@@ -180,7 +180,7 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
   ],
   colors: {
     // Editor background — matches app bg for seamless look
-    'editor.background': '#0f0f0f',
+    'editor.background': '#0d0d0f',
     'editor.foreground': '#e6edf3',
 
     // Definition link (Cmd+hover)
@@ -189,7 +189,7 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
     // Gutter / line numbers
     'editorLineNumber.foreground': '#3d4450',
     'editorLineNumber.activeForeground': '#8b949e',
-    'editorGutter.background': '#0f0f0f',
+    'editorGutter.background': '#0d0d0f',
     'editorGutter.addedBackground': '#2ea04380',
     'editorGutter.modifiedBackground': '#a371f780',
     'editorGutter.deletedBackground': '#f8514980',
@@ -198,9 +198,9 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
     'editorCursor.foreground': '#c2185b',
 
     // Selection
-    'editor.selectionBackground': '#c2185b30',
-    'editor.selectionHighlightBackground': '#c2185b18',
-    'editor.inactiveSelectionBackground': '#c2185b15',
+    'editor.selectionBackground': '#c2185b34',
+    'editor.selectionHighlightBackground': '#c2185b1c',
+    'editor.inactiveSelectionBackground': '#c2185b14',
 
     // Word highlight
     'editor.wordHighlightBackground': '#a371f720',
@@ -212,7 +212,7 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
     'editor.findMatchBorder': '#c2185b',
 
     // Current line
-    'editor.lineHighlightBackground': '#ffffff06',
+    'editor.lineHighlightBackground': '#ffffff08',
     'editor.lineHighlightBorder': '#00000000',
 
     // Brackets
@@ -226,8 +226,8 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
     'editorBracketHighlight.foreground6': '#ff79c6',
 
     // Indentation guides
-    'editorIndentGuide.background': '#ffffff08',
-    'editorIndentGuide.activeBackground': '#ffffff18',
+    'editorIndentGuide.background': '#ffffff07',
+    'editorIndentGuide.activeBackground': '#ffffff1c',
 
     // Scrollbar — thin, subtle
     'scrollbar.shadow': '#00000000',
@@ -236,7 +236,7 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
     'scrollbarSlider.activeBackground': '#ffffff30',
 
     // Minimap
-    'minimap.background': '#0a0a0a',
+    'minimap.background': '#0d0d0f',
     'minimap.selectionHighlight': '#c2185b40',
     'minimap.findMatchHighlight': '#c2185b60',
     'minimapSlider.background': '#ffffff10',
@@ -247,7 +247,7 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
     'minimapGutter.deletedBackground': '#f8514980',
 
     // Overview ruler (right edge)
-    'editorOverviewRuler.background': '#0a0a0a',
+    'editorOverviewRuler.background': '#0d0d0f',
     'editorOverviewRuler.border': '#00000000',
     'editorOverviewRuler.addedForeground': '#2ea04380',
     'editorOverviewRuler.modifiedForeground': '#a371f780',
@@ -298,8 +298,8 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
     'peekViewEditor.matchHighlightBackground': '#c2185b30',
 
     // Sticky scroll
-    'editorStickyScroll.background': '#0f0f0f',
-    'editorStickyScrollHover.background': '#161616',
+    'editorStickyScroll.background': '#0d0d0fee',
+    'editorStickyScrollHover.background': '#17171a',
 
     // Inlay hints (type annotations, parameter names)
     'editorInlayHint.foreground': '#5c6370',
@@ -334,7 +334,7 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
     'editor.linkedEditingBackground': '#c2185b15',
 
     // Ghost text (inline suggestions)
-    'editorGhostText.foreground': '#3d4450',
+    'editorGhostText.foreground': '#5a5360',
 
     // Menu / context menu
     'menu.background': '#161616',
@@ -349,7 +349,7 @@ export const toqueMediaTheme: editor.IStandaloneThemeData = {
 
     // Breadcrumb
     'breadcrumb.foreground': '#8b949e',
-    'breadcrumb.background': '#0f0f0f',
+    'breadcrumb.background': '#0d0d0f',
     'breadcrumb.focusForeground': '#e6edf3',
     'breadcrumb.activeSelectionForeground': '#e6edf3',
 

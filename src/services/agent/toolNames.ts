@@ -1,7 +1,7 @@
 /**
  * Tool name constants — single source of truth.
  *
- * The system prompt (chat + cmd-mode), the /plan architect prompt, and the
+ * The system prompts, the /plan architect prompt, and the
  * mechanical access controls (planMode allowlist, env-file gate) all
  * reference tools by name. Hardcoding literals across ~70 sites means a
  * rename in toolExecutor silently desyncs the prompt: the model is told
@@ -77,6 +77,8 @@ export const SAVE_MEMORY = 'save_memory'
 export const FORGET_MEMORY = 'forget_memory'
 export const READ_MEMORY = 'read_memory'
 export const DISTILL_MEMORY = 'distill_memory'
+export const UPDATE_SESSION_MEMORY = 'update_session_memory'
+export const READ_SESSION_MEMORY = 'read_session_memory'
 
 /**
  * Every tool name registered by ToolExecutor. Walked by
@@ -100,7 +102,7 @@ export const TOOL_NAMES = [
   DELEGATE, COLLECT_RESULTS,
   UPDATE_TASKS,
   PROVISION_AUTH, PROVISION_DATABASE, PROVISION_FILES, PROVISION_DEPLOY, REQUEST_CREDENTIALS, ASK_USER_QUESTION,
-  SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,
+  SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY, UPDATE_SESSION_MEMORY, READ_SESSION_MEMORY,
 ] as const
 
 export type ToolName = (typeof TOOL_NAMES)[number]

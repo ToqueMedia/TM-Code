@@ -1,5 +1,5 @@
 /**
- * Sliding 3-task window helper shared by the chat-mode `TodoListCard`
+ * Sliding 3-task window helper shared by `TodoListCard`
  * (post-/plan approval) and the `AgentTasksPanel` (live agent task
  * tracker). Both compact UIs follow the same rule:
  *

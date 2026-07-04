@@ -45,7 +45,7 @@ export interface ToolRegistrationContext {
    *  cleared (e.g., after session reload). Returns null if not found. */
   readLargeResultFromDisk(id: string): Promise<string | null>
 
-  // ── CMD mode (getter — reads current value) ────────────────────────
+  // ── Cwd-scoped execution root (getter — reads current value) ───────
   getCmdModeCwd(): string | null
 
   // ── Memory scope (getter — reads current value) ────────────────────
@@ -55,6 +55,7 @@ export interface ToolRegistrationContext {
   // ── Plan mode (getters — read current values) ──────────────────────
   getPlanMode(): boolean
   getPlanFileWritten(): boolean
+  getPlanReadyForTaskSeed(): Promise<boolean>
   setPlanTasksSeeded(v: boolean): void
 
   // ── Truncation (delegated to ToolExecutor) ─────────────────────────

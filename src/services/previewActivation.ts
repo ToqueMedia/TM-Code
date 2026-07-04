@@ -12,12 +12,19 @@ import { devServerManager } from './devServerManager'
 import { ensureDependenciesInstalled } from './dependencyInstaller'
 import { logger } from '../utils/logger'
 import { t } from '../i18n'
+import { readProjectManifest } from './projectManifestService'
 
 /**
  * Detect the dev command for a project by checking manifest and package.json.
  */
 export async function detectDevCommand(projectPath: string): Promise<string | null> {
-  // 1. Check .toquemedia-template manifest
+  // 1. Check the canonical TM Code project manifest.
+  const projectManifest = await readProjectManifest(projectPath)
+  if (projectManifest?.capabilities.preview.supported === false) return null
+  if (projectManifest?.commands.dev) return projectManifest.commands.dev
+  if (projectManifest?.capabilities.preview.command) return projectManifest.capabilities.preview.command
+
+  // 2. Check legacy .toquemedia-template manifest
   try {
     const raw = await invoke<string>('read_file', { path: `${projectPath}/.toquemedia-template` })
     if (raw) {
@@ -26,7 +33,7 @@ export async function detectDevCommand(projectPath: string): Promise<string | nu
     }
   } catch { /* no manifest */ }
 
-  // 2. Check package.json for "dev" or "start" script
+  // 3. Check package.json for "dev" or "start" script
   try {
     const raw = await invoke<string>('read_file', { path: `${projectPath}/package.json` })
     if (raw) {

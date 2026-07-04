@@ -27,8 +27,8 @@ function formatRelativeTime(ts: number): string {
 }
 
 /**
- * Keyboard-driven picker for CMD-mode `/resume`. Arrow keys navigate,
- * Enter loads, Esc closes without exiting CMD Mode. Owns Escape in the
+ * Keyboard-driven picker for `/resume`. Arrow keys navigate,
+ * Enter loads, Esc closes without exiting this surface. Owns Escape in the
  * TerminalView priority chain (registered via a `data-session-picker`
  * marker the outer handler checks).
  */

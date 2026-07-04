@@ -4,6 +4,7 @@
  */
 
 import type { TemplateManifest } from '../../templateService'
+import type { ProjectManifest } from '../../projectManifestService'
 
 export interface MCPToolSummary {
   name: string
@@ -43,7 +44,7 @@ export interface PathAlias {
 }
 
 /**
- * Inputs every cmd-mode section function needs. Built once per
+ * Inputs every cwd-scoped section function needs. Built once per
  * `buildCmdModeSystemPrompt` call.
  */
 export interface CmdPromptContext {
@@ -56,7 +57,7 @@ export interface CmdPromptContext {
   globalTmsContent: string | null
   /** Project-level TMS.md content (<project>/TMS.md). Null when missing. */
   tmsContent: string | null
-  /** Session-scoped memory notes (same source as chat mode). */
+  /** Session-scoped memory notes. */
   sessionMemory: string | null
   /** Pre-loaded user-scope MEMORY.md index content (cross-project facts).
    *  Null when no user memory exists yet. */
@@ -72,7 +73,7 @@ export interface CmdPromptContext {
 }
 
 /**
- * Inputs every chat-mode section function needs. Built once per
+ * Inputs every project prompt section function needs. Built once per
  * `buildSystemPrompt` call from the parallel gather phase, then passed
  * through. Lets section functions stay pure (input → string | null), so
  * order changes and conditional inclusion are array-level concerns, not
@@ -102,6 +103,7 @@ export interface PromptContext {
   planContent: string | null
   todoContent: string | null
   templateManifest: TemplateManifest | null
+  projectManifest: ProjectManifest | null
   // Runtime config
   langInstruction: string
   modelProfile: import('../modelProfiles').ModelProfile | null

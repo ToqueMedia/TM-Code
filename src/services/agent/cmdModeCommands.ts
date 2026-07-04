@@ -30,9 +30,8 @@ function fmt(template: string, vars: Record<string, string | number>): string {
 }
 
 /**
- * CMD-mode-only slash commands — not available in regular chat mode.
- * These are session management commands that only make sense in the
- * terminal/agentic context.
+ * Cwd-scoped slash commands. These are session management commands for the
+ * standalone workspace surface.
  */
 
 // ─── Session list cache — populated by /resume (list), consumed by /resume <n> ───
@@ -447,11 +446,10 @@ async function executeHistoryClear(_args: string, projectPath: string): Promise<
   }
 }
 
-// ─── /start-server, /stop-server — Manual dev server control in Terminal mode ───
+// ─── /start-server, /stop-server — Manual dev server control ───
 //
-// Terminal mode has no preview, so dev servers don't auto-start the way they do
-// in chat mode. These commands let the user explicitly fire / stop the project's
-// dev script. Detection: lockfile picks the PM, package.json picks the script.
+// These commands let the user explicitly fire / stop the project's dev script.
+// Detection: lockfile picks the PM, package.json picks the script.
 
 async function readPackageJsonScripts(projectPath: string): Promise<Record<string, string> | null> {
   try {
@@ -575,7 +573,7 @@ async function executeExit(_args: string, _projectPath: string): Promise<void> {
   useProjectStore.getState().setCmdModeProjectPath(null)
 }
 
-// ─── /team-chat — Toggle the terminal-style team chat side panel ───
+// ─── /team-chat — Toggle the team chat side panel ───
 
 async function executeTeamChat(_args: string, _projectPath: string): Promise<void> {
   if (!canShareCode()) {

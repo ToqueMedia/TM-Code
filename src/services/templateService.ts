@@ -1,5 +1,6 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { detectSystemPackageManager, adaptCommand } from './packageManagerDetector'
+import { PROJECT_MANIFEST_RELATIVE_PATH, buildTemplateProjectManifest } from './projectManifestService'
 
 export interface Requirement {
   name: string
@@ -246,19 +247,30 @@ class TemplateService {
 
     // Write manifest with the actual PM available on the system
     const pm = await detectSystemPackageManager()
+    const scaffoldedAt = new Date().toISOString()
     const manifest: TemplateManifest = {
       templateId: template.id,
       name: template.name,
       framework: template.framework,
       installCommand: adaptCommand(template.installCommand, pm),
       devCommand: adaptCommand(template.devCommand, pm),
-      scaffoldedAt: new Date().toISOString(),
+      scaffoldedAt,
       ...(template.frontendPort !== undefined ? { frontendPort: template.frontendPort } : {}),
     }
+    const projectManifest = buildTemplateProjectManifest(template, {
+      installCommand: manifest.installCommand,
+      devCommand: manifest.devCommand,
+      buildCommand: adaptCommand('npm run build', pm),
+      scaffoldedAt,
+    })
 
     await invoke('write_file', {
       path: `${destinationPath}/.toquemedia-template`,
       content: JSON.stringify(manifest, null, 2),
+    })
+    await invoke('write_file', {
+      path: `${destinationPath}/${PROJECT_MANIFEST_RELATIVE_PATH}`,
+      content: JSON.stringify(projectManifest, null, 2),
     })
   }
 }
@@ -292,6 +304,14 @@ export async function resolveFrontendPortHint(
   projectKind: 'frontend' | 'backend' | 'fullstack',
 ): Promise<number | undefined> {
   if (projectKind !== 'fullstack') return undefined
+  try {
+    const { readProjectManifest } = await import('./projectManifestService')
+    const projectManifest = await readProjectManifest(projectPath)
+    const port = projectManifest?.capabilities.preview.frontendPort
+    if (typeof port === 'number') return port
+  } catch {
+    // Fall through to legacy manifest.
+  }
   const manifest = await readTemplateManifest(projectPath)
   return manifest?.frontendPort
 }

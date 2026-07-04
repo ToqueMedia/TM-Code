@@ -37,9 +37,8 @@ export async function executeDebug(
     await runAgentWithCallbacks(buildDebugPrompt(args, projectPath), {
       addUserMessage: true,
       userMessageText: `/debug ${args}`,
-      // CMD mode requires explicit cmdOnlyMode so the tool executor uses the
-      // cwd instead of falling back to useProjectStore.currentProject (which
-      // CMD never populates).
+      // Cwd-scoped runs require explicit cmdOnlyMode so the tool executor
+      // uses cwd instead of falling back to useProjectStore.currentProject.
       cmdOnlyMode: mode === 'terminal',
     })
   } finally {

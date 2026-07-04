@@ -1,5 +1,5 @@
 /**
- * Shared helpers, markdown components, and Error Boundary for CMD mode terminal UI.
+ * Shared helpers, markdown components, and Error Boundary for the shell-styled UI.
  */
 import React, { type ComponentProps } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
@@ -185,7 +185,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
   private reset = () => this.setState({ hasError: false, error: null })
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
-    // Terminal mode previously swallowed per-message render errors silently —
+    // This surface previously swallowed per-message render errors silently —
     // the message just vanished with no trace. Log with the componentStack so
     // these are diagnosable (directly aids the React #185 investigation, whose
     // root cause was pending a componentStack).

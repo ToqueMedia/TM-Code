@@ -68,7 +68,9 @@ function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
         height="26px"
         align="center"
         px={3}
-        borderBottom={`1px solid ${tokens.colors.border.default}`}
+        bg="rgba(255,255,255,0.018)"
+        borderTop="1px solid rgba(255,255,255,0.035)"
+        borderBottom="1px solid rgba(255,255,255,0.045)"
       >
         <HStack gap={1.5}>
           <FiHome size={12} color={tokens.colors.text.disabled} />
@@ -82,10 +84,12 @@ function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
 
   return (
     <Flex
-      height="26px"
+      height="28px"
       align="center"
       px={3}
-      borderBottom={`1px solid ${tokens.colors.border.default}`}
+      bg="rgba(255,255,255,0.018)"
+      borderTop="1px solid rgba(255,255,255,0.035)"
+      borderBottom="1px solid rgba(255,255,255,0.045)"
       overflow="hidden"
       position="relative"
     >
@@ -119,7 +123,7 @@ function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
                 maxW="150px"
                 px={1}
                 py={0.5}
-                borderRadius="3px"
+                borderRadius="7px"
               >
                 {index === 0 ? (
                   <FiHome size={11} color={tokens.colors.text.disabled} style={{ flexShrink: 0 }} />
@@ -147,7 +151,7 @@ function Breadcrumbs({ filePath, projectRoot, onNavigate }: BreadcrumbsProps) {
                   overflow="hidden"
                   textOverflow="ellipsis"
                   maxW="120px"
-                  letterSpacing="-0.01em"
+                  letterSpacing="0"
                 >
                   {item.name}
                 </Text>

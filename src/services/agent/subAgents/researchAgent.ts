@@ -17,8 +17,8 @@ export const RESEARCH_AGENT: SubAgentDefinition = {
   omitProjectContext: true,
 
   getSystemPrompt: (ctx: SubAgentParentContext) => {
-    const cmdModeLine = ctx.cmdOnlyMode
-      ? '\n\nYou are running in Terminal Mode (no project sidebar). CWD is the working directory.'
+    const cwdLine = ctx.cmdOnlyMode
+      ? '\n\nCWD is the working directory for tool calls.'
       : ''
 
     const depthGuide = ctx.thoroughness === 'quick'
@@ -60,7 +60,7 @@ ${depthGuide}
 ## Completion
 When you have found the answer (or determined it doesn't exist), return your summary and stop. Do not continue searching after you have a sufficient answer.
 
-Project root: ${ctx.workingPath}${cmdModeLine}
+Project root: ${ctx.workingPath}${cwdLine}
 Language: respond in ${ctx.agentLanguage}`
   },
 }

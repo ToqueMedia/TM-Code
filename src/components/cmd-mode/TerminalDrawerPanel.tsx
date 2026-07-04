@@ -1,20 +1,21 @@
 import { memo, useCallback, useEffect } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
-import { FiClock, FiX } from 'react-icons/fi'
-import CheckpointPanel from './CheckpointPanel'
-import { useCheckpointStore } from '@/stores/checkpointStore'
-import { useLayoutStore } from '@/stores/layoutStore'
+import { FiTerminal, FiX } from 'react-icons/fi'
+import { useCurrentProject } from '@/hooks/useProjectState'
+import { useTerminalPanelStore } from '@/stores/terminalPanelStore'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
+import { TerminalPanel } from './TerminalPanel'
 
-function CheckpointDrawerPanel() {
-  const isOpen = useLayoutStore(s => s.isCheckpointDrawerOpen)
-  const setCheckpointDrawerOpen = useLayoutStore(s => s.setCheckpointDrawerOpen)
-  const checkpointCount = useCheckpointStore(s => s.checkpoints.length)
+function TerminalDrawerPanel() {
+  const currentProject = useCurrentProject()
+  const isOpen = useTerminalPanelStore(s => s.isOpen)
+  const widthPx = useTerminalPanelStore(s => s.widthPx)
+  const close = useTerminalPanelStore(s => s.close)
 
   const handleClose = useCallback(() => {
-    setCheckpointDrawerOpen(false)
-  }, [setCheckpointDrawerOpen])
+    close()
+  }, [close])
 
   useEffect(() => {
     if (!isOpen) return
@@ -28,20 +29,26 @@ function CheckpointDrawerPanel() {
     return () => window.removeEventListener('keydown', handler)
   }, [isOpen, handleClose])
 
+  useEffect(() => {
+    if (isOpen && !currentProject?.path) {
+      close()
+    }
+  }, [isOpen, currentProject?.path, close])
+
   return (
     <Flex
       direction="column"
-      w={isOpen ? 'min(420px, 100vw)' : '0px'}
+      w={isOpen ? `${widthPx}px` : '0px'}
       h="100%"
       flexShrink={0}
-      bg={tokens.colors.bg.mainLayout}
-      borderLeft={isOpen ? '1px solid rgba(255, 255, 255, 0.06)' : 'none'}
+      bg={tokens.colors.terminal.background}
+      borderLeft={isOpen ? '1px solid rgba(255, 255, 255, 0.08)' : 'none'}
       overflow="hidden"
       transition="width 0.35s cubic-bezier(0.32, 0.72, 0, 1), border-left 0.25s ease"
     >
       <Flex
         direction="column"
-        w="min(420px, 100vw)"
+        w={`${widthPx}px`}
         h="100%"
         transform={isOpen ? 'translateX(0)' : 'translateX(100%)'}
         opacity={isOpen ? 1 : 0}
@@ -56,22 +63,10 @@ function CheckpointDrawerPanel() {
           flexShrink={0}
         >
           <Flex align="center" gap={2}>
-            <FiClock size={14} color={tokens.colors.text.secondary} />
+            <FiTerminal size={14} color={tokens.colors.text.secondary} />
             <Text fontSize="13px" fontWeight={600} color={tokens.colors.text.primary}>
-              {t('checkpoint.title')}
+              {t('activity.terminal')}
             </Text>
-            {checkpointCount > 0 && (
-              <Text
-                fontSize="10px"
-                color={tokens.colors.text.muted}
-                bg={tokens.colors.bg.hoverSubtle}
-                px="6px"
-                py="1px"
-                borderRadius="999px"
-              >
-                {checkpointCount}
-              </Text>
-            )}
           </Flex>
           <Box
             as="button"
@@ -92,12 +87,14 @@ function CheckpointDrawerPanel() {
           </Box>
         </Flex>
 
-        <Box flex={1} minH={0} overflow="auto" px={3} py={3}>
-          <CheckpointPanel surface="drawer" />
+        <Box flex={1} minH={0} overflow="hidden">
+          {currentProject?.path && (
+            <TerminalPanel projectPath={currentProject.path} widthPx={widthPx} showBorder={false} />
+          )}
         </Box>
       </Flex>
     </Flex>
   )
 }
 
-export default memo(CheckpointDrawerPanel)
+export default memo(TerminalDrawerPanel)

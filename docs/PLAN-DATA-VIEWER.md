@@ -123,7 +123,7 @@ Pick A for v1 because it matches the shipped service. B is the correct long-term
 // 1. Manual override in localStorage (`data-viewer-source:{projectId}` → 'dev'|'prod')
 // 2. Presence of dev.db file → 'dev' default
 // 3. Presence of TMDB_URL + TMDB_TOKEN in local .env inspection creds → 'prod' available
-// 4. Neither → empty state with local migration CTA; production persistence is handled by Publish/deploy
+// 4. Neither → empty state with local migration CTA; PROD viewer requires local inspection credentials in v1
 ```
 
 Detection result is shown in the source toggle; user can flip it manually at any time.

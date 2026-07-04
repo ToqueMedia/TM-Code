@@ -1,5 +1,6 @@
 import { lazy, memo, Suspense, useCallback, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
+import { FiCheck, FiCopy } from 'react-icons/fi'
 import type { CodeBlock } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
 import { basename } from '@/utils/platform'
@@ -20,11 +21,11 @@ const LazyHighlighter = lazy(async () => {
       customStyle={{
         background: 'transparent',
         margin: 0,
-        padding: '6px 8px',
+        padding: '10px 12px',
         fontSize: '12px',
-        lineHeight: '1.45',
+        lineHeight: '1.55',
         whiteSpace: 'pre-wrap',
-        wordBreak: 'break-all',
+        wordBreak: 'break-word',
       }}
     >
       {children}
@@ -50,39 +51,82 @@ export const TerminalCodeBlock = memo(function TerminalCodeBlock({ block }: Term
   const file = block.filePath ? basename(String(block.filePath)) : null
 
   return (
-    <Box my={1.5} pl={2} borderLeft={`2px solid rgba(255,255,255,0.08)`} data-no-focus-steal maxW="100%">
-      {/* Header: lang + file + copy */}
-      <Flex align="center" justify="space-between" mb="3px">
-        <Flex align="center" gap={2}>
-          <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} fontWeight="600" textTransform="uppercase" letterSpacing="0.06em">
+    <Box
+      my={2}
+      border="1px solid rgba(255,255,255,0.075)"
+      borderRadius="10px"
+      overflow="hidden"
+      bg="rgba(0,0,0,0.28)"
+      data-no-focus-steal
+      maxW="100%"
+    >
+      <Flex
+        align="center"
+        justify="space-between"
+        gap={2}
+        px={3}
+        py="7px"
+        bg="rgba(255,255,255,0.032)"
+        borderBottom="1px solid rgba(255,255,255,0.06)"
+      >
+        <Flex align="center" gap={2} minW={0}>
+          <Text
+            fontSize="10px"
+            color={tokens.colors.text.disabled}
+            fontFamily={tokens.fontFamily.mono}
+            fontWeight="700"
+            textTransform="uppercase"
+            bg="rgba(255,255,255,0.045)"
+            border="1px solid rgba(255,255,255,0.07)"
+            borderRadius="999px"
+            px="7px"
+            py="2px"
+            lineHeight="1"
+            flexShrink={0}
+          >
             {lang}
           </Text>
           {file && (
-            <Text fontSize="10px" color={tokens.colors.accent.purple} fontFamily={tokens.fontFamily.mono} opacity={0.8}>
+            <Text
+              fontSize="11px"
+              color={tokens.colors.text.secondary}
+              fontFamily={tokens.fontFamily.mono}
+              fontWeight="600"
+              overflow="hidden"
+              textOverflow="ellipsis"
+              whiteSpace="nowrap"
+            >
               {file}
             </Text>
           )}
         </Flex>
-        <Text
+        <Flex
           as="button"
           aria-label="Copy code"
-          fontSize="9px"
+          align="center"
+          gap={1.5}
+          px="8px"
+          py="5px"
+          borderRadius="7px"
+          border="1px solid rgba(255,255,255,0.075)"
           color={copied ? tokens.colors.accent.green : tokens.colors.text.disabled}
+          bg="transparent"
+          fontSize="10px"
           fontFamily={tokens.fontFamily.mono}
-          fontWeight="600"
-          letterSpacing="0.06em"
+          fontWeight="700"
           textTransform="uppercase"
           onClick={handleCopy}
           cursor="pointer"
-          _hover={{ color: copied ? tokens.colors.accent.green : tokens.colors.text.secondary }}
-          transition="color 0.1s"
+          _hover={{ bg: 'rgba(255,255,255,0.055)', color: copied ? tokens.colors.accent.green : tokens.colors.text.secondary }}
+          transition="all 0.14s ease"
+          flexShrink={0}
         >
-          {copied ? '✓ copied' : 'copy'}
-        </Text>
+          {copied ? <FiCheck size={11} /> : <FiCopy size={11} />}
+          {copied ? 'copied' : 'copy'}
+        </Flex>
       </Flex>
 
-      {/* Code — flat surface: ≤2px radius, 1px hairline only, no shadow. */}
-      <Box borderRadius={tokens.radius.sm} bg="rgba(0,0,0,0.35)" overflow="hidden" border="1px solid rgba(255,255,255,0.04)">
+      <Box bg="rgba(0,0,0,0.22)" overflow="hidden">
         <Suspense fallback={<CodeFallback code={block.code} />}>
           <LazyHighlighter language={lang}>{block.code}</LazyHighlighter>
         </Suspense>
@@ -96,9 +140,9 @@ function CodeFallback({ code }: { code: string }) {
     <Box
       as="pre"
       m={0}
-      p="6px 8px"
+      p="10px 12px"
       fontSize="12px"
-      lineHeight="1.45"
+      lineHeight="1.55"
       fontFamily={tokens.fontFamily.mono}
       color={tokens.colors.text.secondary}
       whiteSpace="pre-wrap"

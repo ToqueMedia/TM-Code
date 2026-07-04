@@ -33,7 +33,7 @@ export const TerminalTitleBar = memo(function TerminalTitleBar({ projectPath, on
   const mcpServers = useMcpStore(s => s.servers)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   // BYOK state via shared hook so this component never drifts from
-  // AgentStatusBar / ChatView. CMD mode uses the same AgentService
+  // AgentStatusBar / ChatView. This surface uses the same AgentService
   // singleton, so BYOK rules apply identically here.
   const { byokInPlay: showModelIndicator } = useByokState()
   // Mandatory-thinking badge only — interactive toggle was removed

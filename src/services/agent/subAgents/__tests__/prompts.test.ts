@@ -2,7 +2,7 @@
  * Snapshot tests for built-in sub-agent system prompts.
  *
  * Verifies each agent's prompt contains all required sections and
- * produces correct output for both chat-mode and cmd-mode contexts.
+ * produces correct output for both project and cwd-scoped contexts.
  */
 
 import { EXPLORE_AGENT } from '../exploreAgent'
@@ -10,6 +10,8 @@ import { RESEARCH_AGENT } from '../researchAgent'
 import { VERIFY_AGENT } from '../verifyAgent'
 import { BUILT_IN_AGENTS, getAgentDefinition } from '../builtInAgents'
 import type { SubAgentParentContext } from '../types'
+
+const LEGACY_MODE_LABEL = ['Terminal', 'Mode'].join(' ')
 
 const CHAT_CTX: SubAgentParentContext = {
   cmdOnlyMode: false,
@@ -92,14 +94,15 @@ describe('Explore agent prompt', () => {
     expect(prompt).toContain('respond in en')
   })
 
-  it('includes Terminal Mode line when cmdOnlyMode is true', () => {
+  it('includes cwd guidance when cmdOnlyMode is true', () => {
     const prompt = EXPLORE_AGENT.getSystemPrompt(CMD_CTX)
-    expect(prompt).toContain('Terminal Mode')
+    expect(prompt).toContain('CWD is the working directory for tool calls')
+    expect(prompt).not.toContain(LEGACY_MODE_LABEL)
   })
 
-  it('does NOT include Terminal Mode line when cmdOnlyMode is false', () => {
+  it('does NOT mention the legacy mode label when cmdOnlyMode is false', () => {
     const prompt = EXPLORE_AGENT.getSystemPrompt(CHAT_CTX)
-    expect(prompt).not.toContain('Terminal Mode')
+    expect(prompt).not.toContain(LEGACY_MODE_LABEL)
   })
 })
 
@@ -137,9 +140,10 @@ describe('Research agent prompt', () => {
     expect(prompt).toContain('Completion')
   })
 
-  it('includes Terminal Mode line when cmdOnlyMode is true', () => {
+  it('includes cwd guidance when cmdOnlyMode is true', () => {
     const prompt = RESEARCH_AGENT.getSystemPrompt(CMD_CTX)
-    expect(prompt).toContain('Terminal Mode')
+    expect(prompt).toContain('CWD is the working directory for tool calls')
+    expect(prompt).not.toContain(LEGACY_MODE_LABEL)
   })
 })
 
@@ -187,8 +191,8 @@ describe('Verify agent prompt', () => {
     expect(VERIFY_AGENT.disallowedTools).toContain('edit_file')
   })
 
-  it('does NOT include Terminal Mode line when cmdOnlyMode is false', () => {
+  it('does NOT mention the legacy mode label when cmdOnlyMode is false', () => {
     const prompt = VERIFY_AGENT.getSystemPrompt(CHAT_CTX)
-    expect(prompt).not.toContain('Terminal Mode')
+    expect(prompt).not.toContain(LEGACY_MODE_LABEL)
   })
 })

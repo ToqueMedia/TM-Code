@@ -55,9 +55,8 @@ Implement this following the exact API contracts in the skills. Use the project'
     addUserMessage: true,
     userMessageText: `/payments ${args}`,
     useConversationHistory: true,
-    // CMD mode → enable cwd-scoped tool executor; otherwise file writes
-    // fail with "No project is open" because useProjectStore.currentProject
-    // is never set in CMD.
+    // Enable cwd-scoped tool execution when needed; otherwise file writes
+    // may fail with "No project is open" if currentProject is not populated.
     cmdOnlyMode: mode === 'terminal',
   })
 }

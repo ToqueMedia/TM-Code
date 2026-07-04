@@ -21,8 +21,8 @@ import { logger } from '../../../utils/logger'
  * context blocks. The agent gets a single, self-contained instruction with
  * everything needed to implement — no round-trip to read_skill mid-turn.
  *
- * Works in BOTH chat and CMD modes — wired in `usePromptBar.ts` and
- * `useCmdPromptLogic.ts` (handleSend / executePrompt branch).
+ * Wired in both prompt inputs (`usePromptBar.ts` and `useCmdPromptLogic.ts`)
+ * through the handleSend / executePrompt branches.
  */
 
 export type Provider = 'email-password' | 'google'

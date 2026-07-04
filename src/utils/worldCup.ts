@@ -2,7 +2,7 @@
 //
 // A successful, user-initiated agent run "scores a goal": a short burst plays
 // on whichever surface is active (chat/welcome get a framer-motion confetti
-// pop; terminal mode gets a hard-step ASCII kick that respects the
+// pop; the shell-styled surface gets a hard-step ASCII kick that respects the
 // refined-terminal contract). This module is the single source of truth for
 // the feature flag, palette and timing so the seasonal code is trivial to tune
 // or pull in one place.
@@ -19,8 +19,8 @@ export const GOAL_BURST_MS = 1600
 /**
  * Confetti palette for the GUI burst — dominant TM brand hues (pink → purple)
  * plus white and a single trophy-gold accent so it reads as celebratory
- * without leaving the brand. NOTE: terminal mode does NOT use this palette —
- * the refined-terminal contract allows only the single purple accent there.
+ * without leaving the brand. NOTE: the shell-styled surface does NOT use this
+ * palette; the refined-shell contract allows only the single purple accent there.
  */
 export const GOAL_CONFETTI_COLORS = [
   '#FE1063', // accent.primary

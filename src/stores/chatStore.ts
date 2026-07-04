@@ -551,9 +551,9 @@ export async function createDiffApprovalPromise(toolCallId: string): Promise<boo
     return true
   }
 
-  // CMD mode guard: the tool executor writes files directly to disk and
+  // Cwd-scoped guard: the tool executor writes files directly to disk and
   // marks diffStatus='approved' via updateToolCallWithResult (alreadyApplied=true)
-  // BEFORE this promise is created. Since CMD mode never populates pendingDiffs
+  // BEFORE this promise is created. Since this path never populates pendingDiffs
   // and never shows an approval UI, nobody would call resolveDiffApproval —
   // the promise would block for 30 min. Check the toolCall's diffStatus and
   // resolve immediately if already approved.
@@ -1527,7 +1527,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         // to "hidden" on the very same render that draws the new user
         // bubble (no momentary stale flash carried over from the previous
         // turn). One source of truth for "a new user message starts a
-        // fresh token budget for the UI" — covers chat-mode AND slash
+        // fresh token budget for the UI" — covers prompt AND slash
         // command paths.
         return {
           sessions: updatedSessions,
@@ -2361,11 +2361,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
                 diffOldContent = parsed.oldContent
                 diffNewContent = parsed.newContent
                 isNewFile = parsed.isNewFile
-                // CMD mode writes directly to disk and marks the diff as
-                // alreadyApplied — skip the approval queue entirely. Chat
-                // mode always starts pending and waits for user approval.
+                // Cwd-scoped execution writes directly to disk and marks the diff as
+                // alreadyApplied — skip the approval queue entirely. Project
+                // diff flow starts pending and waits for user approval.
                 // The "accepted" badge must only appear after a real write
-                // happens on disk (chat mode: DiffService.acceptDiff; cmd
+                // happens on disk (project flow: DiffService.acceptDiff; direct
                 // mode: the tool itself) — otherwise an aborted/failed write
                 // would leave the UI claiming the file was saved when it
                 // wasn't.
@@ -2375,7 +2375,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
                   diffStatus = 'pending'
 
                   // Create DiffResult for DiffService + GeneratingView.
-                  // Skipped in cmd mode — there's no approval flow to drive.
+                  // Skipped for direct disk writes — there's no approval flow to drive.
                   const id = crypto.randomUUID()
                   diffResultId = id
                   newDiff = {
@@ -2637,7 +2637,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const session = sessions.get(activeSessionId)
         if (!session) return state
 
-        // Capture per-turn stats for the assistant footer (CMD mode shows
+        // Capture per-turn stats for the assistant footer (the shell-styled surface shows
         // a "✓ 2.3s · ↑12k ↓4k" summary line below each completed reply).
         // tokens here is the per-REQUEST counter — addTokenUsage accumulates
         // across tool loops within the same turn — so it represents the

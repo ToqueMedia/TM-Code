@@ -6,7 +6,7 @@
 
 import { memo, useSyncExternalStore } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
-import { FiX } from 'react-icons/fi'
+import { FiClock, FiX } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import {
   getCommandQueueSnapshot,
@@ -55,25 +55,22 @@ function QueuedMessagesPreview() {
           align="center"
           gap={2}
           px={3}
-          py={1.5}
+          py={2}
           borderRadius="8px"
-          bg="rgba(254, 16, 99, 0.06)"
-          border={`1px solid rgba(254, 16, 99, 0.15)`}
+          bg="rgba(254, 16, 99, 0.055)"
+          border="1px solid rgba(254, 16, 99, 0.16)"
           mb={index < visibleCommands.length - 1 ? 1 : 0}
+          boxShadow="inset 2px 0 0 rgba(254, 16, 99, 0.45)"
         >
-          <Box
-            w="6px"
-            h="6px"
-            borderRadius="full"
-            bg={tokens.colors.accent.primary}
-            opacity={0.6}
-            flexShrink={0}
-          />
+          <Box color={tokens.colors.accent.primary} display="flex" flexShrink={0}>
+            <FiClock size={13} />
+          </Box>
           <Text
-            fontSize={tokens.fontSize.sm}
+            fontSize="12px"
             color={tokens.colors.text.secondary}
             lineClamp={1}
             flex={1}
+            fontWeight="500"
           >
             {previewText(cmd.value)}
           </Text>
@@ -81,6 +78,9 @@ function QueuedMessagesPreview() {
             fontSize={tokens.fontSize.xs}
             color={tokens.colors.text.disabled}
             flexShrink={0}
+            fontFamily={tokens.fontFamily.mono}
+            textTransform="uppercase"
+            letterSpacing="0.06em"
           >
             queued
           </Text>
@@ -98,6 +98,7 @@ function QueuedMessagesPreview() {
             _hover={{ color: tokens.colors.accent.red, bg: tokens.colors.accent.redSubtle }}
             transition={tokens.transition.fast}
             onClick={() => removeFromQueue([cmd])}
+            aria-label="Remove queued message"
           >
             <FiX size={12} />
           </Box>

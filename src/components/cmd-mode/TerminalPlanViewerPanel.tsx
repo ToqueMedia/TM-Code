@@ -20,12 +20,12 @@ interface TerminalPlanViewerPanelProps {
 const PANEL_WIDTH = '640px'
 
 /**
- * Painel lateral (estilo Terminal Mode) que mostra o PLAN.md renderizado.
+ * Painel lateral (estilo shell) que mostra o PLAN.md renderizado.
  *
- * Em Chat mode esta função é do PlanViewerPanel, montado no MainLayout. O
- * TerminalView NÃO monta esse painel, por isso o botão "Ver Plano Completo"
+ * No layout principal esta função é do PlanViewerPanel. O TerminalView NÃO
+ * monta esse painel, por isso o botão "Ver Plano Completo"
  * (TerminalPlanApprovalCard → setPlanViewerOpen) alternava o estado sem nada a
- * ouvir — o plano nunca aparecia. Este componente é o ouvinte em Terminal mode.
+ * ouvir — o plano nunca aparecia. Este componente é o ouvinte desta superfície.
  *
  * Contrato refined-terminal: mono, chrome plano, acento roxo único, sem tweens
  * bombásticos (apenas uma transição de largura). Push-from-right como o
@@ -33,7 +33,7 @@ const PANEL_WIDTH = '640px'
  * flex=1/minW=0 e encolhe suavemente.
  *
  * Escape é tratado pelo TerminalView (listener de captura à janela), que fecha
- * este painel ANTES de sair do CMD mode — por isso aqui não há listener próprio
+ * este painel ANTES de sair desta superfície — por isso aqui não há listener próprio
  * de Escape (evita duplo tratamento).
  */
 function TerminalPlanViewerPanel({ projectPath }: TerminalPlanViewerPanelProps) {

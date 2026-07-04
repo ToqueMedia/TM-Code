@@ -1,15 +1,15 @@
 /**
- * ContextBuilder — chat-mode + cmd-mode system-prompt orchestrator.
+ * ContextBuilder — system-prompt orchestrator.
  *
  * **Where the content lives** (May 2026 slice):
  *
  *   - Module-level helpers and constants  →  `contextBuilder/helpers.ts`
  *   - Shared types (PromptContext etc.)   →  `contextBuilder/types.ts`
  *   - File-tree / pkg / lang utilities    →  `contextBuilder/projectUtils.ts`
- *   - Cross-mode shared snippets          →  `contextBuilder/sections/sharedSections.ts`
+ *   - Shared snippets                     →  `contextBuilder/sections/sharedSections.ts`
  *   - The big Publishing section          →  `contextBuilder/sections/chatPublishing.ts`
- *   - Chat-mode section builders          →  `contextBuilder/sections/chatSections.ts`
- *   - CMD-mode section builders           →  `contextBuilder/sections/cmdSections.ts`
+ *   - Project prompt section builders     →  `contextBuilder/sections/chatSections.ts`
+ *   - Cwd-scoped section builders         →  `contextBuilder/sections/cmdSections.ts`
  *
  * This file keeps the class itself: cache state, the public
  * `buildSystemPrompt` / `buildCmdModeSystemPrompt` entry points, and
@@ -30,6 +30,7 @@ import {
   extractCriticalSectionsWithStats,
   sanitizeProjectContent as _sanitizeProjectContent,
   skillsFromHashtags,
+  stablePromptHash,
   splitOnBoundary,
 } from './contextBuilder/helpers'
 import type {
@@ -49,6 +50,7 @@ import {
   gatherRecentFiles,
   getLangInstruction,
   readPathAliases,
+  readProjectManifest,
   readTemplateManifest,
   safeReadFile,
 } from './contextBuilder/projectUtils'
@@ -64,7 +66,7 @@ import {
   sharedMcpBlock,
   sharedMcpIndexBlock,
   sharedOutputEfficiency,
-  sharedTerminalAgentLoop,
+  sharedShellExecutionLoop,
   sharedToneAndStyle,
   sharedTurnEfficiency,
   sharedTasteDefaults,
@@ -146,6 +148,17 @@ import {
 } from './contextBuilder/auxiliaryRegistry'
 import { getTmsTurnTelemetry, markProjectSymbolIndexRequested } from './tmsContext'
 
+type IntentOverride = {
+  profile: PromptProfile
+  readOnly: boolean
+  requiresMutation?: boolean
+  reason?: string
+  source?: 'model' | 'fallback' | 'keyword'
+  confidence?: 'high' | 'medium' | 'low' | 'none'
+  error?: string
+  diagnostics?: RouterDiagnostics
+}
+
 // ── Re-exports — keep the legacy import surface so external callers (tests,
 // other services) don't have to update their import paths after the slice. ──
 
@@ -158,7 +171,7 @@ export {
 export type { PromptContext, CmdPromptContext, MCPToolSummary, PackageSummary }
 
 /**
- * Helper for CMD-mode memory index loading. Loads the MEMORY.md index
+ * Helper for cwd-scoped memory index loading. Loads the MEMORY.md index
  * and mtime map in parallel, checks for stale entries.
  * Consolidates the two identical IIFEs that were previously inline.
  */
@@ -410,7 +423,8 @@ class ContextBuilder {
   /**
    * Invalidate cached prompts for a project (or all projects if omitted).
    * Call after write operations that touch README.md, TMS.md, PLAN.md, TODO.md,
-   * package.json, .toquemedia-template, or .toquemedia-id. The last one matters:
+   * package.json, .toquemedia/project.json, .toquemedia-template, or
+   * .toquemedia-id. The last one matters:
    * if the agent writes .toquemedia-id mid-session (standardization pass), the
    * next prompt must reflect tm_code_owned=true, not the cached false.
    */
@@ -549,7 +563,7 @@ class ContextBuilder {
     }
   }
 
-  async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[], coreToolCount?: number, userMessage?: string, accessedPaths?: string[], intentOverride?: { profile: PromptProfile; readOnly: boolean; reason?: string; source?: 'model' | 'fallback' | 'keyword'; confidence?: 'high' | 'medium' | 'low' | 'none'; error?: string; diagnostics?: RouterDiagnostics }): Promise<string> {
+  async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[], coreToolCount?: number, userMessage?: string, accessedPaths?: string[], intentOverride?: IntentOverride): Promise<string> {
     // Cache key must include everything that affects the prompt shape.
     // Plan is read below; include it in the key so plan switches bypass the cache.
     let planKey = 'unknown'
@@ -598,6 +612,7 @@ class ContextBuilder {
       mentionedFiles: accessedPaths,
     })
     const readOnly = intentOverride?.readOnly ?? false
+    const requiresMutation = !readOnly && intentOverride?.requiresMutation === true
     let contextPlan: Awaited<ReturnType<typeof planContextWithModel>>
     let plannerFailure: ContextPlannerError | null = null
     try {
@@ -651,6 +666,7 @@ class ContextBuilder {
         fallbackReason: contextPlan.fallbackReason,
         selectionReason: contextPlan.reason,
       },
+      requiresMutation,
     )
     this.lastAuxiliarySelection = auxSelection
     const contextPlanSig = [
@@ -659,34 +675,9 @@ class ContextBuilder {
       auxSelection.contextPlan.candidateContexts.join(','),
       auxSelection.contextPlan.toolGroups?.join(',') ?? '',
     ].join('|')
-    const cacheKey = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|${mcpSig}|${stickyHashtagSig}|fs${fsVersion}|ac${accessedCount}|p${auxProfile}|ro${auxSelection.readOnly ? 1 : 0}|cp${contextPlanSig}`
+    const cacheKeyBase = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|${mcpSig}|${stickyHashtagSig}|fs${fsVersion}|ac${accessedCount}|p${auxProfile}|ro${auxSelection.readOnly ? 1 : 0}|mut${auxSelection.requiresMutation ? 1 : 0}|cp${contextPlanSig}`
 
     const now = Date.now()
-    const cached = this.promptCache.get(cacheKey)
-    if (cached && cached.expiresAt > now) {
-      // Cache-hit telemetry — cheap, lets us measure hit rate. The bytes
-      // metric is still useful even when cached because the value matches
-      // the original miss's bytes; the proxy uses these to monitor the
-      // static/dynamic split health over time.
-      emitPromptBuiltTelemetry({
-        mode: 'chat',
-        cacheHit: true,
-        prompt: cached.prompt,
-        plan: planKey,
-        agentLang: agentLangKey,
-        fsVersion,
-        mcpToolCount: (mcpTools ?? []).length,
-        loadedSkillNames: [],
-      })
-      // Restore the auxiliary ctx from the cache entry so the on-demand
-      // `request_context` loader (needs pmDetected for scaffolding/install)
-      // works even when the prompt itself is served from cache.
-      this.lastAuxiliaryCtx = cached.auxiliaryCtx ?? null
-      if (cached.symbolIndexTelemetry) {
-        markProjectSymbolIndexRequested(cached.symbolIndexTelemetry)
-      }
-      return cached.prompt
-    }
     // Kick off memory work IMMEDIATELY so its network call (selector
     // model side-car, ~300-600 ms) overlaps with everything else this
     // function does: disk I/O, scaffolding detection, MCP refresh,
@@ -699,10 +690,11 @@ class ContextBuilder {
 
     // Gather context in parallel for speed
     const { detectScaffolding } = await import('../scaffoldingDetector')
-    const [treeString, pkgSummary, readme, templateManifest, tmsContent, planContent, todoContent, toquemediaIdRaw, appliedScaffolding, gitContext, recentFiles, pathAliases] = await Promise.all([
+    const [treeString, pkgSummary, readme, projectManifest, templateManifest, tmsContent, planContent, todoContent, toquemediaIdRaw, appliedScaffolding, gitContext, recentFiles, pathAliases] = await Promise.all([
       buildFileTree(projectPath),
       extractPackageSummary(projectPath),
       safeReadFile(`${projectPath}/README.md`),
+      readProjectManifest(projectPath),
       readTemplateManifest(projectPath),
       safeReadFile(`${projectPath}/TMS.md`),
       safeReadFile(`${projectPath}/PLAN.md`),
@@ -815,6 +807,7 @@ class ContextBuilder {
       tmsContent,
       planContent,
       todoContent,
+      projectManifest,
       templateManifest,
       langInstruction,
       modelProfile,
@@ -851,6 +844,58 @@ class ContextBuilder {
       if (body) auxLoadedContent[l.id] = body
     }
     const onDemandIndex = buildOnDemandIndex(auxSelection)
+    const dynamicCacheSig = stablePromptHash(JSON.stringify({
+      userMessage: userMessage ?? '',
+      accessedPaths: accessedPaths ?? [],
+      treeString,
+      pkgSummary,
+      readme,
+      projectManifest,
+      templateManifest,
+      tmsContent,
+      planContent,
+      todoContent,
+      toquemediaIdRaw,
+      appliedScaffolding,
+      gitContext,
+      recentFiles,
+      pathAliases,
+      pmDetected,
+      isTemplateProject,
+      isVanillaWeb,
+      loadedSkillNames: loadedSkills.map(s => s.name),
+      currentTasks,
+      userMemoryIndex,
+      projectMemoryIndex,
+      memoryHasStale,
+      pendingMemoryProposals,
+      sessionMemory,
+      teamSection,
+      bgCommandsSection,
+      auxLoadedContent,
+      onDemandIndex,
+    }))
+    const cacheKey = `${cacheKeyBase}|dyn${dynamicCacheSig}`
+    const cached = this.promptCache.get(cacheKey)
+    if (cached && cached.expiresAt > now) {
+      // Cache hits are allowed only after per-turn inputs have been gathered
+      // and hashed. Returning earlier risks serving stale memory, tracker, or
+      // session state even though those sections live below the dynamic marker.
+      emitPromptBuiltTelemetry({
+        mode: 'chat',
+        cacheHit: true,
+        prompt: cached.prompt,
+        plan: planKey,
+        agentLang: agentLangKey,
+        fsVersion,
+        mcpToolCount: (mcpTools ?? []).length,
+        loadedSkillNames: ctx.loadedSkillNames,
+      })
+      if (cached.symbolIndexTelemetry) {
+        markProjectSymbolIndexRequested(cached.symbolIndexTelemetry)
+      }
+      return cached.prompt
+    }
 
     const sections = [
       // ── Static block (cacheable cross-session) ──────────────────
@@ -859,25 +904,12 @@ class ContextBuilder {
       sharedIdentity(),
       getModelSpecificSection(ctx),
       getSystemSection(),
-      getDoingTasksSection(ctx, {
-        scaffoldingInstall: auxLoadedContent['scaffold.workflow'] ?? null,
-      }),
+      getDoingTasksSection(ctx),
       getExecutingActionsSection(),
-      sharedTerminalAgentLoop('chat'),
+      sharedShellExecutionLoop('chat'),
       getClosedLoopSection(),
       getToolsSection(ctx),
-      getConstraintsSection(ctx, {
-        publishing: auxLoadedContent['delivery.deploy'] ?? null,
-        vision: auxLoadedContent['vision.image_rules'] ?? null,
-        auth: auxLoadedContent['auth_database.provision'] ?? null,
-        devServer: auxLoadedContent['delivery.dev_server'] ?? null,
-      }),
-      auxLoadedContent['design_system.semantic_tokens'] ?? '',
-      auxLoadedContent['design_system.theme_config'] ?? '',
-      auxLoadedContent['design_system.brand_palette'] ?? '',
-      auxLoadedContent['design_system.chakra_recipes'] ?? '',
-      auxLoadedContent['design_system.component_patterns'] ?? '',
-      auxLoadedContent['ui_patterns'] ?? '',
+      getConstraintsSection(ctx),
       sharedToneAndStyle(),
       sharedOutputEfficiency(),
       sharedContextPreservation(),
@@ -900,6 +932,27 @@ class ContextBuilder {
       // developer established). Below the cache boundary because the indexes
       // mutate when the model saves/forgets memories mid-session, so static-
       // caching them would serve stale content.
+      dynamicSection('scaffold_workflow', () => auxLoadedContent['scaffold.workflow'] ?? null,
+        'scaffold workflow auxiliary is selected only for project-bootstrap tasks'),
+      dynamicSection('additional_constraints', () => [
+        auxLoadedContent['vision.image_rules'] ?? '',
+        auxLoadedContent['auth_database.provision'] ?? '',
+        auxLoadedContent['delivery.dev_server'] ?? '',
+        auxLoadedContent['delivery.deploy'] ?? '',
+      ].filter(Boolean).join('\n\n') || null,
+        'constraint auxiliaries are selected per intent/project and may be absent'),
+      dynamicSection('design_system_semantic_tokens', () => auxLoadedContent['design_system.semantic_tokens'] ?? null,
+        'design-system auxiliary is selected per intent/project and may be absent'),
+      dynamicSection('design_system_theme_config', () => auxLoadedContent['design_system.theme_config'] ?? null,
+        'theme auxiliary is selected per intent/project and may be absent'),
+      dynamicSection('design_system_brand_palette', () => auxLoadedContent['design_system.brand_palette'] ?? null,
+        'brand palette auxiliary is selected per intent/project and may be absent'),
+      dynamicSection('design_system_chakra_recipes', () => auxLoadedContent['design_system.chakra_recipes'] ?? null,
+        'Chakra recipe auxiliary is selected per intent/project and may be absent'),
+      dynamicSection('design_system_component_patterns', () => auxLoadedContent['design_system.component_patterns'] ?? null,
+        'component pattern auxiliary is selected per intent/project and may be absent'),
+      dynamicSection('ui_patterns', () => auxLoadedContent['ui_patterns'] ?? null,
+        'UI pattern auxiliary is selected per intent/project and may be absent'),
       dynamicSection('memory', () => getMemorySection(ctx),
         'MEMORY.md indexes mutate as save_memory / forget_memory run'),
       // Pending auto-extracted proposals — surfaced AFTER the existing
@@ -926,7 +979,7 @@ class ContextBuilder {
       dynamicSection('background_commands', () => bgCommandsSection,
         'running/completed background shell commands'),
       dynamicSection('template_context', () => getTemplateContextSection(ctx),
-        '.toquemedia-template manifest changes when scaffold is re-run'),
+        '.toquemedia/project.json or .toquemedia-template changes when scaffold is re-run'),
       dynamicSection('environment', () => getEnvironmentSection(ctx),
         'project path / package manager / language detected per session'),
       dynamicSection('preview_compatibility', () => getPreviewCompatibilitySection(ctx),
@@ -1036,7 +1089,7 @@ class ContextBuilder {
     homeDir: string | null,
     mcpTools?: { name: string; description: string; serverName: string }[],
     userMessage?: string,
-    intentOverride?: { profile: PromptProfile; readOnly: boolean; reason?: string; source?: 'model' | 'fallback' | 'keyword'; confidence?: 'high' | 'medium' | 'low' | 'none'; error?: string; diagnostics?: RouterDiagnostics },
+    intentOverride?: IntentOverride,
   ): Promise<string> {
     const normalizedCwd = cwd.replace(/\\/g, '/')
     const normalizedHome = homeDir ? homeDir.replace(/\\/g, '/') : null
@@ -1054,6 +1107,9 @@ class ContextBuilder {
               diagnostics: intentOverride.diagnostics,
             }
           : undefined,
+        undefined,
+        undefined,
+        intentOverride.requiresMutation === true,
       )
       : null
 
@@ -1068,8 +1124,8 @@ class ContextBuilder {
           return useChatStore.getState().getActiveSession()?.sessionMemory ?? null
         } catch { return null }
       })(),
-      // Persistent memory indexes — same I/O chat mode does in runMemoryWork,
-      // but without the selector (CMD mode is lighter, indexes are cheap).
+      // Persistent memory indexes — same I/O as runMemoryWork, but without
+      // the selector because indexes are cheap at this point.
       loadCmdMemoryIndex('user'),
       loadCmdMemoryIndex('project', normalizedCwd),
     ])
@@ -1121,7 +1177,7 @@ class ContextBuilder {
       getCmdSystemSection(),
       getCmdDoingTasksSection(),
       getCmdExecutingActionsSection(),
-      sharedTerminalAgentLoop('cmd'),
+      sharedShellExecutionLoop('cmd'),
       getCmdClosedLoopSection(),
       getCmdToolsSection(),
       getCmdSessionGuidanceSection(),
@@ -1132,13 +1188,13 @@ class ContextBuilder {
       sharedOutputEfficiency(),
       sharedContextPreservation(),
       sharedTurnEfficiency(),
-      // Memory taxonomy + save/forget discipline — same static block
-      // position as chat mode. The rules are stable across sessions.
+      // Memory taxonomy + save/forget discipline. The rules are stable
+      // across sessions.
       getCmdMemoryToolsGuidanceSection(),
       // ── Boundary: everything below varies per session / per turn ──
       SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
       // ── Dynamic block (per-session / per-turn) ──────────────────
-      // Wrapped with dynamicSection() — see the chat-mode block for the
+      // Wrapped with dynamicSection() — see the project prompt block for the
       // contract: every section below must declare a non-empty reason or
       // the wrapper throws at build time.
       dynamicSection('mcp', () => sharedMcpBlock(ctx.mcpTools, 'user'),
@@ -1150,7 +1206,7 @@ class ContextBuilder {
       // Scaffolding-aware framing + hashtag-triggered sticky CRITICAL rules.
       // Placed BEFORE the generic skills index so the matched skill rules
       // are read by the model before it sees the generic "skills available"
-      // listing — same ordering chat mode uses. Re-cited by name in the
+      // listing. Re-cited by name in the
       // reminder section below to defeat the U-Curve middle-dip.
       dynamicSection('scaffolding', () => scaffoldingSection,
         'scaffolding markers + sticky hashtag rules depend on user message'),
@@ -1169,7 +1225,7 @@ class ContextBuilder {
         'TMS.md existence is a per-session check (file may be created mid-session)'),
       // Persistent memory — user-scope + project-scope MEMORY.md indexes.
       // Placed after TMS.md content so the model reads project memory first,
-      // then cross-session memory facts. Same ordering as chat mode.
+      // then cross-session memory facts.
       dynamicSection('memory', () => getCmdMemorySection(ctx),
         'MEMORY.md indexes mutate as save_memory / forget_memory run'),
       // Session memory — agent-maintained notes that survive compaction.
@@ -1193,9 +1249,8 @@ class ContextBuilder {
       .slice(0, 15)
 
     const fullCmd = sections.join('\n\n')
-    // CMD mode doesn't have a billing-plan or fsVersion concept (no project
-    // is open at the harness level), so we emit "n/a" for the dimensions
-    // that don't apply rather than forcing dummy values into the schema.
+    // Cwd-scoped prompt builds may not have a billing-plan or fsVersion
+    // concept, so emit "n/a" for dimensions that do not apply.
     emitPromptBuiltTelemetry({
       mode: 'cmd',
       sectionBreakdown: cmdSectionBreakdown,
