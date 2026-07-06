@@ -11,7 +11,10 @@ import { useAuthStore } from '../../stores/authStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
 import { useProblemsStore } from '../../stores/problemsStore'
-import { activatePreview, detectDevCommand } from '../../services/previewActivation'
+import { useToastStore } from '../../stores/toastStore'
+import { activatePreview, detectDevCommand, ensureDevServerRunning } from '../../services/previewActivation'
+import { devServerManager } from '../../services/devServerManager'
+import { improveUserPrompt } from '../../services/promptImprovementService'
 import AgentService from '../../services/agent/agentService'
 import ToolExecutor from '../../services/agent/toolExecutor'
 import ContextBuilder from '../../services/agent/contextBuilder'
@@ -110,6 +113,8 @@ export function usePromptBar() {
   const hasInputContent = useChatStore(s => s.draftInput.trim().length > 0)
   const setInput = useChatStore(s => s.setDraftInput)
   const [devCommand, setDevCommand] = useState<string | null>(null)
+  const [isImprovingPrompt, setIsImprovingPrompt] = useState(false)
+  const [promptImprovementBackup, setPromptImprovementBackup] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const historyIndexRef = useRef(-1)
@@ -126,6 +131,8 @@ export function usePromptBar() {
   const currentProject = useProjectStore(s => s.currentProject)
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewServerRunning = useLayoutStore(selectIsPreviewServerRunning)
+  const devServerStatus = useLayoutStore(s => s.devServer?.status ?? 'stopped')
+  const isPreviewServerLoading = useLayoutStore(s => s.isPreviewServerLoading)
   const previewHtmlContent = useLayoutStore(s => s.previewHtmlContent)
   const scaffoldPhase = useLayoutStore(s => s.scaffoldPhase)
   const isScaffolding = scaffoldPhase === 'installing' || scaffoldPhase === 'starting'
@@ -148,6 +155,9 @@ export function usePromptBar() {
   //   - If no devCommand: switches to preview view (shows "Waiting..." with instructions)
   // This ensures the user can always manually initiate the dev server.
   const hasPreview = !!currentProject?.path || isPreviewServerRunning || !!previewHtmlContent || !!devCommand
+  const canToggleDevServer = !!currentProject?.path || isPreviewServerRunning
+  const isDevServerActive = isPreviewServerRunning
+  const isDevServerStarting = devServerStatus === 'starting' || (isPreviewServerLoading && !isPreviewServerRunning)
 
   // Slash command menu state
   const [showCommandMenu, setShowCommandMenu] = useState(false)
@@ -265,6 +275,7 @@ export function usePromptBar() {
   // Slash command input handler — detect "/" prefix and filter commands
   const handleInputChange = useCallback((value: string) => {
     setInput(value)
+    setPromptImprovementBackup(null)
 
     // Don't reset history index when the change came from history navigation
     if (navigatingHistoryRef.current) {
@@ -1600,6 +1611,61 @@ export function usePromptBar() {
     await activatePreview(currentProject?.path ?? null)
   }, [currentProject?.path])
 
+  const handleImprovePrompt = useCallback(async () => {
+    const original = useChatStore.getState().draftInput
+    const current = original.trim()
+    if (!current || isImprovingPrompt) return
+
+    setIsImprovingPrompt(true)
+    try {
+      const improved = await improveUserPrompt(current)
+      if (improved) {
+        if (useChatStore.getState().draftInput !== original) return
+        setPromptImprovementBackup(original)
+        useChatStore.getState().setDraftInput(improved)
+        requestAnimationFrame(() => {
+          const textarea = textareaRef.current
+          if (!textarea) return
+          textarea.focus()
+          textarea.selectionStart = improved.length
+          textarea.selectionEnd = improved.length
+        })
+      }
+    } catch (err) {
+      logger.warn('prompt', 'Failed to improve prompt:', err)
+      useToastStore.getState().addToast('error', t('prompt.improvePromptFailed'))
+    } finally {
+      setIsImprovingPrompt(false)
+    }
+  }, [isImprovingPrompt])
+
+  const handleUndoImprovePrompt = useCallback(() => {
+    if (promptImprovementBackup === null) return
+    useChatStore.getState().setDraftInput(promptImprovementBackup)
+    const restoredLength = promptImprovementBackup.length
+    setPromptImprovementBackup(null)
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current
+      if (!textarea) return
+      textarea.focus()
+      textarea.selectionStart = restoredLength
+      textarea.selectionEnd = restoredLength
+    })
+  }, [promptImprovementBackup])
+
+  const toggleDevServer = useCallback(async () => {
+    const layout = useLayoutStore.getState()
+
+    if (selectIsPreviewServerRunning(layout) || devServerManager.isActive()) {
+      await devServerManager.stop()
+      textareaRef.current?.focus()
+      return
+    }
+
+    await ensureDevServerRunning(currentProject?.path ?? null, { openPreview: false })
+    textareaRef.current?.focus()
+  }, [currentProject?.path])
+
   return {
     hasInputContent,
     setInput: handleInputChange,
@@ -1612,12 +1678,20 @@ export function usePromptBar() {
     hasPendingCredential,
     viewMode,
     hasPreview,
+    canToggleDevServer,
+    isDevServerActive,
+    isDevServerStarting,
+    isImprovingPrompt,
+    canUndoImprovePrompt: promptImprovementBackup !== null,
     handleSend,
     handleStop,
     handleKeyDown,
     handleBlur,
     toggleEditor,
+    handleImprovePrompt,
+    handleUndoImprovePrompt,
     togglePreview,
+    toggleDevServer,
     // Slash command menu
     showCommandMenu,
     filteredCommands,

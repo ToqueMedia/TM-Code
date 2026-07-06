@@ -1,8 +1,8 @@
 import { query, type QueryParams, type QueryStreamEvent } from '../query'
 import { ToolsetSelector, REQUEST_TOOLS_NAME, BUGFIX_BASE } from '../toolsetSelector'
 import {
-  SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE, GLOB,
-  EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
+  SEARCH_FILES, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EDIT_FILE, GLOB,
+  EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS, UPDATE_SESSION_MEMORY,
   WRITE_FILE, START_DEV_SERVER, PROVISION_AUTH,
   READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
 } from '../toolNames'
@@ -290,8 +290,8 @@ describe('query retry handling', () => {
   it('selects tools from human-authored text, not synthetic @mention/tool_result content', async () => {
     const names = [
       READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
-      SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE, GLOB,
-      EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
+      SEARCH_FILES, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EDIT_FILE, GLOB,
+      EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS, UPDATE_SESSION_MEMORY,
       WRITE_FILE, START_DEV_SERVER, PROVISION_AUTH,
     ]
     const create = makeStreamingCreate([

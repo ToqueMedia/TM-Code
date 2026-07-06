@@ -29,7 +29,16 @@ export interface Attachment {
  *  the correct positions: e.g. `[reasoning, tool_call, tool_call, reasoning]`
  *  rather than collapsing every thinking pass into a single block at the top. */
 export type ContentBlock =
-  | { type: 'text'; text: string }
+  | {
+      type: 'text'
+      text: string
+      /**
+       * Visible in the transcript UI, but excluded when rebuilding model
+       * history from legacy UI state. Used for app-generated progress text
+       * that is not provider output.
+       */
+      uiOnly?: boolean
+    }
   | { type: 'tool_call'; toolCallId: string }
   | {
       type: 'reasoning'

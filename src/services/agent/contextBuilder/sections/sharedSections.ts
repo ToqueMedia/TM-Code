@@ -33,6 +33,7 @@ import {
   LIST_DIRECTORY,
   LS_ALIAS,
   GREP_ALIAS,
+  READ_AROUND,
   READ_ALIAS,
   READ_FILE,
   SEARCH_FILES,
@@ -211,6 +212,7 @@ Operate like an interactive shell operator, not a script generator.
  - **Use persistent shell for interactive state**: when you need to stay inside a shell, SSH session, REPL, or stateful CLI, call \`${AGENT_SHELL_START}\`, then send one input line at a time with \`${AGENT_SHELL_WRITE}\`, observe with \`${AGENT_SHELL_READ}\`, and finish with \`${AGENT_SHELL_STOP}\`. The start result includes \`platform\` and \`command_style\`; obey it. On Windows, \`command_style: posix\` means Git Bash is active and POSIX commands are appropriate; \`powershell\` or \`cmd\` means use native Windows syntax until you enter a remote Unix shell. Example: start shell → write \`ssh root@host\` → read prompt → write \`apt-get update\` → read → write \`DEBIAN_FRONTEND=noninteractive apt-get upgrade -yq\`.
  - **Use shell for shell work only**: use dedicated tools for file/code exploration, and \`${EXECUTE_COMMAND}\` for everything else. Prefer the Claude-like aliases; TM Code maps them internally:
    - \`${READ_ALIAS}\` — read file contents (internal \`${READ_FILE}\`; replaces \`cat\`, \`head\`, \`tail\`, \`sed -n\`)
+   - \`${READ_AROUND}\` — read a bounded window around a known line from search results
    - \`${GREP_ALIAS}\` — search text/patterns in files (internal \`${SEARCH_FILES}\`; replaces \`grep\`, \`rg\`, \`ack\`)
    - \`${LS_ALIAS}\` — list directory contents (internal \`${LIST_DIRECTORY}\`; replaces \`ls\`, \`tree\`)
    - \`${GLOB_ALIAS}\` — find files by pattern (internal \`${GLOB}\`; replaces \`find\`, \`fd\`)

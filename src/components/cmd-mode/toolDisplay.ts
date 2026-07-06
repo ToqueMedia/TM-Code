@@ -17,6 +17,7 @@ export type ToolDisplay = {
 
 const TOOL_DISPLAY: Record<string, ToolDisplay> = {
   read_file: { running: 'Reading', done: 'Read', failed: 'Read failed' },
+  read_around: { running: 'Reading nearby lines', done: 'Read nearby lines', failed: 'Nearby read failed' },
   write_file: { running: 'Writing', done: 'Wrote', failed: 'Write failed' },
   create_file: { running: 'Creating', done: 'Created', failed: 'Create failed' },
   edit_file: { running: 'Editing', done: 'Edited', failed: 'Edit failed' },

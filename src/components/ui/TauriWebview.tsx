@@ -30,6 +30,7 @@ interface TauriWebviewProps {
   html?: string
   reloadKey?: number
   frozen?: boolean
+  onLocationChange?: (url: string) => void
   /**
    * Pixels to subtract from the webview's bottom edge. Used when an overlay
    * (e.g. the Data Viewer drawer) takes the lower portion of the preview
@@ -54,9 +55,19 @@ function htmlToDataUri(html: string): string {
 // Windows / Linux — plain iframe
 // ═══════════════════════════════════════════════════════════════
 
-const IframePreview = memo(forwardRef<TauriWebviewHandle, TauriWebviewProps>(function IframePreview({ url, html, reloadKey = 0 }, ref) {
+const IframePreview = memo(forwardRef<TauriWebviewHandle, TauriWebviewProps>(function IframePreview({ url, html, reloadKey = 0, onLocationChange }, ref) {
   const resolvedUrl = url || (html ? htmlToDataUri(html) : '')
   const iframeRef = useRef<HTMLIFrameElement>(null)
+
+  const syncLocation = useCallback(() => {
+    if (!onLocationChange) return
+    try {
+      const href = iframeRef.current?.contentWindow?.location.href
+      if (href) onLocationChange(href)
+    } catch {
+      if (url) onLocationChange(url)
+    }
+  }, [onLocationChange, url])
 
   const navigate = useCallback((script: (win: Window) => void): boolean => {
     const win = iframeRef.current?.contentWindow
@@ -85,6 +96,7 @@ const IframePreview = memo(forwardRef<TauriWebviewHandle, TauriWebviewProps>(fun
           key={`${resolvedUrl}-${reloadKey}`}
           src={resolvedUrl}
           title="Preview"
+          onLoad={syncLocation}
           style={{
             width: '100%',
             height: '100%',
@@ -155,7 +167,7 @@ function parkPreviewWebview(): void {
   firePreviewInvoke('resize_preview_webview', { x: -9999, y: -9999, width: 1, height: 1 })
 }
 
-const MacWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function MacWebview({ url, html, reloadKey = 0, frozen = false, bottomReserveHeight = 0 }, ref) {
+const MacWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function MacWebview({ url, html, reloadKey = 0, frozen = false, bottomReserveHeight = 0, onLocationChange }, ref) {
   const containerRef = useRef<HTMLDivElement>(null)
   const rafRef = useRef<number>(0)
   // Last rect actually sent to the Rust side. Skipping IPCs when the rect
@@ -270,6 +282,16 @@ const MacWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function Ma
   }, [syncPosition])
 
   useEffect(() => {
+    if (!onLocationChange) return
+    const handleLocation = (event: Event) => {
+      const detail = (event as CustomEvent<{ url?: string }>).detail
+      if (detail?.url) onLocationChange(detail.url)
+    }
+    window.addEventListener('preview-location', handleLocation)
+    return () => window.removeEventListener('preview-location', handleLocation)
+  }, [onLocationChange])
+
+  useEffect(() => {
     const el = containerRef.current
     if (!el) return
     const observer = new ResizeObserver(scheduleSync)
@@ -331,7 +353,7 @@ const TauriWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function 
 
 export default TauriWebview
 
-/** Explicitly close the preview webview (e.g., stop server).
+/** Explicitly close the preview webview (e.g., leaving Preview view).
  *  No-op on non-macOS (iframe just unmounts with the React tree). */
 export function closePreviewWebview() {
   if (IS_MAC && nativePreviewUrl && !pageIsUnloading) {

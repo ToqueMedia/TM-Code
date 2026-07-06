@@ -37,10 +37,16 @@ pub struct QueryResult {
     pub rows: Vec<Vec<CellValue>>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ExecuteResult {
+    #[serde(rename = "rowsAffected")]
+    pub rows_affected: usize,
+}
+
 /// Opens the project's `dev.db` in read-only mode. Refuses any path that
 /// resolves outside `<project_path>/dev.db` (mirrors the JS-side
 /// `validatePathWithinProject` from toolExecutor.ts:644).
-fn open_dev_db(project_path: &str) -> Result<Connection, String> {
+fn open_dev_db_with_flags(project_path: &str, flags: OpenFlags) -> Result<Connection, String> {
     let project = Path::new(project_path);
     if !project.exists() || !project.is_dir() {
         return Err(format!("Project path does not exist: {}", project_path));
@@ -59,8 +65,12 @@ fn open_dev_db(project_path: &str) -> Result<Connection, String> {
         ));
     }
 
-    Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    Connection::open_with_flags(&db_path, flags)
         .map_err(|e| format!("Failed to open dev.db: {}", e))
+}
+
+fn open_dev_db(project_path: &str) -> Result<Connection, String> {
+    open_dev_db_with_flags(project_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
 }
 
 /// Gate every query on a leading `SELECT` (case-insensitive, comments stripped).
@@ -73,6 +83,20 @@ fn ensure_read_only_statement(sql: &str) -> Result<(), String> {
     }
     Err(format!(
         "Only SELECT and PRAGMA table_info(...) statements are allowed in the data viewer (got: {}...)",
+        &sql[..sql.len().min(40)]
+    ))
+}
+
+/// Gate Data Viewer mutations to single-row DML composed by the renderer.
+/// Arbitrary DDL/schema changes stay out of this path.
+fn ensure_mutating_statement(sql: &str) -> Result<(), String> {
+    let trimmed = strip_leading_comments(sql).trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("insert") || lower.starts_with("update") || lower.starts_with("delete") {
+        return Ok(());
+    }
+    Err(format!(
+        "Only INSERT, UPDATE, and DELETE statements are allowed in the data viewer mutation path (got: {}...)",
         &sql[..sql.len().min(40)]
     ))
 }
@@ -113,6 +137,39 @@ fn value_ref_to_cell(v: ValueRef) -> CellValue {
     }
 }
 
+fn json_params_to_rusqlite(
+    params: Vec<serde_json::Value>,
+) -> (Vec<Box<dyn rusqlite::ToSql>>, Vec<String>) {
+    let mut keepalive: Vec<String> = Vec::new();
+    let converted: Vec<Box<dyn rusqlite::ToSql>> = params
+        .into_iter()
+        .map(|v| -> Box<dyn rusqlite::ToSql> {
+            match v {
+                serde_json::Value::Null => Box::new(rusqlite::types::Null),
+                serde_json::Value::Bool(b) => Box::new(b),
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        Box::new(i)
+                    } else if let Some(f) = n.as_f64() {
+                        Box::new(f)
+                    } else {
+                        let text = n.to_string();
+                        keepalive.push(text.clone());
+                        Box::new(text)
+                    }
+                }
+                serde_json::Value::String(s) => Box::new(s),
+                other => {
+                    let text = other.to_string();
+                    keepalive.push(text.clone());
+                    Box::new(text)
+                }
+            }
+        })
+        .collect();
+    (converted, keepalive)
+}
+
 /// Run a SELECT or PRAGMA table_info(...) against the project's dev.db.
 ///
 /// Parameters are forwarded verbatim — the viewer is responsible for using
@@ -137,26 +194,7 @@ pub async fn data_viewer_dev_query(
         .map(|i| stmt.column_name(i).unwrap_or("").to_string())
         .collect();
 
-    let rusqlite_params: Vec<Box<dyn rusqlite::ToSql>> = params
-        .into_iter()
-        .map(|v| -> Box<dyn rusqlite::ToSql> {
-            match v {
-                serde_json::Value::Null => Box::new(rusqlite::types::Null),
-                serde_json::Value::Bool(b) => Box::new(b),
-                serde_json::Value::Number(n) => {
-                    if let Some(i) = n.as_i64() {
-                        Box::new(i)
-                    } else if let Some(f) = n.as_f64() {
-                        Box::new(f)
-                    } else {
-                        Box::new(n.to_string())
-                    }
-                }
-                serde_json::Value::String(s) => Box::new(s),
-                other => Box::new(other.to_string()),
-            }
-        })
-        .collect();
+    let (rusqlite_params, _keepalive) = json_params_to_rusqlite(params);
     let param_refs: Vec<&dyn rusqlite::ToSql> =
         rusqlite_params.iter().map(|b| b.as_ref()).collect();
 
@@ -180,4 +218,28 @@ pub async fn data_viewer_dev_query(
     }
 
     Ok(QueryResult { columns, rows })
+}
+
+/// Execute a controlled INSERT/UPDATE/DELETE against the project's dev.db.
+#[tauri::command]
+pub async fn data_viewer_dev_execute(
+    project_path: String,
+    sql: String,
+    params: Vec<serde_json::Value>,
+) -> Result<ExecuteResult, String> {
+    ensure_mutating_statement(&sql)?;
+    let conn = open_dev_db_with_flags(
+        &project_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+
+    let (rusqlite_params, _keepalive) = json_params_to_rusqlite(params);
+    let param_refs: Vec<&dyn rusqlite::ToSql> =
+        rusqlite_params.iter().map(|b| b.as_ref()).collect();
+
+    let rows_affected = conn
+        .execute(&sql, rusqlite::params_from_iter(param_refs.iter()))
+        .map_err(|e| format!("Execute failed: {}", e))?;
+
+    Ok(ExecuteResult { rows_affected })
 }

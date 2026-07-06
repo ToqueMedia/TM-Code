@@ -1,8 +1,6 @@
 /**
- * Standalone preview activation — detects the dev command, starts the
- * dev server, and switches the layout to preview mode. Extracted from
- * usePromptBar's `togglePreview` so ChatView's header button can
- * trigger the same flow without duplicating detection logic.
+ * Standalone preview/dev-server activation. ChatView and PromptBar share this
+ * so preview opening and manual server start use the same detection path.
  */
 import { invoke } from '@/utils/invokeMetrics'
 import { useLayoutStore, selectIsPreviewServerRunning } from '../stores/layoutStore'
@@ -46,17 +44,20 @@ export async function detectDevCommand(projectPath: string): Promise<string | nu
   return null
 }
 
-/**
- * Activate the preview for a project:
- *  1. If already in preview mode → do nothing (caller can toggle off via goBack).
- *  2. If server already running or static preview exists → just switch view.
- *  3. Otherwise → detect dev command, start dev server, switch view.
- */
-export async function activatePreview(projectPath: string | null): Promise<void> {
-  const layout = useLayoutStore.getState()
+interface EnsureDevServerOptions {
+  openPreview?: boolean
+}
 
-  // Already in preview — nothing to do (caller handles toggle-off).
-  if (layout.viewMode === 'preview') return
+/**
+ * Ensure the project's dev server is running. When `openPreview` is true,
+ * also switches the layout to Preview; otherwise starts in the background.
+ */
+export async function ensureDevServerRunning(
+  projectPath: string | null,
+  options: EnsureDevServerOptions = {},
+): Promise<boolean> {
+  const openPreview = options.openPreview === true
+  const layout = useLayoutStore.getState()
 
   // Blocked while sharing a team Live Preview: opening the normal preview would
   // start a SECOND dev server for the same project (port collision) and clash
@@ -64,25 +65,27 @@ export async function activatePreview(projectPath: string | null): Promise<void>
   // entry point (header button, menu, agent tool) is covered.
   if (useCollabStore.getState().sharingPreview) {
     useToastStore.getState().addToast('warning', t('team.previewBlockedBySharing'))
-    return
+    return false
   }
 
-  // Server already running or static preview ready → just switch.
-  if (selectIsPreviewServerRunning(layout) || layout.previewHtmlContent) {
-    layout.setViewMode('preview')
-    return
+  // Server already running → optionally switch to preview, but never restart.
+  if (selectIsPreviewServerRunning(layout)) {
+    if (openPreview) layout.setViewMode('preview')
+    return true
   }
 
   // Server already starting → don't restart.
   if (devServerManager.isActive()) {
-    layout.setViewMode('preview')
-    return
+    if (openPreview) layout.setViewMode('preview')
+    return true
   }
 
-  // Switch to preview view immediately so the user sees the loading state.
-  layout.setViewMode('preview')
+  if (openPreview) {
+    // Switch immediately so the user sees the loading state.
+    layout.setViewMode('preview')
+  }
 
-  if (!projectPath) return
+  if (!projectPath) return false
 
   // Detect dev command (just-in-time — detection may not have run yet).
   let cmd: string | null = null
@@ -95,7 +98,10 @@ export async function activatePreview(projectPath: string | null): Promise<void>
   if (!cmd) {
     // No dev command found — preview opens with "Waiting..." state.
     // User can ask the agent to set up and start the server.
-    return
+    if (!openPreview) {
+      useToastStore.getState().addToast('warning', t('team.noDevCommand'))
+    }
+    return false
   }
 
   // One-click contract: a project that was never installed (no node_modules)
@@ -111,7 +117,7 @@ export async function activatePreview(projectPath: string | null): Promise<void>
   if (ensured.status === 'failed') {
     // Error already logged → the PreviewView surfaces the failure state.
     useLayoutStore.getState().setPreviewServerLoading(false)
-    return
+    return false
   }
 
   const freshLayout = useLayoutStore.getState()
@@ -131,8 +137,31 @@ export async function activatePreview(projectPath: string | null): Promise<void>
       ? await resolveFrontendPortHint(projectPath, projectKind)
       : undefined
     await devServerManager.start(projectPath, cmd, { projectKind, frontendPortHint })
+    return true
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     useLayoutStore.getState().addDevServerLog(`Could not start dev server: ${msg}`, 'error')
+    return false
   }
+}
+
+/**
+ * Activate the preview for a project:
+ *  1. If already in preview mode → do nothing (caller can toggle off via goBack).
+ *  2. If server already running or static preview exists → just switch view.
+ *  3. Otherwise → detect dev command, start dev server, switch view.
+ */
+export async function activatePreview(projectPath: string | null): Promise<void> {
+  const layout = useLayoutStore.getState()
+
+  // Already in preview — nothing to do (caller handles toggle-off).
+  if (layout.viewMode === 'preview') return
+
+  // Static preview does not require a dev server.
+  if (layout.previewHtmlContent) {
+    layout.setViewMode('preview')
+    return
+  }
+
+  await ensureDevServerRunning(projectPath, { openPreview: true })
 }

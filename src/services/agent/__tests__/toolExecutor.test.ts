@@ -31,7 +31,23 @@ if (!globalThis.TextEncoder) {
 // every existing `mockInvokeImpl.mockResolvedValue('file content')` call working
 // without touching 48 test bodies.
 const mockInvokeImpl = jest.fn()
-const sigFor = (c: string) => ({ hash: 'h-' + c.length, size: c.length, modifiedMs: 1700000000000 })
+const sigFor = (c: string) => ({ sha256: 'h-' + c.length, hash: 'h-' + c.length, size: c.length, modifiedMs: 1700000000000 })
+const rangeFor = (full: string, args?: unknown) => {
+  const input = (args ?? {}) as { offset?: number; limit?: number }
+  const startLine = Math.max(1, input.offset ?? 1)
+  const lines = full.split('\n')
+  const start = startLine - 1
+  const end = input.limit ? start + input.limit : lines.length
+  const selected = lines.slice(start, end)
+  return {
+    content: selected.join('\n'),
+    signature: sigFor(full),
+    startLine,
+    lineCount: selected.length,
+    totalLines: lines.length,
+    hasMore: end < lines.length,
+  }
+}
 const mockInvoke = jest.fn(async (cmd: string, _args?: unknown) => {
   let result = await mockInvokeImpl(cmd, _args)
   // write_file/edit_file internally call the legacy 'read_file' command to
@@ -44,6 +60,14 @@ const mockInvoke = jest.fn(async (cmd: string, _args?: unknown) => {
   }
   if (cmd === 'read_file_with_signature' && typeof result === 'string') {
     return { content: result, signature: sigFor(result) }
+  }
+  if (cmd === 'read_file_range_with_signature' && result === undefined) {
+    const sigResult = await mockInvokeImpl('read_file_with_signature', _args)
+    const full = typeof sigResult === 'string' ? sigResult : (sigResult as { content?: string } | null)?.content
+    if (typeof full === 'string') return rangeFor(full, _args)
+  }
+  if (cmd === 'read_file_range_with_signature' && typeof result === 'string') {
+    return rangeFor(result, _args)
   }
   if (cmd === 'file_signature' && typeof result === 'string') {
     return sigFor(result)
@@ -306,6 +330,129 @@ describe('A: execute() orchestration', () => {
       path: '/projects/test-app/src/App.tsx',
     })
     expect(mockInvokeImpl.mock.calls.filter(([cmd]) => cmd === 'read_file_with_signature')).toHaveLength(2)
+    expect(mockInvokeImpl.mock.calls.filter(([cmd]) => cmd === 'read_file_range_with_signature')).toHaveLength(0)
+  })
+
+  it('read_around reads only the requested local line window', async () => {
+    const exec = freshExecutor()
+    const content = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join('\n')
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'read_file_with_signature') return content
+      return undefined
+    })
+
+    const result = await exec.execute('read_around', {
+      file_path: 'src/App.tsx',
+      line: 50,
+      before: 2,
+      after: 3,
+    })
+
+    expect(result).toContain('    48→line 48')
+    expect(result).toContain('    53→line 53')
+    expect(result).not.toContain('    47→line 47')
+    expect(mockInvokeImpl).toHaveBeenCalledWith('read_file_range_with_signature', {
+      path: '/projects/test-app/src/App.tsx',
+      offset: 48,
+      limit: 6,
+    })
+  })
+
+  it('read_file uses a claude-vaz-style full-read fast path for small ranged reads', async () => {
+    const exec = freshExecutor()
+    const content = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join('\n')
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'file_stat') return { size: content.length, modifiedMs: 1700000000000 }
+      if (cmd === 'read_file_range_with_signature') throw new Error('native range reader should not be used for small files')
+      if (cmd === 'read_file_with_signature') return content
+      return undefined
+    })
+
+    const result = await exec.execute('read_file', {
+      file_path: 'src/App.tsx',
+      offset: 10,
+      limit: 3,
+    })
+
+    expect(result).toContain('    10→line 10')
+    expect(result).toContain('    12→line 12')
+    expect(result).not.toContain('     9→line 9')
+    expect(mockInvokeImpl).toHaveBeenCalledWith('read_file_with_signature', {
+      path: '/projects/test-app/src/App.tsx',
+    })
+    expect(mockInvokeImpl.mock.calls.some(([cmd]) => cmd === 'read_file_range_with_signature')).toBe(false)
+  })
+
+  it('read_file uses the native line-range reader for large ranged reads', async () => {
+    const exec = freshExecutor()
+    const content = Array.from({ length: 20_000 }, (_, i) => `line ${i + 1} ${'x'.repeat(20)}`).join('\n')
+    mockInvokeImpl.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'file_stat') return { size: content.length, modifiedMs: 1700000000000 }
+      if (cmd === 'read_file_range_with_signature') return rangeFor(content, args)
+      if (cmd === 'read_file_with_signature') throw new Error('full read should not be used for large ranged reads')
+      return undefined
+    })
+
+    const result = await exec.execute('read_file', {
+      file_path: 'src/App.tsx',
+      offset: 10,
+      limit: 3,
+    })
+
+    expect(result).toContain('    10→line 10')
+    expect(result).toContain('    12→line 12')
+    expect(result).not.toContain('     9→line 9')
+    expect(mockInvokeImpl).toHaveBeenCalledWith('read_file_range_with_signature', {
+      path: '/projects/test-app/src/App.tsx',
+      offset: 10,
+      limit: 3,
+    })
+    expect(mockInvokeImpl.mock.calls.some(([cmd]) => cmd === 'read_file_with_signature')).toBe(false)
+  })
+
+  it('small ranged reads do not surface native range-reader false not-found errors', async () => {
+    const exec = freshExecutor()
+    const content = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join('\n')
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'file_stat') return { size: content.length, modifiedMs: 1700000000000 }
+      if (cmd === 'read_file_range_with_signature') throw new Error('Path not found: /projects/test-app/src/App.tsx')
+      if (cmd === 'read_file_with_signature') return content
+      return undefined
+    })
+
+    const result = await exec.execute('read_file', {
+      file_path: 'src/App.tsx',
+      offset: 10,
+      limit: 3,
+    })
+
+    expect(result).toContain('    10→line 10')
+    expect(result).toContain('    12→line 12')
+    expect(result).not.toContain('     9→line 9')
+    expect(result).not.toContain('File not found')
+    expect(mockInvokeImpl.mock.calls.some(([cmd]) => cmd === 'read_file_range_with_signature')).toBe(false)
+    expect(mockInvokeImpl).toHaveBeenCalledWith('read_file_with_signature', {
+      path: '/projects/test-app/src/App.tsx',
+    })
+  })
+
+  it('read_file returns a numbered blank line for ranged reads of empty lines', async () => {
+    const exec = freshExecutor()
+    const content = 'alpha\n'
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'file_stat') return { size: content.length, modifiedMs: 1700000000000 }
+      if (cmd === 'read_file_with_signature') return content
+      return undefined
+    })
+
+    const result = await exec.execute('read_file', {
+      file_path: 'src/App.tsx',
+      offset: 2,
+      limit: 1,
+    })
+
+    expect(result).toBe('     2→')
+    expect(result).not.toContain('contents are empty')
   })
 
   it('canonicalizes Grep, Glob, and LS aliases to native read tools', async () => {
@@ -995,6 +1142,31 @@ describe('E: Read-before-write enforcement', () => {
     expect(parsed.type).toBe('diff')
   })
 
+  it('write_file does not treat a ranged read hash as a concurrent full-file change', async () => {
+    const exec = freshExecutor()
+    const fullContent = 'alpha\nbeta\ngamma'
+    mockInvokeImpl.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'file_stat') return { size: fullContent.length, modifiedMs: 1700000000000 }
+      if (cmd === 'read_file_range_with_signature') return rangeFor(fullContent, args)
+      if (cmd === 'read_file_with_signature') return fullContent as never
+      return undefined as never
+    })
+
+    await exec.execute('read_file', {
+      file_path: '/projects/test-app/x.txt',
+      offset: 2,
+      limit: 1,
+    })
+
+    const result = await exec.execute('write_file', {
+      file_path: '/projects/test-app/x.txt',
+      content: 'new content',
+    })
+
+    expect(result).not.toContain('modified since you last read it')
+    expect(JSON.parse(result).type).toBe('diff')
+  })
+
   it('edit_file requires file to be read first', async () => {
     const exec = freshExecutor()
 
@@ -1510,6 +1682,7 @@ describe('I: Tool definitions and metadata', () => {
     const names = defs.map(d => d.function.name)
 
     expect(names).toContain('read_file')
+    expect(names).toContain('read_around')
     expect(names).toContain('Read')
     expect(names).toContain('Grep')
     expect(names).toContain('Glob')
@@ -1704,6 +1877,44 @@ describe('J: Path validation', () => {
     const exec = freshExecutor()
     const result = await exec.execute('search_files', { query: 'todo', directory: '/etc' })
     expect(result).toContain('outside the project directory')
+  })
+
+  it('search_files passes contextLines and formats surrounding context', async () => {
+    const exec = freshExecutor()
+    mockInvokeImpl.mockResolvedValueOnce({
+      query: 'target',
+      total_files: 1,
+      total_matches: 1,
+      files: [{
+        file_path: '/projects/test-app/src/App.tsx',
+        total_matches: 1,
+        matches: [{
+          line_number: 10,
+          column: 5,
+          text: 'const target = true',
+          match_text: 'target',
+          context_before: ['const beforeA = 1', 'const beforeB = 2'],
+          context_after: ['const afterA = 3'],
+        }],
+      }],
+      file_name_matches: [],
+      duration_ms: 1,
+      truncated: false,
+    } as never)
+
+    const result = await exec.execute('search_files', {
+      query: 'target',
+      directory: '/projects/test-app/src',
+      contextLines: 2,
+    })
+
+    expect(mockInvoke).toHaveBeenLastCalledWith('search_in_files', expect.objectContaining({
+      options: expect.objectContaining({ context_lines: 2 }),
+    }))
+    expect(result).toContain('/projects/test-app/src/App.tsx:10:5:target')
+    expect(result).toContain('  8: const beforeA = 1')
+    expect(result).toContain('> 10: const target = true')
+    expect(result).toContain('  11: const afterA = 3')
   })
 
   it('create_directory goes through the path-access prompt like other file tools', async () => {

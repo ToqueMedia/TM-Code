@@ -37,11 +37,12 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ size?: number | string }>
 }
 
 /** Tools where we show a file-extension icon instead of the generic tool icon. */
-const FILE_TOOLS = new Set(['read_file', 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'])
+const FILE_TOOLS = new Set(['read_file', 'read_around', 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'])
 
 /** Human-readable tool labels shown in the chat UI. */
 const TOOL_LABELS: Record<string, string> = {
   read_file: t('toolLabel.readingOutput'),
+  read_around: t('toolLabel.readingOutput'),
   write_file: t('toolLabel.writing'),
   create_file: t('toolLabel.creating'),
   edit_file: t('toolLabel.editing'),
@@ -133,6 +134,7 @@ function getInputSummary(
 
   switch (toolName) {
     case 'read_file':
+    case 'read_around':
       return displayPath(fp)
     case 'write_file':
     case 'create_file':

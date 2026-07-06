@@ -27,6 +27,7 @@ export interface AgentTool {
 
 export type AgentToolName =
   | 'read_file'
+  | 'read_around'
   | 'write_file'
   | 'edit_file'
   | 'create_file'

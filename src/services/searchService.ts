@@ -9,6 +9,7 @@ export interface SearchOptions {
   include_patterns: string[];
   exclude_patterns: string[];
   max_results?: number;
+  context_lines?: number;
 }
 
 export interface SearchMatch {
@@ -138,6 +139,7 @@ export default class SearchService {
         '*.map'
       ],
       max_results: 1000,
+      context_lines: 0,
     };
   }
 
@@ -156,7 +158,8 @@ export default class SearchService {
     useRegex: boolean,
     includePatterns: string = '',
     excludePatterns: string = '',
-    maxResults?: number
+    maxResults?: number,
+    contextLines?: number
   ): SearchOptions {
     const defaultOptions = this.getDefaultOptions();
     
@@ -171,6 +174,7 @@ export default class SearchService {
         ? this.parsePatterns(excludePatterns)
         : defaultOptions.exclude_patterns,
       max_results: maxResults || defaultOptions.max_results,
+      context_lines: contextLines ?? defaultOptions.context_lines,
     };
   }
 

@@ -4,14 +4,13 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Flex, Box, Text, IconButton, HStack, Button } from '@chakra-ui/react'
 import { IS_MAC } from '@/utils/platform'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiArrowLeft, FiArrowRight, FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiZap, FiSend, FiUpload, FiCamera, FiDatabase, FiMaximize2, FiMinimize2 } from 'react-icons/fi'
+import { FiArrowLeft, FiArrowRight, FiRefreshCw, FiExternalLink, FiX, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiZap, FiSend, FiUpload, FiCamera, FiDatabase, FiMaximize2, FiMinimize2 } from 'react-icons/fi'
 import { useChatStore, generateId } from '../../stores/chatStore'
 import { enqueue as enqueueMessage } from '../../services/agent/messageQueue'
 import { useLayoutStore, selectFrontendUrl, selectBackendUrl, selectProjectKind, type DevServerLogEntry } from '../../stores/layoutStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { useToastStore } from '../../stores/toastStore'
 import { createImageAttachmentFromClipboard } from '../../services/attachmentService'
-import { devServerManager } from '../../services/devServerManager'
 import StaticPreviewBuilder from '../../services/agent/staticPreviewBuilder'
 import HttpClientPanel from '../http-client/HttpClientPanel'
 import DataViewerView from './DataViewerView'
@@ -100,6 +99,7 @@ function PreviewView() {
   const showIframe = projectKind === 'frontend' || projectKind === 'fullstack' || previewMode === 'static'
   const isFullstack = projectKind === 'fullstack'
   const previewUrl = showHttpClientMain ? backendUrl : frontendUrl
+  const [currentPreviewLocation, setCurrentPreviewLocation] = useState<string | null>(null)
 
   const consoleHandleRef = useRef<HTMLDivElement>(null)
   const consoleScrollRef = useRef<HTMLDivElement>(null)
@@ -245,25 +245,20 @@ function PreviewView() {
   }, [])
 
   const handleOpenExternal = async () => {
-    if (!previewUrl) return
+    const targetUrl = currentPreviewLocation || previewUrl
+    if (!targetUrl) return
     try {
       const { openUrl } = await import('@tauri-apps/plugin-opener')
-      await openUrl(previewUrl)
+      await openUrl(targetUrl)
     } catch {
       useToastStore.getState().addToast('error', t('preview.copyUrlManually'))
     }
   }
 
 
-  const handleStopServer = useCallback(async () => {
-    // Read previousViewMode BEFORE any state mutations — stop() calls
-    // clearDevServer() internally which resets store flags.
+  const handleClosePreview = useCallback(() => {
     const prev = useLayoutStore.getState().previousViewMode
     closePreviewWebview()
-    await devServerManager.stop()
-    // clearDevServer() already called by devServerManager.stop() — don't
-    // call it again (redundant set() triggers an extra MacWebview re-render
-    // that races with the native webview teardown).
     useLayoutStore.getState().setViewMode(prev && prev !== 'generating' && prev !== 'preview' ? prev : 'chat')
   }, [])
 
@@ -335,39 +330,34 @@ function PreviewView() {
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
         blob = new Blob([bytes], { type: 'image/png' })
       } else {
-        // Windows / Linux fallback — html2canvas. Iframe is in-DOM on
-        // these platforms so the capture works partially (iframe element
-        // bounds at minimum; content opaque if cross-origin). The Tauri
-        // webview on Win/Linux is also a regular iframe under the hood
-        // so this path covers both.
-        const html2canvas = (await import('html2canvas')).default
-        const canvas = await html2canvas(container, {
-          backgroundColor: '#ffffff',
-          scale: 1,
-          logging: false,
-          useCORS: true,
-          allowTaint: true,
+        // Windows / Linux native path. html2canvas can only see the wrapper
+        // around a cross-origin iframe/webview, which produced all-dark
+        // screenshots on Windows. The Rust command captures the actual
+        // framebuffer pixels for the preview rectangle.
+        const rect = container.getBoundingClientRect()
+        const scale = window.devicePixelRatio || await getCurrentWindow().scaleFactor()
+        const x = Math.round((window.screenX + rect.left) * scale)
+        const y = Math.round((window.screenY + rect.top) * scale)
+        const w = Math.round(rect.width * scale)
+        const h = Math.round(rect.height * scale)
+        const base64 = await invoke<string>('capture_screen_region', {
+          x, y, width: w, height: h,
         })
-        // Compress to JPEG ~0.8 quality, max-width 1280 — matches the
-        // feedback-dialog defaults (kept image payload under ~400 KB).
-        const MAX_W = 1280
-        let outCanvas: HTMLCanvasElement = canvas
-        if (canvas.width > MAX_W) {
-          const ratio = MAX_W / canvas.width
-          outCanvas = document.createElement('canvas')
-          outCanvas.width = MAX_W
-          outCanvas.height = Math.round(canvas.height * ratio)
-          const ctx = outCanvas.getContext('2d')
-          if (ctx) ctx.drawImage(canvas, 0, 0, outCanvas.width, outCanvas.height)
-        }
-        blob = await new Promise<Blob | null>(resolve =>
-          outCanvas.toBlob(b => resolve(b), 'image/jpeg', 0.8),
-        )
+        const binary = atob(base64)
+        const bytes = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+        blob = new Blob([bytes], { type: 'image/png' })
       }
 
       if (!blob) throw new Error('capture produced no image data')
+      if (await imageLooksUniformDark(blob)) {
+        throw new Error(t('preview.screenshotBlank'))
+      }
 
       const attachment = await createImageAttachmentFromClipboard(blob)
+      if (!attachment.base64?.startsWith('data:image/')) {
+        throw new Error('screenshot attachment did not include model-ready image data')
+      }
       const ext = blob.type === 'image/png' ? 'png' : 'jpg'
       attachment.name = `preview-screenshot-${Date.now()}.${ext}`
       useChatStore.getState().addDraftAttachment(attachment)
@@ -445,7 +435,11 @@ function PreviewView() {
     ? (previewSourcePath?.split('/').pop() || 'Static Preview')
     : showHttpClientMain
       ? (previewUrl || 'HTTP Client')
-      : (previewUrl || 'Loading...')
+      : (currentPreviewLocation || previewUrl || 'Loading...')
+
+  useEffect(() => {
+    setCurrentPreviewLocation(previewUrl)
+  }, [previewUrl])
 
   // Data Viewer drawer resize (vertical, drag up from the top of the drawer)
   const handleDataDrawerResizeStart = useCallback((e: React.PointerEvent) => {
@@ -689,10 +683,8 @@ function PreviewView() {
               </IconButton>
             )}
 
-            {/* Stop server — always visible so users can close the preview
-                without searching for the action. Red accent on hover makes
-                the destructive intent clear. Stops the dev server and
-                navigates back, not just hides the view. */}
+            {/* Close preview — leaves the dev server running for continued
+                development. Manual server stop lives in the prompt toolbar. */}
             <Flex
               align="center"
               gap="4px"
@@ -700,19 +692,19 @@ function PreviewView() {
               h="24px"
               borderRadius="6px"
               cursor="pointer"
-              color="#fff"
+              color={tokens.colors.text.secondary}
               fontSize="11px"
               fontWeight="500"
-              bg="rgba(248, 81, 73, 0.15)"
-              border={`1px solid rgba(248, 81, 73, 0.25)`}
+              bg={tokens.colors.bg.whiteSubtle}
+              border={`1px solid ${tokens.colors.border.panel}`}
               transition={`all ${tokens.transition.fast}`}
-              _hover={{ bg: 'rgba(248, 81, 73, 0.25)', borderColor: 'rgba(248, 81, 73, 0.4)' }}
-              onClick={handleStopServer}
-              aria-label={t("misc.stopServer")}
+              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary, borderColor: tokens.colors.border.inputAlt }}
+              onClick={handleClosePreview}
+              aria-label={t("misc.closePreview")}
               role="button"
             >
-              <FiSquare size={10} color="#f85149" />
-              <Text fontSize="11px" fontWeight="500" color="#f85149">{t("misc.stopServer")}</Text>
+              <FiX size={11} />
+              <Text fontSize="11px" fontWeight="500" color="inherit">{t("misc.closePreview")}</Text>
             </Flex>
 
             {/* Data Viewer — toggles a bottom slide-up drawer rather than
@@ -842,6 +834,7 @@ function PreviewView() {
                   // below, which matches the original "preview + data
                   // simultaneously visible" intent the drawer was added for.
                   bottomReserveHeight={isDataDrawerOpen ? dataDrawerHeight + 4 : 0}
+                  onLocationChange={setCurrentPreviewLocation}
                 />
                 {isResizingConsole && (
                   <Box
@@ -1294,5 +1287,43 @@ const ConsoleLogLine = memo(function ConsoleLogLine({ entry }: { entry: DevServe
     </Flex>
   )
 })
+
+async function imageLooksUniformDark(blob: Blob): Promise<boolean> {
+  const url = URL.createObjectURL(blob)
+  try {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image()
+      img.onload = () => resolve(img)
+      img.onerror = () => reject(new Error('could not decode screenshot'))
+      img.src = url
+    })
+
+    const max = 48
+    const ratio = Math.min(1, max / Math.max(image.width, image.height))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(image.width * ratio))
+    canvas.height = Math.max(1, Math.round(image.height * ratio))
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) return false
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
+
+    const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+    let sum = 0
+    let sumSq = 0
+    let samples = 0
+    for (let i = 0; i < pixels.length; i += 4) {
+      const luminance = 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2]
+      sum += luminance
+      sumSq += luminance * luminance
+      samples += 1
+    }
+    if (samples === 0) return false
+    const mean = sum / samples
+    const variance = Math.max(0, sumSq / samples - mean * mean)
+    return mean < 10 && Math.sqrt(variance) < 6
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
 
 export default memo(PreviewView)

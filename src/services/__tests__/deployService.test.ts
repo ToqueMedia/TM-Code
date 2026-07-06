@@ -118,10 +118,10 @@ describe('PublishModal phase priority', () => {
   })
 })
 
-// ── handleClose: clear + setViewMode invariants ──────────────
-// Pins the fix for the redundant clearDevServer + stale previousViewMode.
+// ── Preview close invariants ─────────────────────────────────
+// Closing Preview hides the view and leaves the dev server running.
 
-describe('handleStopServer invariants', () => {
+describe('PreviewView close invariants', () => {
   let previewSource: string
 
   beforeAll(() => {
@@ -131,14 +131,12 @@ describe('handleStopServer invariants', () => {
     )
   })
 
-  it('devServerManager.stop() calls clearDevServer internally — no redundant call', () => {
-    // The devServerManager.stop() method already calls clearDevServer().
-    // Calling it again from handleStopServer triggers an extra re-render
-    // that races with native webview teardown.
+  it('closes preview without stopping or clearing the dev server', () => {
+    expect(previewSource).not.toContain('devServerManager.stop()')
     expect(previewSource).not.toMatch(/layout\.clearDevServer\(\)/)
   })
 
-  it('previousViewMode is read before async mutations', () => {
+  it('previousViewMode is read before closing the webview', () => {
     const prevAssign = previewSource.indexOf('const prev =')
     const closeWebview = previewSource.indexOf('closePreviewWebview()')
     expect(prevAssign).toBeGreaterThan(-1)

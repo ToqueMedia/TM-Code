@@ -12,7 +12,7 @@ export const VERIFY_AGENT: SubAgentDefinition = {
   agentType: 'Verify',
   whenToUse: 'Verify implementation correctness by running tests, type checks, and diagnostics',
   tools: [
-    'read_file', 'list_directory', 'search_files', 'glob',
+    'read_file', 'read_around', 'list_directory', 'search_files', 'glob',
     'execute_command', 'start_dev_server', 'stop_dev_server', 'read_dev_server_logs',
     'read_large_result',
   ],

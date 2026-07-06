@@ -86,6 +86,7 @@ export function humaniseToolName(toolName: string): string {
   const map: Record<string, string> = {
     write_file: 'edit a file',
     read_file: 'read a file',
+    read_around: 'read nearby file lines',
     create_file: 'create a file',
     delete_file_or_directory: 'delete a file or folder',
     rename_file_or_directory: 'rename a file or folder',

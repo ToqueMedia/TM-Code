@@ -343,3 +343,46 @@ describe('rebuildConversationHistory — compact_boundary summary re-emission', 
     expect(history[0].content).toBe('hi')
   })
 })
+
+describe('rebuildConversationHistory — UI-only assistant text', () => {
+  it('keeps app-generated progress out of legacy assistant reconstruction', () => {
+    const assistant: ChatMessage = {
+      id: 'a1',
+      role: 'assistant',
+      content: 'Preparing project context...\n\nFinal answer',
+      timestamp: ts,
+      contentBlocks: [
+        { type: 'text', text: 'Preparing project context...\n\n', uiOnly: true },
+        { type: 'text', text: 'Final answer' },
+      ],
+    }
+
+    const history = rebuildConversationHistory([userMsg('hi'), assistant])
+
+    expect(history[1].content).toEqual([{ type: 'text', text: 'Final answer' }])
+  })
+
+  it('omits pure UI progress while preserving legacy tool calls/results', () => {
+    const assistant: ChatMessage = {
+      id: 'a1',
+      role: 'assistant',
+      content: 'Preparing project context...\n\n',
+      timestamp: ts,
+      contentBlocks: [
+        { type: 'text', text: 'Preparing project context...\n\n', uiOnly: true },
+      ],
+      toolCalls: [toolCall('id1', 'r1')],
+    }
+
+    const history = rebuildConversationHistory([userMsg('hi'), assistant])
+    const assistantBlocks = history[1].content as Array<{ type: string; text?: string; id?: string }>
+    const resultBlocks = history[2].content as Array<{ type: string; toolCallId: string; content: string }>
+
+    expect(assistantBlocks).toEqual([
+      { type: 'tool_call', id: 'id1', name: 'read_file', arguments: '{}' },
+    ])
+    expect(resultBlocks).toEqual([
+      { type: 'tool_result', toolCallId: 'id1', content: 'r1' },
+    ])
+  })
+})

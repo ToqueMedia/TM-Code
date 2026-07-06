@@ -1,7 +1,7 @@
 /**
  * Research agent — web research + skill lookup.
  *
- * Sister to Explore: web_search + web_fetch + read_skill + read_file + read_large_result + execute_command.
+ * Sister to Explore: web_search + web_fetch + read_skill + read_file/read_around + read_large_result + execute_command.
  * Cannot write files; execute_command runs under read-only diagnostics.
  */
 
@@ -10,7 +10,7 @@ import type { SubAgentDefinition, SubAgentParentContext } from './types'
 export const RESEARCH_AGENT: SubAgentDefinition = {
   agentType: 'Research',
   whenToUse: 'Find API docs, external documentation, or technical information online',
-  tools: ['web_search', 'web_fetch', 'read_skill', 'read_file', 'read_large_result', 'execute_command'],
+  tools: ['web_search', 'web_fetch', 'read_skill', 'read_file', 'read_around', 'read_large_result', 'execute_command'],
   maxTurns: 15,
   maxWallClockMs: 3 * 60 * 1000,
   color: '#a371f7',
@@ -37,6 +37,7 @@ ${depthGuide}
 - **web_fetch** — fetch the contents of a specific URL. Use to read the full content of a page you found via web_search.
 - **read_skill** — read a skill file from the project's skill directory. Use when you need context about a specific technology or framework.
 - **read_file** — read a file from the project. Use only when you need to cross-reference local code with external docs.
+- **read_around** — read a bounded window around a known line from search results.
 - **read_large_result** — page through large web_fetch, command, or file outputs when a result was truncated.
 - **execute_command** — run read-only diagnostics such as curl/rg/cat. Use only after web_fetch/search cannot read an important official/current source.
 

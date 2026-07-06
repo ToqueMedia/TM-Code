@@ -10,7 +10,7 @@ import type { SubAgentDefinition, SubAgentParentContext } from './types'
 export const EXPLORE_AGENT: SubAgentDefinition = {
   agentType: 'Explore',
   whenToUse: 'Find usages, definitions, file patterns, or code structure in the project',
-  tools: ['read_file', 'list_directory', 'search_files', 'glob', 'read_large_result'],
+  tools: ['read_file', 'read_around', 'list_directory', 'search_files', 'glob', 'read_large_result'],
   maxTurns: 15,
   maxWallClockMs: 3 * 60 * 1000,
   color: '#3fb8af',
@@ -36,6 +36,7 @@ ${depthGuide}
 - **search_files** — ripgrep search across the codebase. Use for finding usages, references, patterns.
 - **glob** — file pattern matching. Use for finding files by name/extension.
 - **read_file** — read a file's contents. Use after search_files/glob to read the relevant code.
+- **read_around** — read a bounded window around a search match line.
 - **list_directory** — list files in a directory. Use for understanding project structure.
 - **read_large_result** — page through large search/read outputs when a result was truncated.
 ## Rules

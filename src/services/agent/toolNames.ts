@@ -18,6 +18,7 @@
 
 // Read tools — concurrency-safe, allowed in /plan architect mode
 export const READ_FILE = 'read_file'
+export const READ_AROUND = 'read_around'
 export const LIST_DIRECTORY = 'list_directory'
 export const SEARCH_FILES = 'search_files'
 export const GLOB = 'glob'
@@ -91,7 +92,7 @@ export const READ_SESSION_MEMORY = 'read_session_memory'
  * verifier walks both surfaces and reports drift in either direction.
  */
 export const TOOL_NAMES = [
-  READ_FILE, LIST_DIRECTORY, SEARCH_FILES, GLOB,
+  READ_FILE, READ_AROUND, LIST_DIRECTORY, SEARCH_FILES, GLOB,
   READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   READ_SKILL, READ_LARGE_RESULT, READ_DEV_SERVER_LOGS,
   WRITE_FILE, CREATE_FILE, EDIT_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,

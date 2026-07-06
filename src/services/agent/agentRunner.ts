@@ -1,6 +1,6 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { logger } from '@/utils/logger'
-import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, markReasoningBoundary, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
+import { useChatStore, appendTextDeltaBuffered, appendUiTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, markReasoningBoundary, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useProblemsStore } from '../../stores/problemsStore'
@@ -294,7 +294,7 @@ async function runAgentInternal(
     chatStore.startAssistantMessage(agentService.isThinkingRequestedForNextTurn())
   }
   if (bootstrapOnly) {
-    appendTextDeltaBuffered(`${t(getTmsBootstrapStartMessageKey(tmsPreflight!))}\n\n`)
+    appendUiTextDeltaBuffered(`${t(getTmsBootstrapStartMessageKey(tmsPreflight!))}\n\n`)
     flushBufferedDeltas()
   }
   // 'awaiting_response': prompt is about to be sent; nothing has streamed yet.
@@ -803,7 +803,7 @@ async function runAgentInternal(
     if (!isBackgroundRun && bootstrapOnly) {
       const tms = getTmsTurnTelemetry()
       if (tms.tmsCreated || tms.tmsAlreadyExists) {
-        appendTextDeltaBuffered(`\n\n${t(getTmsBootstrapCompleteMessageKey(tms.tmsCreated))}\n\n`)
+        appendUiTextDeltaBuffered(`\n\n${t(getTmsBootstrapCompleteMessageKey(tms.tmsCreated))}\n\n`)
         flushBufferedDeltas()
         await runAgentInternal(prompt, {
           ...options,

@@ -176,6 +176,17 @@ pub struct ReadFileWithSignatureResult {
     pub signature: FileSignature,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadFileRangeWithSignatureResult {
+    pub content: String,
+    pub signature: FileSignature,
+    pub start_line: usize,
+    pub line_count: usize,
+    pub total_lines: usize,
+    pub has_more: bool,
+}
+
 // Error types specific to file tree operations
 #[derive(Debug, thiserror::Error, serde::Serialize)]
 pub enum FileTreeError {
@@ -994,6 +1005,109 @@ pub async fn read_file_with_signature(path: String) -> Result<ReadFileWithSignat
             modified_ms: modified_ms(&metadata),
             sha256,
         },
+    })
+}
+
+#[tauri::command]
+pub async fn read_file_range_with_signature(
+    path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<ReadFileRangeWithSignatureResult> {
+    let file_path = Path::new(&path);
+    let canonical = validate_path_safe(file_path)?;
+
+    if !canonical.exists() {
+        return Err(FileTreeError::PathNotFound(path));
+    }
+
+    if canonical.is_dir() {
+        return Err(FileTreeError::InvalidOperation(
+            "Path is a directory".to_string(),
+        ));
+    }
+
+    let metadata = tokio::fs::metadata(&canonical).await?;
+    let start_line = offset.unwrap_or(1).max(1);
+    let end_line = limit
+        .map(|n| n.max(1))
+        .and_then(|n| start_line.checked_add(n - 1))
+        .unwrap_or(usize::MAX);
+
+    let mut file = tokio::fs::File::open(&canonical).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut selected = Vec::<u8>::new();
+    let mut current_line = 1usize;
+    let mut current_selected_line = Vec::<u8>::new();
+    let mut selected_lines = 0usize;
+    let mut saw_any_byte = false;
+
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        saw_any_byte = true;
+        let chunk = &buffer[..read];
+        hasher.update(chunk);
+
+        for &byte in chunk {
+            let in_range = current_line >= start_line && current_line <= end_line;
+            if in_range && byte != b'\n' {
+                current_selected_line.push(byte);
+            }
+
+            if byte == b'\n' {
+                if in_range {
+                    if current_selected_line.ends_with(&[b'\r']) {
+                        current_selected_line.pop();
+                    }
+                    if selected_lines > 0 {
+                        selected.push(b'\n');
+                    }
+                    selected.extend_from_slice(&current_selected_line);
+                    current_selected_line.clear();
+                    selected_lines += 1;
+                }
+                current_line = current_line.saturating_add(1);
+            }
+        }
+    }
+
+    if saw_any_byte {
+        if current_line >= start_line && current_line <= end_line {
+            if current_selected_line.ends_with(&[b'\r']) {
+                current_selected_line.pop();
+            }
+            if selected_lines > 0 {
+                selected.push(b'\n');
+            }
+            selected.extend_from_slice(&current_selected_line);
+            selected_lines += 1;
+        }
+    }
+
+    let total_lines = if saw_any_byte { current_line } else { 0 };
+    let content = String::from_utf8(selected).map_err(|_| {
+        FileTreeError::InvalidOperation("Cannot read binary file as text".to_string())
+    })?;
+
+    let digest = hasher.finalize();
+    let sha256: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+
+    Ok(ReadFileRangeWithSignatureResult {
+        content,
+        signature: FileSignature {
+            path: normalize_path_for_frontend(&canonical),
+            size: metadata.len(),
+            modified_ms: modified_ms(&metadata),
+            sha256,
+        },
+        start_line,
+        line_count: selected_lines,
+        total_lines,
+        has_more: end_line < total_lines,
     })
 }
 

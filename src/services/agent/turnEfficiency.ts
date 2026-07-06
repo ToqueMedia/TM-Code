@@ -49,7 +49,7 @@ export const EFFICIENCY_TARGET_TURNS = 4
 
 /** Tool names that indicate information-gathering (insufficient context). */
 const READ_TOOLS = new Set([
-  'read_file', 'search_files', 'glob', 'list_directory', 'read_large_result',
+  'read_file', 'read_around', 'search_files', 'glob', 'list_directory', 'read_large_result',
   'Read', 'Grep', 'Glob', 'LS',
   'read_skill', 'read_dev_server_logs',
 ])

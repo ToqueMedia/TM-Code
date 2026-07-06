@@ -2005,6 +2005,13 @@ export async function* query(
           typeof tu.cache_creation_input_tokens === 'number' ? tu.cache_creation_input_tokens : undefined
         const cacheReadInputTokens =
           typeof tu.cache_read_input_tokens === 'number' ? tu.cache_read_input_tokens : dashScopeCachedTokens
+        const overlapStats = getAndResetOverlapStats()
+        if (overlapStats.skippedOverlappingReads > 0 || overlapStats.adjustedReadRanges > 0) {
+          console.debug(
+            `[query] read-range dedup: skipped=${overlapStats.skippedOverlappingReads}, ` +
+            `adjusted=${overlapStats.adjustedReadRanges}`,
+          )
+        }
         onRequestUsage?.({
           requestId: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
             ? crypto.randomUUID()
@@ -2085,13 +2092,8 @@ export async function* query(
           // tool calls executed between the previous request and this one;
           // getAndResetOverlapStats() resets the counters each call.
           readRanges: getReadRanges(),
-          ...(() => {
-            const s = getAndResetOverlapStats()
-            return {
-              skippedOverlappingReads: s.skippedOverlappingReads,
-              adjustedReadRanges: s.adjustedReadRanges,
-            }
-          })(),
+          skippedOverlappingReads: overlapStats.skippedOverlappingReads,
+          adjustedReadRanges: overlapStats.adjustedReadRanges,
           // ── Mention context redundancy telemetry (Correção B) ──
           // mentionContextSentFullThisTurn=false means the follow-up-turn
           // stub fired (full outline replaced by a short reference);

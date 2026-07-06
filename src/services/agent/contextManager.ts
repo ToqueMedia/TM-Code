@@ -30,8 +30,13 @@ import {
   MICROCOMPACT_GAP_KEEP_RECENT,
   POST_COMPACTION_REREAD_FILES,
   POST_COMPACTION_FILE_MAX_CHARS,
+  POST_COMPACTION_REREAD_RANGES,
+  POST_COMPACTION_RANGES_PER_FILE,
+  POST_COMPACTION_RANGE_MAX_LINES,
   SUMMARIZE_TIMEOUT_MS,
 } from './agentConfig'
+import { getReadRanges } from './toolExecutor/readRangeTracker'
+import { addLineNumbers } from './toolExecutor/lineNumbers'
 
 // ── Types ──
 
@@ -422,6 +427,80 @@ export async function compressContext(
   ]
 }
 
+type RecoveryReadRange = {
+  path: string
+  offset?: number
+  limit?: number
+  readToEnd?: boolean
+}
+
+type RecoveryInterval = {
+  start: number
+  end: number
+  capped: boolean
+}
+
+function buildRecoveryIntervals(
+  ranges: RecoveryReadRange[],
+  totalLines: number,
+): RecoveryInterval[] {
+  const intervals = ranges
+    .map((range): RecoveryInterval | null => {
+      const start = Math.max(1, range.offset ?? 1)
+      if (start > totalLines) return null
+      const requestedEnd = range.limit === undefined
+        ? totalLines
+        : start + Math.max(1, range.limit) - 1
+      const cappedEnd = Math.min(requestedEnd, start + POST_COMPACTION_RANGE_MAX_LINES - 1, totalLines)
+      return {
+        start,
+        end: cappedEnd,
+        capped: requestedEnd > cappedEnd,
+      }
+    })
+    .filter((v): v is RecoveryInterval => v !== null)
+    .sort((a, b) => a.start - b.start)
+
+  const merged: RecoveryInterval[] = []
+  for (const interval of intervals) {
+    const last = merged[merged.length - 1]
+    if (last && interval.start <= last.end + 1) {
+      last.end = Math.max(last.end, interval.end)
+      last.capped = last.capped || interval.capped
+    } else {
+      merged.push({ ...interval })
+    }
+  }
+  return merged.slice(0, POST_COMPACTION_RANGES_PER_FILE)
+}
+
+function renderRecoveryRanges(
+  filePath: string,
+  content: string,
+  ranges: RecoveryReadRange[],
+): string | null {
+  if (ranges.length === 0) return null
+  const lines = content.split(/\r?\n/)
+  const intervals = buildRecoveryIntervals(ranges, lines.length)
+  if (intervals.length === 0) return null
+
+  const parts: string[] = []
+  let usedChars = 0
+  for (const interval of intervals) {
+    const slice = lines.slice(interval.start - 1, interval.end).join('\n')
+    const numbered = addLineNumbers(slice, interval.start)
+    const suffix = interval.capped
+      ? `\n[range capped for context recovery; use read_file offset:${interval.end + 1} to continue if needed]`
+      : ''
+    const block = `### ${filePath}:${interval.start}-${interval.end}\n\`\`\`\n${numbered}${suffix}\n\`\`\``
+    if (usedChars > 0 && usedChars + block.length > POST_COMPACTION_FILE_MAX_CHARS) break
+    parts.push(block)
+    usedChars += block.length
+  }
+
+  return parts.length > 0 ? parts.join('\n\n') : null
+}
+
 // ── Post-compaction recovery ──
 
 /**
@@ -434,26 +513,48 @@ export async function injectPostCompactRecovery(
   toolOpsLog?: string,
 ): Promise<void> {
   const recentFiles = state.getRecentFiles(POST_COMPACTION_REREAD_FILES)
-  if (recentFiles.length === 0 && !toolOpsLog) return
+  const readRanges = [...getReadRanges()].reverse().slice(0, POST_COMPACTION_REREAD_RANGES).reverse()
+  if (recentFiles.length === 0 && readRanges.length === 0 && !toolOpsLog) return
 
   const DiffService = (await import('./diffService')).default
   const diffService = DiffService.getInstance()
   const pendingDiffs = diffService.getPendingDiffs()
   const pendingByPath = new Map(pendingDiffs.map(d => [d.filePath, d]))
 
-  const fileContents: string[] = []
+  const rangesByPath = new Map<string, RecoveryReadRange[]>()
+  for (const range of readRanges) {
+    const bucket = rangesByPath.get(range.path) ?? []
+    bucket.push(range)
+    rangesByPath.set(range.path, bucket)
+  }
+
+  const filesToRecover: string[] = []
   for (const filePath of recentFiles) {
+    if (!filesToRecover.includes(filePath)) filesToRecover.push(filePath)
+  }
+  for (const filePath of rangesByPath.keys()) {
+    if (filesToRecover.length >= POST_COMPACTION_REREAD_FILES) break
+    if (!filesToRecover.includes(filePath)) filesToRecover.push(filePath)
+  }
+
+  const fileContents: string[] = []
+  for (const filePath of filesToRecover) {
     try {
       const pending = pendingByPath.get(filePath)
       const { invoke } = await import('../../utils/invokeMetrics')
       const content = pending
         ? pending.newContent
         : await invoke<string>('read_file', { path: filePath })
-      const truncated = content.length > POST_COMPACTION_FILE_MAX_CHARS
-        ? content.slice(0, POST_COMPACTION_FILE_MAX_CHARS) + '\n[... truncated for context recovery]'
-        : content
       const label = pending ? `${filePath} (pending approval)` : filePath
-      fileContents.push(`### ${label}\n\`\`\`\n${truncated}\n\`\`\``)
+      const rangeRecovery = renderRecoveryRanges(label, content, rangesByPath.get(filePath) ?? [])
+      if (rangeRecovery) {
+        fileContents.push(rangeRecovery)
+      } else {
+        const truncated = content.length > POST_COMPACTION_FILE_MAX_CHARS
+          ? content.slice(0, POST_COMPACTION_FILE_MAX_CHARS) + '\n[... truncated for context recovery]'
+          : content
+        fileContents.push(`### ${label}\n\`\`\`\n${truncated}\n\`\`\``)
+      }
     } catch { /* file may have been deleted */ }
   }
 

@@ -55,6 +55,9 @@ export const MICROCOMPACT_GAP_KEEP_RECENT = 5
 
 export const POST_COMPACTION_REREAD_FILES = 5
 export const POST_COMPACTION_FILE_MAX_CHARS = 8000
+export const POST_COMPACTION_REREAD_RANGES = 12
+export const POST_COMPACTION_RANGES_PER_FILE = 4
+export const POST_COMPACTION_RANGE_MAX_LINES = 160
 
 // ── Reminder re-injection ──
 

@@ -175,6 +175,34 @@ fn open_preview_webview(
                     return String(arg);
                 };
 
+                var _lastLocation = '';
+                var _sendLocation = function() {
+                    try {
+                        var href = window.location && window.location.href ? String(window.location.href) : '';
+                        if (!href || href === _lastLocation) return;
+                        _lastLocation = href;
+                        window.ipc.postMessage(JSON.stringify({ type: 'location', url: href }));
+                    } catch(_) {}
+                };
+                _sendLocation();
+                window.addEventListener('load', _sendLocation);
+                window.addEventListener('hashchange', _sendLocation);
+                window.addEventListener('popstate', _sendLocation);
+                try {
+                    var _origPushState = history.pushState;
+                    var _origReplaceState = history.replaceState;
+                    history.pushState = function() {
+                        var out = _origPushState.apply(this, arguments);
+                        setTimeout(_sendLocation, 0);
+                        return out;
+                    };
+                    history.replaceState = function() {
+                        var out = _origReplaceState.apply(this, arguments);
+                        setTimeout(_sendLocation, 0);
+                        return out;
+                    };
+                } catch(_) {}
+
                 window.addEventListener('error', function(e) {
                     _onerrorFired = true;
                     setTimeout(function() { _onerrorFired = false; }, 50);
@@ -379,6 +407,21 @@ fn open_preview_webview(
                         let _ = win.eval(
                             "window.dispatchEvent(new CustomEvent('preview-gis-detected'));"
                         );
+                    }
+                }
+                "location" => {
+                    let url = parsed.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                    if url.is_empty() { return; }
+                    let safe_url = url
+                        .replace('\\', "\\\\")
+                        .replace('\'', "\\'")
+                        .replace('\n', "")
+                        .replace('\r', "");
+                    if let Some(win) = app_for_ipc.get_webview_window("main") {
+                        let _ = win.eval(format!(
+                            "window.dispatchEvent(new CustomEvent('preview-location',{{detail:{{url:'{}'}}}}));",
+                            safe_url
+                        ));
                     }
                 }
                 _ => {}
@@ -1266,6 +1309,7 @@ pub fn run() {
             file_signature,
             file_stat,
             read_file_with_signature,
+            read_file_range_with_signature,
             path_exists,
             has_database_file,
             write_file,
@@ -1331,6 +1375,7 @@ pub fn run() {
             delete_memory_file,
             list_memory_files,
             data_viewer_dev_query,
+            data_viewer_dev_execute,
             collect_deploy_bundle,
             collect_backend_tarball,
             collect_next_db_meta,

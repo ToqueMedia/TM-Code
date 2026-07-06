@@ -89,6 +89,7 @@ commands.allow = [
   "delete_memory_file",
   "list_memory_files",
   "data_viewer_dev_query",
+  "data_viewer_dev_execute",
   "collect_deploy_bundle",
   "collect_backend_tarball",
   "collect_next_db_meta",

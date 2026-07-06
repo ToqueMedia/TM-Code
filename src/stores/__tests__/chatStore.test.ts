@@ -156,6 +156,22 @@ describe('chatStore', () => {
       const finalMsg = useChatStore.getState().getActiveSession()!.messages.find(m => m.id === assistantId)!
       expect(finalMsg.isStreaming).toBe(false)
     })
+
+    it('marks UI-only streaming text separately from model text', () => {
+      useChatStore.getState().createSession('/test/project')
+      const assistantId = useChatStore.getState().startAssistantMessage()
+
+      useChatStore.getState().appendUiTextDelta('Preparing context...\n\n')
+      useChatStore.getState().appendTextDelta('Final answer')
+
+      const session = useChatStore.getState().getActiveSession()!
+      const msg = session.messages.find(m => m.id === assistantId)!
+      expect(msg.content).toBe('Preparing context...\n\nFinal answer')
+      expect(msg.contentBlocks).toEqual([
+        { type: 'text', text: 'Preparing context...\n\n', uiOnly: true },
+        { type: 'text', text: 'Final answer' },
+      ])
+    })
   })
 
   describe('splitForQueuedMessage', () => {

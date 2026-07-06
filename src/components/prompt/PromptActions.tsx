@@ -1,6 +1,7 @@
 import { memo, useMemo, type MouseEvent, type ReactNode } from 'react'
 import { Box, Flex, IconButton, Text } from '@chakra-ui/react'
-import { FiSend, FiSquare, FiCode, FiImage, FiClock, FiTerminal } from 'react-icons/fi'
+import { FiSend, FiSquare, FiCode, FiImage, FiClock, FiTerminal, FiServer } from 'react-icons/fi'
+import { VscDiscard, VscLoading, VscWand } from 'react-icons/vsc'
 import { useBillingStore } from '../../stores/billingStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useByokStore } from '../../stores/byokStore'
@@ -16,6 +17,14 @@ interface PromptActionsProps {
   isStreaming: boolean
   hasInput: boolean
   onToggleEditor: () => void
+  onImprovePrompt: () => void
+  onUndoImprovePrompt: () => void
+  onToggleDevServer: () => void
+  canToggleDevServer: boolean
+  isDevServerActive: boolean
+  isDevServerStarting: boolean
+  isImprovingPrompt: boolean
+  canUndoImprovePrompt: boolean
   onSend: () => void
   onStop: () => void
   onAttach: () => void
@@ -27,6 +36,14 @@ function PromptActions({
   isStreaming,
   hasInput,
   onToggleEditor,
+  onImprovePrompt,
+  onUndoImprovePrompt,
+  onToggleDevServer,
+  canToggleDevServer,
+  isDevServerActive,
+  isDevServerStarting,
+  isImprovingPrompt,
+  canUndoImprovePrompt,
   onSend,
   onStop,
   onAttach,
@@ -101,6 +118,11 @@ function PromptActions({
     : (byokResolvedActive?.imagesSupported ?? null)
   const byokInUse = byokSnapshot !== null || byokResolvedActive !== null
   const isExplorer = billingPlan === 'explorer'
+  const devServerButtonTitle = isDevServerActive
+    ? t('prompt.stopDevServer')
+    : isDevServerStarting
+      ? t('prompt.startingServer')
+      : t('prompt.startDevServer')
 
   let showAttach = false
   let attachHint: string | null = null
@@ -204,6 +226,46 @@ function PromptActions({
             toggleTerminal()
           }}
         />
+
+        <PromptToolButton
+          icon={<FiServer size={14} />}
+          label={isDevServerActive ? t('prompt.stopDevServer') : t('prompt.startDevServer')}
+          active={isDevServerActive || isDevServerStarting}
+          disabled={!canToggleDevServer || (isDevServerStarting && !isDevServerActive)}
+          ariaLabel={devServerButtonTitle}
+          title={devServerButtonTitle}
+          onClick={event => {
+            event.stopPropagation()
+            onToggleDevServer()
+          }}
+        />
+
+        <PromptToolButton
+          icon={isImprovingPrompt ? <VscLoading size={14} /> : <VscWand size={14} />}
+          label={t('prompt.improvePrompt')}
+          active={isImprovingPrompt}
+          disabled={isImprovingPrompt || !hasInput}
+          loading={isImprovingPrompt}
+          ariaLabel={t('prompt.improvePrompt')}
+          title={t('prompt.improvePromptTitle')}
+          onClick={event => {
+            event.stopPropagation()
+            onImprovePrompt()
+          }}
+        />
+
+        {canUndoImprovePrompt && (
+          <PromptToolButton
+            icon={<VscDiscard size={14} />}
+            label={t('prompt.undoPromptImprovement')}
+            ariaLabel={t('prompt.undoPromptImprovement')}
+            title={t('prompt.undoPromptImprovementTitle')}
+            onClick={event => {
+              event.stopPropagation()
+              onUndoImprovePrompt()
+            }}
+          />
+        )}
       </Flex>
 
       {/* Per-turn context-pressure pill + Send / Stop / Queue button.
@@ -263,6 +325,8 @@ function PromptToolButton({
   label,
   active,
   badge,
+  disabled,
+  loading,
   ariaLabel,
   title,
   onClick,
@@ -271,6 +335,8 @@ function PromptToolButton({
   label: string
   active?: boolean
   badge?: number
+  disabled?: boolean
+  loading?: boolean
   ariaLabel: string
   title?: string
   onClick: (event: MouseEvent) => void
@@ -285,22 +351,32 @@ function PromptToolButton({
       h="28px"
       px="8px"
       borderRadius="8px"
-      cursor="pointer"
+      cursor={disabled ? 'not-allowed' : 'pointer'}
+      opacity={disabled ? 0.45 : 1}
       color={active ? tokens.colors.accent.primary : tokens.colors.text.secondary}
       bg={active ? tokens.colors.accent.primarySubtle : 'transparent'}
       border={`1px solid ${active ? tokens.colors.accent.primaryMuted : 'transparent'}`}
       transition={`background ${tokens.transition.fast}, color ${tokens.transition.fast}, border-color ${tokens.transition.fast}, transform ${tokens.transition.fast}`}
+      css={loading ? {
+        '@keyframes promptToolSpin': {
+          to: { transform: 'rotate(360deg)' },
+        },
+        '& [data-prompt-tool-icon]': {
+          animation: 'promptToolSpin 0.85s linear infinite',
+        },
+      } : undefined}
       _hover={{
-        bg: active ? tokens.colors.accent.primarySubtle : tokens.colors.bg.whiteSubtle,
-        color: active ? tokens.colors.accent.primary : tokens.colors.text.primary,
-        transform: 'translateY(-1px)',
+        bg: disabled ? (active ? tokens.colors.accent.primarySubtle : 'transparent') : active ? tokens.colors.accent.primarySubtle : tokens.colors.bg.whiteSubtle,
+        color: disabled ? (active ? tokens.colors.accent.primary : tokens.colors.text.secondary) : active ? tokens.colors.accent.primary : tokens.colors.text.primary,
+        transform: disabled ? 'none' : 'translateY(-1px)',
       }}
-      onClick={onClick}
+      onClick={disabled ? undefined : onClick}
+      aria-disabled={disabled}
       aria-label={ariaLabel}
       title={title ?? ariaLabel}
       flexShrink={0}
     >
-      <Box display="flex" alignItems="center" justifyContent="center" flexShrink={0}>
+      <Box data-prompt-tool-icon display="flex" alignItems="center" justifyContent="center" flexShrink={0}>
         {icon}
       </Box>
       <Text data-prompt-action-label fontSize="11px" fontWeight="600" whiteSpace="nowrap">

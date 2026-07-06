@@ -5,15 +5,17 @@ import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useToastStore } from '../../stores/toastStore'
 import { useDataViewerStore, type DataSource } from '../../stores/dataViewerStore'
 import { useCurrentProject } from '../../hooks/useProjectState'
 import * as dataViewerService from '../../services/dataViewerService'
-import type { Cell, ProjectContext } from '../../services/dataViewerService'
+import type { Cell, ColumnInfo, ProjectContext, RowValues, SortDirection } from '../../services/dataViewerService'
 import TablesSidebar from '../data-viewer/TablesSidebar'
-import TableView from '../data-viewer/TableView'
+import TableView, { type SelectedCell } from '../data-viewer/TableView'
 import Pagination from '../data-viewer/Pagination'
 import SourceToggle from '../data-viewer/SourceToggle'
 import EmptyState from '../data-viewer/EmptyState'
+import RowMutationDialog from '../data-viewer/RowMutationDialog'
 import { logger } from '../../utils/logger'
 import { trackEvent } from '../../services/analytics'
 
@@ -42,14 +44,23 @@ function DataViewerView({ embedded = false }: DataViewerViewProps) {
   const [tables, setTables] = useState<string[]>([])
   const [tablesLoading, setTablesLoading] = useState(false)
   const [columns, setColumns] = useState<string[]>([])
+  const [columnInfo, setColumnInfo] = useState<ColumnInfo[]>([])
   const [rows, setRows] = useState<Cell[][]>([])
+  const [rowIds, setRowIds] = useState<Cell[]>([])
   const [totalRows, setTotalRows] = useState(0)
   const [rowsLoading, setRowsLoading] = useState(false)
+  const [rowFilter, setRowFilter] = useState('')
+  const [sort, setSort] = useState<{ column: string; direction: SortDirection } | null>(null)
+  const [selectedCell, setSelectedCell] = useState<SelectedCell | null>(null)
+  const [exportingCsv, setExportingCsv] = useState(false)
+  const [mutatingRows, setMutatingRows] = useState(false)
+  const [mutationDialog, setMutationDialog] = useState<'add' | 'edit' | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   // Race guard: discard results from a stale (project, source) once the
   // active selection has changed.
   const requestEpoch = useRef(0)
+  const rowRequestEpoch = useRef(0)
   // One-shot guard for the "opened" telemetry event — fires once per mount.
   const openedTrackedRef = useRef(false)
 
@@ -178,28 +189,44 @@ function DataViewerView({ embedded = false }: DataViewerViewProps) {
   const loadRows = useCallback(
     async (forceRefresh: boolean = false) => {
       if (!project || !activeTable) {
+        rowRequestEpoch.current += 1
         setColumns([])
+        setColumnInfo([])
         setRows([])
+        setRowIds([])
         setTotalRows(0)
+        setSelectedCell(null)
+        setRowsLoading(false)
         return
       }
+      rowRequestEpoch.current += 1
+      const epoch = rowRequestEpoch.current
       setRowsLoading(true)
       setError(null)
       try {
         if (forceRefresh) dataViewerService.invalidateCache(source, project.id, activeTable)
-        const [count, data] = await Promise.all([
-          dataViewerService.countRows(source, project, activeTable),
-          dataViewerService.getRows(source, project, activeTable, page, pageSize),
+        const queryOptions = { filter: rowFilter, sort }
+        const [count, data, info] = await Promise.all([
+          dataViewerService.countRows(source, project, activeTable, rowFilter),
+          dataViewerService.getRows(source, project, activeTable, page, pageSize, queryOptions),
+          dataViewerService.getTableInfo(source, project, activeTable),
         ])
+        if (epoch !== rowRequestEpoch.current) return
         setTotalRows(count)
         setColumns(data.columns)
+        setColumnInfo(info)
         setRows(data.rows)
+        setRowIds(data.rowIds ?? [])
       } catch (err) {
+        if (epoch !== rowRequestEpoch.current) return
         const message = err instanceof Error ? err.message : String(err)
         setError(message)
         setColumns([])
+        setColumnInfo([])
         setRows([])
+        setRowIds([])
         setTotalRows(0)
+        setSelectedCell(null)
         const isPragmaUnsupported =
           err instanceof Error && err.name === 'PragmaUnsupportedError'
         void trackEvent('data_viewer_query_failed', {
@@ -208,67 +235,169 @@ function DataViewerView({ embedded = false }: DataViewerViewProps) {
           kind: isPragmaUnsupported ? 'pragma_unsupported' : 'generic',
         })
       } finally {
-        setRowsLoading(false)
+        if (epoch === rowRequestEpoch.current) setRowsLoading(false)
       }
     },
-    [project, source, activeTable, page, pageSize],
+    [project, source, activeTable, page, pageSize, rowFilter, sort],
   )
 
   useEffect(() => {
-    let cancelled = false
-    if (!project || !activeTable) {
-      setColumns([])
-      setRows([])
-      setTotalRows(0)
-      return
-    }
-    // Use the callback's logic but tolerate cancellation — if the user
-    // changes table mid-fetch, the in-flight result is discarded.
-    setRowsLoading(true)
-    setError(null)
-    Promise.all([
-      dataViewerService.countRows(source, project, activeTable),
-      dataViewerService.getRows(source, project, activeTable, page, pageSize),
-    ])
-      .then(([count, data]) => {
-        if (cancelled) return
-        setTotalRows(count)
-        setColumns(data.columns)
-        setRows(data.rows)
-      })
-      .catch((err) => {
-        if (cancelled) return
-        const message = err instanceof Error ? err.message : String(err)
-        setError(message)
-        setColumns([])
-        setRows([])
-        setTotalRows(0)
-        const isPragmaUnsupported =
-          err instanceof Error && err.name === 'PragmaUnsupportedError'
-        void trackEvent('data_viewer_query_failed', {
-          stage: 'get_rows',
-          source,
-          // Separate counter for the libSQL/PRAGMA failure shape so we
-          // notice if the worker drifts and the prod path stops working
-          // — distinct from generic query failures (network, auth, etc.).
-          kind: isPragmaUnsupported ? 'pragma_unsupported' : 'generic',
-        })
-      })
-      .finally(() => {
-        if (!cancelled) setRowsLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [project?.id, project?.path, source, activeTable, page, pageSize])
+    void loadRows(false)
+  }, [loadRows])
 
   const totalPages = Math.max(1, Math.ceil(totalRows / pageSize))
 
   function handleSourceChange(next: DataSource) {
     if (next === source || !project) return
+    setRowFilter('')
+    setSort(null)
+    setSelectedCell(null)
     setSource(next, project.id)
     void trackEvent('data_viewer_source_switched', { from: source, to: next })
   }
+
+  const handleTableSelect = useCallback((table: string) => {
+    setRowFilter('')
+    setSort(null)
+    setSelectedCell(null)
+    setActiveTable(table)
+  }, [setActiveTable])
+
+  const handlePageSizeChange = useCallback((size: typeof pageSize) => {
+    setSelectedCell(null)
+    setPageSize(size)
+  }, [setPageSize])
+
+  const handlePageChange = useCallback((nextPage: number) => {
+    setSelectedCell(null)
+    setPage(nextPage)
+  }, [setPage])
+
+  const handleFilterChange = useCallback((value: string) => {
+    setRowFilter(value)
+    setSelectedCell(null)
+    setPage(1)
+  }, [setPage])
+
+  const handleSortChange = useCallback((column: string) => {
+    setSort(current => {
+      if (!current || current.column !== column) return { column, direction: 'asc' }
+      if (current.direction === 'asc') return { column, direction: 'desc' }
+      return null
+    })
+    setSelectedCell(null)
+    setPage(1)
+  }, [setPage])
+
+  const handleExportCsv = useCallback(async () => {
+    if (!project || !activeTable || exportingCsv) return
+    const exportColumns = columns.length > 0 ? columns : columnInfo.map(c => c.name)
+    if (exportColumns.length === 0) return
+
+    setExportingCsv(true)
+    try {
+      const queryOptions = { filter: rowFilter, sort }
+      const total = await dataViewerService.countRows(source, project, activeTable, rowFilter)
+      const csvRows = [exportColumns.map(csvEscape).join(',')]
+      const exportPageSize = 500
+      const exportPages = Math.max(1, Math.ceil(total / exportPageSize))
+
+      for (let exportPage = 1; exportPage <= exportPages; exportPage += 1) {
+        const data = await dataViewerService.getRows(
+          source,
+          project,
+          activeTable,
+          exportPage,
+          exportPageSize,
+          queryOptions,
+        )
+        for (const row of data.rows) {
+          csvRows.push(exportColumns.map((_, index) => csvEscape(row[index] ?? null)).join(','))
+        }
+        if (data.rows.length < exportPageSize) break
+      }
+
+      const blob = new Blob(['\ufeff' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `${safeFilename(project.name)}-${source}-${safeFilename(activeTable)}.csv`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+
+      void trackEvent('data_viewer_export_csv', {
+        source,
+        rows: total,
+        filtered: rowFilter.trim().length > 0,
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.error('data-viewer', 'exportCsv failed', err)
+      setError(message)
+      void trackEvent('data_viewer_query_failed', { stage: 'export_csv', source })
+    } finally {
+      setExportingCsv(false)
+    }
+  }, [activeTable, columnInfo, columns, exportingCsv, project, rowFilter, sort, source])
+
+  const handleSubmitMutation = useCallback(async (values: RowValues) => {
+    if (!project || !activeTable) return
+    setMutatingRows(true)
+    try {
+      if (mutationDialog === 'add') {
+        await dataViewerService.insertRow(source, project, activeTable, columnInfo, values)
+        useToastStore.getState().addToast('success', t('dataViewer.rowAdded'))
+      } else {
+        if (!selectedCell) throw new Error(t('dataViewer.noRowSelected'))
+        await dataViewerService.updateRow(
+          source,
+          project,
+          activeTable,
+          columnInfo,
+          selectedCell.rowValues,
+          selectedCell.rowId,
+          values,
+        )
+        useToastStore.getState().addToast('success', t('dataViewer.rowUpdated'))
+      }
+      setMutationDialog(null)
+      setSelectedCell(null)
+      await loadRows(true)
+    } catch (err) {
+      logger.error('data-viewer', 'row mutation failed', err)
+      throw err
+    } finally {
+      setMutatingRows(false)
+    }
+  }, [activeTable, columnInfo, loadRows, mutationDialog, project, selectedCell, source, t])
+
+  const handleDeleteRow = useCallback(async () => {
+    if (!project || !activeTable || !selectedCell || mutatingRows) return
+    if (!window.confirm(t('dataViewer.deleteRowConfirm'))) return
+
+    setMutatingRows(true)
+    try {
+      await dataViewerService.deleteRow(
+        source,
+        project,
+        activeTable,
+        columnInfo,
+        selectedCell.rowValues,
+        selectedCell.rowId,
+      )
+      useToastStore.getState().addToast('success', t('dataViewer.rowDeleted'))
+      setSelectedCell(null)
+      await loadRows(true)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.error('data-viewer', 'deleteRow failed', err)
+      useToastStore.getState().addToast('error', `${t('dataViewer.deleteRowFailed')}: ${message}`, 10_000)
+    } finally {
+      setMutatingRows(false)
+    }
+  }, [activeTable, columnInfo, loadRows, mutatingRows, project, selectedCell, source, t])
 
   function handleSendProvisionPrompt() {
     // Drop a pre-filled message into the chat's draft input. The user
@@ -362,7 +491,7 @@ function DataViewerView({ embedded = false }: DataViewerViewProps) {
           tables={tables}
           activeTable={activeTable}
           loading={tablesLoading}
-          onSelect={setActiveTable}
+          onSelect={handleTableSelect}
           onRefresh={refreshTables}
         />
 
@@ -393,25 +522,72 @@ function DataViewerView({ embedded = false }: DataViewerViewProps) {
               <TableView
                 table={activeTable}
                 columns={columns}
+                columnInfo={columnInfo}
                 rows={rows}
+                rowIds={rowIds}
+                page={page}
                 pageSize={pageSize}
-                onPageSizeChange={setPageSize}
+                totalRows={totalRows}
+                filter={rowFilter}
+                sort={sort}
+                selectedCell={selectedCell}
+                onPageSizeChange={handlePageSizeChange}
+                onFilterChange={handleFilterChange}
+                onSortChange={handleSortChange}
+                onSelectCell={setSelectedCell}
+                onAddRow={() => setMutationDialog('add')}
+                onEditRow={() => { if (selectedCell) setMutationDialog('edit') }}
+                onDeleteRow={handleDeleteRow}
+                onExportCsv={handleExportCsv}
                 onRefresh={() => loadRows(true)}
                 loading={rowsLoading}
+                exporting={exportingCsv}
+                mutating={mutatingRows}
               />
               <Pagination
                 page={page}
                 totalPages={totalPages}
                 totalRows={totalRows}
                 pageSize={pageSize}
-                onChange={setPage}
+                onChange={handlePageChange}
               />
             </>
           )}
         </Flex>
       </Flex>
+      {activeTable && (
+        <RowMutationDialog
+          open={mutationDialog !== null}
+          mode={mutationDialog ?? 'add'}
+          table={activeTable}
+          columns={columnInfo}
+          initialValues={mutationDialog === 'edit' ? selectedCell?.rowValues ?? null : null}
+          saving={mutatingRows}
+          onClose={() => { if (!mutatingRows) setMutationDialog(null) }}
+          onSubmit={handleSubmitMutation}
+        />
+      )}
     </Flex>
   )
+}
+
+function csvEscape(value: Cell): string {
+  const raw = cellToText(value)
+  if (!/[",\r\n]/.test(raw)) return raw
+  return `"${raw.replace(/"/g, '""')}"`
+}
+
+function cellToText(value: Cell): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'object' && value !== null && '__binary' in value) {
+    const byteCount = typeof value.__binary === 'number' ? value.__binary : 0
+    return `<binary, ${byteCount} bytes>`
+  }
+  return String(value)
+}
+
+function safeFilename(value: string): string {
+  return value.trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'data'
 }
 
 export default memo(DataViewerView)

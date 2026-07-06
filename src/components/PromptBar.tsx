@@ -27,11 +27,19 @@ function PromptBar() {
     isDisabled,
     hasPendingCredential,
     viewMode,
+    canToggleDevServer,
+    isDevServerActive,
+    isDevServerStarting,
+    isImprovingPrompt,
+    canUndoImprovePrompt,
     handleSend,
     handleStop,
     handleKeyDown,
     handleBlur,
     toggleEditor,
+    handleImprovePrompt,
+    handleUndoImprovePrompt,
+    toggleDevServer,
     showCommandMenu,
     filteredCommands,
     selectedCommandIndex,
@@ -150,6 +158,14 @@ function PromptBar() {
             isStreaming={isStreaming}
             hasInput={(hasInputContent || draftAttachments.length > 0) && !isSendBlocked}
             onToggleEditor={toggleEditor}
+            onImprovePrompt={handleImprovePrompt}
+            onUndoImprovePrompt={handleUndoImprovePrompt}
+            onToggleDevServer={toggleDevServer}
+            canToggleDevServer={canToggleDevServer}
+            isDevServerActive={isDevServerActive}
+            isDevServerStarting={isDevServerStarting}
+            isImprovingPrompt={isImprovingPrompt}
+            canUndoImprovePrompt={canUndoImprovePrompt}
             onSend={handleSend}
             onStop={handleStop}
             onAttach={handleAttachFiles}

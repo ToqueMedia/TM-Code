@@ -39,6 +39,7 @@ export function isBlobMarker(cell: Cell): cell is BlobMarker {
 export interface QueryResult {
   columns: string[]
   rows: Cell[][]
+  rowIds?: Cell[]
 }
 
 export interface ColumnInfo {
@@ -46,6 +47,22 @@ export interface ColumnInfo {
   type: string
   notNull: boolean
   isPrimaryKey: boolean
+}
+
+export interface MutationResult {
+  rowsAffected?: number
+}
+
+export type RowValues = Record<string, Cell>
+
+export type SortDirection = 'asc' | 'desc'
+
+export interface RowQueryOptions {
+  filter?: string
+  sort?: {
+    column: string
+    direction: SortDirection
+  } | null
 }
 
 export interface ProjectContext {
@@ -133,6 +150,18 @@ async function devQuery(
   })
 }
 
+async function devExecute(
+  projectPath: string,
+  sql: string,
+  params: unknown[] = [],
+): Promise<MutationResult> {
+  return invoke<MutationResult>('data_viewer_dev_execute', {
+    projectPath,
+    sql,
+    params,
+  })
+}
+
 // ─── Prod path ───────────────────────────────────────────────────────────────
 
 interface ProdEnv {
@@ -187,6 +216,28 @@ async function prodQuery(
   return { rows }
 }
 
+async function prodExecute(
+  project: ProjectContext,
+  sql: string,
+  params: unknown[] = [],
+): Promise<MutationResult> {
+  const env = await loadProdEnv(project.path)
+  const url = resolveProdDbUrl(env, project.id)
+  const res = await tauriFetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${env.token}`,
+    },
+    body: JSON.stringify({ sql, params, method: 'run' }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`Worker mutation failed (HTTP ${res.status}): ${text.slice(0, 200)}`)
+  }
+  return {}
+}
+
 // ─── Cache ──────────────────────────────────────────────────────────────────
 //
 // In-memory memoization for the two reads that are stable between pages of
@@ -217,6 +268,10 @@ function cacheKey(source: 'dev' | 'prod', projectId: string, table?: string): st
   return table ? `${source}::${projectId}::${table}` : `${source}::${projectId}`
 }
 
+function countCacheKey(source: 'dev' | 'prod', projectId: string, table: string, filter: string): string {
+  return `${cacheKey(source, projectId, table)}::filter=${filter}`
+}
+
 /**
  * Drop cached entries scoped to one source + project (and optionally one
  * table). Called when the user hits "Refresh tables" or "Refresh rows" and
@@ -229,7 +284,8 @@ export function invalidateCache(
 ): void {
   if (table) {
     schemaCache.delete(cacheKey(source, projectId, table))
-    countCache.delete(cacheKey(source, projectId, table))
+    const prefix = cacheKey(source, projectId, table)
+    for (const k of countCache.keys()) if (k.startsWith(prefix)) countCache.delete(k)
     return
   }
   // Whole-project invalidation: drop the table list AND every per-table
@@ -344,23 +400,56 @@ export async function countRows(
   source: 'dev' | 'prod',
   project: ProjectContext,
   table: string,
+  filter: string = '',
 ): Promise<number> {
   assertTableName(table)
-  const key = cacheKey(source, project.id, table)
+  const normalizedFilter = filter.trim()
+  const key = countCacheKey(source, project.id, table, normalizedFilter)
   const cached = countCache.get(key)
   if (cached !== undefined) return cached
 
-  const sql = `SELECT COUNT(*) FROM ${quoteIdent(table)}`
+  const tableInfo = normalizedFilter ? await getTableInfo(source, project, table) : []
+  const { clause, params } = buildFilterClause(tableInfo, normalizedFilter)
+  const sql = `SELECT COUNT(*) FROM ${quoteIdent(table)}${clause}`
   let total: number
   if (source === 'dev') {
-    const result = await devQuery(project.path, sql)
+    const result = await devQuery(project.path, sql, params)
     total = Number(result.rows[0]?.[0] ?? 0)
   } else {
-    const { rows } = await prodQuery(project, sql)
+    const { rows } = await prodQuery(project, sql, params)
     total = Number(rows[0]?.[0] ?? 0)
   }
   countCache.set(key, total)
   return total
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')
+}
+
+function buildFilterClause(columnInfo: ColumnInfo[], filter: string): { clause: string; params: string[] } {
+  const normalized = filter.trim()
+  if (!normalized || columnInfo.length === 0) return { clause: '', params: [] }
+  const searchable = columnInfo.map(c => c.name).filter(Boolean)
+  if (searchable.length === 0) return { clause: '', params: [] }
+  const like = `%${escapeLike(normalized)}%`
+  return {
+    clause: ` WHERE ${searchable.map(c => `CAST(${quoteIdent(c)} AS TEXT) LIKE ? ESCAPE '\\'`).join(' OR ')}`,
+    params: searchable.map(() => like),
+  }
+}
+
+async function buildOrderClause(
+  source: 'dev' | 'prod',
+  project: ProjectContext,
+  table: string,
+  sort: RowQueryOptions['sort'],
+): Promise<string> {
+  if (!sort?.column) return ''
+  const columnInfo = await getTableInfo(source, project, table)
+  if (!columnInfo.some(c => c.name === sort.column)) return ''
+  const direction = sort.direction === 'desc' ? 'DESC' : 'ASC'
+  return ` ORDER BY ${quoteIdent(sort.column)} ${direction}`
 }
 
 export async function getRows(
@@ -369,24 +458,141 @@ export async function getRows(
   table: string,
   page: number,
   pageSize: number,
+  options: RowQueryOptions = {},
 ): Promise<QueryResult> {
   assertTableName(table)
   const safePage = Math.max(1, Math.floor(page))
   const safeSize = Math.max(1, Math.min(500, Math.floor(pageSize)))
   const offset = (safePage - 1) * safeSize
-  const sql = `SELECT * FROM ${quoteIdent(table)} LIMIT ? OFFSET ?`
-  const params = [safeSize, offset]
+  const columnInfo = await getTableInfo(source, project, table)
+  const { clause, params: filterParams } = buildFilterClause(columnInfo, options.filter ?? '')
+  const orderClause = await buildOrderClause(source, project, table, options.sort ?? null)
+  const primaryKeys = columnInfo.filter(c => c.isPrimaryKey)
+  const includeRowId = primaryKeys.length === 0
+  const selectList = includeRowId ? `_rowid_ AS "__tmcode_rowid__", *` : '*'
+  const sql = `SELECT ${selectList} FROM ${quoteIdent(table)}${clause}${orderClause} LIMIT ? OFFSET ?`
+  const params = [...filterParams, safeSize, offset]
 
   if (source === 'dev') {
-    return devQuery(project.path, sql, params)
+    const result = await devQuery(project.path, sql, params)
+    return stripInternalRowIds(result, includeRowId)
   }
 
   // Prod path: worker returns rows only — fetch columns separately.
   // `getTableInfo` uses the schema cache so this no longer round-trips the
   // worker on every page change for the same table.
-  const [columnInfo, { rows }] = await Promise.all([
-    getTableInfo('prod', project, table),
-    prodQuery(project, sql, params),
-  ])
-  return { columns: columnInfo.map((c) => c.name), rows }
+  const { rows } = await prodQuery(project, sql, params)
+  const result = {
+    columns: includeRowId ? ['__tmcode_rowid__', ...columnInfo.map((c) => c.name)] : columnInfo.map((c) => c.name),
+    rows,
+  }
+  return stripInternalRowIds(result, includeRowId)
+}
+
+function stripInternalRowIds(result: QueryResult, includeRowId: boolean): QueryResult {
+  if (!includeRowId) return result
+  return {
+    columns: result.columns.slice(1),
+    rows: result.rows.map(row => row.slice(1)),
+    rowIds: result.rows.map(row => row[0] ?? null),
+  }
+}
+
+function editableColumns(columnInfo: ColumnInfo[]): ColumnInfo[] {
+  return columnInfo.filter(c => !/\bBLOB\b/i.test(c.type))
+}
+
+function buildSetClause(columnInfo: ColumnInfo[], values: RowValues): { clause: string; params: Cell[] } {
+  const entries = editableColumns(columnInfo).filter(c => Object.prototype.hasOwnProperty.call(values, c.name))
+  if (entries.length === 0) {
+    throw new Error('No editable columns were provided.')
+  }
+  return {
+    clause: entries.map(c => `${quoteIdent(c.name)} = ?`).join(', '),
+    params: entries.map(c => values[c.name]),
+  }
+}
+
+function buildRowWhereClause(
+  columnInfo: ColumnInfo[],
+  originalValues: RowValues,
+  rowId?: Cell | null,
+): { clause: string; params: Cell[] } {
+  const primaryKeys = columnInfo.filter(c => c.isPrimaryKey)
+  if (primaryKeys.length > 0) {
+    return {
+      clause: primaryKeys.map(c => `${quoteIdent(c.name)} IS ?`).join(' AND '),
+      params: primaryKeys.map(c => originalValues[c.name] ?? null),
+    }
+  }
+
+  if (rowId !== undefined && rowId !== null) {
+    return { clause: '_rowid_ IS ?', params: [rowId] }
+  }
+
+  throw new Error('This row cannot be edited because the table has no primary key and no rowid.')
+}
+
+async function executeMutation(
+  source: 'dev' | 'prod',
+  project: ProjectContext,
+  table: string,
+  sql: string,
+  params: Cell[],
+): Promise<MutationResult> {
+  assertTableName(table)
+  if (source === 'dev') {
+    return devExecute(project.path, sql, params)
+  }
+  return prodExecute(project, sql, params)
+}
+
+export async function insertRow(
+  source: 'dev' | 'prod',
+  project: ProjectContext,
+  table: string,
+  columnInfo: ColumnInfo[],
+  values: RowValues,
+): Promise<MutationResult> {
+  assertTableName(table)
+  const entries = editableColumns(columnInfo).filter(c => Object.prototype.hasOwnProperty.call(values, c.name))
+  const sql = entries.length === 0
+    ? `INSERT INTO ${quoteIdent(table)} DEFAULT VALUES`
+    : `INSERT INTO ${quoteIdent(table)} (${entries.map(c => quoteIdent(c.name)).join(', ')}) VALUES (${entries.map(() => '?').join(', ')})`
+  const params = entries.map(c => values[c.name])
+  const result = await executeMutation(source, project, table, sql, params)
+  invalidateCache(source, project.id, table)
+  return result
+}
+
+export async function updateRow(
+  source: 'dev' | 'prod',
+  project: ProjectContext,
+  table: string,
+  columnInfo: ColumnInfo[],
+  originalValues: RowValues,
+  rowId: Cell | null | undefined,
+  values: RowValues,
+): Promise<MutationResult> {
+  const set = buildSetClause(columnInfo, values)
+  const where = buildRowWhereClause(columnInfo, originalValues, rowId)
+  const sql = `UPDATE ${quoteIdent(table)} SET ${set.clause} WHERE ${where.clause}`
+  const result = await executeMutation(source, project, table, sql, [...set.params, ...where.params])
+  invalidateCache(source, project.id, table)
+  return result
+}
+
+export async function deleteRow(
+  source: 'dev' | 'prod',
+  project: ProjectContext,
+  table: string,
+  columnInfo: ColumnInfo[],
+  originalValues: RowValues,
+  rowId?: Cell | null,
+): Promise<MutationResult> {
+  const where = buildRowWhereClause(columnInfo, originalValues, rowId)
+  const sql = `DELETE FROM ${quoteIdent(table)} WHERE ${where.clause}`
+  const result = await executeMutation(source, project, table, sql, where.params)
+  invalidateCache(source, project.id, table)
+  return result
 }

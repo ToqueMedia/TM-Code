@@ -79,7 +79,7 @@ function byteLength(str: string): number {
 // ── Types ───────────────────────────────────────────────────────────────
 
 export interface FileState {
-  /** Full file content as returned by the read_file IPC. */
+  /** Content shown to the model for this read: full file or requested range. */
   content: string
   /**
    * Timestamp when the file was read. Used by external-change sweeps and
@@ -89,8 +89,8 @@ export interface FileState {
   timestamp: number
   /**
    * Line offset of this read (1-based). `undefined` means a full-file read.
-   * Ranged reads (offset + limit) are stored but NOT deduped — the model
-   * may legitimately need a different slice of the same file.
+   * Ranged reads are stored and deduped only when the requested range matches
+   * exactly; overlap dedup is handled by readRangeTracker.
    */
   offset: number | undefined
   /**

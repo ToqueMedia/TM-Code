@@ -186,6 +186,8 @@ interface ChatActions {
   addEstimatedTokenUsage: (inputTokens: number, outputTokens: number) => void
   // Streaming actions
   appendTextDelta: (delta: string) => void
+  /** Append transcript-visible app/status text that must not be re-sent as model output. */
+  appendUiTextDelta: (delta: string) => void
   appendReasoningDelta: (delta: string) => void
   // Reasoning toggle (message-level — legacy / fallback for messages
   // without per-block visibility metadata)
@@ -598,6 +600,29 @@ export function hasPendingDiffApprovals(): boolean {
   return pendingDiffApprovals.size > 0
 }
 
+function appendTextToStreamingMessage(msg: ChatMessage, delta: string, uiOnly = false): void {
+  // Finalize reasoning timing when first text arrives.
+  if (msg.reasoningStartedAt && !msg.reasoningDurationMs) {
+    msg.reasoningDurationMs = Date.now() - msg.reasoningStartedAt
+  }
+  msg.content = msg.content + delta
+
+  // Maintain interleaved contentBlocks: append to the last compatible text
+  // block or create a new one. UI-only progress must stay separate from
+  // model-visible text so rebuildConversationHistory can omit it precisely.
+  const blocks = msg.contentBlocks || (msg.contentBlocks = [])
+  const last = blocks[blocks.length - 1]
+  if (last && last.type === 'reasoning' && last.durationMs === undefined && last.startedAt) {
+    last.durationMs = Date.now() - last.startedAt
+  }
+  const refreshedLast = blocks[blocks.length - 1]
+  if (refreshedLast && refreshedLast.type === 'text' && Boolean(refreshedLast.uiOnly) === uiOnly) {
+    refreshedLast.text += delta
+  } else {
+    blocks.push(uiOnly ? { type: 'text', text: delta, uiOnly: true } : { type: 'text', text: delta })
+  }
+}
+
 // Streaming delta buffer (50ms flush window).
 //
 // We use a SINGLE ordered queue, not two separate buffers. The previous
@@ -611,7 +636,7 @@ export function hasPendingDiffApprovals(): boolean {
 // Preserving arrival order keeps reasoning/text/reasoning interleaving honest
 // — each ContentBlock boundary in the rendered message reflects a real
 // upstream boundary, not an artefact of our flush schedule.
-type DeltaEntry = { kind: 'text' | 'reasoning'; delta: string }
+type DeltaEntry = { kind: 'text' | 'ui_text' | 'reasoning'; delta: string }
 let deltaQueue: DeltaEntry[] = []
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -623,6 +648,18 @@ export function appendTextDeltaBuffered(delta: string) {
     last.delta += delta
   } else {
     deltaQueue.push({ kind: 'text', delta })
+  }
+  scheduleFlush()
+}
+
+export function appendUiTextDeltaBuffered(delta: string) {
+  // Same coalescing rule as model text, but keep a separate kind so UI-only
+  // progress cannot merge into adjacent model-visible assistant text.
+  const last = deltaQueue[deltaQueue.length - 1]
+  if (last && last.kind === 'ui_text') {
+    last.delta += delta
+  } else {
+    deltaQueue.push({ kind: 'ui_text', delta })
   }
   scheduleFlush()
 }
@@ -747,6 +784,7 @@ function scheduleFlush() {
       // emitted them in.
       for (const entry of queued) {
         if (entry.kind === 'text') store.appendTextDelta(entry.delta)
+        else if (entry.kind === 'ui_text') store.appendUiTextDelta(entry.delta)
         else store.appendReasoningDelta(entry.delta)
       }
     }, 50)
@@ -788,6 +826,7 @@ export function flushBufferedDeltas() {
   const store = useChatStore.getState()
   for (const entry of queued) {
     if (entry.kind === 'text') store.appendTextDelta(entry.delta)
+    else if (entry.kind === 'ui_text') store.appendUiTextDelta(entry.delta)
     else store.appendReasoningDelta(entry.delta)
   }
 }
@@ -1042,6 +1081,19 @@ function reconcileMentionContext(
   )
 }
 
+function assistantTextForModel(msg: ChatMessage): string {
+  let sawTextBlock = false
+  let text = ''
+  if (msg.contentBlocks) {
+    for (const block of msg.contentBlocks) {
+      if (block.type !== 'text') continue
+      sawTextBlock = true
+      if (!block.uiOnly) text += block.text
+    }
+  }
+  return sawTextBlock ? text : (msg.content || '')
+}
+
 // Exported for tests — pure function, no store access.
 export function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessage[] {
   const history: ConversationMessage[] = []
@@ -1138,7 +1190,7 @@ export function rebuildConversationHistory(messages: ChatMessage[]): Conversatio
         // _native carries the full native message for the API boundary.
         const nativeContent = typeof native.content === 'string'
           ? native.content
-          : msg.content || ''
+          : assistantTextForModel(msg)
         history.push({
           role: 'assistant',
           content: nativeContent,
@@ -1147,6 +1199,7 @@ export function rebuildConversationHistory(messages: ChatMessage[]): Conversatio
       } else {
         // ── Legacy fallback: reconstruct from UI state ──
         const blocks: ContentBlockAPI[] = []
+        const modelText = assistantTextForModel(msg)
 
         // Thinking/reasoning → thinking block
         if (msg.reasoningContent) {
@@ -1154,8 +1207,8 @@ export function rebuildConversationHistory(messages: ChatMessage[]): Conversatio
         }
 
         // Text → text block
-        if (msg.content) {
-          blocks.push({ type: 'text', text: msg.content })
+        if (modelText) {
+          blocks.push({ type: 'text', text: modelText })
         }
 
         // Tool calls → tool_call blocks
@@ -1172,7 +1225,7 @@ export function rebuildConversationHistory(messages: ChatMessage[]): Conversatio
 
         history.push({
           role: 'assistant',
-          content: blocks.length > 0 ? blocks : msg.content || '',
+          content: blocks.length > 0 ? blocks : modelText || '',
         })
       }
 
@@ -2045,25 +2098,23 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       const msg = session.messages.find(m => m.id === streamingMessageId)
       if (msg) {
-        // Finalize reasoning timing when first text arrives
-        if (msg.reasoningStartedAt && !msg.reasoningDurationMs) {
-          msg.reasoningDurationMs = Date.now() - msg.reasoningStartedAt
-        }
-        msg.content = msg.content + delta
-        // Maintain interleaved contentBlocks: append to last text block or create new one.
-        // If the last block is an in-flight reasoning block, finalize it first so the
-        // ReasoningBlock UI stops streaming and the text appears below it.
-        const blocks = msg.contentBlocks || (msg.contentBlocks = [])
-        const last = blocks[blocks.length - 1]
-        if (last && last.type === 'reasoning' && last.durationMs === undefined && last.startedAt) {
-          last.durationMs = Date.now() - last.startedAt
-        }
-        const refreshedLast = blocks[blocks.length - 1]
-        if (refreshedLast && refreshedLast.type === 'text') {
-          refreshedLast.text += delta
-        } else {
-          blocks.push({ type: 'text', text: delta })
-        }
+        appendTextToStreamingMessage(msg, delta)
+        session.updatedAt = Date.now()
+      }
+
+      set(s => ({ streamingVersion: s.streamingVersion + 1 }))
+    },
+
+    appendUiTextDelta: (delta: string) => {
+      const { activeSessionId, streamingMessageId, sessions } = get()
+      if (!activeSessionId || !streamingMessageId) return
+
+      const session = sessions.get(activeSessionId)
+      if (!session) return
+
+      const msg = session.messages.find(m => m.id === streamingMessageId)
+      if (msg) {
+        appendTextToStreamingMessage(msg, delta, true)
         session.updatedAt = Date.now()
       }
 

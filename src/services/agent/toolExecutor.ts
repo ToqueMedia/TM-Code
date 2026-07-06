@@ -38,6 +38,7 @@ import {
   GLOB_ALIAS,
   GREP_ALIAS,
   LS_ALIAS,
+  READ_AROUND,
   READ_ALIAS,
   WRITE_FILE,
   EDIT_FILE,
@@ -45,7 +46,7 @@ import {
   canonicalToolName,
   normalizeToolInputForCanonical,
 } from './toolNames'
-import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileStateCache } from './toolExecutor/fileStateCache'
+import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileState, type FileStateCache } from './toolExecutor/fileStateCache'
 import { FILE_UNCHANGED_STUB } from './toolExecutor/readDedup'
 import { checkReadRangeOverlap, recordReadRange, clearReadRangeTracker } from './toolExecutor/readRangeTracker'
 import { clearMentionContextTracker } from './mentionContextTracker'
@@ -115,6 +116,13 @@ interface ToolEntry {
 interface ReadFileWithSignatureResult {
   content: string
   signature: FileContentSignature
+}
+
+interface ReadFileRangeWithSignatureResult extends ReadFileWithSignatureResult {
+  startLine: number
+  lineCount: number
+  totalLines: number
+  hasMore: boolean
 }
 
 interface ReadVisibility {
@@ -652,6 +660,33 @@ class ToolExecutor {
     }).catch(() => { /* analytics never blocks tool execution */ })
   }
 
+  private async hasFileChangedSinceRead(
+    path: string,
+    currentContent: string,
+    readState: { hash: number },
+    cachedState: FileState | undefined,
+  ): Promise<boolean> {
+    const currentHash = this.simpleHash(currentContent)
+    if (currentHash === readState.hash) return false
+
+    const isRangedRead =
+      cachedState?.source === 'read' &&
+      (cachedState.offset !== undefined || cachedState.limit !== undefined)
+    const readModifiedMs = cachedState?.signature?.modifiedMs
+    if (!isRangedRead || readModifiedMs === undefined || readModifiedMs === null) {
+      return true
+    }
+
+    try {
+      const current = await invoke<{ modifiedMs: number | null }>('file_stat', { path })
+      return current.modifiedMs === undefined ||
+        current.modifiedMs === null ||
+        current.modifiedMs !== readModifiedMs
+    } catch {
+      return true
+    }
+  }
+
   /**
    * Large @mentions intentionally show only a compact outline/preview to the
    * model. The underlying read_file call still refreshes signatures and hashes,
@@ -859,14 +894,14 @@ class ToolExecutor {
 
     // .env files are ALWAYS blocked — read, write, edit, delete
     const filePath = (input.file_path || input.oldPath || '') as string
-    if (this.isEnvFile(filePath) && ['read_file', 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'].includes(toolName)) {
+    if (this.isEnvFile(filePath) && ['read_file', READ_AROUND, 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'].includes(toolName)) {
       return 'Blocked: .env is sealed (it holds secrets) — the agent cannot read or write it. This block is by design and is NOT a sign that a key is missing. To supply a credential, call request_credentials (it writes straight to .env); once it returns "Credentials saved to .env", that key IS present — trust that result, do not re-read .env to verify, and never ask the developer to edit .env by hand. A .env.example with placeholder values is fine for documentation only.'
     }
 
     // Path scope check — file tools targeting paths outside all allowed
     // roots (project + additionalDirectories) prompt the user for access.
     const FILE_SCOPE_TOOLS = new Set([
-      'read_file', 'write_file', 'edit_file', 'create_file',
+      'read_file', READ_AROUND, 'write_file', 'edit_file', 'create_file',
       'create_directory', 'delete_file', 'rename_file', 'copy_file',
       'list_directory', 'search_files', 'glob', 'path_exists', 'append_file',
       'execute_command', 'execute_command_background', 'agent_shell_start'
@@ -924,7 +959,7 @@ class ToolExecutor {
     }
 
     // Sensitive files require explicit developer authorization
-    const isSensitive = toolName === 'read_file' && this.isSensitiveFile(input.file_path as string)
+    const isSensitive = (toolName === 'read_file' || toolName === READ_AROUND) && this.isSensitiveFile(input.file_path as string)
 
     // Dangerous commands: all commands in the DANGEROUS_COMMANDS list.
     // - If BLOCKED by user in Settings → rejected immediately (never runs)
@@ -1036,7 +1071,7 @@ class ToolExecutor {
     // content is the most likely to be needed verbatim; execute_command gets
     // a TAIL preview because errors and exit code live at the bottom.
     const toolMaxChars = ToolExecutor.getToolResultMaxChars(toolName)
-    const toolPreviewBudget = toolName === 'read_file' ? 8_000 : 2_000
+    const toolPreviewBudget = toolName === 'read_file' || toolName === READ_AROUND ? 8_000 : 2_000
     const toolPreviewFromEnd = toolName === 'execute_command' || toolName === 'execute_command_background' || toolName === 'check_background_commands'
     return this.truncateResult(result, toolMaxChars, toolPreviewBudget, toolPreviewFromEnd)
   }
@@ -1138,6 +1173,7 @@ class ToolExecutor {
    *  are evicted until we fit. Independent from the entry-count cap below. */
   private static readonly LARGE_RESULT_MAX_BYTES = 8 * 1024 * 1024 // 8MB
   private static readonly LARGE_RESULT_MAX_ENTRIES = 20
+  private static readonly READ_FILE_MAX_BYTES = 256 * 1024
 
   /**
    * Per-tool max-chars limit for the result that enters the model's context
@@ -1156,6 +1192,7 @@ class ToolExecutor {
         return 8_000
       case 'search_files':
         return 8_000
+      case READ_AROUND:
       case 'read_file':
         return 12_000
       case 'edit_file':
@@ -1164,6 +1201,90 @@ class ToolExecutor {
         return 12_000
       default:
         return 12_000
+    }
+  }
+
+  private static sliceReadFileRange(
+    fullRead: ReadFileWithSignatureResult,
+    offset: number,
+    limit: number | undefined,
+  ): ReadFileRangeWithSignatureResult {
+    const lines = fullRead.content.length > 0 ? fullRead.content.split('\n') : []
+    const startLine = Math.max(1, offset)
+    const start = startLine - 1
+    const end = limit !== undefined ? Math.min(start + Math.max(1, limit), lines.length) : lines.length
+    const selected = start < lines.length ? lines.slice(start, end) : []
+
+    return {
+      content: selected.join('\n'),
+      signature: fullRead.signature,
+      startLine,
+      lineCount: selected.length,
+      totalLines: lines.length,
+      hasMore: end < lines.length,
+    }
+  }
+
+  private async readFileRange(input: {
+    filePath: string
+    offset: number
+    limit: number
+    limitProvided: boolean
+    preStat?: { size: number; modifiedMs: number | null }
+  }): Promise<ReadFileRangeWithSignatureResult> {
+    // claude-vaz parity: small regular files take the fast path
+    // (read whole file, slice lines in memory). The native range scanner is
+    // reserved for larger files where reading the whole body would be wasteful.
+    if (input.preStat && input.preStat.size <= ToolExecutor.READ_FILE_MAX_BYTES) {
+      try {
+        const fullRead = await invoke<ReadFileWithSignatureResult>('read_file_with_signature', { path: input.filePath })
+        return ToolExecutor.sliceReadFileRange(
+          fullRead,
+          input.offset,
+          input.limitProvided ? input.limit : undefined,
+        )
+      } catch {
+        // Fall through to the native range reader so the original filesystem
+        // error path still gets a chance to produce a precise failure.
+      }
+    }
+
+    const rangeArgs = {
+      path: input.filePath,
+      offset: input.offset,
+      ...(input.limitProvided ? { limit: input.limit } : {}),
+    }
+
+    try {
+      return await invoke<ReadFileRangeWithSignatureResult>('read_file_range_with_signature', rangeArgs)
+    } catch (error) {
+      const msg = formatError(error)
+      const looksLikeRangePathOrCommandFailure =
+        /not found|pathnotfound|no such file|does not exist|unknown command|command .*not.*found/i.test(msg)
+
+      if (
+        !looksLikeRangePathOrCommandFailure ||
+        !input.preStat ||
+        input.preStat.size > ToolExecutor.READ_FILE_MAX_BYTES
+      ) {
+        throw error
+      }
+
+      // Recovery path for the failure mode seen in exported sessions:
+      // search/list can prove the file exists, but the native range reader
+      // reports "not found". For small files, recover by reading the full
+      // signature-aware body once and slicing in JS. Large files keep the
+      // native-range error so we never silently dump huge files into memory.
+      try {
+        const fullRead = await invoke<ReadFileWithSignatureResult>('read_file_with_signature', { path: input.filePath })
+        return ToolExecutor.sliceReadFileRange(
+          fullRead,
+          input.offset,
+          input.limitProvided ? input.limit : undefined,
+        )
+      } catch {
+        throw error
+      }
     }
   }
 
@@ -1282,13 +1403,32 @@ class ToolExecutor {
           const col = m.column ?? '?'
           const text = (m.text as string | undefined) ?? ''
           const matchText = (m.match_text as string | undefined) ?? ''
+          const before = Array.isArray(m.context_before) ? m.context_before as string[] : []
+          const after = Array.isArray(m.context_after) ? m.context_after as string[] : []
           // Format: path:line:col: match_text (one line, grep-like)
           const matchPart = matchText ? matchText.replace(/\n/g, ' ').slice(0, 120) : ''
           lines.push(`${filePath}:${lineNum}:${col}:${matchPart}`)
-          // Include the matching line as context (indented), trimmed
+          const numericLine = typeof lineNum === 'number'
+            ? lineNum
+            : typeof lineNum === 'string'
+              ? Number.parseInt(lineNum, 10)
+              : Number.NaN
+          if (Number.isFinite(numericLine) && before.length > 0) {
+            before.forEach((ctxLine, i) => {
+              const n = numericLine - before.length + i
+              lines.push(`  ${n}: ${ctxLine.replace(/\n/g, '↵').slice(0, 200)}`)
+            })
+          }
+          // Include the matching line as context (indented), trimmed.
           if (text) {
             const ctx = text.replace(/\n/g, '↵').slice(0, 200)
-            lines.push(`  ${ctx}`)
+            lines.push(Number.isFinite(numericLine) ? `> ${numericLine}: ${ctx}` : `> ${ctx}`)
+          }
+          if (Number.isFinite(numericLine) && after.length > 0) {
+            after.forEach((ctxLine, i) => {
+              const n = numericLine + i + 1
+              lines.push(`  ${n}: ${ctxLine.replace(/\n/g, '↵').slice(0, 200)}`)
+            })
           }
         }
       }
@@ -2455,16 +2595,18 @@ ${preview}
           type: 'object',
           properties: {
             file_path: { type: 'string', description: 'Absolute path to the file to read' },
+            path: { type: 'string', description: 'Alias for file_path' },
             offset: { type: 'number', description: '1-indexed line number to start from. Combine with `limit` to read a slice of a large file.' },
             limit: { type: 'number', description: 'Maximum number of lines to read. Default: read to end of file.' },
             force: { type: 'boolean', description: 'Bypass duplicate-read suppression only when a previous Read range is no longer available after compaction/context loss. Do not use for normal navigation.' }
           },
-          required: ['file_path']
+          required: []
         },
         concurrencySafe: true,
       },
       execute: async (input) => {
-        let filePath = input.file_path as string
+        let filePath = (input.file_path ?? input.path) as string | undefined
+        if (!filePath) return 'Error: read_file requires file_path or path.'
         // Resolve relative paths to absolute (agent often sends relative paths)
         filePath = this.resolveToAbsolute(filePath)
         
@@ -2490,7 +2632,6 @@ ${preview}
         }
 
         try {
-          const MAX_FILE_BYTES = 256 * 1024
           let requestedOffset = offsetProvided ? offset : undefined
           let requestedLimit = limitProvided ? limit : undefined
           const existingState = this.readFileState.get(filePath)
@@ -2520,7 +2661,7 @@ ${preview}
           // reading a >256KB file; we now match that instead of reading the
           // whole body first. Skipped when slicing (the slice IS the
           // refinement path the error would recommend).
-          if (preStat && !sliceRequested && preStat.size > MAX_FILE_BYTES) {
+          if (preStat && !sliceRequested && preStat.size > ToolExecutor.READ_FILE_MAX_BYTES) {
             void import('../../services/analytics').then(({ trackEvent }) => {
               trackEvent('read_file_oversize_throw', {
                 path: filePath,
@@ -2585,10 +2726,18 @@ ${preview}
             }
           }
 
-          const readResult = await invoke<ReadFileWithSignatureResult>('read_file_with_signature', { path: filePath })
-          const fullContent = readResult.content
+          const readResult = sliceRequested
+            ? await this.readFileRange({
+              filePath,
+              offset,
+              limit,
+              limitProvided,
+              preStat,
+            })
+            : await invoke<ReadFileWithSignatureResult>('read_file_with_signature', { path: filePath })
+          const rangeResult = sliceRequested ? readResult as ReadFileRangeWithSignatureResult : null
           const signatureForRead = readResult.signature
-          const newHash = this.simpleHash(fullContent)
+          const contentHash = this.simpleHash(readResult.content)
 
           // (Second-stage content dedup + post-read byte-size guard removed
           // for claude-vaz parity: claude-vaz gates dedup solely on mtime
@@ -2597,24 +2746,22 @@ ${preview}
           // equality check would diverge from Claude's "stat is the gate"
           // model.)
 
-          // Apply line-based slice if requested. Lines are 1-indexed for
-          // model parity with Claude Code's Read tool. The truncation suffix
-          // is kept separate so addLineNumbers (cat -n) only numbers the
-          // actual file body, not the metadata line.
-          let content = fullContent
+          // Apply line-based slice if requested. For ranged reads, Rust does
+          // the line-oriented scan and returns only the selected lines (parity
+          // with claude-vaz readFileInRange); full reads keep the existing
+          // whole-file path. The truncation suffix is kept separate so
+          // addLineNumbers (cat -n) only numbers the actual file body, not
+          // the metadata line.
+          let content = readResult.content
           let truncationSuffix = ''
           const startLine = sliceRequested ? offset : 1
-          if (sliceRequested) {
-            const lines = fullContent.split('\n')
-            const start = Math.max(0, offset - 1)
-            const end = limit > 0 ? start + limit : lines.length
-            const slice = lines.slice(start, end)
-            const hasMore = end < lines.length
-            content = slice.join('\n')
-            if (hasMore) {
-              const nextOffset = end + 1
-              truncationSuffix = `\n\n[truncated at line ${end} of ${lines.length}; use offset: ${nextOffset} to continue]`
-            }
+          const totalLines = rangeResult
+            ? rangeResult.totalLines
+            : (content.length > 0 ? content.split('\n').length : 0)
+          if (rangeResult?.hasMore) {
+            const end = rangeResult.startLine + Math.max(0, rangeResult.lineCount) - 1
+            const nextOffset = end + 1
+            truncationSuffix = `\n\n[truncated at line ${end} of ${rangeResult.totalLines}; use offset: ${nextOffset} to continue]`
           }
           // Detect external modification BEFORE overwriting the stored
           // timestamp. If the file's content hash differs from what we
@@ -2628,13 +2775,20 @@ ${preview}
           // the mtime stat to either stub-or-read; when it reads changed
           // content it just sends it). Kept here as a TM-specific aid.
           const prev = this.readFileTimestamps.get(filePath)
-          const externalChange = prev !== undefined && prev.hash !== newHash
+          const externalChange = !sliceRequested && prev !== undefined && prev.hash !== contentHash
 
           // Track read timestamp + content hash for read-before-write enforcement.
           // Set AFTER the externalChange comparison so the comparison uses the
           // truly-previous state.
           const now = Date.now()
-          this.readFileTimestamps.set(filePath, { timestamp: now, hash: newHash })
+          this.readFileTimestamps.set(filePath, {
+            timestamp: now,
+            // Ranged reads intentionally do not load the whole file into JS.
+            // Keep the previous full-file hash when available; write/edit
+            // falls back to the range mtime below when only a ranged view is
+            // known.
+            hash: sliceRequested && prev ? prev.hash : contentHash,
+          })
           if (/[\\/]TMS\.md$/i.test(filePath)) {
             markTmsFullContextSent('read_file:TMS.md')
           }
@@ -2645,13 +2799,13 @@ ${preview}
             // not necessarily the whole internal disk read. This keeps exact
             // dedup and overlap dedup aligned with model-visible context.
             this.readFileState.set(filePath, {
-              content: fullContent,
+              content,
               timestamp: now,
               offset: visibility.range?.offset,
               limit: visibility.range?.limit,
               source: 'read',
               signature: signatureForRead,
-              hash: newHash,
+              hash: contentHash,
               fsVersion: currentFsVersion,
               isPartialView: visibility.partialView || undefined,
             })
@@ -2674,8 +2828,21 @@ ${preview}
           // beyond the last line). Wording mirrors claude-vaz
           // FileReadTool.ts mapToolResultToToolResultBlockParam.
           if (content.length === 0) {
-            if (sliceRequested && fullContent.length > 0) {
-              const totalLines = fullContent.split('\n').length
+            if (sliceRequested && rangeResult && rangeResult.lineCount > 0) {
+              const numStr = String(startLine)
+              const body = numStr.length >= 6 ? `${numStr}→` : `${numStr.padStart(6, ' ')}→`
+              const result = body + truncationSuffix
+              commitReadState(ToolExecutor.getModelVisibleReadRange({
+                result,
+                fileBodyStart: 0,
+                fileBodyLength: body.length,
+                startLine,
+                requestedOffset,
+                requestedLimit,
+              }))
+              return result
+            }
+            if (sliceRequested && totalLines > 0 && offset > totalLines) {
               const result = `<system-reminder>Warning: the file exists but is shorter than the provided offset (${offset}). The file has ${totalLines} lines.</system-reminder>`
               commitReadState(ToolExecutor.getModelVisibleReadRange({
                 result,
@@ -2757,6 +2924,50 @@ ${preview}
       }
     })
 
+    // === read_around ===
+    this.tools.set(READ_AROUND, {
+      definition: {
+        name: READ_AROUND,
+        description: 'Read a bounded line window around a specific 1-indexed line in a file. Use this after search_files returns a matching line and you need the surrounding code. This is a convenience wrapper over read_file offset/limit, so duplicate-read suppression and range tracking still apply.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            file_path: { type: 'string', description: 'Absolute path to the file to read' },
+            path: { type: 'string', description: 'Alias for file_path' },
+            line: { type: 'number', description: '1-indexed target line to center the read around' },
+            before: { type: 'number', description: 'Number of lines to include before line. Default: 40, max: 200.' },
+            after: { type: 'number', description: 'Number of lines to include after line. Default: 40, max: 200.' },
+            force: { type: 'boolean', description: 'Bypass duplicate-read suppression only when prior context was compacted away.' },
+          },
+          required: ['line'],
+        },
+        concurrencySafe: true,
+      },
+      execute: async (input) => {
+        const requestedPath = (input.file_path ?? input.path) as string | undefined
+        if (!requestedPath) return `Error: ${READ_AROUND} requires file_path or path.`
+        const line = typeof input.line === 'number' ? Math.floor(input.line) : 0
+        if (line <= 0) {
+          return `Error: ${READ_AROUND} requires a positive 1-indexed "line" number.`
+        }
+        const clampWindow = (value: unknown, fallback: number): number => {
+          const n = typeof value === 'number' ? Math.floor(value) : fallback
+          return Math.min(Math.max(0, n), 200)
+        }
+        const before = clampWindow(input.before, 40)
+        const after = clampWindow(input.after, 40)
+        const offset = Math.max(1, line - before)
+        const endLine = line + after
+        const limit = endLine - offset + 1
+        return this.execute('read_file', {
+          file_path: requestedPath,
+          offset,
+          limit,
+          ...(input.force === true ? { force: true } : {}),
+        })
+      },
+    })
+
     // === list_directory ===
     this.tools.set('list_directory', {
       definition: {
@@ -2818,7 +3029,7 @@ ${preview}
     this.tools.set('search_files', {
       definition: {
         name: 'search_files',
-        description: 'Search for text patterns across files in a directory using ripgrep. Returns up to 50 matching lines with file paths and line numbers. If you need more results, narrow your search with includePatterns.',
+        description: 'Search for text patterns across files in a directory using ripgrep. Returns up to 50 matching lines with file paths and line numbers. Set contextLines (1-10) when you need a few surrounding lines; for deeper inspection, follow a match with read_around or read_file offset/limit. If you need more results, narrow your search with includePatterns.',
         input_schema: {
           type: 'object',
           properties: {
@@ -2826,7 +3037,8 @@ ${preview}
             directory: { type: 'string', description: 'Absolute path to a directory to search in, or a single file to search within' },
             caseSensitive: { type: 'boolean', description: 'Case sensitive search. Default: false' },
             useRegex: { type: 'boolean', description: 'Interpret query as regex. Default: false' },
-            includePatterns: { type: 'array', items: { type: 'string' }, description: 'Glob patterns to include (e.g., ["*.tsx", "*.ts"])' }
+            includePatterns: { type: 'array', items: { type: 'string' }, description: 'Glob patterns to include (e.g., ["*.tsx", "*.ts"])' },
+            contextLines: { type: 'number', description: 'Number of lines before and after each match to include. Default: 0, max: 10.' },
           },
           required: ['query', 'directory']
         },
@@ -2845,7 +3057,10 @@ ${preview}
           use_regex: (input.useRegex as boolean) || false,
           include_patterns: (input.includePatterns as string[]) || [],
           exclude_patterns: ['node_modules/**', '.git/**', 'dist/**', 'build/**'],
-          max_results: 50
+          max_results: 50,
+          context_lines: typeof input.contextLines === 'number'
+            ? Math.min(Math.max(0, Math.floor(input.contextLines)), 10)
+            : 0,
         }
         const result = await invoke('search_in_files', {
           query: input.query,
@@ -2919,9 +3134,10 @@ ${preview}
             this.recordReadBeforeWriteBlocked(WRITE_FILE, 'partial_view')
             return `Error: You must call ${READ_ALIAS} on "${path}" before overwriting it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${WRITE_FILE}.`
           }
-          // Concurrent modification detection: check if file changed on disk since the model read it
-          const currentHash = this.simpleHash(oldContent)
-          if (currentHash !== readState.hash) {
+          // Concurrent modification detection: full reads use the content
+          // hash; ranged reads use the file mtime captured by the range
+          // reader, matching claude-vaz's read-state gate.
+          if (await this.hasFileChangedSinceRead(path, oldContent, readState, cachedState)) {
             this.readFileTimestamps.delete(path)
             this.recordReadBeforeWriteBlocked(WRITE_FILE, 'modified_since_read')
             return `Error: File "${path}" has been modified since you last read it (by the developer, a formatter, or another process). Read it again with ${READ_ALIAS} before writing.`
@@ -3239,8 +3455,7 @@ ${preview}
         // agent writes, so relying on cached content would miss developer or
         // formatter changes made after the model's last read_file.
         const content = await invoke<string>('read_file', { path })
-        const currentHash = this.simpleHash(content)
-        if (currentHash !== readState.hash) {
+        if (await this.hasFileChangedSinceRead(path, content, readState, readStateEntry)) {
           this.readFileTimestamps.delete(path)
           this.recordReadBeforeWriteBlocked(EDIT_FILE, 'modified_since_read')
           return `Error: File "${path}" has been modified since you last read it. Read it again with ${READ_ALIAS} before editing.`
@@ -3359,7 +3574,7 @@ ${preview}
             limit: { type: 'number', description: 'Maximum number of lines to read' },
             force: { type: 'boolean', description: 'Bypass duplicate-read suppression only when a previous Read range is no longer available after compaction/context loss.' },
           },
-          required: ['file_path'],
+          required: [],
         },
         concurrencySafe: true,
       },
@@ -3665,7 +3880,7 @@ ${preview}
     this.tools.set('start_dev_server', {
       definition: {
         name: 'start_dev_server',
-        description: `Start the project's dev server as a background process. Returns immediately and the server keeps running in the background. The preview does NOT open by itself. If the user should inspect the running app, finish by telling them to click the **Preview** button (top-right of the chat). If you only started the server for debugging, call stop_dev_server before your final answer. ONE dev server per project.
+        description: `Start the project's dev server as a background process. Returns immediately and the server keeps running in the background. The preview does NOT open by itself. If the user should inspect the running app, finish by telling them to click the **Preview** button (top-right of the chat). Leave the server running by default while the project is being developed; use stop_dev_server only on explicit request, before a required restart, during project switch/removal, or for port/process cleanup. ONE dev server per project.
 
 Pass the command that runs the WHOLE project (e.g. "npm run dev" — even if it fans out frontend+backend via concurrently, workspaces, or turbo).
 
@@ -3729,9 +3944,9 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           const url = devServerManager.getUrl()
           const hintNote = frontendPortHint ? ` [frontend port hint: ${frontendPortHint}]` : ''
           if (url) {
-            return `Dev server started and running at ${url} (${projectKind})${hintNote}. The preview does NOT open automatically. If this should stay available for manual inspection, tell the user to click the Preview button (top-right of the chat). If this was only for debugging, call stop_dev_server before your final answer.`
+            return `Dev server started and running at ${url} (${projectKind})${hintNote}. The preview does NOT open automatically. Keep it running for continued development and tell the user to click the Preview button (top-right of the chat) when they want to inspect it.`
           }
-          return `Dev server starting with command: ${command} (${projectKind})${hintNote}. It boots in the background; the preview does NOT open automatically. If this should stay available for manual inspection, tell the user to click the Preview button (top-right of the chat). If this was only for debugging, call stop_dev_server before your final answer.`
+          return `Dev server starting with command: ${command} (${projectKind})${hintNote}. It boots in the background; the preview does NOT open automatically. Keep it running for continued development and tell the user to click the Preview button (top-right of the chat) when they want to inspect it.`
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
           return `Error starting dev server: ${msg}. You can try a different command or check that dependencies are installed.`
@@ -3743,7 +3958,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set(STOP_DEV_SERVER, {
       definition: {
         name: STOP_DEV_SERVER,
-        description: 'Stop the currently running project dev server started by start_dev_server. Use this after a temporary debug/smoke-test server is no longer needed, before giving the final answer. If the user needs to inspect the app manually, leave the server running and tell them to click the Preview button instead.',
+        description: 'Stop the currently running project dev server started by start_dev_server. Do not use this as routine cleanup after successful verification. Use it only when the user explicitly asks, before a required restart, during project switch/removal, or to resolve a port/process conflict.',
         input_schema: {
           type: 'object',
           properties: {},
@@ -4602,7 +4817,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         // Verification agent: read-only + execute (NO write/edit/create tools).
         // execute_command gets a modified description warning about read-only restrictions.
         const verifierToolNames = new Set([
-          'read_file', 'list_directory', 'search_files', 'glob',
+          'read_file', READ_AROUND, 'list_directory', 'search_files', 'glob',
           'execute_command', 'read_dev_server_logs',
           'read_large_result',
         ])

@@ -5,7 +5,7 @@
  * WHY THIS EXISTS
  * ─────────────
  * Every turn of the agent loop re-sends the full tool catalog as JSON schemas.
- * 36 tools × ~300 tokens each ≈ 10K+ tokens of tool-definitions overhead on
+ * Dozens of tools × ~300 tokens each ≈ 10K+ tokens of tool-definitions overhead on
  * EVERY request — even a one-line bugfix that only needs read_file + edit_file.
  * That's ~10K tokens billed as input on every turn, inflating cost and context
  * pressure for no value.
@@ -32,7 +32,7 @@
 
 import type OpenAI from 'openai'
 import {
-  SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE,
+  SEARCH_FILES, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EDIT_FILE,
   READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
   WRITE_FILE, CREATE_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
@@ -54,7 +54,7 @@ import type { PromptProfile } from './contextBuilder/auxiliaryRegistry'
 /** The minimal toolset for a localized code task. Always active. */
 export const CORE_TOOLS = [
   GREP_ALIAS, READ_ALIAS, GLOB_ALIAS, LS_ALIAS,
-  SEARCH_FILES, READ_FILE, READ_LARGE_RESULT, EDIT_FILE, GLOB,
+  SEARCH_FILES, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EDIT_FILE, GLOB,
   EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS, UPDATE_SESSION_MEMORY,
 ] as const
 
@@ -111,7 +111,7 @@ const GROUP_TOOLS: Record<ToolsetGroupName, readonly string[]> = {
 /** Verification/audit without editing files (Parte B: read-only set). */
 const READONLY_BASE = [
   READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
-  READ_FILE, SEARCH_FILES, GLOB, LIST_DIRECTORY, READ_LARGE_RESULT,
+  READ_FILE, READ_AROUND, SEARCH_FILES, GLOB, LIST_DIRECTORY, READ_LARGE_RESULT,
   READ_SKILL, ASK_USER_QUESTION, UPDATE_SESSION_MEMORY,
 ] as const
 
@@ -119,7 +119,7 @@ const READONLY_BASE = [
  *  project profile. No shell by default. */
 const PROJECT_BOOTSTRAP_BASE = [
   LS_ALIAS, GLOB_ALIAS, GREP_ALIAS, READ_ALIAS,
-  LIST_DIRECTORY, GLOB, SEARCH_FILES, READ_FILE, WRITE_FILE, CREATE_FILE,
+  LIST_DIRECTORY, GLOB, SEARCH_FILES, READ_FILE, READ_AROUND, WRITE_FILE, CREATE_FILE,
   ASK_USER_QUESTION, UPDATE_SESSION_MEMORY,
 ] as const
 
@@ -128,7 +128,7 @@ const PROJECT_BOOTSTRAP_BASE = [
  *  this keeps a verification-style bugfix at ~6 tools, not 8. */
 const BUGFIX_BASE = [
   READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
-  READ_FILE, SEARCH_FILES, GLOB, READ_LARGE_RESULT, EXECUTE_COMMAND,
+  READ_FILE, READ_AROUND, SEARCH_FILES, GLOB, READ_LARGE_RESULT, EXECUTE_COMMAND,
   ASK_USER_QUESTION, UPDATE_SESSION_MEMORY,
 ] as const
 /** Exported for tests + the usage-log to reference the bugfix base set. */

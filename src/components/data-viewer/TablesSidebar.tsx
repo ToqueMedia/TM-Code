@@ -1,5 +1,6 @@
+import { useMemo, useState, type ChangeEvent } from 'react'
 import { Box, Flex, Text, VStack } from '@chakra-ui/react'
-import { FiDatabase, FiRefreshCw } from 'react-icons/fi'
+import { FiDatabase, FiRefreshCw, FiSearch } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 
@@ -13,6 +14,13 @@ interface TablesSidebarProps {
 
 function TablesSidebar({ tables, activeTable, loading, onSelect, onRefresh }: TablesSidebarProps) {
   const t = useTranslation()
+  const [query, setQuery] = useState('')
+  const filteredTables = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return tables
+    return tables.filter(table => table.toLowerCase().includes(q))
+  }, [query, tables])
+
   return (
     <Flex
       direction="column"
@@ -60,14 +68,50 @@ function TablesSidebar({ tables, activeTable, loading, onSelect, onRefresh }: Ta
         </button>
       </Flex>
 
+      {tables.length > 0 && (
+        <Flex
+          align="center"
+          gap={2}
+          mx={2}
+          mt={2}
+          px={2}
+          h="28px"
+          border={`1px solid ${tokens.colors.border.sidebarPanel}`}
+          borderRadius={tokens.radius.md}
+          bg={tokens.colors.bg.input}
+        >
+          <FiSearch size={12} color={tokens.colors.text.disabled} />
+          <input
+            value={query}
+            onChange={(event: ChangeEvent<HTMLInputElement>) => setQuery(event.target.value)}
+            placeholder={t('dataViewer.searchTables')}
+            aria-label={t('dataViewer.searchTables')}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              background: 'transparent',
+              border: 0,
+              outline: 'none',
+              color: tokens.colors.text.primary,
+              fontSize: '11px',
+              fontFamily: tokens.fontFamily.ui,
+            }}
+          />
+        </Flex>
+      )}
+
       <Box flex="1" overflowY="auto" py={1}>
         {tables.length === 0 ? (
           <Text px={3} py={2} fontSize="11px" color={tokens.colors.text.disabled}>
             {loading ? t('dataViewer.loading') : t('dataViewer.noTables')}
           </Text>
+        ) : filteredTables.length === 0 ? (
+          <Text px={3} py={2} fontSize="11px" color={tokens.colors.text.disabled}>
+            {t('dataViewer.noTableMatches')}
+          </Text>
         ) : (
           <VStack align="stretch" gap={0}>
-            {tables.map((name) => {
+            {filteredTables.map((name) => {
               const isActive = name === activeTable
               return (
                 <Box
