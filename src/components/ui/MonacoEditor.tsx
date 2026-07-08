@@ -18,6 +18,7 @@ import { GitService, type GitLineChange } from '../../services/gitService';
 import { FormatterService } from '../../services/formatterService';
 import AICompletionService from '../../services/aiCompletionService';
 import { registerReactTypeLibraries } from '../../services/monacoTypeLibraries';
+import { parseMergeConflicts, resolvedTextFor, type MergeAcceptKind } from '../../utils/mergeConflicts';
 import { toqueMediaTheme, toqueMediaSoftTheme } from '../../themes/toqueMediaTheme';
 
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
@@ -122,6 +123,144 @@ function registerFormattingProvider(monaco: Monaco) {
   }
 }
 
+// ── Conflitos de merge no editor (paridade com o VS Code) ────────────────
+//
+// Porte do extensions/merge-conflict do VS Code: blocos Atual/Recebida
+// destacados com as cores canónicas, etiquetas nos marcadores e CodeLens
+// "Aceitar Atual | Aceitar Recebida | Aceitar Ambas" sobre cada conflito.
+let mergeConflictSupportRegistered = false
+
+function ensureMergeConflictStyles() {
+  if (document.getElementById('merge-conflict-styles')) return
+  const style = document.createElement('style')
+  style.id = 'merge-conflict-styles'
+  // Cores por omissão do VS Code (dark): current teal #40C8AE, incoming azul
+  // #40A6FF, ancestral cinzento — headers mais fortes que o conteúdo.
+  style.textContent = `
+    .merge-current-header { background: rgba(64, 200, 174, 0.5); }
+    .merge-current-content { background: rgba(64, 200, 174, 0.2); }
+    .merge-splitter { background: rgba(96, 96, 96, 0.4); }
+    .merge-ancestors { background: rgba(96, 96, 96, 0.25); }
+    .merge-incoming-header { background: rgba(64, 166, 255, 0.48); }
+    .merge-incoming-content { background: rgba(64, 166, 255, 0.19); }
+    .merge-header-label { opacity: 0.75; font-style: italic; }
+  `
+  document.head.appendChild(style)
+}
+
+function registerMergeConflictSupport(monaco: Monaco) {
+  if (mergeConflictSupportRegistered) return
+  mergeConflictSupportRegistered = true
+  ensureMergeConflictStyles()
+
+  // Comando único para os três accepts — argumentos: uri, headerLine, kind.
+  // Re-parse no momento do clique: as linhas podem ter mudado desde que a
+  // lens foi calculada, e o headerLine identifica o conflito com segurança
+  // suficiente (se já não existir, o clique é um no-op).
+  monacoEditor.editor.registerCommand(
+    'tmcode.merge.accept',
+    (_accessor: unknown, uriString: string, headerLine: number, kind: MergeAcceptKind) => {
+      const model = monacoEditor.editor.getModel(monacoEditor.Uri.parse(uriString))
+      if (!model || model.isDisposed()) return
+      const lines = model.getLinesContent()
+      const conflict = parseMergeConflicts(lines).find(c => c.headerLine === headerLine)
+      if (!conflict) return
+      // pushEditOperations preserva o undo stack — Ctrl+Z reverte o accept.
+      model.pushEditOperations(
+        [],
+        [{
+          range: new monacoEditor.Range(
+            conflict.headerLine, 1,
+            conflict.footerLine, model.getLineMaxColumn(conflict.footerLine),
+          ),
+          text: resolvedTextFor(lines, conflict, kind),
+        }],
+        () => null,
+      )
+    },
+  )
+
+  monaco.languages.registerCodeLensProvider({ pattern: '**' }, {
+    provideCodeLenses: (model: monacoEditor.editor.ITextModel) => {
+      const conflicts = parseMergeConflicts(model.getLinesContent())
+      const lenses: monacoEditor.languages.CodeLens[] = conflicts.flatMap((conflict, index) => {
+        const range = new monacoEditor.Range(conflict.headerLine, 1, conflict.headerLine, 1)
+        const uri = model.uri.toString()
+        return [
+          {
+            range,
+            id: `merge-current-${index}`,
+            command: { id: 'tmcode.merge.accept', title: t('merge.acceptCurrent'), arguments: [uri, conflict.headerLine, 'current'] },
+          },
+          {
+            range,
+            id: `merge-incoming-${index}`,
+            command: { id: 'tmcode.merge.accept', title: t('merge.acceptIncoming'), arguments: [uri, conflict.headerLine, 'incoming'] },
+          },
+          {
+            range,
+            id: `merge-both-${index}`,
+            command: { id: 'tmcode.merge.accept', title: t('merge.acceptBoth'), arguments: [uri, conflict.headerLine, 'both'] },
+          },
+        ]
+      })
+      return { lenses, dispose: () => {} }
+    },
+    resolveCodeLens: (_model: monacoEditor.editor.ITextModel, lens: monacoEditor.languages.CodeLens) => lens,
+  })
+}
+
+/** Decorações dos blocos de conflito para um modelo — chamado por editor. */
+function buildMergeConflictDecorations(model: monacoEditor.editor.ITextModel): editor.IModelDeltaDecoration[] {
+  const lines = model.getLinesContent()
+  const conflicts = parseMergeConflicts(lines)
+  const decorations: editor.IModelDeltaDecoration[] = []
+  for (const conflict of conflicts) {
+    const contentEndCurrent = (conflict.ancestorsLine ?? conflict.splitterLine) - 1
+    decorations.push({
+      range: new monacoEditor.Range(conflict.headerLine, 1, conflict.headerLine, 1),
+      options: {
+        isWholeLine: true,
+        className: 'merge-current-header',
+        after: { content: ` ${t('merge.currentChangeLabel')}`, inlineClassName: 'merge-header-label' },
+        overviewRuler: { color: 'rgba(64, 200, 174, 0.8)', position: monacoEditor.editor.OverviewRulerLane.Full },
+      },
+    })
+    if (contentEndCurrent >= conflict.headerLine + 1) {
+      decorations.push({
+        range: new monacoEditor.Range(conflict.headerLine + 1, 1, contentEndCurrent, 1),
+        options: { isWholeLine: true, className: 'merge-current-content' },
+      })
+    }
+    if (conflict.ancestorsLine) {
+      decorations.push({
+        range: new monacoEditor.Range(conflict.ancestorsLine, 1, conflict.splitterLine - 1, 1),
+        options: { isWholeLine: true, className: 'merge-ancestors' },
+      })
+    }
+    decorations.push({
+      range: new monacoEditor.Range(conflict.splitterLine, 1, conflict.splitterLine, 1),
+      options: { isWholeLine: true, className: 'merge-splitter' },
+    })
+    if (conflict.footerLine - 1 >= conflict.splitterLine + 1) {
+      decorations.push({
+        range: new monacoEditor.Range(conflict.splitterLine + 1, 1, conflict.footerLine - 1, 1),
+        options: { isWholeLine: true, className: 'merge-incoming-content' },
+      })
+    }
+    decorations.push({
+      range: new monacoEditor.Range(conflict.footerLine, 1, conflict.footerLine, 1),
+      options: {
+        isWholeLine: true,
+        className: 'merge-incoming-header',
+        after: { content: ` ${t('merge.incomingChangeLabel')}`, inlineClassName: 'merge-header-label' },
+        overviewRuler: { color: 'rgba(64, 166, 255, 0.8)', position: monacoEditor.editor.OverviewRulerLane.Full },
+      },
+    })
+  }
+  return decorations
+}
+
 const MIRRORED_PAIR_CHARS: Record<string, string> = {
   '"': '"',
   "'": "'",
@@ -168,6 +307,8 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
   const cursorCbRef = useRef(onCursorPositionChange);
   const pendingRef = useRef<{ path: string; content: string } | null>(null);
   const gutterCollectionRef = useRef<editor.IEditorDecorationsCollection | null>(null);
+  const mergeCollectionRef = useRef<editor.IEditorDecorationsCollection | null>(null);
+  const mergeUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const applyingStoreUpdateRef = useRef(false);
 
   cursorCbRef.current = onCursorPositionChange;
@@ -243,7 +384,10 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     renderControlCharacters: true,
     links: true,
     colorDecorators: true,
-    codeLens: false,
+    // Necessário para as ações de conflito de merge (Aceitar Atual/Recebida/
+    // Ambas) — o único CodeLens provider registado é o de conflitos, por isso
+    // fora de merges não aparece nada.
+    codeLens: true,
     // Monaco's built-in context menu — cut/copy/paste, Go to Definition,
     // Find References, Format Document, etc. Disabling it was a leftover
     // from a phase where we mounted a custom overlay; the overlay never
@@ -321,6 +465,27 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     }
   }, []);
 
+  // ── Merge conflict decorations ───────────────────────────────────────────
+
+  const updateMergeDecorations = useCallback((ed: editor.IStandaloneCodeEditor) => {
+    const model = ed.getModel()
+    if (!model || model.isDisposed()) return
+    const decorations = buildMergeConflictDecorations(model)
+    if (mergeCollectionRef.current) {
+      mergeCollectionRef.current.set(decorations)
+    } else if (decorations.length > 0) {
+      mergeCollectionRef.current = ed.createDecorationsCollection(decorations)
+    }
+  }, [])
+
+  const scheduleMergeDecorations = useCallback((ed: editor.IStandaloneCodeEditor) => {
+    if (mergeUpdateTimerRef.current) clearTimeout(mergeUpdateTimerRef.current)
+    mergeUpdateTimerRef.current = setTimeout(() => {
+      mergeUpdateTimerRef.current = null
+      updateMergeDecorations(ed)
+    }, 150)
+  }, [updateMergeDecorations])
+
   // ── Saving ───────────────────────────────────────────────────────────────
 
   // Single write path shared by Cmd+S, auto-save, blur-save, tab-switch and
@@ -377,6 +542,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
       monacoProvidersRegistered = true;
 
       registerFormattingProvider(monaco);
+      registerMergeConflictSupport(monaco);
 
       for (const langId of ['typescript', 'javascript']) {
         monaco.languages.registerLinkProvider(langId, {
@@ -421,6 +587,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     dirtyRef.current = false;
     pendingRef.current = null;
     gutterCollectionRef.current = null;
+    mergeCollectionRef.current = null;
     MonacoBridge.getInstance().setCurrentEditor(ed);
 
     // TS/JS compiler config — set once, not per file mount
@@ -581,6 +748,10 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     //     debounced from the LAST edit; never formats).
     disposablesRef.current.push(
       ed.onDidChangeModelContent(() => {
+        // Decorações de conflito refrescam em QUALQUER mudança de conteúdo —
+        // incluindo setValue vindos do store (agente/watcher), que fazem
+        // early-return abaixo.
+        scheduleMergeDecorations(ed);
         if (applyingStoreUpdateRef.current) return;
         dirtyRef.current = true;
         const model = ed.getModel();
@@ -760,6 +931,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
 
     // Load git gutter decorations
     updateGitGutter(ed);
+    updateMergeDecorations(ed);
 
     // Custom context menu — dispatch event for EditorContextMenu React component
     const domNode = ed.getDomNode();
@@ -780,7 +952,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     if (projectRoot) {
       FormatterService.getInstance().loadProjectConfig(projectRoot).catch(() => {});
     }
-  }, [updateGitGutter, saveModel, groupId]);
+  }, [updateGitGutter, saveModel, groupId, updateMergeDecorations, scheduleMergeDecorations]);
 
   // ── Model swap on tab switch (VS Code-style) ────────────────────────
 
@@ -858,7 +1030,8 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
 
     // Update git gutter for the new file
     updateGitGutter(inst);
-  }, [path, groupId, hasFile, saveModel, updateGitGutter]);
+    updateMergeDecorations(inst);
+  }, [path, groupId, hasFile, saveModel, updateGitGutter, updateMergeDecorations]);
 
   // Cleanup on unmount — save everything
   useEffect(() => {
@@ -877,6 +1050,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
       // Flush pending timers
       if (autoSaveRef.current) { clearTimeout(autoSaveRef.current); autoSaveRef.current = null; }
       if (contentSyncRef.current) { clearTimeout(contentSyncRef.current); contentSyncRef.current = null; }
+      if (mergeUpdateTimerRef.current) { clearTimeout(mergeUpdateTimerRef.current); mergeUpdateTimerRef.current = null; }
       disposablesRef.current.forEach(d => d.dispose());
       disposablesRef.current = [];
 

@@ -1372,6 +1372,11 @@ const en = {
   'sourceControl.markResolvedBtn': 'Mark as resolved',
   'sourceControl.markAllResolved': 'Mark all as resolved',
   'sourceControl.openConflict': 'Open file to resolve',
+  'merge.acceptCurrent': 'Accept Current Change',
+  'merge.acceptIncoming': 'Accept Incoming Change',
+  'merge.acceptBoth': 'Accept Both Changes',
+  'merge.currentChangeLabel': '(Current Change)',
+  'merge.incomingChangeLabel': '(Incoming Change)',
 
   // ── Generating Status Bar ─────────────────────────
   'generating.ready': 'Ready',
@@ -3230,6 +3235,11 @@ const pt: Record<keyof typeof en, string> = {
   'sourceControl.markResolvedBtn': 'Marcar como resolvido',
   'sourceControl.markAllResolved': 'Marcar todos como resolvidos',
   'sourceControl.openConflict': 'Abrir ficheiro para resolver',
+  'merge.acceptCurrent': 'Aceitar Alteração Atual',
+  'merge.acceptIncoming': 'Aceitar Alteração Recebida',
+  'merge.acceptBoth': 'Aceitar Ambas',
+  'merge.currentChangeLabel': '(Alteração Atual)',
+  'merge.incomingChangeLabel': '(Alteração Recebida)',
 
   // ── Generating Status Bar ─────────────────────────
   'generating.ready': 'Pronto',
