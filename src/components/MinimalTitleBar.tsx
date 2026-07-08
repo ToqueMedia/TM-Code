@@ -81,6 +81,10 @@ function MinimalTitleBar() {
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showIssueReporter, setShowIssueReporter] = useState(false)
   const [sendingToWeb, setSendingToWeb] = useState(false)
+  // Painel de atividade do "Enviar para Web" — lista de passos com o atual
+  // em spinner e os concluídos com ✓.
+  const [exportSteps, setExportSteps] = useState<Array<{ label: string; done: boolean }>>([])
+  const exportStepsClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const handleCloseIssueReporter = useCallback(() => setShowIssueReporter(false), [])
   const avatarRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -215,10 +219,23 @@ function MinimalTitleBar() {
     }
   }
 
+  // Activity feed do envio — cada passo aparece no painel flutuante enquanto
+  // decorre (spinner) e fica com ✓ quando o seguinte começa. Substitui os
+  // toasts intermédios: o developer vê a sequência inteira num só sítio.
+  function pushExportStep(label: string) {
+    setExportSteps(steps => [...steps.map(step => ({ ...step, done: true })), { label, done: false }])
+  }
+  function finishExportSteps(clearAfterMs: number) {
+    setExportSteps(steps => steps.map(step => ({ ...step, done: true })))
+    if (exportStepsClearTimer.current) clearTimeout(exportStepsClearTimer.current)
+    exportStepsClearTimer.current = setTimeout(() => setExportSteps([]), clearAfterMs)
+  }
+
   async function handleSendToWeb() {
     if (!currentProject || sendingToWeb) return
     setSendingToWeb(true)
-    useToastStore.getState().addToast('info', t('titlebar.sendToWebPreparing'))
+    if (exportStepsClearTimer.current) clearTimeout(exportStepsClearTimer.current)
+    setExportSteps([{ label: t('titlebar.sendToWebPreparing'), done: false }])
     try {
       const prepared = await prepareProjectWebExport(currentProject)
       // Fail-closed confirmation. window.confirm is NOT safe here: with the
@@ -235,33 +252,39 @@ function MinimalTitleBar() {
         )
       } catch {
         useToastStore.getState().addToast('error', t('titlebar.sendToWebConfirmFailed'))
+        setExportSteps([])
         return
       }
-      if (!confirmed) return
+      if (!confirmed) {
+        setExportSteps([])
+        return
+      }
 
       const result = await sendProjectToTmCodeWeb(currentProject, prepared, progress => {
-        const toast = useToastStore.getState()
         if (progress.phase === 'provision-db') {
-          toast.addToast('info', t('titlebar.sendToWebProvisioningDb'))
+          pushExportStep(t('titlebar.sendToWebProvisioningDb'))
         } else if (progress.phase === 'db-ready') {
-          toast.addToast('success', t('titlebar.sendToWebDbReady')
+          pushExportStep(t('titlebar.sendToWebDbReady')
             .replace('{reused}', progress.reused ? t('titlebar.sendToWebDbReused') : t('titlebar.sendToWebDbCreated')))
         } else if (progress.phase === 'db-migrated') {
-          toast.addToast('success', t('titlebar.sendToWebDbMigrated'))
+          pushExportStep(t('titlebar.sendToWebDbMigrated'))
         } else if (progress.phase === 'db-verified') {
-          toast.addToast('success', t('titlebar.sendToWebDbVerified'))
+          pushExportStep(t('titlebar.sendToWebDbVerified'))
         } else if (progress.phase === 'db-linked') {
-          toast.addToast('success', t('titlebar.sendToWebDbLinked'))
+          pushExportStep(t('titlebar.sendToWebDbLinked'))
         } else if (progress.phase === 'uploading') {
-          toast.addToast('info', progress.envVarCount > 0
+          pushExportStep(progress.envVarCount > 0
             ? t('titlebar.sendToWebUploadingWithEnv')
             : t('titlebar.sendToWebUploading'))
         }
       })
+      pushExportStep(t('titlebar.sendToWebSent'))
+      finishExportSteps(3000)
       useToastStore.getState().addToast('success', t('titlebar.sendToWebSent'))
       const { openUrl } = await import('@tauri-apps/plugin-opener')
       await openUrl(result.webUrl)
     } catch (error) {
+      setExportSteps([])
       useToastStore.getState().addToast('error', error instanceof Error ? error.message : String(error))
     } finally {
       setSendingToWeb(false)
@@ -544,6 +567,60 @@ function MinimalTitleBar() {
       {/* E2E: dialog mounted globally so any tool execution path can prompt
           the user, even from views where the preview is not yet visible. */}
       <BrowserMissingDialog />
+
+      {/* Activity Loading do Enviar para Web — cada passo visível enquanto
+          decorre; desaparece sozinho depois do envio concluir. */}
+      {exportSteps.length > 0 && (
+        <Portal>
+          <Box
+            position="fixed"
+            bottom="16px"
+            right="16px"
+            zIndex={9999}
+            minW="300px"
+            maxW="380px"
+            bg={tokens.colors.dialog.bg}
+            border={`1px solid ${tokens.colors.border.panel}`}
+            borderRadius="10px"
+            boxShadow="0 12px 40px rgba(0,0,0,0.45)"
+            px={4}
+            py={3}
+            css={{ '@keyframes tmExportStepSpin': { to: { transform: 'rotate(360deg)' } } }}
+          >
+            <Text fontSize="12px" fontWeight="600" color={tokens.colors.text.primary} mb={2}>
+              {t('titlebar.sendToWebShort')}
+            </Text>
+            <Flex direction="column" gap="6px">
+              {exportSteps.map((step, index) => (
+                <Flex key={index} align="flex-start" gap={2}>
+                  {step.done ? (
+                    <Text as="span" fontSize="12px" color={tokens.colors.accent.green} flexShrink={0} lineHeight="16px">✓</Text>
+                  ) : (
+                    <Box
+                      w="10px"
+                      h="10px"
+                      mt="3px"
+                      flexShrink={0}
+                      borderRadius="full"
+                      border="2px solid transparent"
+                      borderTopColor={tokens.colors.accent.primary}
+                      borderRightColor={tokens.colors.accent.primary}
+                      css={{ animation: 'tmExportStepSpin 0.8s linear infinite' }}
+                    />
+                  )}
+                  <Text
+                    fontSize="12px"
+                    lineHeight="16px"
+                    color={step.done ? tokens.colors.text.secondary : tokens.colors.text.primary}
+                  >
+                    {step.label}
+                  </Text>
+                </Flex>
+              ))}
+            </Flex>
+          </Box>
+        </Portal>
+      )}
     </Box>
   )
 }
