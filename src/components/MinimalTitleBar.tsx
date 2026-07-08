@@ -268,6 +268,12 @@ function MinimalTitleBar() {
             .replace('{reused}', progress.reused ? t('titlebar.sendToWebDbReused') : t('titlebar.sendToWebDbCreated')))
         } else if (progress.phase === 'db-migrated') {
           pushExportStep(t('titlebar.sendToWebDbMigrated'))
+        } else if (progress.phase === 'db-data-start') {
+          pushExportStep(t('titlebar.sendToWebDbDataCopying'))
+        } else if (progress.phase === 'db-data') {
+          pushExportStep(progress.rows > 0
+            ? t('titlebar.sendToWebDbDataDone').replace('{rows}', String(progress.rows))
+            : t('titlebar.sendToWebDbDataNone'))
         } else if (progress.phase === 'db-verified') {
           pushExportStep(t('titlebar.sendToWebDbVerified'))
         } else if (progress.phase === 'db-linked') {

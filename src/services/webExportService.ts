@@ -360,8 +360,8 @@ function analyze(files: PortableFile[]): CompatibilityReport {
 
   if (hasDatabase) {
     warnings.push(
-      'Database detected (schema/migrations/SQLite deps): Web deploy provisions a managed database and applies the migrations. ' +
-      'Local database FILES (.db/.sqlite) and their data are not exported — only the structure travels.',
+      'Database detected: the managed database is provisioned before sending, the structure (migrations) is applied ' +
+      'and the existing local data is copied into it. Local .db files themselves are not exported.',
     )
   }
 
@@ -519,6 +519,43 @@ async function provisionDatabaseForExport(
       throw new Error(`Migration statement ${migrateData.failed.index ?? '?'} failed on the managed database: ${failureText.slice(0, 200)}`)
     }
     onProgress?.({ phase: 'db-migrated', statements: migrationStatements.length })
+
+    // DATA migration: the rows the developer already has in the local .db
+    // travel to the managed database too (user requirement #4). INSERT OR
+    // IGNORE keeps re-exports idempotent — existing rows are left alone.
+    onProgress?.({ phase: 'db-data-start' })
+    const dump = await dumpLocalDatabaseData(project.path)
+    if (dump && dump.statements.length > 0) {
+      const BATCH = 400
+      for (let start = 0; start < dump.statements.length; start += BATCH) {
+        const batch = dump.statements.slice(start, start + BATCH)
+        const dataRes = await tauriFetch(
+          `${resolveWorkerUrl()}/v1/apps/${encodeURIComponent(project.id)}/database/migrate`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({ statements: batch }),
+            timeoutSecs: 120,
+          },
+        )
+        if (!dataRes.ok) {
+          const body = await dataRes.text().catch(() => '')
+          throw new Error(`Copying local data to the managed database failed (HTTP ${dataRes.status}): ${body.slice(0, 200)}`)
+        }
+        const dataResult = await dataRes.json().catch(() => ({})) as { failed?: { index?: number; error?: string } }
+        if (dataResult.failed) {
+          throw new Error(
+            `Copying local data failed at row ${start + (dataResult.failed.index ?? 0) + 1}: ${String(dataResult.failed.error ?? '').slice(0, 200)}. Export aborted.`,
+          )
+        }
+      }
+      onProgress?.({ phase: 'db-data', rows: dump.rows })
+    } else {
+      onProgress?.({ phase: 'db-data', rows: 0 })
+    }
   }
 
   // Positive proof of life, not just a 200 from the provision endpoint: ask
@@ -570,9 +607,149 @@ export type WebExportProgress =
   | { phase: 'provision-db' }
   | { phase: 'db-ready'; dbName: string; reused: boolean }
   | { phase: 'db-migrated'; statements: number }
+  | { phase: 'db-data-start' }
+  | { phase: 'db-data'; rows: number }
   | { phase: 'db-verified' }
   | { phase: 'db-linked' }
   | { phase: 'uploading'; envVarCount: number }
+
+// ── Migração de DADOS do .db local para a base gerida ────────────────────
+//
+// Script executado DENTRO do projeto (cwd = raiz) com o Node do developer:
+// encontra o ficheiro SQLite local, abre-o com o @libsql/client do próprio
+// projeto (contrato dos scaffolds TM; fallback better-sqlite3) e imprime um
+// JSON com INSERT OR IGNORE idempotentes — re-exportar não duplica registos.
+// A tabela de bookkeeping do drizzle fica de fora.
+const DB_DATA_DUMP_SCRIPT = `
+import fs from 'node:fs'
+import path from 'node:path'
+
+const MAX_SQL_BYTES = 8 * 1024 * 1024
+
+const candidates = []
+for (const dir of ['.', 'server', 'backend', 'data']) {
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (/\\.(db|sqlite3?|db3)$/i.test(name)) candidates.push(dir === '.' ? name : path.join(dir, name))
+    }
+  } catch {}
+}
+const dbFile = candidates[0] ?? null
+if (!dbFile) {
+  console.log(JSON.stringify({ dbFile: null, rows: 0, statements: [] }))
+  process.exit(0)
+}
+
+async function openDb() {
+  try {
+    const { createClient } = await import('@libsql/client')
+    const client = createClient({ url: 'file:' + dbFile.split(path.sep).join('/') })
+    return {
+      query: async (sql) => {
+        const result = await client.execute(sql)
+        return { columns: result.columns, rows: result.rows }
+      },
+      close: () => client.close(),
+    }
+  } catch {}
+  const better = (await import('better-sqlite3')).default
+  const database = new better(dbFile, { readonly: true })
+  return {
+    query: async (sql) => {
+      const rows = database.prepare(sql).all()
+      return { columns: rows.length > 0 ? Object.keys(rows[0]) : [], rows }
+    },
+    close: () => database.close(),
+  }
+}
+
+function sqlValue(value) {
+  if (value === null || value === undefined) return 'NULL'
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'NULL'
+  if (typeof value === 'bigint') return value.toString()
+  if (typeof value === 'boolean') return value ? '1' : '0'
+  if (value instanceof Uint8Array || Buffer.isBuffer(value)) {
+    return "X'" + Buffer.from(value).toString('hex') + "'"
+  }
+  return "'" + String(value).replace(/'/g, "''") + "'"
+}
+
+const db = await openDb()
+try {
+  const tables = (await db.query(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '__drizzle%'",
+  )).rows.map(row => Array.isArray(row) ? row[0] : row.name)
+
+  const statements = []
+  let totalRows = 0
+  let totalBytes = 0
+  for (const table of tables) {
+    const result = await db.query('SELECT * FROM "' + String(table).replace(/"/g, '""') + '"')
+    if (result.rows.length === 0) continue
+    const columns = result.columns
+    const columnSql = columns.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(', ')
+    for (const row of result.rows) {
+      const values = columns.map((col, index) => sqlValue(Array.isArray(row) ? row[index] : row[col])).join(', ')
+      const statement = 'INSERT OR IGNORE INTO "' + String(table).replace(/"/g, '""') + '" (' + columnSql + ') VALUES (' + values + ')'
+      totalBytes += statement.length
+      if (totalBytes > MAX_SQL_BYTES) {
+        console.log(JSON.stringify({ dbFile, error: 'too-large', rows: totalRows }))
+        process.exit(0)
+      }
+      statements.push(statement)
+      totalRows += 1
+    }
+  }
+  console.log(JSON.stringify({ dbFile, rows: totalRows, statements }))
+} finally {
+  try { db.close() } catch {}
+}
+`
+
+const DB_DUMP_SCRIPT_PATH = '.toquemedia/tm-export-db-dump.mjs'
+
+interface LocalDatabaseDump {
+  dbFile: string
+  rows: number
+  statements: string[]
+}
+
+/**
+ * Dump the local SQLite data as idempotent INSERT statements, using the
+ * project's own runtime (Node + @libsql/client from its node_modules).
+ * Returns null when the project has no local database file.
+ */
+async function dumpLocalDatabaseData(projectPath: string): Promise<LocalDatabaseDump | null> {
+  await invoke('write_file', { path: `${projectPath}/${DB_DUMP_SCRIPT_PATH}`, content: DB_DATA_DUMP_SCRIPT })
+  try {
+    const result = await invoke<{ stdout: string; stderr: string; success: boolean; exitCode: number }>(
+      'execute_command',
+      { command: `node "${DB_DUMP_SCRIPT_PATH}"`, cwd: projectPath, timeoutSecs: 90 },
+    )
+    if (!result.success) {
+      throw new Error(
+        `Reading the local database data failed (exit ${result.exitCode}): ${(result.stderr || result.stdout).slice(0, 300)}. ` +
+        'Export aborted — nothing was sent. Run "npm install" in the project and retry.',
+      )
+    }
+    const jsonLine = result.stdout.trim().split('\n').pop() ?? ''
+    let parsed: { dbFile: string | null; rows?: number; statements?: string[]; error?: string }
+    try {
+      parsed = JSON.parse(jsonLine)
+    } catch {
+      throw new Error(`Reading the local database data returned unexpected output: ${jsonLine.slice(0, 200)}`)
+    }
+    if (!parsed.dbFile) return null
+    if (parsed.error === 'too-large') {
+      throw new Error(
+        `The local database (${parsed.dbFile}) has too much data to migrate automatically (limit 8MB of SQL). Export aborted.`,
+      )
+    }
+    return { dbFile: parsed.dbFile, rows: parsed.rows ?? 0, statements: parsed.statements ?? [] }
+  } finally {
+    try { await FileService.deleteFile(`${projectPath}/${DB_DUMP_SCRIPT_PATH}`) } catch { /* best-effort cleanup */ }
+  }
+}
 
 /** Drizzle migration .sql files → individual statements for the migrate endpoint. */
 function collectMigrationStatements(files: PortableFile[]): string[] {
