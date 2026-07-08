@@ -135,15 +135,27 @@ function isAssetFile(path: string): boolean {
   return Boolean(ext && ASSET_EXTENSIONS.has(ext))
 }
 
-/** Chunked to avoid call-stack limits on multi-MB assets. */
-function uint8ToBase64(bytes: Uint8Array): string {
-  let binary = ''
-  const chunkSize = 8192
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const end = Math.min(i + chunkSize, bytes.length)
-    for (let j = i; j < end; j++) binary += String.fromCharCode(bytes[j])
-  }
-  return btoa(binary)
+/**
+ * Async base64 via FileReader — the previous char-by-char loop ran on the
+ * main thread and froze the UI (activity spinner included) for seconds on
+ * multi-MB assets.
+ */
+function bytesToBase64(bytes: Uint8Array): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error ?? new Error('base64 encode failed'))
+    reader.onload = () => {
+      const dataUrl = String(reader.result ?? '')
+      resolve(dataUrl.slice(dataUrl.indexOf(',') + 1))
+    }
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+    reader.readAsDataURL(new Blob([buffer]))
+  })
+}
+
+/** Devolve o controlo ao event loop — mantém a UI viva em loops longos. */
+function yieldToUi(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0))
 }
 
 type SkipReason = 'generated' | 'hidden' | 'sensitive' | 'unsupported'
@@ -389,10 +401,17 @@ async function buildPackage(projectPath: string, projectName: string): Promise<P
   collectNodes(projectPath, tree, fileNodes, directories, stats)
 
   const files: PortableFile[] = []
+  const textEncoder = new TextEncoder()
   let totalBytes = 0
   let assetCount = 0
   let assetBytes = 0
+  let processed = 0
   for (const node of fileNodes) {
+    // Respirar a cada lote de ficheiros: sem isto o loop monopoliza o main
+    // thread e o painel de atividade parece congelado.
+    processed += 1
+    if (processed % 25 === 0) await yieldToUi()
+
     const rel = relativePath(projectPath, node.path)
     if (isAssetFile(rel) && !isTextFile(rel)) {
       try {
@@ -402,7 +421,7 @@ async function buildPackage(projectPath: string, projectName: string): Promise<P
           stats.skippedUnsupported += 1
           continue
         }
-        files.push({ path: rel, content: uint8ToBase64(bytes), encoding: 'base64' })
+        files.push({ path: rel, content: await bytesToBase64(bytes), encoding: 'base64' })
         assetCount += 1
         assetBytes += bytes.length
         totalBytes += bytes.length
@@ -414,7 +433,7 @@ async function buildPackage(projectPath: string, projectName: string): Promise<P
     try {
       const content = await FileService.readFile(node.path)
       files.push({ path: rel, content })
-      totalBytes += new TextEncoder().encode(content).length
+      totalBytes += textEncoder.encode(content).length
     } catch {
       stats.skippedUnsupported += 1
       // Too-large or unreadable files are intentionally omitted.

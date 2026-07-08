@@ -611,7 +611,10 @@ function MinimalTitleBar() {
                       border="2px solid transparent"
                       borderTopColor={tokens.colors.accent.primary}
                       borderRightColor={tokens.colors.accent.primary}
-                      css={{ animation: 'tmExportStepSpin 0.8s linear infinite' }}
+                      // will-change promove a animação ao compositor: continua
+                      // a rodar mesmo quando o main thread está ocupado (era o
+                      // "spinner preso" que parecia um crash).
+                      css={{ animation: 'tmExportStepSpin 0.8s linear infinite', willChange: 'transform' }}
                     />
                   )}
                   <Text
