@@ -148,6 +148,12 @@ export function normalizeToolInputForCanonical(
         query: input.query ?? input.pattern,
         directory: input.directory ?? input.path ?? '.',
         ...(includePatterns ? { includePatterns } : {}),
+        // Paridade com o Grep do Claude Code: o pattern é SEMPRE regex
+        // (ripgrep). Com o default antigo (literal), `a|b` procurava a
+        // string com os pipes e devolvia um "No matches found" FALSO — o
+        // modelo (treinado no Claude Code) usa alternação sem hesitar e
+        // era enganado em silêncio. useRegex explícito continua a mandar.
+        useRegex: input.useRegex ?? true,
       }
     }
     case GLOB_ALIAS:

@@ -112,6 +112,13 @@ const GROUP_TOOLS: Record<ToolsetGroupName, readonly string[]> = {
 const READONLY_BASE = [
   READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   READ_FILE, READ_AROUND, SEARCH_FILES, GLOB, LIST_DIRECTORY, READ_LARGE_RESULT,
+  // Shell no perfil read-only DE PROPÓSITO: perguntas de verificação
+  // ("qual é o username do admin?") muitas vezes respondem-se pelo ESTADO
+  // real (consultar a BD, git log, node -e), não pelo código — o claude-vaz
+  // resolve-as assim em 2 chamadas. Comandos perigosos continuam a pedir
+  // autorização e as tools destrutivas de ficheiros continuam bloqueadas
+  // pelo gate DESTRUCTIVE_TOOLS.
+  EXECUTE_COMMAND,
   READ_SKILL, ASK_USER_QUESTION, UPDATE_SESSION_MEMORY,
 ] as const
 

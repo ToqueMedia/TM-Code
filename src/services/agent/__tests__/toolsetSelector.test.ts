@@ -199,8 +199,12 @@ describe('ToolsetSelector (on-demand)', () => {
       expect(selector.isReadOnly()).toBe(false)
       expect(selector.getReadOnlyHint()).toBe(true)
 
+      // execute_command agora faz parte do set INICIAL do perfil read-only
+      // (perguntas de verificação respondem-se pelo estado real: BD, git log)
+      // — pedi-lo é um no-op, não uma adição.
+      expect(names).toContain(EXECUTE_COMMAND)
       const result = selector.requestTools([EDIT_FILE, EXECUTE_COMMAND, PROVISION_DEPLOY])
-      expect(result.added).toEqual([EDIT_FILE, EXECUTE_COMMAND, PROVISION_DEPLOY])
+      expect(result.added).toEqual([EDIT_FILE, PROVISION_DEPLOY])
       expect(result.denied).toEqual([])
     })
 
@@ -208,7 +212,8 @@ describe('ToolsetSelector (on-demand)', () => {
       const selector = new ToolsetSelector(ALL_NAMES, 'analysis_readonly', true)
       const result = selector.requestTools([EDIT_FILE, PROVISION_DEPLOY, START_DEV_SERVER, EXECUTE_COMMAND])
 
-      expect(result.added).toEqual([EXECUTE_COMMAND])
+      // execute_command já está no set inicial do perfil — não é re-adicionado.
+      expect(result.added).toEqual([])
       expect(result.denied).toEqual(expect.arrayContaining([EDIT_FILE, PROVISION_DEPLOY, START_DEV_SERVER]))
       expect(selector.isActive(EDIT_FILE)).toBe(false)
       expect(selector.isActive(EXECUTE_COMMAND)).toBe(true)

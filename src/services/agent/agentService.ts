@@ -576,6 +576,17 @@ class AgentService {
     // multiplicador para o primeiro turno deste run antes dos headers chegarem.
     this.lastResponseSpeedApplied = false;
 
+    // GUARDA DE CANCELAMENTO PRÉ-VOO: o Stop durante a preparação (token,
+    // system prompt, router de perfil, planner de contexto — facilmente
+    // vários segundos) abortava this.abortController mas NADA aqui o lia; o
+    // run continuava, criava o engine (com AbortController PRÓPRIO, novo) e
+    // fazia streaming até ao diálogo de permissão num run já morto — o
+    // "cancelei e segundos depois veio o pedido de autorização" do developer.
+    if (this.abortController?.signal.aborted) {
+      logger.info("agent", "Run cancelled during prep — skipping engine start");
+      return;
+    }
+
     // 7. Create QueryEngine
     const engine = new QueryEngine({
       client,
@@ -651,6 +662,14 @@ class AgentService {
       getDelegateTelemetry: () => this.toolExecutor.consumeDelegateTelemetry(),
     });
     this.queryEngine = engine;
+
+    // Fecha a race restante: Stop entre a guarda acima e esta atribuição
+    // (cancelLoop viu queryEngine=null e não teve nada para cancelar).
+    if (this.abortController?.signal.aborted) {
+      this.queryEngine = null;
+      logger.info("agent", "Run cancelled between prep and engine start");
+      return;
+    }
 
     // 7. Convert conversation history
     const history = toQueryMessages(conversationHistory);
