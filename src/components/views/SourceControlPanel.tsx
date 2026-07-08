@@ -3,7 +3,7 @@ import { Flex, Text, Box, HStack } from '@chakra-ui/react'
 import {
   VscCheck, VscRefresh, VscAdd, VscRemove, VscDiscard,
   VscChevronDown, VscChevronRight, VscSparkle,
-  VscSync, VscError, VscSourceControl,
+  VscSync, VscError, VscSourceControl, VscWarning, VscGoToFile,
 } from 'react-icons/vsc'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog'
@@ -21,11 +21,13 @@ import {
 } from './sourceControlCommit'
 
 const statusMeta: Record<string, { color: string; label: string }> = {
-  added:     { color: tokens.colors.accent.greenBright, label: 'A' },
-  untracked: { color: tokens.colors.accent.greenBright, label: 'U' },
-  modified:  { color: tokens.colors.accent.orangeBright, label: 'M' },
-  deleted:   { color: tokens.colors.accent.red, label: 'D' },
-  renamed:   { color: tokens.colors.accent.purple, label: 'R' },
+  added:      { color: tokens.colors.accent.greenBright, label: 'A' },
+  untracked:  { color: tokens.colors.accent.greenBright, label: 'U' },
+  modified:   { color: tokens.colors.accent.orangeBright, label: 'M' },
+  deleted:    { color: tokens.colors.accent.red, label: 'D' },
+  renamed:    { color: tokens.colors.accent.purple, label: 'R' },
+  // Convenção do VS Code: conflitos de merge com "!" a vermelho.
+  conflicted: { color: tokens.colors.accent.red, label: '!' },
 }
 
 type FeedbackType = 'success' | 'error' | null
@@ -228,6 +230,7 @@ function SourceControlPanel() {
   const [committing, setCommitting] = useState(false)
   const [stagedOpen, setStagedOpen] = useState(true)
   const [changesOpen, setChangesOpen] = useState(true)
+  const [conflictsOpen, setConflictsOpen] = useState(true)
   const [feedback, setFeedback] = useState<{ type: FeedbackType; msg: string }>({ type: null, msg: '' })
   const [generating, setGenerating] = useState(false)
   const [syncing, setSyncing] = useState(false)
@@ -271,8 +274,9 @@ function SourceControlPanel() {
     return acquireGitStatusPolling(projectPath)
   }, [projectPath])
 
-  const staged = files.filter(f => f.staged)
-  const unstaged = files.filter(f => !f.staged)
+  const conflicted = files.filter(f => f.status === 'conflicted')
+  const staged = files.filter(f => f.staged && f.status !== 'conflicted')
+  const unstaged = files.filter(f => !f.staged && f.status !== 'conflicted')
 
   // ── Git actions ──────────────────────────────────────────────────────
 
@@ -319,9 +323,37 @@ function SourceControlPanel() {
     window.dispatchEvent(new CustomEvent('editor:open-diff', { detail: { relPath, projectPath } }))
   }, [projectPath])
 
+  // ── Conflitos de merge (secção "Merge Changes", como no VS Code) ─────
+
+  // Conflito abre o FICHEIRO editável (com os marcadores <<<<<<<), não a
+  // vista de diff — é aí que se resolve.
+  const onOpenConflictFile = useCallback((relPath: string) => {
+    if (!projectPath) return
+    window.dispatchEvent(new CustomEvent('editor:open-file', { detail: `${projectPath}/${relPath}` }))
+  }, [projectPath])
+
+  // Marcar como resolvido = git add (a semântica do git e do VS Code).
+  // Confirmação quando o ficheiro ainda tem marcadores de conflito seria o
+  // ideal; mantemos a ação explícita e reversível (unstage devolve o estado).
+  const onMarkResolved = useCallback(async (path: string) => {
+    try { await GitService.stageFile(projectPath, path); await refreshGitStatus(); refreshGutter(path) }
+    catch (e) { showFeedback('error', t('sourceControl.markResolved').replace('{file}', String(e))) }
+  }, [projectPath, showFeedback, refreshGutter])
+
+  const onMarkAllResolved = useCallback(async () => {
+    try {
+      for (const file of conflicted) {
+        await GitService.stageFile(projectPath, file.path)
+      }
+      await refreshGitStatus()
+      refreshGutter()
+    } catch (e) { showFeedback('error', t('sourceControl.markResolved').replace('{file}', String(e))) }
+  }, [projectPath, conflicted, showFeedback, refreshGutter])
+
   // ── Commit ───────────────────────────────────────────────────────────
 
   const handleCommit = useCallback(async () => {
+    if (conflicted.length > 0) { showFeedback('error', t('sourceControl.resolveConflictsFirst')); return }
     if (!commitMsg.trim()) { showFeedback('error', t('sourceControl.enterCommitMessage')); return }
     if (staged.length === 0) { showFeedback('error', t('sourceControl.stageFilesFirst')); return }
     setCommitting(true)
@@ -336,11 +368,12 @@ function SourceControlPanel() {
       if (mountedRef.current) showFeedback('error', t('sourceControl.commit').replace('{file}', String(e)))
     }
     if (mountedRef.current) setCommitting(false)
-  }, [projectPath, commitMsg, staged.length, showFeedback, branch])
+  }, [projectPath, commitMsg, staged.length, conflicted.length, showFeedback, branch])
 
   // ── Stage All & Commit (quick action) ────────────────────────────────
 
   const handleStageAllAndCommit = useCallback(async () => {
+    if (conflicted.length > 0) { showFeedback('error', t('sourceControl.resolveConflictsFirst')); return }
     if (!commitMsg.trim()) { showFeedback('error', t('sourceControl.enterCommitMessage')); return }
     setCommitting(true)
     try {
@@ -355,7 +388,7 @@ function SourceControlPanel() {
       if (mountedRef.current) showFeedback('error', t('sourceControl.commit').replace('{file}', String(e)))
     }
     if (mountedRef.current) setCommitting(false)
-  }, [projectPath, commitMsg, showFeedback, branch])
+  }, [projectPath, commitMsg, conflicted.length, showFeedback, branch])
 
   // ── Sync (pull, then push) ───────────────────────────────────────────
   // After a commit the main button becomes "Pull & Push": one click brings
@@ -564,8 +597,9 @@ function SourceControlPanel() {
     }
   }, [handleCommit, handleStageAllAndCommit, staged.length, unstaged.length])
 
-  const canCommit = commitMsg.trim().length > 0 && staged.length > 0
-  const canStageAndCommit = commitMsg.trim().length > 0 && staged.length === 0 && unstaged.length > 0
+  const hasConflicts = conflicted.length > 0
+  const canCommit = commitMsg.trim().length > 0 && staged.length > 0 && !hasConflicts
+  const canStageAndCommit = commitMsg.trim().length > 0 && staged.length === 0 && unstaged.length > 0 && !hasConflicts
   // Working tree clean but commits to sync → the main button becomes "Pull & Push".
   const canSync = files.length === 0 && hasUpstream && (ahead > 0 || behind > 0)
 
@@ -692,6 +726,24 @@ function SourceControlPanel() {
         </button>
       </Box>
 
+      {/* Conflitos bloqueiam o commit — aviso persistente (padrão VS Code) */}
+      {hasConflicts && (
+        <Box px={2.5} pb={1.5} flexShrink={0} role="alert">
+          <Flex
+            align="center" gap={1.5} px={2} py="5px" borderRadius="4px"
+            bg={tokens.colors.accent.redSubtle}
+            border={`1px solid ${tokens.colors.accent.redMuted}`}
+          >
+            <Box flexShrink={0} display="flex">
+              <VscWarning size={11} color={tokens.colors.accent.red} />
+            </Box>
+            <Text fontSize="11px" color={tokens.colors.accent.red} lineClamp={2}>
+              {t('sourceControl.conflictsBanner').replace('{count}', String(conflicted.length))}
+            </Text>
+          </Flex>
+        </Box>
+      )}
+
       {/* Feedback */}
       {feedback.type && (
         <Box px={2.5} pb={1.5} flexShrink={0} role="status" aria-live="polite">
@@ -731,17 +783,23 @@ function SourceControlPanel() {
 
         {files.length > 0 && (
           <VirtualFileList
+            conflicted={conflicted}
             staged={staged}
             unstaged={unstaged}
+            conflictsOpen={conflictsOpen}
             stagedOpen={stagedOpen}
             changesOpen={changesOpen}
             projectName={projectName}
+            onToggleConflicts={() => setConflictsOpen(v => !v)}
             onToggleStaged={() => setStagedOpen(v => !v)}
             onToggleChanges={() => setChangesOpen(v => !v)}
             onOpenFile={onOpenFile}
+            onOpenConflictFile={onOpenConflictFile}
             onStageFile={onStageFile}
             onUnstageFile={onUnstageFile}
             onDiscardFile={onDiscardFile}
+            onMarkResolved={onMarkResolved}
+            onMarkAllResolved={onMarkAllResolved}
             onStageAll={stageAll}
             onUnstageAll={unstageAll}
             onDiscardAll={discardAll}
@@ -754,27 +812,37 @@ function SourceControlPanel() {
 
 // ── Virtual File List ────────────────────────────────────────────────────
 
+type ListSection = 'conflicted' | 'staged' | 'unstaged'
+
 type ListItem =
-  | { type: 'header'; section: 'staged' | 'unstaged'; count: number; isOpen: boolean }
-  | { type: 'file'; file: GitFileStatus; section: 'staged' | 'unstaged' }
+  | { type: 'header'; section: ListSection; count: number; isOpen: boolean }
+  | { type: 'file'; file: GitFileStatus; section: ListSection }
 
 const VirtualFileList = memo<{
-  staged: GitFileStatus[]; unstaged: GitFileStatus[]
-  stagedOpen: boolean; changesOpen: boolean; projectName: string
-  onToggleStaged: () => void; onToggleChanges: () => void
+  conflicted: GitFileStatus[]; staged: GitFileStatus[]; unstaged: GitFileStatus[]
+  conflictsOpen: boolean; stagedOpen: boolean; changesOpen: boolean; projectName: string
+  onToggleConflicts: () => void; onToggleStaged: () => void; onToggleChanges: () => void
   onOpenFile: (path: string) => void
+  onOpenConflictFile: (path: string) => void
   onStageFile: (path: string) => void; onUnstageFile: (path: string) => void
   onDiscardFile: (path: string) => void
+  onMarkResolved: (path: string) => void; onMarkAllResolved: () => void
   onStageAll: () => void; onUnstageAll: () => void; onDiscardAll: () => void
 }>(({
-  staged, unstaged, stagedOpen, changesOpen,
-  onToggleStaged, onToggleChanges,
-  onOpenFile, onStageFile, onUnstageFile, onDiscardFile,
+  conflicted, staged, unstaged, conflictsOpen, stagedOpen, changesOpen,
+  onToggleConflicts, onToggleStaged, onToggleChanges,
+  onOpenFile, onOpenConflictFile, onStageFile, onUnstageFile, onDiscardFile,
+  onMarkResolved, onMarkAllResolved,
   onStageAll, onUnstageAll, onDiscardAll,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null)
 
+  // Conflitos primeiro — é a secção que bloqueia tudo o resto (VS Code).
   const items: ListItem[] = []
+  if (conflicted.length > 0) {
+    items.push({ type: 'header', section: 'conflicted', count: conflicted.length, isOpen: conflictsOpen })
+    if (conflictsOpen) for (const f of conflicted) items.push({ type: 'file', file: f, section: 'conflicted' })
+  }
   if (staged.length > 0) {
     items.push({ type: 'header', section: 'staged', count: staged.length, isOpen: stagedOpen })
     if (stagedOpen) for (const f of staged) items.push({ type: 'file', file: f, section: 'staged' })
@@ -800,17 +868,28 @@ const VirtualFileList = memo<{
             <div key={vItem.index} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: vItem.size, transform: `translateY(${vItem.start}px)` }}>
               {item.type === 'header' ? (
                 <SectionHeader
-                  label={item.section === 'staged' ? t('sourceControl.staged') : t('sourceControl.changes')}
+                  label={
+                    item.section === 'conflicted' ? t('sourceControl.mergeChanges')
+                    : item.section === 'staged' ? t('sourceControl.staged')
+                    : t('sourceControl.changes')
+                  }
                   count={item.count} isOpen={item.isOpen}
-                  onToggle={item.section === 'staged' ? onToggleStaged : onToggleChanges}
+                  onToggle={
+                    item.section === 'conflicted' ? onToggleConflicts
+                    : item.section === 'staged' ? onToggleStaged
+                    : onToggleChanges
+                  }
                   section={item.section}
                   onStageAll={onStageAll} onUnstageAll={onUnstageAll} onDiscardAll={onDiscardAll}
+                  onMarkAllResolved={onMarkAllResolved}
                 />
               ) : (
                 <FileRow
                   file={item.file} section={item.section}
-                  onOpenFile={onOpenFile} onStageFile={onStageFile}
+                  onOpenFile={item.section === 'conflicted' ? onOpenConflictFile : onOpenFile}
+                  onStageFile={onStageFile}
                   onUnstageFile={onUnstageFile} onDiscardFile={onDiscardFile}
+                  onMarkResolved={onMarkResolved}
                 />
               )}
             </div>
@@ -826,9 +905,10 @@ VirtualFileList.displayName = 'VirtualFileList'
 
 const SectionHeader = memo<{
   label: string; count: number; isOpen: boolean; onToggle: () => void
-  section: 'staged' | 'unstaged'
+  section: ListSection
   onStageAll: () => void; onUnstageAll: () => void; onDiscardAll: () => void
-}>(({ label, count, isOpen, onToggle, section, onStageAll, onUnstageAll, onDiscardAll }) => (
+  onMarkAllResolved: () => void
+}>(({ label, count, isOpen, onToggle, section, onStageAll, onUnstageAll, onDiscardAll, onMarkAllResolved }) => (
   <div
     className="sc-row"
     style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 8px', height: ROW_HEIGHT, cursor: 'pointer', userSelect: 'none' }}
@@ -842,7 +922,9 @@ const SectionHeader = memo<{
     </div>
     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }} onClick={e => e.stopPropagation()}>
       <span className="sc-actions" style={{ display: 'flex', gap: 2 }}>
-        {section === 'staged' ? (
+        {section === 'conflicted' ? (
+          <button type="button" className="sc-btn green" title={t('sourceControl.markAllResolved')} aria-label={t('sourceControl.markAllResolved')} onClick={onMarkAllResolved}><VscCheck size={13} /></button>
+        ) : section === 'staged' ? (
           <button type="button" className="sc-btn" title={t("view.unstageAll")} aria-label={t("view.unstageAll")} onClick={onUnstageAll}><VscRemove size={13} /></button>
         ) : (
           <>
@@ -866,10 +948,11 @@ SectionHeader.displayName = 'SectionHeader'
 // ── File Row ─────────────────────────────────────────────────────────────
 
 const FileRow = memo<{
-  file: GitFileStatus; section: 'staged' | 'unstaged'
+  file: GitFileStatus; section: ListSection
   onOpenFile: (path: string) => void; onStageFile: (path: string) => void
   onUnstageFile: (path: string) => void; onDiscardFile: (path: string) => void
-}>(({ file, section, onOpenFile, onStageFile, onUnstageFile, onDiscardFile }) => {
+  onMarkResolved: (path: string) => void
+}>(({ file, section, onOpenFile, onStageFile, onUnstageFile, onDiscardFile, onMarkResolved }) => {
   const cfg = statusMeta[file.status] || statusMeta.modified
   const fileName = file.path.split('/').pop() || file.path
   const dirPath = file.path.includes('/') ? file.path.substring(0, file.path.lastIndexOf('/')) : ''
@@ -919,7 +1002,12 @@ const FileRow = memo<{
       {/* Right cluster — pinned, fixed-width status column so M/U/A align. */}
       <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, gap: 4 }}>
         <div className="sc-actions" style={{ display: 'flex' }} onClick={e => e.stopPropagation()}>
-          {section === 'staged' ? (
+          {section === 'conflicted' ? (
+            <>
+              <button type="button" className="sc-btn" title={t('sourceControl.openConflict')} aria-label={t('sourceControl.openConflict')} onClick={() => onOpenFile(file.path)}><VscGoToFile size={12} /></button>
+              <button type="button" className="sc-btn green" title={t('sourceControl.markResolvedBtn')} aria-label={t('sourceControl.markResolvedBtn')} onClick={() => onMarkResolved(file.path)}><VscCheck size={12} /></button>
+            </>
+          ) : section === 'staged' ? (
             <button type="button" className="sc-btn" title={t('sourceControl.unstageBtn')} aria-label={t('sourceControl.unstageBtn')} onClick={() => onUnstageFile(file.path)}><VscRemove size={12} /></button>
           ) : (
             <>
@@ -942,6 +1030,7 @@ const FileRow = memo<{
   prev.onStageFile === next.onStageFile &&
   prev.onUnstageFile === next.onUnstageFile &&
   prev.onDiscardFile === next.onDiscardFile &&
+  prev.onMarkResolved === next.onMarkResolved &&
   prev.onOpenFile === next.onOpenFile
 )
 FileRow.displayName = 'FileRow'

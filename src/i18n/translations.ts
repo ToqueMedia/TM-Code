@@ -1365,6 +1365,13 @@ const en = {
   'sourceControl.discardBtn': 'Discard',
   'sourceControl.staged': 'Staged Changes',
   'sourceControl.changes': 'Changes',
+  'sourceControl.mergeChanges': 'Merge Conflicts',
+  'sourceControl.conflictsBanner': '{count} file(s) with merge conflicts. Resolve them and mark as resolved before committing.',
+  'sourceControl.resolveConflictsFirst': 'There are unresolved merge conflicts — resolve them before committing.',
+  'sourceControl.markResolved': 'Mark as resolved failed: {file}',
+  'sourceControl.markResolvedBtn': 'Mark as resolved',
+  'sourceControl.markAllResolved': 'Mark all as resolved',
+  'sourceControl.openConflict': 'Open file to resolve',
 
   // ── Generating Status Bar ─────────────────────────
   'generating.ready': 'Ready',
@@ -3216,6 +3223,13 @@ const pt: Record<keyof typeof en, string> = {
   'sourceControl.discardBtn': 'Descartar',
   'sourceControl.staged': 'Alterações Preparadas',
   'sourceControl.changes': 'Alterações',
+  'sourceControl.mergeChanges': 'Conflitos de Merge',
+  'sourceControl.conflictsBanner': '{count} ficheiro(s) com conflitos de merge. Resolve-os e marca como resolvidos antes de fazer commit.',
+  'sourceControl.resolveConflictsFirst': 'Há conflitos de merge por resolver — resolve-os antes de fazer commit.',
+  'sourceControl.markResolved': 'Marcar como resolvido falhou: {file}',
+  'sourceControl.markResolvedBtn': 'Marcar como resolvido',
+  'sourceControl.markAllResolved': 'Marcar todos como resolvidos',
+  'sourceControl.openConflict': 'Abrir ficheiro para resolver',
 
   // ── Generating Status Bar ─────────────────────────
   'generating.ready': 'Pronto',

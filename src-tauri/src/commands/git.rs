@@ -479,6 +479,22 @@ pub async fn git_status_files(project_path: String) -> Result<Vec<GitFileStatus>
             continue;
         }
 
+        // Conflitos de merge/rebase (porcelain: U em qualquer lado, AA, DD).
+        // Antes caíam no catch-all como "modified" e o painel nem sabia que
+        // havia conflito — impossível mostrar a secção de Merge Changes.
+        let is_conflict = matches!(
+            (index_status, worktree_status),
+            ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D')
+        );
+        if is_conflict {
+            files.push(GitFileStatus {
+                path: display_path,
+                status: "conflicted".to_string(),
+                staged: false,
+            });
+            continue;
+        }
+
         let (status, staged) = match (index_status, worktree_status) {
             ('?', '?') => ("untracked", false),
             ('A', _) => ("added", true),
