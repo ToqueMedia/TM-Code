@@ -454,6 +454,59 @@ export async function prepareProjectWebExport(project: { name: string; path: str
 }
 
 /**
+ * Apply SQL statements via the migrate endpoint, RESUMING past tolerated
+ * failures. The endpoint executes sequentially and stops at the first error —
+ * on a database with residue from previous exports the early statements fail
+ * with idempotent noise ("already exists", seed rows hitting UNIQUE), and
+ * without resuming, everything after the first noisy statement was silently
+ * skipped. Any non-tolerated failure aborts the export.
+ */
+async function applyStatementsResumable(
+  projectId: string,
+  token: string,
+  statements: string[],
+  tolerated: RegExp,
+  context: string,
+): Promise<void> {
+  const CHUNK = 400
+  let index = 0
+  while (index < statements.length) {
+    const chunk = statements.slice(index, index + CHUNK)
+    const response = await tauriFetch(
+      `${resolveWorkerUrl()}/v1/apps/${encodeURIComponent(projectId)}/database/migrate`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ statements: chunk }),
+        timeoutSecs: 120,
+      },
+    )
+    if (!response.ok) {
+      const body = await response.text().catch(() => '')
+      throw new Error(`${context} failed (HTTP ${response.status}): ${body.slice(0, 200)}. Export aborted — nothing was sent.`)
+    }
+    const data = await response.json().catch(() => ({})) as {
+      applied?: number
+      failed?: { index?: number; error?: string }
+    }
+    if (!data.failed) {
+      index += chunk.length
+      continue
+    }
+    const failedAt = index + (data.failed.index ?? 0)
+    const failureText = String(data.failed.error ?? '')
+    if (!tolerated.test(failureText)) {
+      throw new Error(`${context} failed at statement ${failedAt + 1}: ${failureText.slice(0, 200)}. Export aborted — nothing was sent.`)
+    }
+    // Ruído idempotente — retoma a partir do statement seguinte.
+    index = failedAt + 1
+  }
+}
+
+/**
  * Provision the project's managed database (Turso via TMDB proxy) BEFORE the
  * project lands on Web. The endpoint is idempotent — an already-provisioned
  * app just returns its existing credentials. TMDB_URL/TMDB_TOKEN are written
@@ -489,69 +542,35 @@ async function provisionDatabaseForExport(
   }
 
   // Apply the project's migrations to the MANAGED database right away, so it
-  // has tables before the project lands on Web (the user's report: "a base
-  // provisionada não está a ser escrita" — an empty DB with no schema).
-  // On a reused database the CREATE statements fail with "already exists" —
-  // that is success, not failure.
+  // has tables before the project lands on Web. The migrate endpoint STOPS at
+  // the first failing statement — on a database with residue from previous
+  // exports/tests the early statements legitimately fail ("already exists",
+  // seed rows hitting UNIQUE), so we RESUME from the next statement instead
+  // of silently dropping the rest (or aborting on idempotent noise).
   if (migrationStatements.length > 0) {
-    const migrateRes = await tauriFetch(
-      `${resolveWorkerUrl()}/v1/apps/${encodeURIComponent(project.id)}/database/migrate`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ statements: migrationStatements }),
-        timeoutSecs: 60,
-      },
+    await applyStatementsResumable(
+      project.id,
+      token,
+      migrationStatements,
+      /already exists|duplicate column|UNIQUE constraint|PRIMARY KEY constraint/i,
+      'Applying migrations to the managed database',
     )
-    if (!migrateRes.ok) {
-      const body = await migrateRes.text().catch(() => '')
-      throw new Error(`Applying migrations to the managed database failed (HTTP ${migrateRes.status}): ${body.slice(0, 200)}`)
-    }
-    const migrateData = await migrateRes.json().catch(() => ({})) as {
-      applied?: number
-      failed?: { index?: number; error?: string }
-    }
-    const failureText = String(migrateData.failed?.error ?? '')
-    if (migrateData.failed && !/already exists/i.test(failureText)) {
-      throw new Error(`Migration statement ${migrateData.failed.index ?? '?'} failed on the managed database: ${failureText.slice(0, 200)}`)
-    }
     onProgress?.({ phase: 'db-migrated', statements: migrationStatements.length })
 
     // DATA migration: the rows the developer already has in the local .db
-    // travel to the managed database too (user requirement #4). INSERT OR
-    // IGNORE keeps re-exports idempotent — existing rows are left alone.
+    // travel to the managed database too. INSERT OR IGNORE + tolerated
+    // constraint classes keep re-exports idempotent; the dump orders tables
+    // parents-first so FK-enforced databases accept them.
     onProgress?.({ phase: 'db-data-start' })
     const dump = await dumpLocalDatabaseData(project.path)
     if (dump && dump.statements.length > 0) {
-      const BATCH = 400
-      for (let start = 0; start < dump.statements.length; start += BATCH) {
-        const batch = dump.statements.slice(start, start + BATCH)
-        const dataRes = await tauriFetch(
-          `${resolveWorkerUrl()}/v1/apps/${encodeURIComponent(project.id)}/database/migrate`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${token}`,
-            },
-            body: JSON.stringify({ statements: batch }),
-            timeoutSecs: 120,
-          },
-        )
-        if (!dataRes.ok) {
-          const body = await dataRes.text().catch(() => '')
-          throw new Error(`Copying local data to the managed database failed (HTTP ${dataRes.status}): ${body.slice(0, 200)}`)
-        }
-        const dataResult = await dataRes.json().catch(() => ({})) as { failed?: { index?: number; error?: string } }
-        if (dataResult.failed) {
-          throw new Error(
-            `Copying local data failed at row ${start + (dataResult.failed.index ?? 0) + 1}: ${String(dataResult.failed.error ?? '').slice(0, 200)}. Export aborted.`,
-          )
-        }
-      }
+      await applyStatementsResumable(
+        project.id,
+        token,
+        dump.statements,
+        /UNIQUE constraint|PRIMARY KEY constraint/i,
+        'Copying local data to the managed database',
+      )
       onProgress?.({ phase: 'db-data', rows: dump.rows })
     } else {
       onProgress?.({ phase: 'db-data', rows: 0 })
@@ -680,10 +699,42 @@ try {
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '__drizzle%'",
   )).rows.map(row => Array.isArray(row) ? row[0] : row.name)
 
+  // Ordenar pais-primeiro pelas foreign keys: se a base de destino tiver a
+  // verificação de FK ativa, inserir um filho antes do pai daria erro de
+  // constraint. Ciclos ou falha do PRAGMA caem na ordem original.
+  const dependsOn = new Map()
+  for (const table of tables) {
+    try {
+      const fks = await db.query('PRAGMA foreign_key_list("' + String(table).replace(/"/g, '""') + '")')
+      const parents = fks.rows
+        .map(row => Array.isArray(row) ? row[2] : row.table)
+        .filter(parent => parent && parent !== table && tables.includes(parent))
+      dependsOn.set(table, new Set(parents))
+    } catch {
+      dependsOn.set(table, new Set())
+    }
+  }
+  const ordered = []
+  const placed = new Set()
+  let progressed = true
+  while (progressed && ordered.length < tables.length) {
+    progressed = false
+    for (const table of tables) {
+      if (placed.has(table)) continue
+      const parents = dependsOn.get(table) ?? new Set()
+      if ([...parents].every(parent => placed.has(parent))) {
+        ordered.push(table)
+        placed.add(table)
+        progressed = true
+      }
+    }
+  }
+  for (const table of tables) if (!placed.has(table)) ordered.push(table)
+
   const statements = []
   let totalRows = 0
   let totalBytes = 0
-  for (const table of tables) {
+  for (const table of ordered) {
     const result = await db.query('SELECT * FROM "' + String(table).replace(/"/g, '""') + '"')
     if (result.rows.length === 0) continue
     const columns = result.columns

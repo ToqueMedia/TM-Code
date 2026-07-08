@@ -50,7 +50,10 @@ export class FileService {
 
   static async deleteFile(path: string): Promise<void> {
     try {
-      await invoke<void>('delete_file', { path });
+      // Não existe um comando `delete_file` no Rust — o comando real (usado
+      // por toda a app) é delete_file_or_directory. O nome antigo nunca
+      // funcionou: falhava com "delete_file not allowed. Command not found".
+      await invoke<void>('delete_file_or_directory', { path });
     } catch (error) {
       logger.error('file', 'Error deleting file:', error);
       throw error;
