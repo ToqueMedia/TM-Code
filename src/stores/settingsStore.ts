@@ -15,6 +15,12 @@ export interface AutocompleteSettings {
   ollamaUrl: string
 }
 
+// VS Code files.autoSave semantics: 'afterDelay' saves autoSaveDelay ms
+// after the last edit; 'onFocusChange' saves when the editor/window loses
+// focus; 'off' keeps explicit Cmd+S the only file-writing path.
+export type AutoSaveMode = 'off' | 'afterDelay' | 'onFocusChange'
+export const AUTO_SAVE_DELAY_MS = 1000
+
 export const DEFAULT_CHAT_TEXT_FONT_SIZE = 14
 export const CHAT_TEXT_FONT_SIZE_OPTIONS = [14, 16, 18, 20] as const
 export type ChatTextFontSize = typeof CHAT_TEXT_FONT_SIZE_OPTIONS[number]
@@ -73,6 +79,8 @@ interface SettingsState {
   editor: EditorIndentationSettings
   autocomplete: AutocompleteSettings
   formatOnSave: boolean
+  autoSave: AutoSaveMode
+  autoSaveDelay: number
   appLanguage: AppLanguage
   agentLanguage: AgentLanguage
   shortcuts: ShortcutMap
@@ -95,6 +103,7 @@ interface SettingsActions {
   setFlaggedCommands: (commands: string[]) => void
   toggleFlaggedCommand: (command: string) => void
   setFormatOnSave: (value: boolean) => void
+  setAutoSave: (mode: AutoSaveMode) => void
   setAppLanguage: (lang: AppLanguage) => void
   setAgentLanguage: (lang: AgentLanguage) => void
   setChatTextFontSize: (size: number) => void
@@ -115,6 +124,8 @@ const DEFAULTS: SettingsState = {
     ollamaUrl: resolveOllamaUrl(),
   },
   formatOnSave: false,
+  autoSave: 'afterDelay',
+  autoSaveDelay: AUTO_SAVE_DELAY_MS,
   appLanguage: 'en',
   agentLanguage: 'en',
   shortcuts: { ...DEFAULT_SHORTCUTS },
@@ -207,6 +218,10 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         set(() => ({ formatOnSave: !!value }))
       },
 
+      setAutoSave: (mode: AutoSaveMode) => {
+        set(() => ({ autoSave: mode }))
+      },
+
       setAppLanguage: (lang: AppLanguage) => {
         set(() => ({ appLanguage: lang }))
       },
@@ -249,7 +264,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
     {
       name: 'settings-storage',
       partialize: (state) => {
-        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, chatTextFontSize: state.chatTextFontSize, flaggedCommands: state.flaggedCommands }
+        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, autoSave: state.autoSave, autoSaveDelay: state.autoSaveDelay, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, chatTextFontSize: state.chatTextFontSize, flaggedCommands: state.flaggedCommands }
       },
       // Deep merge — ensures new fields added to sub-objects get defaults
       merge: (persisted, current) => {
@@ -268,6 +283,8 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           editor: { ...DEFAULTS.editor, ...p.editor },
           autocomplete: { ...DEFAULTS.autocomplete, ...p.autocomplete, ollamaUrl },
           formatOnSave: p.formatOnSave ?? DEFAULTS.formatOnSave,
+          autoSave: p.autoSave === 'off' || p.autoSave === 'afterDelay' || p.autoSave === 'onFocusChange' ? p.autoSave : DEFAULTS.autoSave,
+          autoSaveDelay: typeof p.autoSaveDelay === 'number' && Number.isFinite(p.autoSaveDelay) && p.autoSaveDelay >= 250 ? p.autoSaveDelay : DEFAULTS.autoSaveDelay,
           appLanguage: p.appLanguage ?? DEFAULTS.appLanguage,
           agentLanguage: p.agentLanguage ?? DEFAULTS.agentLanguage,
           hasCompletedOnboarding: p.hasCompletedOnboarding ?? DEFAULTS.hasCompletedOnboarding,

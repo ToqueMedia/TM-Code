@@ -2568,6 +2568,20 @@ ${preview}
     }
   }
 
+  // After a cwd-scoped (auto-applied) agent write, reload the buffer of an
+  // open tab so the editor reflects the change live. Without this, only the
+  // diff-APPROVAL path (diffService.acceptDiff) refreshed open buffers, and
+  // direct writes required closing + reopening the tab to be seen.
+  // refreshFileContent skips dirty buffers — unsaved user edits always win.
+  private refreshEditorIfOpen(path: string) {
+    try {
+      const editorState = useEditorRepository.getState()
+      if (editorState.openFiles.some(f => f.path === path)) {
+        void editorState.refreshFileContent(path).catch(() => {})
+      }
+    } catch { /* editor refresh is best-effort */ }
+  }
+
   private formatFileTreeCompact(node: Record<string, unknown>, indent: string = ''): string {
     if (!node) return ''
     let result = ''
@@ -3159,6 +3173,7 @@ ${preview}
           this.readFileState.set(path, { content: newContent, timestamp: Date.now(), offset: undefined, limit: undefined, source: 'write', hash: this.simpleHash(newContent), fsVersion: getFsVersion() })
           bumpFsVersion(`write:${path}`)
           this.refreshFileTree()
+          this.refreshEditorIfOpen(path)
           return JSON.stringify({
             type: 'diff',
             path,
@@ -3230,6 +3245,7 @@ ${preview}
           this.readFileState.set(path, { content, timestamp: Date.now(), offset: undefined, limit: undefined, source: 'write', hash: this.simpleHash(content), fsVersion: getFsVersion() })
           bumpFsVersion(`create:${path}`)
           this.refreshFileTree()
+          this.refreshEditorIfOpen(path)
           return JSON.stringify({
             type: 'diff',
             path,
@@ -3502,6 +3518,7 @@ ${preview}
           this.readFileState.set(path, { content: newContent, timestamp: Date.now(), offset: undefined, limit: undefined, source: 'write', hash: this.simpleHash(newContent), fsVersion: getFsVersion() })
           bumpFsVersion(`edit:${path}`)
           this.refreshFileTree()
+          this.refreshEditorIfOpen(path)
           return JSON.stringify({
             type: 'diff',
             path,

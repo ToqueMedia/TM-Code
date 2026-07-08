@@ -9,11 +9,11 @@ import { useLayoutStore } from '../stores/layoutStore'
 import { useChatStore } from '../stores/chatStore'
 import { useToastStore } from '../stores/toastStore'
 import FirebaseAuthService from '../services/auth/firebaseAuth'
-import { prepareProjectWebExport, sendProjectToTmCodeWeb, type WebExportSummary } from '../services/webExportService'
+import { prepareProjectWebExport, sendProjectToTmCodeWeb, type PreparedWebExport } from '../services/webExportService'
 import WindowControls from './ui/WindowControls'
 import MenuBar from './ui/titlebar/MenuBar'
 import { BrowserMissingDialog } from './dialogs/BrowserMissingDialog'
-import { useTranslation } from '@/i18n'
+import { useTranslation, t as translate } from '@/i18n'
 import { IS_MAC, IS_LINUX } from '@/utils/platform'
 
 const IssueReporterDialog = lazy(() => import('./dialogs/IssueReporterDialog'))
@@ -50,15 +50,28 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(precision)} ${units[unitIndex]}`
 }
 
-function buildSendToWebConfirmMessage(template: string, summary: WebExportSummary): string {
+function buildSendToWebConfirmMessage(template: string, prepared: PreparedWebExport): string {
+  const summary = prepared.summary
   const skipped = summary.skippedGenerated +
     summary.skippedHidden +
     summary.skippedSensitive +
     summary.skippedUnsupported
-  return template
+  const base = template
     .replace('{files}', String(summary.fileCount))
     .replace('{size}', formatBytes(summary.totalBytes))
     .replace('{skipped}', String(skipped))
+
+  // Only curated, translated, plain-language notes here — the raw
+  // compatibility warnings are developer-facing and stay in the payload.
+  const extras: string[] = []
+  const compatibility = prepared.payload.compatibility
+  if (compatibility.hasDatabase) extras.push(`• ${translate('titlebar.sendToWebDbNote')}`)
+  extras.push(`• ${translate('titlebar.sendToWebEnvNote')}`)
+  if (summary.assetCount > 0) {
+    extras.push(`• ${translate('titlebar.sendToWebAssetsNote').replace('{assets}', String(summary.assetCount))}`)
+  }
+
+  return extras.length > 0 ? `${base}\n\n${extras.join('\n')}` : base
 }
 
 function MinimalTitleBar() {
@@ -208,12 +221,43 @@ function MinimalTitleBar() {
     useToastStore.getState().addToast('info', t('titlebar.sendToWebPreparing'))
     try {
       const prepared = await prepareProjectWebExport(currentProject)
-      const confirmed = window.confirm(
-        buildSendToWebConfirmMessage(t('titlebar.sendToWebConfirm'), prepared.summary),
-      )
+      // Fail-closed confirmation. window.confirm is NOT safe here: with the
+      // Tauri dialog plugin it becomes async, and on an outdated binary the
+      // command rejects ("dialog.confirm not allowed") — the old code then
+      // treated the pending Promise as truthy and exported WITHOUT any
+      // confirmation. Any failure to show the dialog must abort the send.
+      let confirmed = false
+      try {
+        const { confirm: tauriConfirm } = await import('@tauri-apps/plugin-dialog')
+        confirmed = await tauriConfirm(
+          buildSendToWebConfirmMessage(t('titlebar.sendToWebConfirm'), prepared),
+          { title: t('titlebar.sendToWebTitle'), kind: 'info' },
+        )
+      } catch {
+        useToastStore.getState().addToast('error', t('titlebar.sendToWebConfirmFailed'))
+        return
+      }
       if (!confirmed) return
 
-      const result = await sendProjectToTmCodeWeb(currentProject, prepared)
+      const result = await sendProjectToTmCodeWeb(currentProject, prepared, progress => {
+        const toast = useToastStore.getState()
+        if (progress.phase === 'provision-db') {
+          toast.addToast('info', t('titlebar.sendToWebProvisioningDb'))
+        } else if (progress.phase === 'db-ready') {
+          toast.addToast('success', t('titlebar.sendToWebDbReady')
+            .replace('{reused}', progress.reused ? t('titlebar.sendToWebDbReused') : t('titlebar.sendToWebDbCreated')))
+        } else if (progress.phase === 'db-migrated') {
+          toast.addToast('success', t('titlebar.sendToWebDbMigrated'))
+        } else if (progress.phase === 'db-verified') {
+          toast.addToast('success', t('titlebar.sendToWebDbVerified'))
+        } else if (progress.phase === 'db-linked') {
+          toast.addToast('success', t('titlebar.sendToWebDbLinked'))
+        } else if (progress.phase === 'uploading') {
+          toast.addToast('info', progress.envVarCount > 0
+            ? t('titlebar.sendToWebUploadingWithEnv')
+            : t('titlebar.sendToWebUploading'))
+        }
+      })
       useToastStore.getState().addToast('success', t('titlebar.sendToWebSent'))
       const { openUrl } = await import('@tauri-apps/plugin-opener')
       await openUrl(result.webUrl)

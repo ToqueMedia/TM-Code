@@ -74,7 +74,12 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
   }, [projectPath, isStreaming])
 
   return (
-    <Flex align="center" gap={2} minW={0} flexShrink={0}>
+    // minW=0 + shrinkable children: when the toolbar gets squeezed (preview
+    // sidebar open, narrow window) the labels truncate with an ellipsis and
+    // eventually collapse to icon-only. flexShrink={0} here made the fixed
+    // content overflow the flex-1 wrapper and paint OVER the neighbouring
+    // toolbar buttons (Data Manager / billing pills).
+    <Flex align="center" gap={2} minW={0} maxW="100%">
       {/* Home Button */}
       {projectPath && (
         <Box
@@ -109,7 +114,9 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
         aria-label={t("view.newChat")}
         display="flex"
         alignItems="center"
-        flexShrink={0}
+        flexShrink={1}
+        minW="32px"
+        overflow="hidden"
         gap="6px"
         h="34px"
         px={2.5}
@@ -129,14 +136,14 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
         } : {}}
         onClick={handleNewChat}
       >
-        <FiPlus size={13} />
-        <Text as="span" whiteSpace="nowrap" lineHeight="1">
+        <Box as="span" flexShrink={0} display="flex" alignItems="center"><FiPlus size={13} /></Box>
+        <Text as="span" whiteSpace="nowrap" lineHeight="1" overflow="hidden" textOverflow="ellipsis" minW={0}>
           {t("view.newChat")}
         </Text>
       </Box>
 
       {/* Sessions dropdown */}
-      <Box position="relative" ref={sessionsRef} flexShrink={0}>
+      <Box position="relative" ref={sessionsRef} flexShrink={1} minW="32px" maxW="100%">
         <Box
           as="button"
           aria-label={t("view.toggleSessions")}
@@ -144,7 +151,8 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
           aria-haspopup="listbox"
           display="flex"
           alignItems="center"
-          flexShrink={0}
+          maxW="100%"
+          overflow="hidden"
           gap="6px"
           h="34px"
           px={2.5}
@@ -163,11 +171,11 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
           }}
           onClick={handleToggleSessions}
         >
-          <FiClock size={13} />
-          <Text as="span" whiteSpace="nowrap" lineHeight="1">
+          <Box as="span" flexShrink={0} display="flex" alignItems="center"><FiClock size={13} /></Box>
+          <Text as="span" whiteSpace="nowrap" lineHeight="1" overflow="hidden" textOverflow="ellipsis" minW={0}>
             Sessions
           </Text>
-          <FiChevronDown size={11} />
+          <Box as="span" flexShrink={0} display="flex" alignItems="center"><FiChevronDown size={11} /></Box>
         </Box>
 
         {showSessions && (

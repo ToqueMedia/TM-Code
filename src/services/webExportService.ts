@@ -1,17 +1,20 @@
 import { FileTreeService } from './fileTreeService'
 import { FileService } from './fileService'
 import FirebaseAuthService from './auth/firebaseAuth'
+import { invoke } from '@/utils/invokeMetrics'
 import { tauriFetch } from './tauriFetch'
 import { buildTmCodeWebImportUrl, resolveWorkerUrl } from '@/utils/devUrls'
 import { IS_VITE_DEV } from '@/utils/viteEnv'
 import type { FileTreeNode } from '../types/fileTree'
 
 type Capability = 'edit' | 'preview' | 'check' | 'deploy'
-type Framework = 'react-vite' | 'nextjs' | 'static-html' | 'vanilla-vite' | 'unsupported' | 'unknown'
+type Framework = 'react-vite' | 'react-vite-fullstack' | 'nextjs' | 'static-html' | 'vanilla-vite' | 'unsupported' | 'unknown'
 
 interface PortableFile {
   path: string
   content: string
+  /** 'base64' marks a binary asset (image/font/media) — content is base64. */
+  encoding?: 'base64'
 }
 
 interface CompatibilityReport {
@@ -20,6 +23,10 @@ interface CompatibilityReport {
   capabilities: Capability[]
   entryRoot: string
   packageManager?: 'npm' | 'yarn' | 'pnpm' | 'bun'
+  /** Backend Node folder ('server'/'backend') when the project is fullstack. */
+  backendDir?: string
+  /** Schema/migrations/SQLite deps present — Web deploy provisions a managed DB. */
+  hasDatabase?: boolean
   blockers: string[]
   warnings: string[]
 }
@@ -33,6 +40,12 @@ interface ExportPackage {
   files: PortableFile[]
   directories: Array<{ path: string }>
   compatibility: CompatibilityReport
+  /**
+   * Raw contents of the project's `.env`, sent at the user's request so Web
+   * seeds its per-project secret store (same treatment as Web-created
+   * projects). Never included in `files` — Web keeps env out of the VFS.
+   */
+  env?: string
   metadata: Record<string, unknown>
 }
 
@@ -47,6 +60,7 @@ export interface WebExportSummary {
   fileCount: number
   directoryCount: number
   totalBytes: number
+  assetCount: number
   skippedGenerated: number
   skippedHidden: number
   skippedSensitive: number
@@ -58,7 +72,7 @@ export interface PreparedWebExport {
   summary: WebExportSummary
 }
 
-interface PackageJson {
+export interface PackageJson {
   scripts?: Record<string, string>
   dependencies?: Record<string, string>
   devDependencies?: Record<string, string>
@@ -103,6 +117,34 @@ const TEXT_FILENAMES = new Set([
   'README',
   'TMS.md',
 ])
+
+// Binary assets travel base64-encoded so images/fonts/media keep working on
+// Web (they end up in the deploy source bundle on R2 and are served by the
+// published site). Bounded so a stray video folder can't blow up the import.
+const ASSET_EXTENSIONS = new Set([
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'avif',
+  'woff', 'woff2', 'ttf', 'otf', 'eot',
+  'mp3', 'wav', 'mp4', 'webm', 'pdf',
+])
+const MAX_ASSET_FILE_BYTES = 5 * 1024 * 1024
+const MAX_ASSET_TOTAL_BYTES = 12 * 1024 * 1024
+
+function isAssetFile(path: string): boolean {
+  const filename = path.split('/').pop() || ''
+  const ext = filename.includes('.') ? filename.split('.').pop()?.toLowerCase() : ''
+  return Boolean(ext && ASSET_EXTENSIONS.has(ext))
+}
+
+/** Chunked to avoid call-stack limits on multi-MB assets. */
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const chunkSize = 8192
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const end = Math.min(i + chunkSize, bytes.length)
+    for (let j = i; j < end; j++) binary += String.fromCharCode(bytes[j])
+  }
+  return btoa(binary)
+}
 
 type SkipReason = 'generated' | 'hidden' | 'sensitive' | 'unsupported'
 
@@ -154,11 +196,14 @@ function classifyPortableExportPath(path: string, options: { isDirectory?: boole
   if (isSecretLikePath(path)) return 'sensitive'
 
   const filename = parts[parts.length - 1] || ''
+  // PLAN.md é rascunho de trabalho do agente — nunca acompanha o projeto
+  // (pedido explícito do developer, 2026-07-08).
+  if (filename.toLowerCase() === 'plan.md') return 'generated'
   const parentParts = parts.slice(0, -1)
   if (parentParts.some(part => part.startsWith('.'))) return 'hidden'
   if (filename.startsWith('.') && !TEXT_FILENAMES.has(filename)) return 'hidden'
 
-  if (!options.isDirectory && filename && !isTextFile(path)) return 'unsupported'
+  if (!options.isDirectory && filename && !isTextFile(path) && !isAssetFile(path)) return 'unsupported'
   return null
 }
 
@@ -222,11 +267,45 @@ function allDeps(pkg: PackageJson): Set<string> {
   ])
 }
 
-function detectFramework(files: PortableFile[], pkg?: PackageJson): Framework {
+// Mirrors the Web side (webAgent/compatibility.ts): a backend is either a
+// server|backend/ folder with its own package.json, or the TM scaffold
+// single-package layout — an entrypoint in server/ with the server-framework
+// dependency living in the ROOT package.json (fila1-style projects).
+const BACKEND_DIR_CANDIDATES = ['server', 'backend']
+const SERVER_FRAMEWORK_DEPS = ['express', 'fastify', 'hono', '@hono/node-server', 'koa', '@nestjs/core']
+const BACKEND_ENTRY_SUFFIXES = ['index.ts', 'index.js', 'index.mjs', 'index.cjs', 'src/index.ts', 'src/index.js']
+
+export function detectBackendDir(paths: Set<string>, pkg?: PackageJson): string | undefined {
+  for (const dir of BACKEND_DIR_CANDIDATES) {
+    if (paths.has(`${dir}/package.json`)) return dir
+  }
+  if (!pkg) return undefined
+  const deps = allDeps(pkg)
+  if (!SERVER_FRAMEWORK_DEPS.some(dep => deps.has(dep))) return undefined
+  for (const dir of BACKEND_DIR_CANDIDATES) {
+    if (BACKEND_ENTRY_SUFFIXES.some(entry => paths.has(`${dir}/${entry}`))) return dir
+  }
+  return undefined
+}
+
+export function detectDatabase(files: PortableFile[], pkg?: PackageJson): boolean {
+  const deps = pkg ? allDeps(pkg) : new Set<string>()
+  if (['drizzle-orm', '@libsql/client', 'better-sqlite3', 'sqlite3'].some(dep => deps.has(dep))) return true
+  return files.some(file => {
+    if (file.encoding === 'base64') return false
+    if (/(?:^|\/)schema\.(?:ts|js)$/i.test(file.path) && /\bsqliteTable\s*\(/.test(file.content)) return true
+    if (/\.sql$/i.test(file.path) && /(?:^|\/)(?:drizzle|migrations?|db|database)(?:\/|$)/i.test(file.path)) return true
+    return false
+  })
+}
+
+export function detectFramework(files: PortableFile[], pkg?: PackageJson): Framework {
   const paths = new Set(files.map(file => file.path))
   const deps = pkg ? allDeps(pkg) : new Set<string>()
   if (deps.has('next')) return 'nextjs'
-  if (deps.has('vite') && deps.has('react')) return 'react-vite'
+  if (deps.has('vite') && deps.has('react')) {
+    return detectBackendDir(paths, pkg) ? 'react-vite-fullstack' : 'react-vite'
+  }
   if (deps.has('vite')) return 'vanilla-vite'
   if (paths.has('index.html')) return 'static-html'
   return pkg ? 'unsupported' : 'unknown'
@@ -253,9 +332,19 @@ function analyze(files: PortableFile[]): CompatibilityReport {
   if (files.length === 0) blockers.push('No portable text files were found.')
   if (files.some(file => file.path === 'package.json') && !pkg) blockers.push('package.json is not valid JSON.')
 
-  if (framework === 'react-vite') {
+  const paths = new Set(files.map(file => file.path))
+  const backendDir = detectBackendDir(paths, pkg)
+  const hasDatabase = detectDatabase(files, pkg)
+
+  if (framework === 'react-vite' || framework === 'react-vite-fullstack') {
     capabilities.push('preview')
     if (hasBuild) capabilities.push('check', 'deploy')
+    if (framework === 'react-vite-fullstack') {
+      warnings.push(
+        `Backend detected in "${backendDir}/": it runs in Web's remote preview and deploy. ` +
+        '.env files are never exported — configure the project env vars in Web before testing.',
+      )
+    }
   } else if (framework === 'nextjs') {
     if (hasBuild) capabilities.push('check', 'deploy')
     warnings.push('NextJS opens in Web for check/deploy; browser preview is limited.')
@@ -269,12 +358,21 @@ function analyze(files: PortableFile[]): CompatibilityReport {
     warnings.push('No supported Web runtime was detected; Web will import it for editing only.')
   }
 
+  if (hasDatabase) {
+    warnings.push(
+      'Database detected (schema/migrations/SQLite deps): Web deploy provisions a managed database and applies the migrations. ' +
+      'Local database FILES (.db/.sqlite) and their data are not exported — only the structure travels.',
+    )
+  }
+
   return {
     importable: blockers.length === 0,
     framework,
     capabilities,
     entryRoot: '.',
     packageManager: detectPackageManager(files, pkg),
+    ...(backendDir ? { backendDir } : {}),
+    hasDatabase,
     blockers,
     warnings,
   }
@@ -292,15 +390,34 @@ async function buildPackage(projectPath: string, projectName: string): Promise<P
 
   const files: PortableFile[] = []
   let totalBytes = 0
+  let assetCount = 0
+  let assetBytes = 0
   for (const node of fileNodes) {
     const rel = relativePath(projectPath, node.path)
+    if (isAssetFile(rel) && !isTextFile(rel)) {
+      try {
+        const { readFile: tauriReadFile } = await import('@tauri-apps/plugin-fs')
+        const bytes = await tauriReadFile(node.path)
+        if (bytes.length > MAX_ASSET_FILE_BYTES || assetBytes + bytes.length > MAX_ASSET_TOTAL_BYTES) {
+          stats.skippedUnsupported += 1
+          continue
+        }
+        files.push({ path: rel, content: uint8ToBase64(bytes), encoding: 'base64' })
+        assetCount += 1
+        assetBytes += bytes.length
+        totalBytes += bytes.length
+      } catch {
+        stats.skippedUnsupported += 1
+      }
+      continue
+    }
     try {
       const content = await FileService.readFile(node.path)
       files.push({ path: rel, content })
       totalBytes += new TextEncoder().encode(content).length
     } catch {
       stats.skippedUnsupported += 1
-      // Binary, too-large, or unreadable files are intentionally omitted.
+      // Too-large or unreadable files are intentionally omitted.
     }
   }
 
@@ -326,6 +443,7 @@ async function buildPackage(projectPath: string, projectName: string): Promise<P
       fileCount: files.length,
       directoryCount: uniqueDirectories.length,
       totalBytes,
+      assetCount,
       ...stats,
     },
   }
@@ -335,9 +453,231 @@ export async function prepareProjectWebExport(project: { name: string; path: str
   return buildPackage(project.path, project.name)
 }
 
+/**
+ * Provision the project's managed database (Turso via TMDB proxy) BEFORE the
+ * project lands on Web. The endpoint is idempotent — an already-provisioned
+ * app just returns its existing credentials. TMDB_URL/TMDB_TOKEN are written
+ * to the local .env (same behaviour as the explicit `provision_database`
+ * tool), so the exported env points the app at the managed DB instead of the
+ * local .db file, and Web deploys reuse the SAME database via the app id.
+ */
+async function provisionDatabaseForExport(
+  project: { id: string; path: string },
+  token: string,
+  migrationStatements: string[],
+  onProgress?: (progress: WebExportProgress) => void,
+): Promise<{ dbName: string; reused: boolean }> {
+  const response = await tauriFetch(
+    `${resolveWorkerUrl()}/v1/apps/${encodeURIComponent(project.id)}/database/provision`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({}),
+      timeoutSecs: 45,
+    },
+  )
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    throw new Error(`Database provisioning failed (HTTP ${response.status}): ${body.slice(0, 200)}`)
+  }
+  const data = await response.json() as { tmdbUrl?: string; tmdbToken?: string; dbName?: string; reused?: boolean }
+  if (!data.tmdbUrl || !data.tmdbToken || !data.dbName) {
+    throw new Error(`Database provisioning returned incomplete data: ${JSON.stringify(data)}`)
+  }
+
+  // Apply the project's migrations to the MANAGED database right away, so it
+  // has tables before the project lands on Web (the user's report: "a base
+  // provisionada não está a ser escrita" — an empty DB with no schema).
+  // On a reused database the CREATE statements fail with "already exists" —
+  // that is success, not failure.
+  if (migrationStatements.length > 0) {
+    const migrateRes = await tauriFetch(
+      `${resolveWorkerUrl()}/v1/apps/${encodeURIComponent(project.id)}/database/migrate`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ statements: migrationStatements }),
+        timeoutSecs: 60,
+      },
+    )
+    if (!migrateRes.ok) {
+      const body = await migrateRes.text().catch(() => '')
+      throw new Error(`Applying migrations to the managed database failed (HTTP ${migrateRes.status}): ${body.slice(0, 200)}`)
+    }
+    const migrateData = await migrateRes.json().catch(() => ({})) as {
+      applied?: number
+      failed?: { index?: number; error?: string }
+    }
+    const failureText = String(migrateData.failed?.error ?? '')
+    if (migrateData.failed && !/already exists/i.test(failureText)) {
+      throw new Error(`Migration statement ${migrateData.failed.index ?? '?'} failed on the managed database: ${failureText.slice(0, 200)}`)
+    }
+    onProgress?.({ phase: 'db-migrated', statements: migrationStatements.length })
+  }
+
+  // Positive proof of life, not just a 200 from the provision endpoint: ask
+  // the database for its TABLES through the returned URL + token. This
+  // catches stale records, bad tokens, unreachable proxies AND an empty
+  // schema — any failure ABORTS the export (user requirement: no send
+  // without a positive confirmation of every step).
+  const probe = await tauriFetch(data.tmdbUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${data.tmdbToken}`,
+    },
+    body: JSON.stringify({
+      sql: "SELECT count(*) FROM sqlite_master WHERE type = 'table'",
+      params: [],
+      method: 'get',
+    }),
+    timeoutSecs: 30,
+  })
+  if (!probe.ok) {
+    const body = await probe.text().catch(() => '')
+    throw new Error(
+      `Database verification failed (HTTP ${probe.status}): the provisioned database did not answer a test query. ` +
+      `Export aborted — nothing was sent. ${body.slice(0, 200)}`,
+    )
+  }
+  if (migrationStatements.length > 0) {
+    const probeData = await probe.json().catch(() => null) as { rows?: unknown[][] } | null
+    const tableCount = Number(probeData?.rows?.[0]?.[0] ?? 0)
+    if (!Number.isFinite(tableCount) || tableCount <= 0) {
+      throw new Error(
+        'The managed database answered but has no tables after applying migrations. Export aborted — nothing was sent.',
+      )
+    }
+  }
+
+  await invoke('write_env_vars', {
+    projectPath: project.path,
+    vars: [
+      { key: 'TMDB_URL', value: data.tmdbUrl },
+      { key: 'TMDB_TOKEN', value: data.tmdbToken },
+    ],
+  })
+  return { dbName: data.dbName, reused: data.reused === true }
+}
+
+export type WebExportProgress =
+  | { phase: 'provision-db' }
+  | { phase: 'db-ready'; dbName: string; reused: boolean }
+  | { phase: 'db-migrated'; statements: number }
+  | { phase: 'db-verified' }
+  | { phase: 'db-linked' }
+  | { phase: 'uploading'; envVarCount: number }
+
+/** Drizzle migration .sql files → individual statements for the migrate endpoint. */
+function collectMigrationStatements(files: PortableFile[]): string[] {
+  const sqlFiles = files
+    .filter(file => file.encoding !== 'base64')
+    .filter(file => /\.sql$/i.test(file.path))
+    .filter(file => /(?:^|\/)(?:drizzle|migrations?|db|database)(?:\/|$)/i.test(file.path))
+    .sort((a, b) => a.path.localeCompare(b.path))
+  const statements: string[] = []
+  for (const file of sqlFiles) {
+    for (const raw of file.content.split(/-->\s*statement-breakpoint/gi)) {
+      const statement = raw.trim().replace(/;\s*$/, '')
+      if (statement) statements.push(statement)
+    }
+  }
+  return statements
+}
+
+// Canonical managed-only db.ts — mirrors the production branch of the TM
+// scaffold (drizzle sqlite-proxy over the platform's TMDB endpoint), with the
+// local-file branch removed entirely. Written into the EXPORTED copy so the
+// Web agent and the preview/publish runtimes only ever see the managed DB —
+// no dev.db traces, nothing writing to a throwaway local file.
+const MANAGED_DB_FILE = `// Gerado pelo TM Code ao enviar para a Web.
+// Esta app usa EXCLUSIVAMENTE a base de dados gerida da plataforma (via
+// proxy HTTP TMDB). Não existe fallback para ficheiros .db locais — em
+// qualquer ambiente (preview, publicação), TMDB_URL e TMDB_TOKEN vêm das
+// configurações do projeto.
+import { drizzle } from 'drizzle-orm/sqlite-proxy';
+import * as schema from './schema.js';
+
+const tmdbUrl = process.env.TMDB_URL;
+const tmdbToken = process.env.TMDB_TOKEN;
+
+if (!tmdbUrl || !tmdbToken) {
+  throw new Error('TMDB_URL e TMDB_TOKEN têm de estar configuradas — esta app usa apenas a base de dados gerida.');
+}
+
+async function callTmdb(path: string, body: unknown): Promise<any> {
+  const response = await fetch(\`\${tmdbUrl}\${path}\`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': \`Bearer \${tmdbToken}\`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(\`Erro no proxy da base de dados: \${response.status} - \${errorText}\`);
+  }
+
+  return response.json();
+}
+
+let db: any;
+
+db = drizzle(
+  async (sql: string, params: any[], method: string) => {
+    const result = (await callTmdb('', { sql, params, method })) as { rows: any[][] };
+    return { rows: result.rows };
+  },
+  // Transações (db.transaction / db.batch): lote atómico no endpoint /batch,
+  // que devolve um array de { rows } pela mesma ordem das queries.
+  async (queries: { sql: string; params: any[]; method: string }[]) => {
+    const results = (await callTmdb('/batch', {
+      queries: queries.map((q) => ({ sql: q.sql, params: q.params, method: q.method })),
+    })) as { rows: any[][] }[];
+    return results;
+  },
+  { schema }
+);
+
+export { db };
+export { schema };
+`
+
+/**
+ * Point the exported copy's db.ts at the managed database ONLY. Applies just
+ * to the TM scaffold contract (a {server|backend}/db.ts that already has the
+ * TMDB production branch plus a local-file dev branch) — anything else is
+ * left untouched and reported via a compatibility warning.
+ */
+function rewriteDbFileToManaged(payload: ExportPackage): { rewritten: boolean; path?: string } {
+  const backendDir = payload.compatibility.backendDir
+  if (!backendDir) return { rewritten: false }
+  const dbFile = payload.files.find(file => file.path === `${backendDir}/db.ts` || file.path === `${backendDir}/db.js`)
+  if (!dbFile) return { rewritten: false }
+  const matchesContract = dbFile.content.includes('TMDB_URL')
+    && (dbFile.content.includes('dev.db') || dbFile.content.includes('DATABASE_URL'))
+  if (!matchesContract) {
+    payload.compatibility.warnings.push(
+      `Could not automatically point "${dbFile.path}" at the managed database — it does not follow the standard contract. Review it on Web.`,
+    )
+    return { rewritten: false }
+  }
+  dbFile.content = MANAGED_DB_FILE
+  return { rewritten: true, path: dbFile.path }
+}
+
 export async function sendProjectToTmCodeWeb(
-  project: { name: string; path: string },
+  project: { id?: string; name: string; path: string },
   prepared?: PreparedWebExport,
+  onProgress?: (progress: WebExportProgress) => void,
 ): Promise<ExportResponse> {
   const token = await FirebaseAuthService.getInstance().getIdToken(true)
   if (!token) throw new Error('Not signed in to TM Code. Sign in and retry.')
@@ -346,6 +686,58 @@ export async function sendProjectToTmCodeWeb(
   if (!payload.compatibility.importable) {
     throw new Error(payload.compatibility.blockers.join(' ') || 'Project is not importable.')
   }
+
+  // DB-first: a project that uses a database must have its managed DB
+  // provisioned BEFORE it lands on Web — blocking on purpose (user decision):
+  // exporting an app that still points at file:./dev.db just ships a broken
+  // backend. Provisioning also rewrites .env to point at the managed DB.
+  if (payload.compatibility.hasDatabase) {
+    // No silent skip: a database project without an app identity cannot be
+    // provisioned, so it must not be exported at all.
+    if (!project.id) {
+      throw new Error('This project uses a database but has no app identity — export aborted. Reopen the project and retry.')
+    }
+    onProgress?.({ phase: 'provision-db' })
+    const migrationStatements = collectMigrationStatements(payload.files)
+    const provisioned = await provisionDatabaseForExport(
+      { id: project.id, path: project.path },
+      token,
+      migrationStatements,
+      onProgress,
+    )
+    payload.metadata.database = { provisioned: true, dbName: provisioned.dbName, reused: provisioned.reused }
+    onProgress?.({ phase: 'db-ready', dbName: provisioned.dbName, reused: provisioned.reused })
+    onProgress?.({ phase: 'db-verified' })
+
+    // The EXPORTED copy points at the managed database only — the local-file
+    // branch is removed so the Web agent, preview and publish never touch a
+    // throwaway .db again (user requirement: no trace of local DB usage).
+    const linked = rewriteDbFileToManaged(payload)
+    if (linked.rewritten) {
+      payload.metadata.databaseLinked = { path: linked.path }
+      onProgress?.({ phase: 'db-linked' })
+    }
+  }
+
+  // App identity travels with the export: Web deploys use this id against the
+  // control-plane so the deploy record, slug and provisioned database are the
+  // SAME app the IDE worked on (container/deploy injects TMDB_* from the KV
+  // record keyed by this id — caller-supplied TMDB vars are stripped).
+  if (project.id) payload.metadata.appId = project.id
+
+  // .env travels OUTSIDE the file list, to be seeded into Web's per-project
+  // secret store (exactly how Web-created projects manage env). Read AFTER
+  // provisioning so TMDB_URL/TMDB_TOKEN are already in it.
+  try {
+    const envContent = await FileService.readFile(`${project.path}/.env`)
+    if (envContent.trim()) payload.env = envContent
+  } catch { /* no .env — nothing to send */ }
+
+  const envVarCount = (payload.env ?? '')
+    .split('\n')
+    .filter(line => /^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=/.test(line))
+    .length
+  onProgress?.({ phase: 'uploading', envVarCount })
 
   const response = await tauriFetch(`${resolveWorkerUrl()}/v1/web-agent/imports`, {
     method: 'POST',

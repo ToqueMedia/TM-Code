@@ -15,7 +15,10 @@ import { useGitStatusStore } from '@/stores/gitStatusStore'
 import { useCurrentProject } from '@/hooks/useProjectState'
 import { getFileIconByExtension } from '@/utils/iconMapper'
 import { CollabShareControls } from '@/components/collab/CollabShareControls'
-import { cleanGeneratedCommitMessage, ensureTmCodeCommitSignature } from './sourceControlCommit'
+import {
+  cleanGeneratedCommitMessage, ensureTmCodeCommitSignature,
+  buildCommitPrompt, selectTopChangedPaths, COMMIT_PROMPT_LIMITS,
+} from './sourceControlCommit'
 
 const statusMeta: Record<string, { color: string; label: string }> = {
   added:     { color: tokens.colors.accent.greenBright, label: 'A' },
@@ -400,75 +403,80 @@ function SourceControlPanel() {
         }
       }
       const diffBase = staged.length > 0 ? 'git diff --cached' : 'git diff HEAD'
-      const maxDiffChars = 12_000
-      const [diffStatResult, nameStatusResult, numstatResult, detailResult] = await Promise.all([
+
+      // Summaries first (cheap, parallel). The DETAIL diff command is decided
+      // from numstat afterwards: for big changesets, `git diff -U3` over the
+      // whole tree can produce tens of MB that the Rust side buffers in full
+      // and ships over IPC only for us to keep 12KB — that transfer was the
+      // main reason generation failed with many modified files.
+      const [diffStatResult, nameStatusResult, numstatResult] = await Promise.all([
         runGit(`${diffBase} --stat --compact-summary`, 20),
         runGit(`${diffBase} --name-status`, 20),
         runGit(`${diffBase} --numstat`, 20),
-        runGit(`${diffBase} --no-color --find-renames --find-copies --diff-algorithm=histogram -U3`, 25),
       ])
       const diffStat = diffStatResult.text
       const nameStatus = nameStatusResult.text
       const numstat = numstatResult.text
-      const rawDiffDetail = detailResult.text
-      const diffNotes = [diffStatResult.note, nameStatusResult.note, numstatResult.note, detailResult.note].filter(Boolean).join('\n')
-      const diffDetail = rawDiffDetail.length > maxDiffChars
-        ? `${rawDiffDetail.slice(0, maxDiffChars)}\n\n[Diff truncated: ${rawDiffDetail.length - maxDiffChars} additional characters omitted]`
-        : (rawDiffDetail || '[Detailed diff unavailable; use file list, name/status, numstat, and stat only.]')
+
+      const changedFileCount = numstat.split('\n').filter(l => l.trim()).length
+      // Generated/vendored files (lockfiles, dist, node_modules, minified
+      // bundles) are excluded from the DETAIL diff — their hunks are pure
+      // noise for a commit message and routinely dwarf the real changes.
+      // They still appear in the summaries above, so the model knows they
+      // changed. Double quotes work in both `sh -c` (mac) and `cmd /C` (win).
+      const detailExcludes = [
+        '*node_modules/*', '*package-lock.json', '*yarn.lock', '*pnpm-lock.yaml',
+        '*bun.lockb', '*Cargo.lock', '*.min.js', '*.min.css', '*.map',
+      ].map(p => `":(exclude)${p}"`).join(' ')
+      let detailPathspec = `-- ${detailExcludes}`
+      if (changedFileCount > COMMIT_PROMPT_LIMITS.detailFileThreshold) {
+        // Huge changeset: fetch hunks only for the files with the most churn
+        // instead of diffing the whole tree.
+        const topPaths = selectTopChangedPaths(numstat, COMMIT_PROMPT_LIMITS.detailTopFiles)
+        if (topPaths.length > 0) {
+          detailPathspec = `-- ${topPaths.map(p => `"${p}"`).join(' ')}`
+        }
+      }
+      const detailResult = await runGit(
+        `${diffBase} --no-color --find-renames --find-copies --diff-algorithm=histogram -U3 ${detailPathspec}`,
+        25,
+      )
+
+      const diffNotes = [
+        diffStatResult.note, nameStatusResult.note, numstatResult.note, detailResult.note,
+        changedFileCount > COMMIT_PROMPT_LIMITS.detailFileThreshold
+          ? `Changeset has ${changedFileCount} files; detailed hunks included only for the ${COMMIT_PROMPT_LIMITS.detailTopFiles} most-changed files.`
+          : '',
+      ].filter(Boolean).join('\n')
+
       const targetFiles = staged.length > 0 ? staged : unstaged
-      const fileList = targetFiles.map(f => `${f.status}: ${f.path}`).join('\n')
+      const sections = {
+        fileList: targetFiles.map(f => `${f.status}: ${f.path}`).join('\n'),
+        nameStatus,
+        numstat,
+        diffStat,
+        diffDetail: detailResult.text,
+        diffNotes,
+      }
 
-      const promptContent = `Generate a detailed git commit message for these changes using conventional commits format.
-
-Base the message on the actual diff hunks and changed files below. Mention concrete modules, components, APIs, config, tests, and behavior changes when they are visible in the diff. Do not invent changes that are not supported by the diff.
-
-Format:
-<type>(<scope>): <subject line, max 72 chars>
-
-<body: 6-12 bullet points explaining what changed, why, and the impact>
-
-Rules:
-- type: feat, fix, refactor, chore, docs, style, perf, test
-- scope: the main area affected (component, service, worker endpoint, etc.)
-- subject: imperative mood, lowercase, no period, specific to the main change
-- body: each line starts with "- "
-- be THOROUGH: cover every meaningful change visible in the diff — new functions/components, changed behavior, removed code, edge cases handled, UI/UX adjustments, config/dependency changes
-- group related bullets by area (e.g. UI, service, worker) when multiple areas changed
-- for each significant bullet, include the "why" or the user-visible effect, not just the "what"
-- call out breaking changes or migrations explicitly with "BREAKING:" if the diff shows any
-- do not pad with filler: every bullet must be backed by the diff, but do not omit real changes either
-- do not add any signature, trailer, attribution, user name or email — the app appends those automatically
-- Output ONLY the commit message, no quotes, no markdown, no explanation
-
-Files changed:
-${fileList}
-
-Name/status:
-${nameStatus}
-
-Line changes:
-${numstat}
-
-Diff stat:
-${diffStat}
-
-Diff hunks:
-${diffDetail}
-
-Diff collection notes:
-${diffNotes || 'none'}`
-
-      const commitMessages = [{ role: 'user', content: promptContent }]
       let aiMsg = ''
       const { resolveAuxByokRoute, byokAuxCompletion } = await import('../../services/agent/byokRouting')
       const auxRoute = resolveAuxByokRoute()
 
       const callAi = async (attempt: number): Promise<string> => {
+        // Attempt 2 rebuilds the prompt with a smaller diff budget — if the
+        // first attempt failed on prompt size (worker 400 / timeout),
+        // retrying the identical payload could never succeed.
+        const promptContent = buildCommitPrompt(sections, {
+          detailBudget: attempt === 1
+            ? COMMIT_PROMPT_LIMITS.detailChars
+            : COMMIT_PROMPT_LIMITS.detailCharsRetry,
+        })
         const messages = attempt === 1
-          ? commitMessages
+          ? [{ role: 'user', content: promptContent }]
           : [{
               role: 'user',
-              content: `${promptContent}\n\nThe previous generation attempt returned empty content. Retry now and output a non-empty commit message only.`,
+              content: `${promptContent}\n\nThe previous generation attempt failed or returned empty content. Retry now and output a non-empty commit message only.`,
             }]
 
         if (auxRoute) {

@@ -120,6 +120,20 @@ function App() {
 		return () => { active = false }
 	}, []);
 
+	// Keep open editor buffers in sync with the filesystem — shell edits by
+	// the agent (execute_command), Source Control discard/stage, and files
+	// changed externally while the window was unfocused. The direct agent
+	// write tools refresh their own target; this is the catch-all sweep.
+	useEffect(() => {
+		let stop: (() => void) | null = null
+		let active = true
+		import('./services/bufferReconciler').then(({ startBufferReconciler }) => {
+			if (!active) return
+			stop = startBufferReconciler()
+		})
+		return () => { active = false; stop?.() }
+	}, []);
+
 	// Detect the mandatory external tools (git/node/python) once the app is up,
 	// and re-check on window focus. Prompt sending is blocked while any is
 	// missing (see requiredToolsStore + the handleSend gates). Best-effort;

@@ -80,6 +80,23 @@ function pushContentToStore(path: string, content: string) {
   } catch {}
 }
 
+// Model → file path it was created for. Edits/saves are attributed to the
+// path bound to the MODEL, never to the component's `path` prop: during the
+// async gap of a tab switch (file not yet read from disk) the editor still
+// shows the previous model, and attributing those keystrokes to the new path
+// would silently corrupt the other file in the store.
+const modelPaths = new WeakMap<editor.ITextModel, string>();
+
+function acquireModel(path: string, content: string, language: string): editor.ITextModel {
+  const uri = monacoEditor.Uri.file(path);
+  let model = monacoEditor.editor.getModel(uri);
+  if (!model) {
+    model = monacoEditor.editor.createModel(content, language, uri);
+  }
+  modelPaths.set(model, path);
+  return model;
+}
+
 // Register Prettier as a document formatting provider
 function registerFormattingProvider(monaco: Monaco) {
   if (formattingProviderRegistered) return;
@@ -146,6 +163,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
   const prevPathRef = useRef<string | null>(null);
   const dirtyRef = useRef(false);
   const autoSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const contentSyncRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const disposablesRef = useRef<IDisposable[]>([]);
   const cursorCbRef = useRef(onCursorPositionChange);
   const pendingRef = useRef<{ path: string; content: string } | null>(null);
@@ -158,6 +176,13 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
   const tabSize = useSettingsStore(s => s.editor.tabSize);
   const insertSpaces = useSettingsStore(s => s.editor.insertSpaces);
   const detectIndentation = useSettingsStore(s => s.editor.detectIndentation);
+
+  // Reactive lookup — the previous getState() read never re-rendered this
+  // component on its own; it only worked because parents happened to
+  // re-render on every store change. The selector returns the same object
+  // reference while the entry is untouched, so re-renders stay scoped.
+  const file = useEditorRepository(s => s.openFiles.find(f => f.path === path));
+  const hasFile = !!file;
 
   const options = useMemo((): editor.IStandaloneEditorConstructionOptions => ({
     automaticLayout: true,
@@ -296,6 +321,50 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     }
   }, []);
 
+  // ── Saving ───────────────────────────────────────────────────────────────
+
+  // Single write path shared by Cmd+S, auto-save, blur-save, tab-switch and
+  // unmount. Clears the dirty flag only if the model version is unchanged
+  // after the async write — edits typed while the write was in flight keep
+  // the buffer dirty (VS Code's guard against silently "clean" stale saves).
+  const saveModel = useCallback(async (
+    model: editor.ITextModel,
+    savePath: string,
+    opts?: { format?: boolean }
+  ) => {
+    if (autoSaveRef.current) { clearTimeout(autoSaveRef.current); autoSaveRef.current = null; }
+    if (contentSyncRef.current) { clearTimeout(contentSyncRef.current); contentSyncRef.current = null; }
+
+    // Format only on explicit saves (VS Code never formats on auto-save),
+    // and only if this model is the one currently in the editor.
+    if (opts?.format && editorRef.current && editorRef.current.getModel() === model) {
+      try { await editorRef.current.getAction('editor.action.formatDocument')?.run(); } catch {}
+    }
+
+    if (model.isDisposed()) return;
+    const saveVersion = model.getAlternativeVersionId();
+    const content = model.getValue();
+    pendingRef.current = { path: savePath, content };
+    pushContentToStore(savePath, content);
+
+    try {
+      await FileService.writeFile(savePath, content);
+      const unchangedSinceWrite = !model.isDisposed() && model.getAlternativeVersionId() === saveVersion;
+      if (unchangedSinceWrite) {
+        if (pathRef.current === savePath) dirtyRef.current = false;
+        pendingRef.current = null;
+        useEditorRepository.getState().markFileSaved(savePath, content);
+      }
+    } catch (e) {
+      logger.error('editor', 'Save failed', e);
+      pendingRef.current = null;
+    }
+
+    if (editorRef.current && pathRef.current === savePath) {
+      updateGitGutter(editorRef.current);
+    }
+  }, [updateGitGutter]);
+
   // ── Editor Mount ─────────────────────────────────────────────────────────
 
   const handleBeforeMount = useCallback((monaco: Monaco) => {
@@ -313,7 +382,9 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
         monaco.languages.registerLinkProvider(langId, {
           provideLinks: (model: monacoEditor.editor.ITextModel) => {
             const links: monacoEditor.languages.ILink[] = [];
-            const lineCount = model.getLineCount();
+            // Cap the scan — this runs on every content change, and regexing
+            // hundreds of thousands of lines would stall the UI thread.
+            const lineCount = Math.min(model.getLineCount(), 5000);
             for (let i = 1; i <= lineCount; i++) {
               const line = model.getLineContent(i);
               const patterns = [
@@ -460,66 +531,18 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
 
     const boundPath = pathRef.current;
 
-    // Format document using Prettier
-    const doFormat = async (): Promise<boolean> => {
-      const inst = editorRef.current;
-      if (!inst) return false;
-      try {
-        const action = inst.getAction('editor.action.formatDocument');
-        if (action) {
-          await action.run();
-          return true;
-        }
-      } catch {}
-      return false;
-    };
-
-    // Save handler
+    // Explicit save (Cmd+S / menu) — formats when formatOnSave is enabled
     const doSave = async () => {
-      if (autoSaveRef.current) { clearTimeout(autoSaveRef.current); autoSaveRef.current = null; }
       const inst = editorRef.current;
       if (!inst) {
         console.warn('[MonacoEditor:doSave] No editor instance');
         return;
       }
-
-      const savePath = pathRef.current;
-
-      // Format on save — best-effort, never blocks save
-      const { formatOnSave } = useSettingsStore.getState();
-      if (formatOnSave) {
-        try { await doFormat(); } catch {}
-      }
-
       const model = inst.getModel();
-      const saveVersion = model?.getAlternativeVersionId();
-
-      try {
-        const content = inst.getValue();
-        pendingRef.current = { path: savePath, content };
-        pushContentToStore(savePath, content);
-        await FileService.writeFile(savePath, content);
-        const currentModel = inst.getModel();
-        const unchangedSinceWrite =
-          !!currentModel &&
-          currentModel === model &&
-          typeof saveVersion === 'number' &&
-          currentModel.getAlternativeVersionId() === saveVersion &&
-          pathRef.current === savePath;
-
-        if (unchangedSinceWrite) {
-          dirtyRef.current = false;
-          pendingRef.current = null;
-          useEditorRepository.getState().markFileSaved(savePath, content);
-        }
-      } catch (e) {
-        logger.error('editor', 'Save failed', e);
-        pendingRef.current = null;
-        dirtyRef.current = true;
-      }
-
-      // Refresh git gutter after save
-      updateGitGutter(inst);
+      if (!model) return;
+      const savePath = modelPaths.get(model) ?? pathRef.current;
+      const { formatOnSave } = useSettingsStore.getState();
+      await saveModel(model, savePath, { format: formatOnSave });
     };
 
     ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { doSave(); });
@@ -546,20 +569,64 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
       }
     }));
 
-    // Content change — keep the editor store current for dirty-buffer recovery.
-    // explicit Save/Cmd+S remains the only path that writes the real file.
+    // Content change — three responsibilities, each on its own budget:
+    //  1. Immediately flip the dirty flag in the store (one cheap update →
+    //     tab dot appears on the first keystroke).
+    //  2. Debounce the full-content sync to the store. Pushing getValue()
+    //     per keystroke copied the whole file (plus an undo-stack snapshot)
+    //     on every key and re-rendered the entire editor chrome; 300ms
+    //     coalesces a typing burst into one push. Save/tab-switch/unmount
+    //     all flush fresh content explicitly, so nothing user-visible lags.
+    //  3. Schedule auto-save per the user's setting (VS Code 'afterDelay':
+    //     debounced from the LAST edit; never formats).
     disposablesRef.current.push(
       ed.onDidChangeModelContent(() => {
         if (applyingStoreUpdateRef.current) return;
         dirtyRef.current = true;
-        const currentPath = pathRef.current;
-        if (currentPath) {
-          const content = ed.getValue();
-          pendingRef.current = { path: currentPath, content };
-          pushContentToStore(currentPath, content);
-        }
+        const model = ed.getModel();
+        if (!model) return;
+        // Attribute to the model's bound path — during a tab-switch gap the
+        // prop path may already point at a file whose model isn't ready yet.
+        const boundPath = modelPaths.get(model) ?? pathRef.current;
+        if (!boundPath) return;
+
+        useEditorRepository.getState().markFileDirty(boundPath);
+
+        if (contentSyncRef.current) clearTimeout(contentSyncRef.current);
+        contentSyncRef.current = setTimeout(() => {
+          contentSyncRef.current = null;
+          try {
+            if (model.isDisposed()) return;
+            const content = model.getValue();
+            pendingRef.current = { path: boundPath, content };
+            pushContentToStore(boundPath, content);
+          } catch {}
+        }, 300);
+
         if (autoSaveRef.current) clearTimeout(autoSaveRef.current);
         autoSaveRef.current = null;
+        const { autoSave, autoSaveDelay } = useSettingsStore.getState();
+        if (autoSave === 'afterDelay') {
+          autoSaveRef.current = setTimeout(() => {
+            autoSaveRef.current = null;
+            if (!model.isDisposed()) void saveModel(model, boundPath);
+          }, autoSaveDelay);
+        }
+      })
+    );
+
+    // Auto-save on focus loss (editor blur). Applies to both auto-save
+    // modes: in 'afterDelay' it just flushes the pending timer early.
+    disposablesRef.current.push(
+      ed.onDidBlurEditorWidget(() => {
+        const { autoSave } = useSettingsStore.getState();
+        if (autoSave === 'off') return;
+        const model = ed.getModel();
+        if (!model) return;
+        const boundPath = modelPaths.get(model) ?? pathRef.current;
+        if (!boundPath) return;
+        const f = useEditorRepository.getState().openFiles.find(ff => ff.path === boundPath);
+        if (f?.isDirty) void saveModel(model, boundPath);
       })
     );
 
@@ -650,16 +717,20 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
       run: (editor) => { editor.trigger('keyboard', 'editor.action.quickOutline', null); },
     });
 
+    // The editor instance can be disposed without this component unmounting
+    // (switching to the image/diff branch unmounts only <Editor>). Null the
+    // ref so effects never operate on a disposed instance.
+    disposablesRef.current.push(ed.onDidDispose(() => {
+      if (editorRef.current === ed) editorRef.current = null;
+    }));
+
     // Initial model setup — create model for the initial file
     // Dispose the empty placeholder model created by @monaco-editor/react
     const placeholderModel = ed.getModel();
     const initialFile = useEditorRepository.getState().openFiles.find(f => f.path === boundPath);
     if (initialFile) {
-      const uri = monacoEditor.Uri.file(boundPath);
-      let model = monacoEditor.editor.getModel(uri);
-      if (!model) {
-        model = monacoEditor.editor.createModel(initialFile.content, initialFile.language, uri);
-      } else if (!initialFile.isDirty && model.getValue() !== initialFile.content) {
+      const model = acquireModel(boundPath, initialFile.content, initialFile.language);
+      if (!initialFile.isDirty && model.getValue() !== initialFile.content) {
         applyingStoreUpdateRef.current = true;
         try {
           model.setValue(initialFile.content);
@@ -682,7 +753,10 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
       ed.revealLineInCenter(cached.line);
     }
     ed.focus();
-    prevPathRef.current = boundPath;
+    // Only commit prevPath when the file's model is actually in the editor.
+    // If the file is still being read from disk, leaving prevPath as null
+    // lets the model-swap effect finish the job when the content arrives.
+    prevPathRef.current = initialFile ? boundPath : null;
 
     // Load git gutter decorations
     updateGitGutter(ed);
@@ -706,7 +780,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     if (projectRoot) {
       FormatterService.getInstance().loadProjectConfig(projectRoot).catch(() => {});
     }
-  }, [updateGitGutter]);
+  }, [updateGitGutter, saveModel, groupId]);
 
   // ── Model swap on tab switch (VS Code-style) ────────────────────────
 
@@ -715,45 +789,63 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     if (!inst) return;
 
     const prevPath = prevPathRef.current;
-    prevPathRef.current = path;
 
     // Same file — nothing to do
     if (prevPath === path) return;
 
-    // Save cursor from previous model
+    // File content not loaded yet (openFile is still reading from disk).
+    // Do NOT commit prevPath: leaving it untouched makes this effect run
+    // again when `hasFile` flips, completing the deferred swap. Committing
+    // early was the old bug — the swap never retried and keystrokes kept
+    // flowing into the previous file's model under the new path.
+    const nextFile = useEditorRepository.getState().openFiles.find(f => f.path === path);
+    if (!nextFile) return;
+
+    prevPathRef.current = path;
+
+    // Flush the previous file: cursor, pending content sync, and — with
+    // auto-save on — the file itself (VS Code saves dirty buffers when the
+    // user switches away in onFocusChange mode; afterDelay flushes early).
+    if (contentSyncRef.current) { clearTimeout(contentSyncRef.current); contentSyncRef.current = null; }
+    if (autoSaveRef.current) { clearTimeout(autoSaveRef.current); autoSaveRef.current = null; }
     if (prevPath) {
       try {
         const pos = inst.getPosition();
         if (pos) setCursorCached(`${groupId}::${prevPath}`, { line: pos.lineNumber, col: pos.column });
       } catch {}
-      // Save content of previous model to store
       try {
         const prevModel = inst.getModel();
-        if (prevModel) pushContentToStore(prevPath, prevModel.getValue());
+        if (prevModel && modelPaths.get(prevModel) === prevPath) {
+          pushContentToStore(prevPath, prevModel.getValue());
+          const { autoSave } = useSettingsStore.getState();
+          const prevFile = useEditorRepository.getState().openFiles.find(f => f.path === prevPath);
+          if (autoSave !== 'off' && prevFile?.isDirty) {
+            void saveModel(prevModel, prevPath);
+          }
+        }
       } catch {}
     }
 
-    // Get or create model for the new file
-    const file = useEditorRepository.getState().openFiles.find(f => f.path === path);
-    if (!file) return;
-
-    const uri = monacoEditor.Uri.file(path);
-    let model = monacoEditor.editor.getModel(uri);
-    if (!model) {
-      model = monacoEditor.editor.createModel(file.content, file.language, uri);
-    } else if (!file.isDirty && model.getValue() !== file.content) {
+    const model = acquireModel(path, nextFile.content, nextFile.language);
+    if (!nextFile.isDirty && model.getValue() !== nextFile.content) {
       applyingStoreUpdateRef.current = true;
       try {
-        model.setValue(file.content);
+        model.setValue(nextFile.content);
       } finally {
         applyingStoreUpdateRef.current = false;
       }
-    } else if (file.isDirty && model.getValue() !== file.content) {
+    } else if (nextFile.isDirty && model.getValue() !== nextFile.content) {
       pushContentToStore(path, model.getValue());
     }
 
     // Swap model (near-instant — no parsing, no re-tokenizing if cached)
+    const outgoingModel = inst.getModel();
     inst.setModel(model);
+    // A leftover placeholder model (inmemory://) from mounting before the
+    // file was loaded is unreachable after the swap — dispose it.
+    if (outgoingModel && outgoingModel !== model && outgoingModel.uri.scheme !== 'file') {
+      outgoingModel.dispose();
+    }
 
     // Restore cursor
     const cached = cursorCache.get(`${groupId}::${path}`);
@@ -766,7 +858,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
 
     // Update git gutter for the new file
     updateGitGutter(inst);
-  }, [path, groupId, updateGitGutter]);
+  }, [path, groupId, hasFile, saveModel, updateGitGutter]);
 
   // Cleanup on unmount — save everything
   useEffect(() => {
@@ -782,19 +874,30 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
         } catch {}
       }
 
-      // Flush autosave
+      // Flush pending timers
       if (autoSaveRef.current) { clearTimeout(autoSaveRef.current); autoSaveRef.current = null; }
+      if (contentSyncRef.current) { clearTimeout(contentSyncRef.current); contentSyncRef.current = null; }
       disposablesRef.current.forEach(d => d.dispose());
       disposablesRef.current = [];
 
-      // File autosave on unmount is temporarily disabled. Preserve the latest
-      // buffer in the editor store only; explicit Save writes the real file.
+      // Preserve the latest buffer in the store, and — when auto-save is
+      // enabled — flush the dirty buffer to disk (fire-and-forget; the
+      // dirty flag is only cleared if the write succeeds and content in
+      // the store still matches).
       if (inst && currentPath) {
         let content: string | null = null;
         try { content = inst.getValue() ?? null; } catch {}
-        if (!content && pendingRef.current?.path === currentPath) content = pendingRef.current.content;
-        if (content) {
+        if (content === null && pendingRef.current?.path === currentPath) content = pendingRef.current.content;
+        if (content !== null) {
           pushContentToStore(currentPath, content);
+          const { autoSave } = useSettingsStore.getState();
+          const f = useEditorRepository.getState().openFiles.find(ff => ff.path === currentPath);
+          if (autoSave !== 'off' && f?.isDirty) {
+            const flushed = content;
+            FileService.writeFile(currentPath, flushed)
+              .then(() => useEditorRepository.getState().markFileSaved(currentPath, flushed))
+              .catch(() => {});
+          }
         }
       }
 
@@ -884,6 +987,10 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
       // guard around resolving dirty text models.
       if (file.content !== prevFile.content) {
         const model = editorRef.current.getModel();
+        // The model in the editor MUST be the one bound to this path — during
+        // a tab-switch gap it can still be the previous file's model, and
+        // setValue here would overwrite the wrong file's buffer.
+        if (model && modelPaths.get(model) !== currentPath) return;
         if (model && model.getValue() !== file.content) {
           if (file.isDirty) return;
           // Preserve cursor position across the update
@@ -918,12 +1025,28 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     return () => window.removeEventListener('git:refreshGutter', handler);
   }, [updateGitGutter]);
 
+  // Auto-save when the app window loses focus (VS Code 'onWindowChange'
+  // semantics, folded into both auto-save modes as a safety flush).
+  useEffect(() => {
+    const onWindowBlur = () => {
+      const { autoSave } = useSettingsStore.getState();
+      if (autoSave === 'off') return;
+      const inst = editorRef.current;
+      const model = inst?.getModel();
+      if (!model) return;
+      const boundPath = modelPaths.get(model) ?? pathRef.current;
+      if (!boundPath) return;
+      const f = useEditorRepository.getState().openFiles.find(ff => ff.path === boundPath);
+      if (f?.isDirty) void saveModel(model, boundPath);
+    };
+    window.addEventListener('blur', onWindowBlur);
+    return () => window.removeEventListener('blur', onWindowBlur);
+  }, [saveModel]);
+
   // SVG toggle state — MUST be before any early returns (rules of hooks)
   const [svgViewMode, setSvgViewMode] = useState<'image' | 'code'>('image')
 
   // Reset view mode when file changes
-  const store = useEditorRepository.getState();
-  const file = store.openFiles.find(f => f.path === path);
   const isSvgFile = file?.isImage && file.mimeType === 'image/svg+xml'
   useEffect(() => {
     if (!isSvgFile) {
@@ -931,17 +1054,24 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
     }
   }, [path, isSvgFile])
 
-  if (!file) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: tokens.colors.text.secondary, fontSize: '14px', flexDirection: 'column', gap: '8px' }}>
-        <div>{t("common.fileNotFound")}</div>
-        <div style={{ fontSize: '12px', opacity: 0.7 }}>{path}</div>
-      </div>
-    );
-  }
+  // While `openFile` is still reading the file from disk, `file` is missing
+  // from the store for a few frames. The old code early-returned a
+  // "file not found" placeholder here, which UNMOUNTED the whole Monaco
+  // instance and remounted it when the content arrived — the flash the
+  // users saw on every first open. Instead we keep <Editor> mounted and
+  // draw an opaque overlay; the model-swap effect completes the switch as
+  // soon as the content lands. If nothing arrives (the open genuinely
+  // failed), the overlay degrades to the not-found message.
+  const [openTimedOut, setOpenTimedOut] = useState(false)
+  useEffect(() => {
+    setOpenTimedOut(false)
+    if (hasFile) return
+    const timer = setTimeout(() => setOpenTimedOut(true), 5000)
+    return () => clearTimeout(timer)
+  }, [path, hasFile])
 
   // Diff mode — render side-by-side diff editor
-  if (file.diff) {
+  if (file?.diff) {
     return (
       <React.Suspense fallback={
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: tokens.colors.text.secondary, fontSize: '14px' }}>
@@ -960,7 +1090,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
   }
 
   // Image preview — render full-size image centered
-  if (file.isImage && file.mimeType && file.base64) {
+  if (file?.isImage && file.mimeType && file.base64) {
     const isSvg = file.mimeType === 'image/svg+xml'
 
     return (
@@ -1060,7 +1190,7 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
   }
 
   return (
-    <div style={{ height: '100%', width: '100%' }}>
+    <div style={{ height: '100%', width: '100%', position: 'relative' }}>
       <Editor
         height="100%"
         defaultLanguage="typescript"
@@ -1075,6 +1205,26 @@ const MonacoEditor: React.FC<MonacoEditorProps> = ({ path, groupId = 'main', onC
           </div>
         }
       />
+      {!file && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 10,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '8px',
+            background: tokens.colors.bg.panel,
+            color: tokens.colors.text.secondary,
+            fontSize: '14px',
+          }}
+        >
+          <div>{openTimedOut ? t('common.fileNotFound') : t('explorer.loadingEditor')}</div>
+          <div style={{ fontSize: '12px', opacity: 0.7 }}>{path}</div>
+        </div>
+      )}
     </div>
   );
 };

@@ -936,6 +936,8 @@ function EditorSection() {
   const insertSpaces = useSettingsStore(function (s) { return s.editor.insertSpaces })
   const detectIndentation = useSettingsStore(function (s) { return s.editor.detectIndentation })
   const formatOnSave = useSettingsStore(function (s) { return s.formatOnSave })
+  const autoSave = useSettingsStore(function (s) { return s.autoSave })
+  const setAutoSave = useSettingsStore(function (s) { return s.setAutoSave })
   const chatTextFontSize = useSettingsStore(function (s) { return s.chatTextFontSize })
 
   const setAutocompleteEnabled = useSettingsStore(function (s) { return s.setAutocompleteEnabled })
@@ -998,6 +1000,38 @@ function EditorSection() {
               <Switch.HiddenInput />
               <Switch.Control />
             </Switch.Root>
+          </HStack>
+        </Field.Root>
+      </SettingsGroup>
+
+      <SettingsGroup title={t("settings.autoSaveGroup")}>
+        <Field.Root>
+          <HStack justify="space-between" align="center" gap={4}>
+            <Box minW={0}>
+              <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px">
+                {t('settings.autoSave')}
+              </Text>
+              <Text color={tokens.colors.text.secondary} fontSize="12px" mt="2px">
+                {t('settings.autoSaveDesc')}
+              </Text>
+            </Box>
+            <NativeSelect.Root size="sm" width="180px" flexShrink={0}>
+              <NativeSelect.Field
+                bg={tokens.colors.bg.input}
+                borderColor={tokens.colors.border.input}
+                color={tokens.colors.text.primary}
+                value={autoSave}
+                onChange={function (e) {
+                  const v = e.target.value
+                  if (v === 'off' || v === 'afterDelay' || v === 'onFocusChange') setAutoSave(v)
+                }}
+              >
+                <option value="afterDelay">{t('settings.autoSaveAfterDelay')}</option>
+                <option value="onFocusChange">{t('settings.autoSaveOnFocusChange')}</option>
+                <option value="off">{t('settings.autoSaveOff')}</option>
+              </NativeSelect.Field>
+              <NativeSelect.Indicator />
+            </NativeSelect.Root>
           </HStack>
         </Field.Root>
       </SettingsGroup>

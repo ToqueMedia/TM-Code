@@ -1201,9 +1201,41 @@ pub async fn write_file(path: String, content: String) -> Result<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    tokio::fs::write(&canonical, content)
-        .await
-        .map_err(FileTreeError::from)
+    // Atomic save: write to a temp file in the same directory, then rename
+    // over the target. A crash/power-cut mid-write can never leave the real
+    // file truncated — the reader sees either the old or the new content,
+    // never a partial one. rename() is atomic on POSIX and maps to
+    // MoveFileEx(REPLACE_EXISTING) on Windows.
+    let file_name = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let tmp = canonical.with_file_name(format!(".{}.tm-write-{}", file_name, std::process::id()));
+
+    if let Err(e) = tokio::fs::write(&tmp, &content).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(FileTreeError::from(e));
+    }
+
+    // Preserve the original file's permissions — rename would otherwise
+    // replace them with the temp file's default mode (e.g. drop +x).
+    #[cfg(unix)]
+    if let Ok(meta) = tokio::fs::metadata(&canonical).await {
+        let _ = tokio::fs::set_permissions(&tmp, meta.permissions()).await;
+    }
+
+    match tokio::fs::rename(&tmp, &canonical).await {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // Some filesystems (network mounts, exotic FUSE) reject the
+            // rename — fall back to a direct write rather than failing the
+            // save outright.
+            let _ = tokio::fs::remove_file(&tmp).await;
+            tokio::fs::write(&canonical, content)
+                .await
+                .map_err(FileTreeError::from)
+        }
+    }
 }
 
 // Append to a file (creates parent dirs and the file if needed). Used for
