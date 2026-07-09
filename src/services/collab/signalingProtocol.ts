@@ -16,14 +16,61 @@ export interface PeerInfo {
 /** Logical data channels that can be relayed through the DO when P2P fails. */
 export type RelayChannel = 'control' | 'bulk'
 
-/** Messages the worker pushes to the client. `iceServers` (welcome only) are
- *  ephemeral TURN credentials, present when the worker has a Calls TURN key. */
+/** Messages the worker pushes to the client. On welcome, `iceServers` are
+ *  ephemeral TURN credentials (present when the worker has a Calls TURN key)
+ *  and `mediaPolicy` the per-plan voice/screen limits. */
 export type ServerMessage =
-  | { type: 'welcome'; selfId: string; peers: PeerInfo[]; iceServers?: unknown }
+  | { type: 'welcome'; selfId: string; peers: PeerInfo[]; iceServers?: unknown; mediaPolicy?: unknown }
   | { type: 'peer-join'; peer: PeerInfo }
   | { type: 'peer-leave'; peerId: string }
   | { type: SignalType; from: string; payload: unknown }
   | { type: 'relay'; from: string; channel: RelayChannel; payload: string }
+
+/**
+ * Per-plan voice/screen limits the worker hands out on welcome. Absent (old
+ * worker) → null → the client applies NO limits, so a worker rollback can
+ * never lock paying teams out of calls.
+ */
+export interface MediaPolicy {
+  maxCallParticipants: number
+  /** Minutes; null = unlimited. */
+  maxCallMinutes: number | null
+  maxScreenWatchers: number
+  screenMaxHeight: number
+  screenMaxFrameRate: number
+}
+
+/** Validate the welcome's `mediaPolicy` blob (version-skewed wire — never
+ *  trust the shape). Null on anything malformed. */
+export function sanitizeMediaPolicy(value: unknown): MediaPolicy | null {
+  if (!value || typeof value !== 'object') return null
+  const v = value as Record<string, unknown>
+  const posInt = (x: unknown): number | null =>
+    typeof x === 'number' && Number.isFinite(x) && x >= 1 ? Math.floor(x) : null
+  const maxCallParticipants = posInt(v.maxCallParticipants)
+  const maxScreenWatchers = posInt(v.maxScreenWatchers)
+  const screenMaxHeight = posInt(v.screenMaxHeight)
+  const screenMaxFrameRate = posInt(v.screenMaxFrameRate)
+  if (
+    maxCallParticipants === null ||
+    maxScreenWatchers === null ||
+    screenMaxHeight === null ||
+    screenMaxFrameRate === null
+  ) {
+    return null
+  }
+  // `null` is the only spelling of "unlimited" — an INVALID number (negative,
+  // NaN, string) must reject the whole policy, never upgrade to unlimited.
+  let maxCallMinutes: number | null
+  if (v.maxCallMinutes === null) {
+    maxCallMinutes = null
+  } else {
+    const parsed = posInt(v.maxCallMinutes)
+    if (parsed === null) return null
+    maxCallMinutes = parsed
+  }
+  return { maxCallParticipants, maxCallMinutes, maxScreenWatchers, screenMaxHeight, screenMaxFrameRate }
+}
 
 /** Client → worker: forward a WebRTC signal to one peer. */
 export interface SignalMessage {

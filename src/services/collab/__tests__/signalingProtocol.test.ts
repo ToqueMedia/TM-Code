@@ -3,6 +3,7 @@ import {
   COLLAB_SUBPROTOCOL,
   parseServerMessage,
   sanitizeIceServers,
+  sanitizeMediaPolicy,
   shouldInitiate,
   signalingSubprotocols,
 } from '../signalingProtocol'
@@ -99,6 +100,41 @@ describe('signalingProtocol', () => {
       expect(sanitizeIceServers([{ urls: 'turn:t:3478', username: 42, credential: null }])).toEqual([
         { urls: ['turn:t:3478'] },
       ])
+    })
+  })
+
+  describe('sanitizeMediaPolicy', () => {
+    const pro = {
+      maxCallParticipants: 4,
+      maxCallMinutes: 120,
+      maxScreenWatchers: 3,
+      screenMaxHeight: 720,
+      screenMaxFrameRate: 10,
+    }
+
+    it('accepts a valid policy and floors fractional numbers', () => {
+      expect(sanitizeMediaPolicy(pro)).toEqual(pro)
+      expect(sanitizeMediaPolicy({ ...pro, maxCallParticipants: 4.9 })).toEqual({
+        ...pro,
+        maxCallParticipants: 4,
+      })
+    })
+
+    it('accepts null maxCallMinutes as "unlimited"', () => {
+      expect(sanitizeMediaPolicy({ ...pro, maxCallMinutes: null })).toEqual({
+        ...pro,
+        maxCallMinutes: null,
+      })
+    })
+
+    it('rejects absent, malformed, or non-positive fields', () => {
+      expect(sanitizeMediaPolicy(undefined)).toBeNull()
+      expect(sanitizeMediaPolicy('policy')).toBeNull()
+      expect(sanitizeMediaPolicy({})).toBeNull()
+      expect(sanitizeMediaPolicy({ ...pro, maxCallParticipants: 0 })).toBeNull()
+      expect(sanitizeMediaPolicy({ ...pro, screenMaxHeight: '720' })).toBeNull()
+      expect(sanitizeMediaPolicy({ ...pro, maxCallMinutes: -5 })).toBeNull()
+      expect(sanitizeMediaPolicy({ ...pro, screenMaxFrameRate: NaN })).toBeNull()
     })
   })
 })

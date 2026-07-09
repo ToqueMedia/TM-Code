@@ -34,8 +34,21 @@ export interface VoiceState {
   muted: boolean
 }
 
+/**
+ * A teammate's screen-share state. Same idempotent-snapshot discipline as
+ * VoiceState: broadcast on change, replayed to late joiners, receivers
+ * overwrite. `screen-watch` is the viewer-side opt-in — the presenter routes
+ * the video track ONLY toward peers that asked to watch (bandwidth gating,
+ * mirroring "mic only to in-call peers").
+ */
+export interface ScreenState {
+  uid: string
+  name: string
+  sharing: boolean
+}
+
 /** Control-channel envelopes: chat + typing presence + live-preview offer/stop
- *  + voice-call state/speaking. */
+ *  + voice-call state/speaking + screen-share state/watch. */
 export type ControlMessage =
   | { t: 'chat'; msg: ChatMessage }
   | { t: 'typing'; uid: string; name: string; typing: boolean }
@@ -43,6 +56,10 @@ export type ControlMessage =
   | { t: 'preview-stop'; uid: string }
   | { t: 'voice-state'; state: VoiceState }
   | { t: 'voice-speaking'; uid: string; speaking: boolean }
+  | { t: 'screen-state'; state: ScreenState }
+  | { t: 'screen-watch'; uid: string; watching: boolean }
+  /** Presenter → viewer: the watcher slots are full (plan limit). */
+  | { t: 'screen-full'; max: number }
 
 /** Wrap a chat message for broadcast over the control channel. */
 export function buildChatControl(msg: ChatMessage): ControlMessage {
@@ -52,6 +69,11 @@ export function buildChatControl(msg: ChatMessage): ControlMessage {
 /** Wrap a voice-state snapshot for broadcast over the control channel. */
 export function buildVoiceStateControl(state: VoiceState): ControlMessage {
   return { t: 'voice-state', state }
+}
+
+/** Wrap a screen-share snapshot for broadcast over the control channel. */
+export function buildScreenStateControl(state: ScreenState): ControlMessage {
+  return { t: 'screen-state', state }
 }
 
 function isChatMessage(value: unknown): value is ChatMessage {
@@ -110,6 +132,18 @@ export function parseControlMessage(value: unknown): ControlMessage | null {
   }
   if (env.t === 'voice-speaking' && typeof env.uid === 'string' && typeof env.speaking === 'boolean') {
     return { t: 'voice-speaking', uid: env.uid, speaking: env.speaking }
+  }
+  if (env.t === 'screen-state') {
+    const s = env.state as Record<string, unknown> | undefined
+    if (s && typeof s.uid === 'string' && typeof s.name === 'string' && typeof s.sharing === 'boolean') {
+      return { t: 'screen-state', state: { uid: s.uid, name: s.name, sharing: s.sharing } }
+    }
+  }
+  if (env.t === 'screen-watch' && typeof env.uid === 'string' && typeof env.watching === 'boolean') {
+    return { t: 'screen-watch', uid: env.uid, watching: env.watching }
+  }
+  if (env.t === 'screen-full' && typeof env.max === 'number' && Number.isFinite(env.max)) {
+    return { t: 'screen-full', max: env.max }
   }
   return null
 }

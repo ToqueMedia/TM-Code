@@ -34,6 +34,14 @@ import {
   replayVoiceStateTo,
   resetVoiceService,
 } from '@/services/collab/collabVoice'
+import {
+  attachScreenTransport,
+  handleScreenControl,
+  onRemoteVideoTrack,
+  onScreenPeerGone,
+  replayScreenStateTo,
+  resetScreenService,
+} from '@/services/collab/collabScreen'
 import { resolveCollabSignalingUrl } from '@/utils/devUrls'
 import { playMessageChime } from '@/utils/notificationSound'
 import { stopLivePreviewServer } from '@/services/collab/livePreviewServer'
@@ -154,11 +162,18 @@ export async function startCollabSession(): Promise<void> {
         if (activeShareOffer) {
           mesh.sendControl(peer.peerId, { t: 'preview-offer' as const, offer: activeShareOffer })
         }
-        // Replay our voice-call state so the newcomer sees the ongoing call.
+        // Replay our voice-call / screen-share state so the newcomer sees the
+        // ongoing call/presentation.
         replayVoiceStateTo(peer.peerId)
+        replayScreenStateTo(peer.peerId)
       },
-      onPeerDisconnected: (peerId) => onVoicePeerGone(peerId),
+      onPeerDisconnected: (peerId) => {
+        onVoicePeerGone(peerId)
+        onScreenPeerGone(peerId)
+      },
       onPeerAudioTrack: (peer, track, stream) => onRemoteAudioTrack(peer, track, stream),
+      onPeerVideoTrack: (peer, track, stream) => onRemoteVideoTrack(peer, track, stream),
+      onMediaPolicy: (policy) => useCollabStore.getState().setMediaPolicy(policy),
       onSessionClosed: () => {
         useCollabStore.getState().setConnected(false)
         useCollabStore.getState().setPeers([])
@@ -195,24 +210,35 @@ export async function startCollabSession(): Promise<void> {
           useCollabStore.getState().removeLivePreviewByUid(control.uid)
         } else if (control?.t === 'voice-state' || control?.t === 'voice-speaking') {
           handleVoiceControl(peerId, control)
+        } else if (
+          control?.t === 'screen-state' ||
+          control?.t === 'screen-watch' ||
+          control?.t === 'screen-full'
+        ) {
+          handleScreenControl(peerId, control)
         }
       },
     })
     mesh.connect()
     // Wire the live-preview tunnel to send over this mesh.
     attachTunnel((peerId, frame) => mesh?.sendBulk(peerId, frame))
-    // Wire voice calls to send over this mesh (closures read the live `mesh`
-    // var, so a torn-down mesh degrades to no-ops instead of stale sends).
-    attachVoiceTransport(
-      {
-        broadcastControl: (data) => mesh?.broadcastControl(data),
-        sendControl: (peerId, data) => mesh?.sendControl(peerId, data),
-        setVoiceTrackForPeer: (peerId, track) => mesh?.setVoiceTrackForPeer(peerId, track),
-        hasVoicePath: (peerId) => mesh?.hasVoicePath(peerId) ?? false,
-        peers: () => mesh?.currentPeers() ?? [],
-      },
-      () => selfIdentity(),
-    )
+    // Wire voice calls + screen share to send over this mesh (closures read
+    // the live `mesh` var, so a torn-down mesh degrades to no-ops instead of
+    // stale sends). One object satisfies both transports structurally.
+    const mediaTransport = {
+      broadcastControl: (data: Parameters<CollabMesh['broadcastControl']>[0]) =>
+        mesh?.broadcastControl(data),
+      sendControl: (peerId: string, data: unknown) => mesh?.sendControl(peerId, data),
+      setVoiceTrackForPeer: (peerId: string, track: MediaStreamTrack | null) =>
+        mesh?.setVoiceTrackForPeer(peerId, track),
+      setScreenTrackForPeer: (peerId: string, track: MediaStreamTrack | null) =>
+        mesh?.setScreenTrackForPeer(peerId, track),
+      hasVoicePath: (peerId: string) => mesh?.hasVoicePath(peerId) ?? false,
+      hasScreenPath: (peerId: string) => mesh?.hasScreenPath(peerId) ?? false,
+      peers: () => mesh?.currentPeers() ?? [],
+    }
+    attachVoiceTransport(mediaTransport, () => selfIdentity())
+    attachScreenTransport(mediaTransport, () => selfIdentity())
 
     // Rehydrate recent local chat history for continuity (best-effort).
     void loadChatHistory()
@@ -235,8 +261,11 @@ function scheduleReconnect(): void {
     voiceRejoin = { droppedAt: Date.now() }
   }
   // The mic must not stay hot across the gap — the call does not survive a
-  // dropped session (maybeRejoinVoice restores it after the mesh heals).
+  // dropped session (maybeRejoinVoice restores it after the mesh heals). The
+  // screen capture stops too and does NOT auto-resume: re-acquiring a capture
+  // surface requires a user gesture by design.
   resetVoiceService()
+  resetScreenService()
   // Tear down the dead mesh (notify=false → no recursive onSessionClosed) so
   // startCollabSession's guard lets a fresh connect through.
   mesh?.disconnect()
@@ -301,9 +330,11 @@ function teardownSession(): void {
   activeShareOffer = null
   offlineUnsub?.()
   offlineUnsub = null
-  // Voice first, while the mesh is still up: releases the mic, clears the
-  // audio senders and removes every sink. Never let the mic outlive the session.
+  // Media first, while the mesh is still up: releases the mic + screen
+  // capture, clears the senders and removes every sink. Never let capture
+  // devices outlive the session.
   resetVoiceService()
+  resetScreenService()
   mesh?.disconnect()
   mesh = null
   activeRoom = null
@@ -314,6 +345,7 @@ function teardownSession(): void {
   store.setConnected(false)
   store.setPeers([])
   store.setSharingPreview(false)
+  store.setMediaPolicy(null)
   // Tearing down the session (team/project switch, sign-out) must also kill any
   // Live Preview server we started — it has no reason to outlive the session.
   void stopLivePreviewServer()

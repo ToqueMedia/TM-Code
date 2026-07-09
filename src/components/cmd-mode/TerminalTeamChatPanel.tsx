@@ -6,6 +6,7 @@ import { useAuthStore } from '@/stores/authStore'
 import { canShareCode, useCollabStore, type LivePreview } from '@/stores/collabStore'
 import { sendChatMessage, stopLivePreview } from '@/services/collab/collabSessionService'
 import { joinVoiceCall, leaveVoiceCall, toggleVoiceMute } from '@/services/collab/collabVoice'
+import { startScreenShare, stopScreenShare, watchPresenter } from '@/services/collab/collabScreen'
 import { openPreview } from '@/services/collab/previewViewerService'
 import { useTeamTyping } from '@/hooks/useTeamTyping'
 import type { ChatMessage } from '@/services/collab/collabChat'
@@ -52,7 +53,12 @@ export function TerminalTeamChatPanel() {
   const voiceJoining = useCollabStore((s) => s.voiceJoining)
   const voiceMuted = useCollabStore((s) => s.voiceMuted)
   const speakingSelf = useCollabStore((s) => s.voiceSpeakingSelf)
+  const voiceCountdown = useCollabStore((s) => s.voiceCountdown)
   const voiceRoster = useCollabStore((s) => s.voiceRoster)
+  const screenSharing = useCollabStore((s) => s.screenSharing)
+  const screenStarting = useCollabStore((s) => s.screenStarting)
+  const screenPresenter = useCollabStore((s) => s.screenPresenter)
+  const screenWatching = useCollabStore((s) => s.screenWatching)
   const selfUid = useAuthStore((s) => s.user?.uid)
   const { notifyTyping, stopTyping, typingLabel } = useTeamTyping()
   const [draft, setDraft] = useState('')
@@ -129,6 +135,20 @@ export function TerminalTeamChatPanel() {
           </Text>
         </Flex>
         <Flex align="center" gap={2} flexShrink={0}>
+          {/* Present our screen — hidden while a presentation is running. */}
+          {connected && !screenPresenter && !screenSharing && (
+            <Box
+              as="button"
+              fontSize="11px"
+              color={tokens.colors.terminal.brightBlack}
+              _hover={{ color: tokens.colors.accent.purple }}
+              opacity={screenStarting ? 0.5 : 1}
+              onClick={() => void startScreenShare()}
+              title={t('team.screenShare')}
+            >
+              [{t('team.screenShareShort')}]
+            </Box>
+          )}
           {/* Start a call — once active, the voice row below owns the controls. */}
           {connected && !callActive && (
             <Box
@@ -215,6 +235,11 @@ export function TerminalTeamChatPanel() {
               <Text as="span" lineClamp={1}>
                 {t('team.voiceInCallCount').replace('{count}', String(participantCount))}
               </Text>
+              {voiceCountdown !== null && (
+                <Text as="span" flexShrink={0} color={tokens.colors.terminal.brightRed}>
+                  {t('team.voiceEndsIn').replace('{s}', String(voiceCountdown))}
+                </Text>
+              )}
             </Flex>
             <Flex align="center" gap={2} flexShrink={0}>
               {inVoice ? (
@@ -275,6 +300,56 @@ export function TerminalTeamChatPanel() {
             ))}
           </Flex>
         </Box>
+      )}
+
+      {/* Screen share — flat status row (presenter / watch / stop) */}
+      {(screenSharing || screenPresenter) && (
+        <Flex
+          align="center"
+          justify="space-between"
+          gap={2}
+          flexShrink={0}
+          px={3}
+          py={1.5}
+          borderTop={`1px solid ${tokens.colors.terminal.chromeHairline}`}
+          fontSize="11px"
+        >
+          <Flex align="center" gap={2} minW={0} color={tokens.colors.terminal.brightRed}>
+            <Text as="span" flexShrink={0}>◉</Text>
+            <Text as="span" lineClamp={1}>
+              {screenSharing
+                ? t('team.screenYouArePresenting')
+                : t('team.screenPresenting').replace('{name}', screenPresenter?.name ?? '')}
+            </Text>
+          </Flex>
+          <Flex align="center" gap={2} flexShrink={0}>
+            {screenSharing ? (
+              <Box
+                as="button"
+                color={tokens.colors.terminal.brightBlack}
+                _hover={{ color: tokens.colors.terminal.brightRed }}
+                onClick={() => stopScreenShare()}
+                title={t('team.screenStop')}
+              >
+                [{t('team.screenStopShort')}]
+              </Box>
+            ) : screenWatching ? (
+              <Text as="span" color={tokens.colors.terminal.brightBlack}>
+                [{t('team.screenWatchingTag')}]
+              </Text>
+            ) : (
+              <Box
+                as="button"
+                color={tokens.colors.accent.purple}
+                _hover={{ color: tokens.colors.terminal.foreground }}
+                onClick={() => watchPresenter()}
+                title={t('team.screenWatch')}
+              >
+                [{t('team.screenWatchShort')}]
+              </Box>
+            )}
+          </Flex>
+        </Flex>
       )}
 
       {/* Incoming live previews — clickable system lines */}

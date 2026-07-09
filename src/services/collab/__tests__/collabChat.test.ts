@@ -1,10 +1,12 @@
 import {
   buildChatControl,
+  buildScreenStateControl,
   buildVoiceStateControl,
   dedupeChatById,
   parseControlMessage,
   parseStoredChat,
   type ChatMessage,
+  type ScreenState,
   type VoiceState,
 } from '../collabChat'
 
@@ -82,6 +84,46 @@ describe('collabChat', () => {
     expect(
       parseControlMessage({ t: 'voice-state', state: { ...state, extra: 'x' } }),
     ).toEqual({ t: 'voice-state', state })
+  })
+
+  it('round-trips a screen-state envelope and rejects bad ones', () => {
+    const state: ScreenState = { uid: 'u1', name: 'Ada', sharing: true }
+    const env = buildScreenStateControl(state)
+    expect(env).toEqual({ t: 'screen-state', state })
+    expect(parseControlMessage(env)).toEqual({ t: 'screen-state', state })
+    expect(parseControlMessage({ t: 'screen-state' })).toBeNull()
+    expect(parseControlMessage({ t: 'screen-state', state: { uid: 'u1', name: 'Ada' } })).toBeNull()
+    expect(
+      parseControlMessage({ t: 'screen-state', state: { ...state, sharing: 'yes' } }),
+    ).toBeNull()
+    // Extra unknown fields are dropped, not echoed through.
+    expect(parseControlMessage({ t: 'screen-state', state: { ...state, extra: 1 } })).toEqual({
+      t: 'screen-state',
+      state,
+    })
+  })
+
+  it('parses a screen-watch envelope and rejects bad ones', () => {
+    expect(parseControlMessage({ t: 'screen-watch', uid: 'u1', watching: true })).toEqual({
+      t: 'screen-watch',
+      uid: 'u1',
+      watching: true,
+    })
+    expect(parseControlMessage({ t: 'screen-watch', uid: 'u1', watching: false })).toEqual({
+      t: 'screen-watch',
+      uid: 'u1',
+      watching: false,
+    })
+    expect(parseControlMessage({ t: 'screen-watch', uid: 'u1' })).toBeNull()
+    expect(parseControlMessage({ t: 'screen-watch', watching: true })).toBeNull()
+    expect(parseControlMessage({ t: 'screen-watch', uid: 'u1', watching: 'yes' })).toBeNull()
+  })
+
+  it('parses a screen-full envelope and rejects bad ones', () => {
+    expect(parseControlMessage({ t: 'screen-full', max: 3 })).toEqual({ t: 'screen-full', max: 3 })
+    expect(parseControlMessage({ t: 'screen-full' })).toBeNull()
+    expect(parseControlMessage({ t: 'screen-full', max: 'three' })).toBeNull()
+    expect(parseControlMessage({ t: 'screen-full', max: NaN })).toBeNull()
   })
 
   it('parses a voice-speaking envelope and rejects bad ones', () => {

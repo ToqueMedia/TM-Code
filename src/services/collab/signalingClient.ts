@@ -8,7 +8,9 @@ import {
   buildSignalingUrl,
   parseServerMessage,
   sanitizeIceServers,
+  sanitizeMediaPolicy,
   signalingSubprotocols,
+  type MediaPolicy,
   type PeerInfo,
   type RelayChannel,
   type RelayMessage,
@@ -18,8 +20,14 @@ import {
 
 export interface SignalingHandlers {
   /** `iceServers`: ephemeral TURN credentials from the worker (null when the
-   *  worker has no TURN key configured → STUN-only session). */
-  onWelcome: (selfId: string, peers: PeerInfo[], iceServers: RTCIceServer[] | null) => void
+   *  worker has no TURN key configured → STUN-only session). `mediaPolicy`:
+   *  per-plan voice/screen limits (null on old workers → no limits). */
+  onWelcome: (
+    selfId: string,
+    peers: PeerInfo[],
+    iceServers: RTCIceServer[] | null,
+    mediaPolicy: MediaPolicy | null,
+  ) => void
   onPeerJoin: (peer: PeerInfo) => void
   onPeerLeave: (peerId: string) => void
   onSignal: (from: string, type: SignalType, payload: unknown) => void
@@ -50,7 +58,12 @@ export class SignalingClient {
       if (!msg) return
       switch (msg.type) {
         case 'welcome':
-          this.handlers.onWelcome(msg.selfId, msg.peers, sanitizeIceServers(msg.iceServers))
+          this.handlers.onWelcome(
+            msg.selfId,
+            msg.peers,
+            sanitizeIceServers(msg.iceServers),
+            sanitizeMediaPolicy(msg.mediaPolicy),
+          )
           break
         case 'peer-join':
           this.handlers.onPeerJoin(msg.peer)

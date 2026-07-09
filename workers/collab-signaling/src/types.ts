@@ -79,11 +79,18 @@ export interface RelayMessage {
 /** Any message a peer can address to another (forwarded by the DO). */
 export type AddressedMessage = SignalMessage | RelayMessage
 
-/** Server → client: presence + relayed signals/data. `iceServers` (welcome
- *  only) carries ephemeral TURN credentials when the Calls TURN key is
- *  configured — see turn.ts. */
+/** Server → client: presence + relayed signals/data. On welcome, `iceServers`
+ *  carries ephemeral TURN credentials (when the Calls TURN key is configured —
+ *  see turn.ts) and `mediaPolicy` the per-plan voice/screen limits the client
+ *  enforces (see mediaPolicy.ts). */
 export type ServerMessage =
-  | { type: 'welcome'; selfId: string; peers: PeerInfo[]; iceServers?: IceServerEntry[] }
+  | {
+      type: 'welcome'
+      selfId: string
+      peers: PeerInfo[]
+      iceServers?: IceServerEntry[]
+      mediaPolicy?: import('./mediaPolicy').MediaPolicy
+    }
   | { type: 'peer-join'; peer: PeerInfo }
   | { type: 'peer-leave'; peerId: string }
   | { type: SignalType; from: string; payload: unknown }

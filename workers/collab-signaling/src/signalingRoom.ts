@@ -8,6 +8,7 @@
 
 import { HttpError, jsonError } from './errors'
 import { checkMembership } from './membership'
+import { policyForPlan, type MediaPolicy } from './mediaPolicy'
 import { parseInbound, routeTargets, tokenFromSubprotocols } from './protocol'
 import { mintTurnIceServers, TURN_CACHE_MS, type IceServer } from './turn'
 import { COLLAB_SUBPROTOCOL, type Env, type PeerInfo, type ServerMessage } from './types'
@@ -23,6 +24,8 @@ export class SignalingRoom {
   /** Room-wide cache of minted TURN credentials (ephemeral, shared within the
    *  team's trust boundary) so joins don't each pay a Calls API round-trip. */
   private turnCache: { servers: IceServer[]; expiresAt: number } | null = null
+  /** One "TURN not configured" log per DO lifetime, not one per join. */
+  private loggedTurnUnconfigured = false
 
   constructor(_state: DurableObjectState, env: Env) {
     this.env = env
@@ -53,13 +56,15 @@ export class SignalingRoom {
       return jsonError(new HttpError(401, 'tm_auth_error', 'Invalid or expired user session.'))
     }
 
-    // 2) Gate on authoritative team membership (fails closed).
-    const member = await checkMembership(room, uid, token, this.env)
-    if (!member) {
+    // 2) Gate on authoritative team membership (fails closed). The same read
+    //    resolves the team's plan tier → per-plan media policy in the welcome.
+    const membership = await checkMembership(room, uid, token, this.env)
+    if (!membership.member) {
       return jsonError(
         new HttpError(403, 'tm_not_team_member', 'You are not a member of this team.'),
       )
     }
+    const mediaPolicy = policyForPlan(membership.plan)
 
     // 3) Mint ephemeral TURN credentials for the welcome (null → the client
     //    stays STUN-only; TURN is an upgrade, never a join dependency).
@@ -71,7 +76,7 @@ export class SignalingRoom {
     const client = pair[0]
     const server = pair[1]
     server.accept()
-    this.registerPeer(server, uid, name, iceServers)
+    this.registerPeer(server, uid, name, iceServers, mediaPolicy)
 
     return new Response(null, {
       status: 101,
@@ -82,9 +87,19 @@ export class SignalingRoom {
 
   /** Serve TURN credentials from the room cache, minting on miss/expiry. */
   private async turnServers(): Promise<IceServer[] | null> {
+    if (!this.env.TURN_KEY_ID || !this.env.TURN_KEY_API_TOKEN) {
+      if (!this.loggedTurnUnconfigured) {
+        this.loggedTurnUnconfigured = true
+        console.log('[turn] not configured (TURN_KEY_ID/TURN_KEY_API_TOKEN unset) — welcomes go out STUN-only')
+      }
+      return null
+    }
     if (this.turnCache && Date.now() < this.turnCache.expiresAt) return this.turnCache.servers
     const servers = await mintTurnIceServers(this.env)
-    if (servers) this.turnCache = { servers, expiresAt: Date.now() + TURN_CACHE_MS }
+    if (servers) {
+      this.turnCache = { servers, expiresAt: Date.now() + TURN_CACHE_MS }
+      console.log('[turn] minted', servers.length, 'ice-server entr(y/ies) — cached for the room')
+    }
     return servers
   }
 
@@ -93,12 +108,14 @@ export class SignalingRoom {
     uid: string,
     name: string,
     iceServers: IceServer[] | null,
+    mediaPolicy: MediaPolicy,
   ): void {
     const peerId = crypto.randomUUID()
     const self: Peer = { peerId, uid, name, socket }
     this.peers.set(socket, self)
 
-    // Tell the newcomer who's already here (+ TURN credentials when minted).
+    // Tell the newcomer who's already here (+ TURN credentials when minted,
+    // + the per-plan media policy the client enforces).
     const others: PeerInfo[] = [...this.peers.values()]
       .filter((p) => p.socket !== socket)
       .map(({ peerId: id, uid: u, name: n }) => ({ peerId: id, uid: u, name: n }))
@@ -106,6 +123,7 @@ export class SignalingRoom {
       type: 'welcome',
       selfId: peerId,
       peers: others,
+      mediaPolicy,
       ...(iceServers ? { iceServers } : {}),
     })
 

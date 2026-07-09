@@ -45,6 +45,10 @@ export interface VoiceTransport {
 /** How often the local mic level is sampled for the speaking indicator. */
 const VAD_INTERVAL_MS = 200
 
+/** Plan-limit deadline cadence: minute warnings, then a visible countdown. */
+const DEADLINE_WARN_MINUTES = [15, 10, 5]
+const COUNTDOWN_SECONDS = 5
+
 let transport: VoiceTransport | null = null
 let getSelf: (() => { uid: string; name: string }) | null = null
 
@@ -52,6 +56,9 @@ let micStream: MediaStream | null = null
 let audioCtx: AudioContext | null = null
 let vadTimer: ReturnType<typeof setInterval> | null = null
 let lastSentSpeaking = false
+/** Timers for the plan-limit call deadline (warnings + countdown + hang-up). */
+let deadlineTimers: ReturnType<typeof setTimeout>[] = []
+let countdownInterval: ReturnType<typeof setInterval> | null = null
 /** Peers we already warned "in the call but unreachable" about (relay-only —
  *  no P2P path means no audio). Reset with the session. */
 const warnedNoPath = new Set<string>()
@@ -179,6 +186,17 @@ export async function joinVoiceCall(): Promise<void> {
     toast('error', t('team.notConnected'))
     return
   }
+  // Plan limit: call size. Counted from the roster (teammates in the call)
+  // + us. Best-effort client-side — a simultaneous-join race can briefly
+  // overshoot, which costs nothing (media is P2P) and self-corrects socially.
+  const policy = store.mediaPolicy
+  if (policy && Object.keys(store.voiceRoster).length + 1 > policy.maxCallParticipants) {
+    toast(
+      'warning',
+      t('team.voiceCallFull').replace('{count}', String(policy.maxCallParticipants)),
+    )
+    return
+  }
   const media = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined
   if (!media?.getUserMedia) {
     toast('error', t('team.voiceNotSupported'))
@@ -230,12 +248,18 @@ export async function joinVoiceCall(): Promise<void> {
   }
   startVad(micStream)
   broadcastSelfState()
+
+  // Plan limit: call duration. Armed per join; a reconnect auto-rejoin gets a
+  // fresh window (the drop was involuntary — never punish it).
+  const maxMinutes = useCollabStore.getState().mediaPolicy?.maxCallMinutes
+  if (maxMinutes) armCallDeadline(maxMinutes)
 }
 
 /** Leave the call: mic off everywhere, ears muted, state broadcast. */
 export function leaveVoiceCall(opts: { broadcast?: boolean } = {}): void {
   const store = useCollabStore.getState()
   const wasInCall = store.voiceInCall
+  clearCallDeadline()
   stopVad()
   if (transport) {
     for (const peer of transport.peers()) transport.setVoiceTrackForPeer(peer.peerId, null)
@@ -248,6 +272,7 @@ export function leaveVoiceCall(opts: { broadcast?: boolean } = {}): void {
     voiceJoining: false,
     voiceMuted: false,
     voiceSpeakingSelf: false,
+    voiceCountdown: null,
   })
   if (wasInCall && opts.broadcast !== false) broadcastSelfState()
 }
@@ -270,6 +295,52 @@ export function toggleVoiceMute(): void {
 }
 
 // ── internals ────────────────────────────────────────────────────────────────
+
+/**
+ * Plan-limit deadline: minute warnings (15/10/5 remaining, only those inside
+ * the limit), then a visible 5…1 s countdown (voiceCountdown in the store,
+ * rendered red in both voice bars, chime at the start), then hang-up.
+ */
+function armCallDeadline(maxMinutes: number): void {
+  clearCallDeadline()
+  const totalMs = maxMinutes * 60_000
+  for (const min of DEADLINE_WARN_MINUTES) {
+    const fireAt = totalMs - min * 60_000
+    if (fireAt <= 0) continue // warning wouldn't fit inside the limit
+    deadlineTimers.push(
+      setTimeout(() => {
+        playMessageChime()
+        toast('warning', t('team.voiceTimeLeft').replace('{min}', String(min)))
+      }, fireAt),
+    )
+  }
+  deadlineTimers.push(
+    setTimeout(() => {
+      playMessageChime()
+      let remaining = COUNTDOWN_SECONDS
+      useCollabStore.getState().setVoiceSelf({ voiceCountdown: remaining })
+      countdownInterval = setInterval(() => {
+        remaining -= 1
+        if (remaining >= 1) {
+          useCollabStore.getState().setVoiceSelf({ voiceCountdown: remaining })
+          return
+        }
+        // Zero: hang up (leaveVoiceCall clears these timers + the countdown).
+        leaveVoiceCall()
+        toast('info', t('team.voiceTimeUp'))
+      }, 1000)
+    }, Math.max(0, totalMs - COUNTDOWN_SECONDS * 1000)),
+  )
+}
+
+function clearCallDeadline(): void {
+  for (const timer of deadlineTimers) clearTimeout(timer)
+  deadlineTimers = []
+  if (countdownInterval) {
+    clearInterval(countdownInterval)
+    countdownInterval = null
+  }
+}
 
 function warnIfNoVoicePath(peerId: string, name: string): void {
   if (!transport || transport.hasVoicePath(peerId) || warnedNoPath.has(peerId)) return

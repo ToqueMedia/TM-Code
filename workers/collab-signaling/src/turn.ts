@@ -64,6 +64,9 @@ export async function mintTurnIceServers(env: Env): Promise<IceServer[] | null> 
   const keyId = env.TURN_KEY_ID
   const apiToken = env.TURN_KEY_API_TOKEN
   if (!keyId || !apiToken) return null
+  // Failures degrade to STUN-only but must NEVER be silent — a mistyped token
+  // would otherwise be indistinguishable from "TURN not configured". These
+  // logs surface in `wrangler tail` and the observability dashboard.
   try {
     const res = await fetch(`${TURN_API_BASE}/${keyId}/credentials/generate-ice-servers`, {
       method: 'POST',
@@ -73,9 +76,19 @@ export async function mintTurnIceServers(env: Env): Promise<IceServer[] | null> 
       },
       body: JSON.stringify({ ttl: TURN_TTL_SECONDS }),
     })
-    if (!res.ok) return null
-    return normalizeIceServers(await res.json())
-  } catch {
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      console.warn('[turn] credential mint FAILED:', res.status, body.slice(0, 300))
+      return null
+    }
+    const servers = normalizeIceServers(await res.json())
+    if (!servers) {
+      console.warn('[turn] credential mint returned an unrecognized body shape')
+      return null
+    }
+    return servers
+  } catch (e) {
+    console.warn('[turn] credential mint threw:', (e as Error)?.message ?? e)
     return null
   }
 }

@@ -5,12 +5,13 @@
 //   - `control`: small JSON messages (presence, chat, share notifications)
 //   - `bulk`:    larger payloads (changeset patches), chunked by the caller
 //
-// Voice: every connection ALSO pre-negotiates one `sendrecv` audio transceiver
-// during the initial offer/answer, with no track attached. Joining/leaving a
-// voice call is then just `sender.replaceTrack(mic | null)` — which requires
-// NO renegotiation, so the one-shot signaling handshake stays sufficient and
-// there is no offer-glare to handle. While no one is in a call the m-line is
-// negotiated but silent (no RTP flows for a null track).
+// Voice + screen: every connection ALSO pre-negotiates one `sendrecv` audio
+// transceiver AND one `sendrecv` video transceiver during the initial
+// offer/answer, with no tracks attached. Joining a voice call / starting a
+// screen share is then just `sender.replaceTrack(mic|screen | null)` — which
+// requires NO renegotiation, so the one-shot signaling handshake stays
+// sufficient and there is no offer-glare to handle. While unused the m-lines
+// are negotiated but silent (no RTP flows for a null track).
 //
 // DataChannels are DTLS-encrypted end-to-end and voice is SRTP-encrypted
 // end-to-end, so nothing the team shares is ever readable by the signaling
@@ -25,6 +26,7 @@
 import { SignalingClient } from './signalingClient'
 import {
   shouldInitiate,
+  type MediaPolicy,
   type PeerInfo,
   type SignalType,
 } from './signalingProtocol'
@@ -39,6 +41,10 @@ const ICE_SERVERS: RTCIceServer[] = [
 /** If a peer's WebRTC channels aren't open within this window, fall back to
  *  relaying its data through the DO (don't wait the full ICE-failure timeout). */
 const RELAY_FALLBACK_MS = 8000
+
+/** Encoder ceiling for the screen-share track (per watcher). ~2.5 Mbps keeps
+ *  1080p UI/code content crisp while bounding the mesh fan-out cost. */
+const SCREEN_MAX_BITRATE_BPS = 2_500_000
 
 /** Diagnostic logger for the WebRTC handshake (enable while debugging P2P). */
 const COLLAB_MESH_DEBUG = true
@@ -69,6 +75,12 @@ export interface MeshHandlers {
    *  the pre-negotiated voice transceiver; the track stays silent until the
    *  peer joins a call and feeds a real mic track into it). */
   onPeerAudioTrack?: (peer: PeerInfo, track: MediaStreamTrack, stream: MediaStream) => void
+  /** Same for the pre-negotiated video transceiver — black/frozen until the
+   *  peer starts a screen share and feeds a display track into it. */
+  onPeerVideoTrack?: (peer: PeerInfo, track: MediaStreamTrack, stream: MediaStream) => void
+  /** Per-plan voice/screen limits from the welcome (null = no limits — old
+   *  worker). Fires once per (re)connect, before any peer exists. */
+  onMediaPolicy?: (policy: MediaPolicy | null) => void
 }
 
 interface PeerState {
@@ -79,6 +91,8 @@ interface PeerState {
   /** Pre-negotiated audio transceiver — voice joins/leaves via
    *  `audioTx.sender.replaceTrack`, never via renegotiation. */
   audioTx?: RTCRtpTransceiver
+  /** Pre-negotiated video transceiver — screen share via replaceTrack. */
+  videoTx?: RTCRtpTransceiver
   /** 'p2p' = direct DataChannels; 'relay' = data forwarded via the DO when the
    *  WebRTC connection couldn't be established. */
   mode: 'p2p' | 'relay'
@@ -106,10 +120,14 @@ export class CollabMesh {
 
   connect(): void {
     this.signaling = new SignalingClient(this.base, this.teamId, this.idToken, this.displayName, {
-      onWelcome: (selfId, peers, iceServers) => {
+      onWelcome: (selfId, peers, iceServers, mediaPolicy) => {
         this.selfId = selfId
         this.iceServers = iceServers?.length ? [...ICE_SERVERS, ...iceServers] : ICE_SERVERS
-        dlog('welcome:', peers.length, 'peers,', iceServers?.length ?? 0, 'TURN server entries')
+        dlog(
+          'welcome:', peers.length, 'peers,', iceServers?.length ?? 0, 'TURN server entries,',
+          mediaPolicy ? `policy(call≤${mediaPolicy.maxCallParticipants})` : 'no policy',
+        )
+        this.handlers.onMediaPolicy?.(mediaPolicy)
         for (const peer of peers) this.addPeer(peer)
         this.emitPresence()
       },
@@ -190,6 +208,38 @@ export class CollabMesh {
     return Boolean(peer && peer.mode === 'p2p' && peer.audioTx)
   }
 
+  /**
+   * Feed (or clear) our screen-capture track toward ONE peer — same
+   * no-renegotiation contract as setVoiceTrackForPeer. Which peers get it is
+   * the screen service's policy (only opted-in watchers). Also caps the
+   * encoder bitrate: screen content is mostly static, and without a cap a
+   * scroll/video moment would happily eat the whole uplink × N watchers.
+   */
+  setScreenTrackForPeer(peerId: string, track: MediaStreamTrack | null): void {
+    const peer = this.peers.get(peerId)
+    const sender = peer?.mode === 'p2p' ? peer.videoTx?.sender : undefined
+    if (!sender) return
+    dlog('screen track', track ? 'ON' : 'off', '→', peerId)
+    void sender
+      .replaceTrack(track)
+      .then(() => {
+        if (!track) return
+        const params = sender.getParameters()
+        if (!params.encodings?.length) params.encodings = [{}]
+        params.encodings[0].maxBitrate = SCREEN_MAX_BITRATE_BPS
+        return sender.setParameters(params)
+      })
+      .catch(() => {
+        /* pc closed mid-flight — nothing to route anymore */
+      })
+  }
+
+  /** True when a direct (P2P) video path to this peer is negotiated. */
+  hasScreenPath(peerId: string): boolean {
+    const peer = this.peers.get(peerId)
+    return Boolean(peer && peer.mode === 'p2p' && peer.videoTx)
+  }
+
   /** Route a payload to a peer over its open DataChannel, or via the DO relay
    *  when the peer fell back to relay mode. Returns the path used (or null). */
   private sendOn(peer: PeerState, channel: 'control' | 'bulk', payload: string): 'p2p' | 'relay' | null {
@@ -246,11 +296,11 @@ export class CollabMesh {
       }
     }
     pc.ontrack = (event) => {
-      if (event.track.kind !== 'audio') return
-      dlog('remote audio track ←', info.peerId)
+      dlog('remote', event.track.kind, 'track ←', info.peerId)
       // addTransceiver-without-stream on the far side → `streams` can be empty.
       const stream = event.streams[0] ?? new MediaStream([event.track])
-      this.handlers.onPeerAudioTrack?.(info, event.track, stream)
+      if (event.track.kind === 'audio') this.handlers.onPeerAudioTrack?.(info, event.track, stream)
+      else if (event.track.kind === 'video') this.handlers.onPeerVideoTrack?.(info, event.track, stream)
     }
     pc.oniceconnectionstatechange = () => dlog('iceConnectionState', info.peerId, pc.iceConnectionState)
     pc.onconnectionstatechange = () => {
@@ -265,9 +315,11 @@ export class CollabMesh {
       // Initiator owns the channels; the answerer receives them via ondatachannel.
       this.attachChannel(state, pc.createDataChannel('control'), 'control')
       this.attachChannel(state, pc.createDataChannel('bulk'), 'bulk')
-      // Pre-negotiate the voice m-line (trackless) so a later call join is a
-      // pure replaceTrack — see the header. The answerer adopts it in onSignal.
+      // Pre-negotiate the voice + screen m-lines (trackless) so a later call
+      // join / screen share is a pure replaceTrack — see the header. The
+      // answerer adopts them in onSignal.
       state.audioTx = pc.addTransceiver('audio', { direction: 'sendrecv' })
+      state.videoTx = pc.addTransceiver('video', { direction: 'sendrecv' })
       void this.makeOffer(state)
     } else {
       pc.ondatachannel = (event) => {
@@ -304,9 +356,10 @@ export class CollabMesh {
     }
     state.control = undefined
     state.bulk = undefined
-    // Closing the pc above ended any remote audio track (the voice service
-    // cleans its sink via track.onended). No transceiver → no voice path.
+    // Closing the pc above ended any remote audio/video tracks (the voice and
+    // screen services clean up via track.onended). No transceivers → no media.
     state.audioTx = undefined
+    state.videoTx = undefined
     // The relay path (the WebSocket) is already up → the peer is usable now.
     this.markReady(state)
   }
@@ -339,14 +392,20 @@ export class CollabMesh {
     try {
       if (type === 'offer') {
         await state.pc.setRemoteDescription(payload as RTCSessionDescriptionInit)
-        // Adopt the audio transceiver the remote offer created and answer it
-        // sendrecv — a remotely-created transceiver defaults to recvonly, which
-        // would let us hear but never speak. Older clients whose offer carries
-        // no audio m-line simply leave audioTx undefined (voice no-ops).
-        const audioTx = state.pc.getTransceivers().find((tx) => tx.receiver.track?.kind === 'audio')
-        if (audioTx) {
-          state.audioTx = audioTx
-          audioTx.direction = 'sendrecv'
+        // Adopt the audio/video transceivers the remote offer created and
+        // answer them sendrecv — a remotely-created transceiver defaults to
+        // recvonly, which would let us hear/watch but never speak/present.
+        // Older clients whose offer carries fewer m-lines simply leave the
+        // corresponding tx undefined (that media no-ops toward them).
+        for (const tx of state.pc.getTransceivers()) {
+          const kind = tx.receiver.track?.kind
+          if (kind === 'audio' && !state.audioTx) {
+            state.audioTx = tx
+            tx.direction = 'sendrecv'
+          } else if (kind === 'video' && !state.videoTx) {
+            state.videoTx = tx
+            tx.direction = 'sendrecv'
+          }
         }
         const answer = await state.pc.createAnswer()
         await state.pc.setLocalDescription(answer)

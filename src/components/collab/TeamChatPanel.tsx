@@ -1,12 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text, Textarea } from '@chakra-ui/react'
-import { VscCallOutgoing, VscClose, VscMic, VscMicFilled, VscMute, VscSend } from 'react-icons/vsc'
+import {
+  VscCallOutgoing,
+  VscClose,
+  VscDeviceCameraVideo,
+  VscMic,
+  VscMicFilled,
+  VscMute,
+  VscSend,
+} from 'react-icons/vsc'
 import { useTranslation } from '@/i18n'
 import { tokens } from '@/theme/tokens'
 import { useAuthStore } from '@/stores/authStore'
 import { useCollabStore } from '@/stores/collabStore'
 import { sendChatMessage, stopLivePreview } from '@/services/collab/collabSessionService'
 import { joinVoiceCall, leaveVoiceCall, toggleVoiceMute } from '@/services/collab/collabVoice'
+import { startScreenShare, stopScreenShare, watchPresenter } from '@/services/collab/collabScreen'
 import { useTeamTyping } from '@/hooks/useTeamTyping'
 
 /** One participant pill in the voice bar: mic state + speaking highlight. */
@@ -53,7 +62,12 @@ export function TeamChatPanel() {
   const voiceJoining = useCollabStore((s) => s.voiceJoining)
   const voiceMuted = useCollabStore((s) => s.voiceMuted)
   const speakingSelf = useCollabStore((s) => s.voiceSpeakingSelf)
+  const voiceCountdown = useCollabStore((s) => s.voiceCountdown)
   const voiceRoster = useCollabStore((s) => s.voiceRoster)
+  const screenSharing = useCollabStore((s) => s.screenSharing)
+  const screenStarting = useCollabStore((s) => s.screenStarting)
+  const screenPresenter = useCollabStore((s) => s.screenPresenter)
+  const screenWatching = useCollabStore((s) => s.screenWatching)
   const selfUid = useAuthStore((s) => s.user?.uid)
   const { notifyTyping, stopTyping, typingLabel } = useTeamTyping()
   const [draft, setDraft] = useState('')
@@ -128,6 +142,20 @@ export function TeamChatPanel() {
           </Text>
         </Flex>
         <Flex align="center" gap={2}>
+          {/* Present our screen — hidden while a presentation is running. */}
+          {connected && !screenPresenter && !screenSharing && (
+            <Box
+              as="button"
+              aria-label={t('team.screenShare')}
+              title={t('team.screenShare')}
+              color={tokens.colors.text.muted}
+              opacity={screenStarting ? 0.5 : 1}
+              _hover={{ color: tokens.colors.text.primary }}
+              onClick={() => void startScreenShare()}
+            >
+              <VscDeviceCameraVideo size={14} />
+            </Box>
+          )}
           {/* Start a call — once one is active, the voice bar owns the controls. */}
           {connected && !callActive && (
             <Box
@@ -167,10 +195,17 @@ export function TeamChatPanel() {
           borderBottom={`1px solid ${tokens.colors.border.default}`}
         >
           <Flex align="center" justify="space-between">
-            <Text fontSize="10px" fontWeight="600" color={tokens.colors.text.muted}>
-              {t('team.voiceTitle')} ·{' '}
-              {t('team.voiceInCallCount').replace('{count}', String(participantCount))}
-            </Text>
+            <Flex align="center" gap={2} minW={0}>
+              <Text fontSize="10px" fontWeight="600" color={tokens.colors.text.muted}>
+                {t('team.voiceTitle')} ·{' '}
+                {t('team.voiceInCallCount').replace('{count}', String(participantCount))}
+              </Text>
+              {voiceCountdown !== null && (
+                <Text fontSize="10px" fontWeight="700" color={tokens.colors.accent.red} flexShrink={0}>
+                  {t('team.voiceEndsIn').replace('{s}', String(voiceCountdown))}
+                </Text>
+              )}
+            </Flex>
             {inVoice ? (
               <Flex align="center" gap={2}>
                 <Box
@@ -223,6 +258,68 @@ export function TeamChatPanel() {
               <VoiceChip key={uid} name={p.name} muted={p.muted} speaking={p.speaking} />
             ))}
           </Flex>
+        </Flex>
+      )}
+
+      {/* Screen share — presenter status + watch/stop controls */}
+      {(screenSharing || screenPresenter) && (
+        <Flex
+          align="center"
+          justify="space-between"
+          gap={2}
+          px={3}
+          py={2}
+          flexShrink={0}
+          borderBottom={`1px solid ${tokens.colors.border.default}`}
+        >
+          <Flex align="center" gap={2} minW={0}>
+            <VscDeviceCameraVideo
+              size={13}
+              color={tokens.colors.accent.red}
+              style={{ flexShrink: 0 }}
+            />
+            <Text fontSize="11px" color={tokens.colors.text.secondary} lineClamp={1}>
+              {screenSharing
+                ? t('team.screenYouArePresenting')
+                : t('team.screenPresenting').replace('{name}', screenPresenter?.name ?? '')}
+            </Text>
+          </Flex>
+          {screenSharing ? (
+            <Box
+              as="button"
+              flexShrink={0}
+              fontSize="10px"
+              fontWeight="600"
+              px="8px"
+              py="3px"
+              borderRadius="5px"
+              color={tokens.colors.accent.red}
+              bg={tokens.colors.accent.redSubtle}
+              _hover={{ bg: tokens.colors.accent.redMuted }}
+              onClick={() => stopScreenShare()}
+            >
+              {t('team.screenStop')}
+            </Box>
+          ) : screenWatching ? (
+            <Text fontSize="10px" color={tokens.colors.text.muted} flexShrink={0}>
+              {t('team.screenWatchingTag')}
+            </Text>
+          ) : (
+            <Box
+              as="button"
+              flexShrink={0}
+              fontSize="10px"
+              fontWeight="600"
+              px="8px"
+              py="3px"
+              borderRadius="5px"
+              color={tokens.colors.badge.notificationText}
+              bg={tokens.colors.accent.primary}
+              onClick={() => watchPresenter()}
+            >
+              {t('team.screenWatch')}
+            </Box>
+          )}
         </Flex>
       )}
 

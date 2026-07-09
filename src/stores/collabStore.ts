@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { useBillingStore } from '@/stores/billingStore'
-import type { PeerInfo } from '@/services/collab/signalingProtocol'
+import type { MediaPolicy, PeerInfo } from '@/services/collab/signalingProtocol'
 import type { ChatMessage } from '@/services/collab/collabChat'
 
 // Team collaboration store: presence, ephemeral team chat, and live-preview
@@ -28,15 +28,30 @@ interface CollabState {
   /// last "typing" ping (ms) — the UI expires stale entries on a short TTL so a
   /// crashed/closed peer's indicator can't get stuck on.
   typingPeers: Record<string, { name: string; at: number }>
+  /// Per-plan voice/screen limits from the signaling welcome (null = none —
+  /// old worker or not connected). Enforced client-side by the media services.
+  mediaPolicy: MediaPolicy | null
   /// Whether WE are in the team voice call / mid-join (mic prompt pending).
   voiceInCall: boolean
   voiceJoining: boolean
   /// Our mic mute state + local voice-activity flag (for our own chip in the UI).
   voiceMuted: boolean
   voiceSpeakingSelf: boolean
+  /// Final plan-limit countdown (5…1 s) before the call auto-ends; null when
+  /// not counting. Rendered red in both voice bars.
+  voiceCountdown: number | null
   /// Teammates currently in the voice call, keyed by uid — rebuilt from their
   /// idempotent `voice-state` broadcasts; pruned when a peer goes offline.
   voiceRoster: Record<string, VoicePeer>
+  /// Whether WE are sharing our screen / mid-start (OS picker open).
+  screenSharing: boolean
+  screenStarting: boolean
+  /// The teammate currently presenting (from `screen-state` snapshots).
+  screenPresenter: { uid: string; name: string } | null
+  /// Whether WE opted in to watch the presenter, and their live stream (set
+  /// while watching; a MediaStream is intentionally non-serializable state).
+  screenWatching: boolean
+  screenRemoteStream: MediaStream | null
 
   setConnected: (connected: boolean) => void
   setPeers: (peers: PeerInfo[]) => void
@@ -48,11 +63,17 @@ interface CollabState {
   setSharingPreview: (sharing: boolean) => void
   setStartingPreview: (starting: boolean) => void
   setPeerTyping: (uid: string, name: string, typing: boolean) => void
+  setMediaPolicy: (policy: MediaPolicy | null) => void
   setVoiceSelf: (patch: Partial<VoiceSelf>) => void
   /// Upsert (state) or drop (null) a teammate from the voice roster.
   setVoicePeer: (uid: string, state: { name: string; muted: boolean } | null) => void
   setVoicePeerSpeaking: (uid: string, speaking: boolean) => void
   resetVoice: () => void
+  setScreenSelf: (patch: Partial<Pick<CollabState, 'screenSharing' | 'screenStarting'>>) => void
+  setScreenPresenter: (presenter: { uid: string; name: string } | null) => void
+  setScreenWatching: (watching: boolean) => void
+  setScreenRemoteStream: (stream: MediaStream | null) => void
+  resetScreen: () => void
   reset: () => void
 }
 
@@ -69,6 +90,7 @@ type VoiceSelf = {
   voiceJoining: boolean
   voiceMuted: boolean
   voiceSpeakingSelf: boolean
+  voiceCountdown: number | null
 }
 
 const VOICE_INITIAL: VoiceSelf & { voiceRoster: Record<string, VoicePeer> } = {
@@ -76,7 +98,16 @@ const VOICE_INITIAL: VoiceSelf & { voiceRoster: Record<string, VoicePeer> } = {
   voiceJoining: false,
   voiceMuted: false,
   voiceSpeakingSelf: false,
+  voiceCountdown: null,
   voiceRoster: {},
+}
+
+const SCREEN_INITIAL = {
+  screenSharing: false,
+  screenStarting: false,
+  screenPresenter: null as { uid: string; name: string } | null,
+  screenWatching: false,
+  screenRemoteStream: null as MediaStream | null,
 }
 
 /** A teammate's live-preview offer, with the peer id needed to tunnel to them. */
@@ -100,9 +131,12 @@ export const useCollabStore = create<CollabState>((set) => ({
   sharingPreview: false,
   startingPreview: false,
   typingPeers: {},
+  mediaPolicy: null,
   ...VOICE_INITIAL,
+  ...SCREEN_INITIAL,
 
   setConnected: (connected) => set({ connected }),
+  setMediaPolicy: (policy) => set({ mediaPolicy: policy }),
   setPeers: (peers) =>
     set((s) => {
       // Drop typing + voice-roster entries from teammates no longer present.
@@ -115,12 +149,18 @@ export const useCollabStore = create<CollabState>((set) => ({
       for (const [uid, info] of Object.entries(s.voiceRoster)) {
         if (presentUids.has(uid)) voiceRoster[uid] = info
       }
+      // A presenter that went offline takes the presentation (and our watching
+      // state) down with it.
+      const presenterGone = s.screenPresenter && !presentUids.has(s.screenPresenter.uid)
       return {
         peers,
         // Drop preview offers from peers that are no longer present.
         livePreviews: s.livePreviews.filter((lp) => peers.some((p) => p.peerId === lp.peerId)),
         typingPeers,
         voiceRoster,
+        ...(presenterGone
+          ? { screenPresenter: null, screenWatching: false, screenRemoteStream: null }
+          : {}),
       }
     }),
 
@@ -171,6 +211,12 @@ export const useCollabStore = create<CollabState>((set) => ({
     }),
   resetVoice: () => set(VOICE_INITIAL),
 
+  setScreenSelf: (patch) => set(patch),
+  setScreenPresenter: (presenter) => set({ screenPresenter: presenter }),
+  setScreenWatching: (watching) => set({ screenWatching: watching }),
+  setScreenRemoteStream: (stream) => set({ screenRemoteStream: stream }),
+  resetScreen: () => set(SCREEN_INITIAL),
+
   reset: () =>
     set({
       connected: false,
@@ -182,7 +228,9 @@ export const useCollabStore = create<CollabState>((set) => ({
       sharingPreview: false,
       startingPreview: false,
       typingPeers: {},
+      mediaPolicy: null,
       ...VOICE_INITIAL,
+      ...SCREEN_INITIAL,
     }),
 }))
 

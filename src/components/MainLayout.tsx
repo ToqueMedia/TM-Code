@@ -32,6 +32,7 @@ import { devServerManager } from '../services/devServerManager'
 import DevServerStatus from './chat/DevServerStatus'
 import PublishModal from './dialogs/PublishModal'
 import { TeamChatPanel } from './collab/TeamChatPanel'
+import { ScreenShareViewer } from './collab/ScreenShareViewer'
 import { useCollabSession } from '@/hooks/useCollabSession'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
@@ -577,6 +578,9 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
 
       {/* Ephemeral team chat (P2P) — toggled from the Source Control header */}
       <TeamChatPanel />
+
+      {/* Teammate screen-share viewer (P2P video) — shows while watching */}
+      <ScreenShareViewer />
 
       {/* Requirements check dialog removed — templates disabled */}
     </Flex>
