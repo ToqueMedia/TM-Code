@@ -42,9 +42,28 @@ const ICE_SERVERS: RTCIceServer[] = [
  *  relaying its data through the DO (don't wait the full ICE-failure timeout). */
 const RELAY_FALLBACK_MS = 8000
 
-/** Encoder ceiling for the screen-share track (per watcher). ~2.5 Mbps keeps
- *  1080p UI/code content crisp while bounding the mesh fan-out cost. */
-const SCREEN_MAX_BITRATE_BPS = 2_500_000
+/** Default encoder ceiling for the screen-share track (per watcher) when the
+ *  caller doesn't pass one (media policy carries the per-plan value). This is
+ *  a CEILING — WebRTC congestion control adapts below it on weak uplinks. */
+const DEFAULT_SCREEN_MAX_BITRATE_BPS = 4_000_000
+
+/**
+ * Prefer codecs that excel at screen content — VP9 (whose screen-content
+ * tools are what Meet-class sharing leans on), then AV1, then the engine
+ * default order. Must run BEFORE the offer/answer that negotiates the m-line;
+ * silently a no-op on engines without codec control (older WebKit).
+ */
+function preferScreenCodecs(tx: RTCRtpTransceiver): void {
+  try {
+    const caps = RTCRtpReceiver.getCapabilities?.('video')
+    if (!caps?.codecs?.length || typeof tx.setCodecPreferences !== 'function') return
+    const score = (c: { mimeType: string }): number =>
+      /vp9/i.test(c.mimeType) ? 0 : /av1/i.test(c.mimeType) ? 1 : 2
+    tx.setCodecPreferences([...caps.codecs].sort((a, b) => score(a) - score(b)))
+  } catch {
+    /* codec control unsupported — the negotiated default still works */
+  }
+}
 
 /** Diagnostic logger for the WebRTC handshake (enable while debugging P2P). */
 const COLLAB_MESH_DEBUG = true
@@ -215,7 +234,7 @@ export class CollabMesh {
    * encoder bitrate: screen content is mostly static, and without a cap a
    * scroll/video moment would happily eat the whole uplink × N watchers.
    */
-  setScreenTrackForPeer(peerId: string, track: MediaStreamTrack | null): void {
+  setScreenTrackForPeer(peerId: string, track: MediaStreamTrack | null, maxBitrateBps?: number): void {
     const peer = this.peers.get(peerId)
     const sender = peer?.mode === 'p2p' ? peer.videoTx?.sender : undefined
     if (!sender) return
@@ -226,7 +245,10 @@ export class CollabMesh {
         if (!track) return
         const params = sender.getParameters()
         if (!params.encodings?.length) params.encodings = [{}]
-        params.encodings[0].maxBitrate = SCREEN_MAX_BITRATE_BPS
+        params.encodings[0].maxBitrate = maxBitrateBps ?? DEFAULT_SCREEN_MAX_BITRATE_BPS
+        // Text stays sharp under pressure: drop frames before resolution.
+        ;(params as RTCRtpSendParameters & { degradationPreference?: string }).degradationPreference =
+          'maintain-resolution'
         return sender.setParameters(params)
       })
       .catch(() => {
@@ -320,6 +342,7 @@ export class CollabMesh {
       // answerer adopts them in onSignal.
       state.audioTx = pc.addTransceiver('audio', { direction: 'sendrecv' })
       state.videoTx = pc.addTransceiver('video', { direction: 'sendrecv' })
+      preferScreenCodecs(state.videoTx)
       void this.makeOffer(state)
     } else {
       pc.ondatachannel = (event) => {
@@ -405,6 +428,7 @@ export class CollabMesh {
           } else if (kind === 'video' && !state.videoTx) {
             state.videoTx = tx
             tx.direction = 'sendrecv'
+            preferScreenCodecs(tx)
           }
         }
         const answer = await state.pc.createAnswer()

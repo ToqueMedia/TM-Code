@@ -1918,6 +1918,8 @@ const en = {
   'team.voiceEndsIn': 'call ends in {s}s',
   'team.voiceTimeUp': 'Team plan time limit reached — the voice call ended.',
   'team.screenFull': 'The presentation is full — your team plan allows up to {count} viewers.',
+  'team.screenShareMonitor': 'Entire screen',
+  'team.screenShareWindow': 'A window',
 
 } as const
 
@@ -3825,6 +3827,8 @@ const pt: Record<keyof typeof en, string> = {
   'team.voiceEndsIn': 'a chamada termina em {s}s',
   'team.voiceTimeUp': 'Limite de tempo do plano atingido — a chamada de voz terminou.',
   'team.screenFull': 'A apresentação está cheia — o plano da tua equipa permite até {count} espectadores.',
+  'team.screenShareMonitor': 'Ecrã inteiro',
+  'team.screenShareWindow': 'Uma janela',
 }
 
 export type TranslationKey = keyof typeof en

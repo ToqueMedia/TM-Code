@@ -9,6 +9,7 @@ import { joinVoiceCall, leaveVoiceCall, toggleVoiceMute } from '@/services/colla
 import { startScreenShare, stopScreenShare, watchPresenter } from '@/services/collab/collabScreen'
 import { openPreview } from '@/services/collab/previewViewerService'
 import { useTeamTyping } from '@/hooks/useTeamTyping'
+import { useElapsedLabel } from '@/hooks/useElapsedLabel'
 import type { ChatMessage } from '@/services/collab/collabChat'
 
 // Shell-style team chat — a side panel (mounted alongside the PTY
@@ -64,6 +65,10 @@ export function TerminalTeamChatPanel() {
   const [draft, setDraft] = useState('')
   const listRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const voiceElapsed = useElapsedLabel(useCollabStore((s) => s.voiceCallStartedAt))
+  const screenElapsed = useElapsedLabel(
+    useCollabStore((s) => (s.screenSharing ? s.screenSharingSince : s.screenPresenterSince)),
+  )
 
   useEffect(() => {
     if (open && listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight
@@ -235,6 +240,11 @@ export function TerminalTeamChatPanel() {
               <Text as="span" lineClamp={1}>
                 {t('team.voiceInCallCount').replace('{count}', String(participantCount))}
               </Text>
+              {inVoice && voiceElapsed && (
+                <Text as="span" flexShrink={0} color={tokens.colors.terminal.brightBlack}>
+                  {voiceElapsed}
+                </Text>
+              )}
               {voiceCountdown !== null && (
                 <Text as="span" flexShrink={0} color={tokens.colors.terminal.brightRed}>
                   {t('team.voiceEndsIn').replace('{s}', String(voiceCountdown))}
@@ -321,6 +331,11 @@ export function TerminalTeamChatPanel() {
                 ? t('team.screenYouArePresenting')
                 : t('team.screenPresenting').replace('{name}', screenPresenter?.name ?? '')}
             </Text>
+            {screenElapsed && (
+              <Text as="span" flexShrink={0} color={tokens.colors.terminal.brightBlack}>
+                {screenElapsed}
+              </Text>
+            )}
           </Flex>
           <Flex align="center" gap={2} flexShrink={0}>
             {screenSharing ? (

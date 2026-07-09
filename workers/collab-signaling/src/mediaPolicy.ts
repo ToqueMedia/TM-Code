@@ -17,25 +17,30 @@ export interface MediaPolicy {
   maxCallMinutes: number | null
   /** Max simultaneous screen-share watchers. */
   maxScreenWatchers: number
-  /** Screen capture ceilings. */
+  /** Screen capture ceilings. Bitrate is the ENCODER ceiling per watcher —
+   *  WebRTC congestion control adapts below it on weak uplinks, so a generous
+   *  ceiling costs nothing on good networks and degrades gracefully on bad. */
   screenMaxHeight: number
   screenMaxFrameRate: number
+  screenMaxBitrateKbps: number
 }
 
 const PRO_POLICY: MediaPolicy = {
   maxCallParticipants: 4,
   maxCallMinutes: 120,
   maxScreenWatchers: 3,
-  screenMaxHeight: 720,
-  screenMaxFrameRate: 10,
+  screenMaxHeight: 1080,
+  screenMaxFrameRate: 12,
+  screenMaxBitrateKbps: 3000,
 }
 
 const MAX_POLICY: MediaPolicy = {
   maxCallParticipants: 8,
   maxCallMinutes: null,
   maxScreenWatchers: 8,
-  screenMaxHeight: 1080,
-  screenMaxFrameRate: 15,
+  screenMaxHeight: 1440,
+  screenMaxFrameRate: 20,
+  screenMaxBitrateKbps: 8000,
 }
 
 /** Resolve the media policy for a team plan tier (case-insensitive). */

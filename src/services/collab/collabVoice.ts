@@ -230,9 +230,13 @@ export async function joinVoiceCall(): Promise<void> {
     useCollabStore.getState().setVoiceSelf({ voiceJoining: false })
     return
   }
-  useCollabStore
-    .getState()
-    .setVoiceSelf({ voiceInCall: true, voiceJoining: false, voiceMuted: false, voiceSpeakingSelf: false })
+  useCollabStore.getState().setVoiceSelf({
+    voiceInCall: true,
+    voiceJoining: false,
+    voiceMuted: false,
+    voiceSpeakingSelf: false,
+    voiceCallStartedAt: Date.now(),
+  })
 
   // Feed our mic to everyone already in the call, open our ears, announce.
   const roster = useCollabStore.getState().voiceRoster
@@ -273,6 +277,7 @@ export function leaveVoiceCall(opts: { broadcast?: boolean } = {}): void {
     voiceMuted: false,
     voiceSpeakingSelf: false,
     voiceCountdown: null,
+    voiceCallStartedAt: null,
   })
   if (wasInCall && opts.broadcast !== false) broadcastSelfState()
 }

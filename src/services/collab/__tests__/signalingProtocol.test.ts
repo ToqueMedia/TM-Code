@@ -108,8 +108,9 @@ describe('signalingProtocol', () => {
       maxCallParticipants: 4,
       maxCallMinutes: 120,
       maxScreenWatchers: 3,
-      screenMaxHeight: 720,
-      screenMaxFrameRate: 10,
+      screenMaxHeight: 1080,
+      screenMaxFrameRate: 12,
+      screenMaxBitrateKbps: 3000,
     }
 
     it('accepts a valid policy and floors fractional numbers', () => {
@@ -125,6 +126,13 @@ describe('signalingProtocol', () => {
         ...pro,
         maxCallMinutes: null,
       })
+    })
+
+    it('defaults the bitrate for 5-field policies from pre-bitrate workers', () => {
+      const { screenMaxBitrateKbps: _drop, ...fiveField } = pro
+      expect(sanitizeMediaPolicy(fiveField)).toEqual({ ...pro, screenMaxBitrateKbps: 4000 })
+      // Present-but-invalid still rejects the whole policy.
+      expect(sanitizeMediaPolicy({ ...pro, screenMaxBitrateKbps: -1 })).toBeNull()
     })
 
     it('rejects absent, malformed, or non-positive fields', () => {

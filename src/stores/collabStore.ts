@@ -40,14 +40,20 @@ interface CollabState {
   /// Final plan-limit countdown (5…1 s) before the call auto-ends; null when
   /// not counting. Rendered red in both voice bars.
   voiceCountdown: number | null
+  /// When WE joined the voice call (ms epoch) — drives the elapsed timer.
+  voiceCallStartedAt: number | null
   /// Teammates currently in the voice call, keyed by uid — rebuilt from their
   /// idempotent `voice-state` broadcasts; pruned when a peer goes offline.
   voiceRoster: Record<string, VoicePeer>
   /// Whether WE are sharing our screen / mid-start (OS picker open).
   screenSharing: boolean
   screenStarting: boolean
-  /// The teammate currently presenting (from `screen-state` snapshots).
+  /// When WE started presenting (ms epoch); null when not presenting.
+  screenSharingSince: number | null
+  /// The teammate currently presenting (from `screen-state` snapshots) and
+  /// when we first learned of this presentation.
   screenPresenter: { uid: string; name: string } | null
+  screenPresenterSince: number | null
   /// Whether WE opted in to watch the presenter, and their live stream (set
   /// while watching; a MediaStream is intentionally non-serializable state).
   screenWatching: boolean
@@ -69,7 +75,9 @@ interface CollabState {
   setVoicePeer: (uid: string, state: { name: string; muted: boolean } | null) => void
   setVoicePeerSpeaking: (uid: string, speaking: boolean) => void
   resetVoice: () => void
-  setScreenSelf: (patch: Partial<Pick<CollabState, 'screenSharing' | 'screenStarting'>>) => void
+  setScreenSelf: (
+    patch: Partial<Pick<CollabState, 'screenSharing' | 'screenStarting' | 'screenSharingSince'>>,
+  ) => void
   setScreenPresenter: (presenter: { uid: string; name: string } | null) => void
   setScreenWatching: (watching: boolean) => void
   setScreenRemoteStream: (stream: MediaStream | null) => void
@@ -91,6 +99,7 @@ type VoiceSelf = {
   voiceMuted: boolean
   voiceSpeakingSelf: boolean
   voiceCountdown: number | null
+  voiceCallStartedAt: number | null
 }
 
 const VOICE_INITIAL: VoiceSelf & { voiceRoster: Record<string, VoicePeer> } = {
@@ -99,13 +108,18 @@ const VOICE_INITIAL: VoiceSelf & { voiceRoster: Record<string, VoicePeer> } = {
   voiceMuted: false,
   voiceSpeakingSelf: false,
   voiceCountdown: null,
+  voiceCallStartedAt: null,
   voiceRoster: {},
 }
 
 const SCREEN_INITIAL = {
   screenSharing: false,
   screenStarting: false,
+  /** When WE started presenting (ms epoch) — drives the elapsed timer. */
+  screenSharingSince: null as number | null,
   screenPresenter: null as { uid: string; name: string } | null,
+  /** When we first learned of the current presentation (ms epoch). */
+  screenPresenterSince: null as number | null,
   screenWatching: false,
   screenRemoteStream: null as MediaStream | null,
 }
@@ -159,7 +173,12 @@ export const useCollabStore = create<CollabState>((set) => ({
         typingPeers,
         voiceRoster,
         ...(presenterGone
-          ? { screenPresenter: null, screenWatching: false, screenRemoteStream: null }
+          ? {
+              screenPresenter: null,
+              screenPresenterSince: null,
+              screenWatching: false,
+              screenRemoteStream: null,
+            }
           : {}),
       }
     }),
@@ -212,7 +231,17 @@ export const useCollabStore = create<CollabState>((set) => ({
   resetVoice: () => set(VOICE_INITIAL),
 
   setScreenSelf: (patch) => set(patch),
-  setScreenPresenter: (presenter) => set({ screenPresenter: presenter }),
+  setScreenPresenter: (presenter) =>
+    set((s) => ({
+      screenPresenter: presenter,
+      // Stamp when a presentation appears; clear when it ends. An upsert of
+      // the SAME presenter keeps the original timestamp.
+      screenPresenterSince: presenter
+        ? s.screenPresenter?.uid === presenter.uid
+          ? s.screenPresenterSince
+          : Date.now()
+        : null,
+    })),
   setScreenWatching: (watching) => set({ screenWatching: watching }),
   setScreenRemoteStream: (stream) => set({ screenRemoteStream: stream }),
   resetScreen: () => set(SCREEN_INITIAL),

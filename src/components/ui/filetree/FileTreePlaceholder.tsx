@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, HStack, Text, Button } from '@chakra-ui/react';
-import { FiRefreshCw } from 'react-icons/fi';
+import { VscRefresh } from 'react-icons/vsc';
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n';
 
@@ -30,7 +30,7 @@ const FileTreePlaceholder: React.FC<FileTreePlaceholderProps> = ({ variant, erro
             _hover={{ bg: tokens.colors.bg.whiteOverlay }}
           >
             <HStack gap={2}>
-              <FiRefreshCw size={12} />
+              <VscRefresh size={12} />
               <span>{t("explorer.retry")}</span>
             </HStack>
           </Button>
@@ -50,7 +50,7 @@ const FileTreePlaceholder: React.FC<FileTreePlaceholderProps> = ({ variant, erro
             _hover={{ bg: tokens.colors.bg.whiteOverlay }}
           >
             <HStack gap={2}>
-              <FiRefreshCw size={12} />
+              <VscRefresh size={12} />
               <span>{t("view.refresh")}</span>
             </HStack>
           </Button>

@@ -34,25 +34,45 @@ import type { PeerInfo } from './signalingProtocol'
 export interface ScreenTransport {
   broadcastControl(data: ControlMessage): void
   sendControl(peerId: string, data: ControlMessage): void
-  setScreenTrackForPeer(peerId: string, track: MediaStreamTrack | null): void
+  setScreenTrackForPeer(peerId: string, track: MediaStreamTrack | null, maxBitrateBps?: number): void
   hasScreenPath(peerId: string): boolean
   peers(): PeerInfo[]
 }
 
+/** Which capture surface the user pre-selected. Chromium/WebView2 honor the
+ *  preference in the picker; WKWebView shows its own system picker and simply
+ *  ignores it — the option is a hint, never a gate. */
+export type ScreenSurface = 'monitor' | 'window'
+
 /** Presentation-friendly capture (crisp text over smooth motion), ceilinged
- *  by the plan's media policy when one is present. */
-function captureConstraints(): DisplayMediaStreamOptions {
+ *  by the plan's media policy when one is present. No policy (old worker) =
+ *  no plan limits → the generous default (1440p@20). */
+function captureConstraints(surface?: ScreenSurface): DisplayMediaStreamOptions {
   const policy = useCollabStore.getState().mediaPolicy
-  const maxHeight = policy?.screenMaxHeight ?? 1080
-  const maxFps = policy?.screenMaxFrameRate ?? 15
-  return {
-    video: {
-      frameRate: { ideal: Math.min(10, maxFps), max: maxFps },
-      width: { max: Math.round((maxHeight * 16) / 9) },
-      height: { max: maxHeight },
-    },
-    audio: false, // narration travels on the voice call, not the capture
+  const maxHeight = policy?.screenMaxHeight ?? 1440
+  const maxFps = policy?.screenMaxFrameRate ?? 20
+  const video: MediaTrackConstraints & { displaySurface?: string } = {
+    frameRate: { ideal: Math.min(12, maxFps), max: maxFps },
+    width: { max: Math.round((maxHeight * 16) / 9) },
+    height: { max: maxHeight },
   }
+  if (surface) video.displaySurface = surface
+  const options: DisplayMediaStreamOptions & {
+    selfBrowserSurface?: string
+    surfaceSwitching?: string
+  } = {
+    video,
+    audio: false, // narration travels on the voice call, not the capture
+    selfBrowserSurface: 'exclude', // never offer the IDE window itself
+    surfaceSwitching: 'include', // Chromium: allow switching mid-share
+  }
+  return options
+}
+
+/** Per-watcher encoder ceiling from the plan policy (bps). */
+function screenBitrateBps(): number | undefined {
+  const kbps = useCollabStore.getState().mediaPolicy?.screenMaxBitrateKbps
+  return kbps ? kbps * 1000 : undefined
 }
 
 let transport: ScreenTransport | null = null
@@ -151,7 +171,7 @@ export function handleScreenControl(peerId: string, control: ControlMessage): vo
         return
       }
       watchers.add(peerId)
-      transport?.setScreenTrackForPeer(peerId, screenTrack())
+      transport?.setScreenTrackForPeer(peerId, screenTrack(), screenBitrateBps())
       warnIfNoScreenPath(peerId)
     } else {
       watchers.delete(peerId)
@@ -203,8 +223,9 @@ export function handleScreenControl(peerId: string, control: ControlMessage): vo
 
 // ── user actions ─────────────────────────────────────────────────────────────
 
-/** Start presenting our screen to the team. */
-export async function startScreenShare(): Promise<void> {
+/** Start presenting our screen to the team. `surface` pre-selects monitor vs
+ *  window in engines that honor the preference (Chromium/WebView2). */
+export async function startScreenShare(surface?: ScreenSurface): Promise<void> {
   const store = useCollabStore.getState()
   if (store.screenSharing || store.screenStarting) return
   if (!transport) {
@@ -223,7 +244,7 @@ export async function startScreenShare(): Promise<void> {
   }
   store.setScreenSelf({ screenStarting: true })
   try {
-    screenStream = await media.getDisplayMedia(captureConstraints())
+    screenStream = await media.getDisplayMedia(captureConstraints(surface))
   } catch {
     // User cancelled the picker OR the OS denied capture (macOS Screen
     // Recording TCC) — the API doesn't let us tell them apart reliably.
@@ -249,7 +270,11 @@ export async function startScreenShare(): Promise<void> {
   // The OS-level "Stop sharing" chrome ends the track outside our UI.
   track.onended = () => stopScreenShare()
   watchers.clear()
-  useCollabStore.getState().setScreenSelf({ screenSharing: true, screenStarting: false })
+  useCollabStore.getState().setScreenSelf({
+    screenSharing: true,
+    screenStarting: false,
+    screenSharingSince: Date.now(),
+  })
   transport.broadcastControl(buildScreenStateControl(selfScreenState()))
 }
 
@@ -265,7 +290,7 @@ export function stopScreenShare(opts: { broadcast?: boolean } = {}): void {
   if (track) track.onended = null // our own stop must not re-enter via onended
   screenStream?.getTracks().forEach((tr) => tr.stop())
   screenStream = null
-  store.setScreenSelf({ screenSharing: false, screenStarting: false })
+  store.setScreenSelf({ screenSharing: false, screenStarting: false, screenSharingSince: null })
   if (wasSharing && opts.broadcast !== false && transport) {
     transport.broadcastControl(buildScreenStateControl(selfScreenState()))
   }

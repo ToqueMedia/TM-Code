@@ -38,7 +38,13 @@ export interface MediaPolicy {
   maxScreenWatchers: number
   screenMaxHeight: number
   screenMaxFrameRate: number
+  /** Encoder ceiling per watcher (kbps). Optional on the wire — workers
+   *  deployed before the field existed send 5-field policies. */
+  screenMaxBitrateKbps: number
 }
+
+/** Default encoder ceiling when the policy predates the bitrate field. */
+const DEFAULT_SCREEN_BITRATE_KBPS = 4000
 
 /** Validate the welcome's `mediaPolicy` blob (version-skewed wire — never
  *  trust the shape). Null on anything malformed. */
@@ -69,7 +75,21 @@ export function sanitizeMediaPolicy(value: unknown): MediaPolicy | null {
     if (parsed === null) return null
     maxCallMinutes = parsed
   }
-  return { maxCallParticipants, maxCallMinutes, maxScreenWatchers, screenMaxHeight, screenMaxFrameRate }
+  // Absent (pre-bitrate worker) → default; present-but-invalid → reject.
+  let screenMaxBitrateKbps = DEFAULT_SCREEN_BITRATE_KBPS
+  if (v.screenMaxBitrateKbps !== undefined) {
+    const parsed = posInt(v.screenMaxBitrateKbps)
+    if (parsed === null) return null
+    screenMaxBitrateKbps = parsed
+  }
+  return {
+    maxCallParticipants,
+    maxCallMinutes,
+    maxScreenWatchers,
+    screenMaxHeight,
+    screenMaxFrameRate,
+    screenMaxBitrateKbps,
+  }
 }
 
 /** Client → worker: forward a WebRTC signal to one peer. */

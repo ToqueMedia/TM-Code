@@ -231,8 +231,8 @@ export async function startCollabSession(): Promise<void> {
       sendControl: (peerId: string, data: unknown) => mesh?.sendControl(peerId, data),
       setVoiceTrackForPeer: (peerId: string, track: MediaStreamTrack | null) =>
         mesh?.setVoiceTrackForPeer(peerId, track),
-      setScreenTrackForPeer: (peerId: string, track: MediaStreamTrack | null) =>
-        mesh?.setScreenTrackForPeer(peerId, track),
+      setScreenTrackForPeer: (peerId: string, track: MediaStreamTrack | null, maxBitrateBps?: number) =>
+        mesh?.setScreenTrackForPeer(peerId, track, maxBitrateBps),
       hasVoicePath: (peerId: string) => mesh?.hasVoicePath(peerId) ?? false,
       hasScreenPath: (peerId: string) => mesh?.hasScreenPath(peerId) ?? false,
       peers: () => mesh?.currentPeers() ?? [],

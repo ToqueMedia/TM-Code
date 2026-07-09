@@ -1,23 +1,87 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { VscClose, VscScreenFull } from 'react-icons/vsc'
 import { useTranslation } from '@/i18n'
 import { tokens } from '@/theme/tokens'
 import { useCollabStore } from '@/stores/collabStore'
 import { stopWatching } from '@/services/collab/collabScreen'
+import { useElapsedLabel } from '@/hooks/useElapsedLabel'
 
 /**
  * Floating viewer for a teammate's screen share. Mounted once in MainLayout
  * (next to TeamChatPanel), visible while WE opted in to watch. The stream is
  * pure video — narration travels on the voice call — so the element is muted,
  * which also makes autoplay unconditionally allowed.
+ *
+ * Draggable by the header, resizable by the bottom-right corner; the rect
+ * persists across sessions (localStorage) and is clamped back into the
+ * viewport on mount so a disconnected monitor can't strand it off-screen.
  */
+
+const RECT_STORAGE_KEY = 'tm.screenviewer.rect'
+const MIN_W = 320
+const MIN_H = 220
+const HEADER_H = 32
+const VIEWPORT_MARGIN = 24
+
+interface ViewerRect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+function defaultRect(): ViewerRect {
+  const w = 640
+  const h = Math.round(((w * 9) / 16) + HEADER_H)
+  return {
+    x: Math.max(VIEWPORT_MARGIN, window.innerWidth - w - 348),
+    y: Math.max(VIEWPORT_MARGIN, window.innerHeight - h - 48),
+    w,
+    h,
+  }
+}
+
+function clampRect(r: ViewerRect): ViewerRect {
+  const w = Math.min(Math.max(r.w, MIN_W), window.innerWidth - VIEWPORT_MARGIN)
+  const h = Math.min(Math.max(r.h, MIN_H), window.innerHeight - VIEWPORT_MARGIN)
+  return {
+    w,
+    h,
+    x: Math.min(Math.max(r.x, VIEWPORT_MARGIN - w + 80), window.innerWidth - 80),
+    y: Math.min(Math.max(r.y, 0), window.innerHeight - HEADER_H - 8),
+  }
+}
+
+function loadRect(): ViewerRect {
+  try {
+    const raw = localStorage.getItem(RECT_STORAGE_KEY)
+    if (!raw) return defaultRect()
+    const parsed = JSON.parse(raw) as Partial<ViewerRect>
+    if (
+      typeof parsed.x !== 'number' ||
+      typeof parsed.y !== 'number' ||
+      typeof parsed.w !== 'number' ||
+      typeof parsed.h !== 'number'
+    ) {
+      return defaultRect()
+    }
+    return clampRect(parsed as ViewerRect)
+  } catch {
+    return defaultRect()
+  }
+}
+
 export function ScreenShareViewer() {
   const t = useTranslation()
   const watching = useCollabStore((s) => s.screenWatching)
   const presenter = useCollabStore((s) => s.screenPresenter)
   const stream = useCollabStore((s) => s.screenRemoteStream)
+  const elapsed = useElapsedLabel(useCollabStore((s) => s.screenPresenterSince))
   const videoRef = useRef<HTMLVideoElement>(null)
+  const [rect, setRect] = useState<ViewerRect>(() => loadRect())
+  const rectRef = useRef(rect)
+  rectRef.current = rect
 
   useEffect(() => {
     const el = videoRef.current
@@ -26,34 +90,92 @@ export function ScreenShareViewer() {
     if (stream) void el.play().catch(() => {/* retried implicitly by autoPlay */})
   }, [stream, watching])
 
+  const persist = useCallback((r: ViewerRect) => {
+    try {
+      localStorage.setItem(RECT_STORAGE_KEY, JSON.stringify(r))
+    } catch {
+      /* storage full/unavailable — position just won't persist */
+    }
+  }, [])
+
+  /** Shared pointer-drag driver for both the move and resize gestures. */
+  const beginGesture = useCallback(
+    (e: React.PointerEvent, apply: (dx: number, dy: number, start: ViewerRect) => ViewerRect) => {
+      e.preventDefault()
+      const target = e.currentTarget as HTMLElement
+      try {
+        target.setPointerCapture(e.pointerId)
+      } catch {
+        /* capture unsupported — plain move events still work */
+      }
+      const startX = e.clientX
+      const startY = e.clientY
+      const start = rectRef.current
+      const onMove = (pe: PointerEvent) => {
+        setRect(clampRect(apply(pe.clientX - startX, pe.clientY - startY, start)))
+      }
+      const onUp = () => {
+        target.removeEventListener('pointermove', onMove)
+        target.removeEventListener('pointerup', onUp)
+        persist(rectRef.current)
+      }
+      target.addEventListener('pointermove', onMove)
+      target.addEventListener('pointerup', onUp)
+    },
+    [persist],
+  )
+
   if (!watching || !presenter) return null
 
   return (
     <Box
       position="fixed"
-      bottom="48px"
-      right="348px" // sits beside the team chat panel (16 + 320 + 12)
+      left={`${rect.x}px`}
+      top={`${rect.y}px`}
+      w={`${rect.w}px`}
+      h={`${rect.h}px`}
       zIndex={49}
-      w="560px"
+      display="flex"
+      flexDirection="column"
       bg={tokens.colors.bg.overlay}
       border={`1px solid ${tokens.colors.border.default}`}
       borderRadius="8px"
       boxShadow="0 12px 40px rgba(0,0,0,0.45)"
       overflow="hidden"
     >
+      {/* Header — drag handle */}
       <Flex
         align="center"
         justify="space-between"
         px={3}
-        h="32px"
+        h={`${HEADER_H}px`}
+        flexShrink={0}
         bg={tokens.colors.bg.glass}
         borderBottom={`1px solid ${tokens.colors.border.default}`}
+        cursor="grab"
+        _active={{ cursor: 'grabbing' }}
+        style={{ touchAction: 'none', userSelect: 'none' }}
+        onPointerDown={(e) => {
+          // Buttons keep their clicks; everything else starts the drag.
+          if ((e.target as HTMLElement).closest('button')) return
+          beginGesture(e, (dx, dy, start) => ({ ...start, x: start.x + dx, y: start.y + dy }))
+        }}
       >
         <Flex align="center" gap={2} minW={0}>
           <Box w="6px" h="6px" borderRadius="full" bg={tokens.colors.accent.red} flexShrink={0} />
           <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.primary} lineClamp={1}>
             {t('team.screenPresenting').replace('{name}', presenter.name)}
           </Text>
+          {elapsed && (
+            <Text
+              fontSize="10px"
+              fontFamily={tokens.fontFamily.mono}
+              color={tokens.colors.text.muted}
+              flexShrink={0}
+            >
+              {elapsed}
+            </Text>
+          )}
         </Flex>
         <Flex align="center" gap={2} flexShrink={0}>
           <Box
@@ -79,7 +201,7 @@ export function ScreenShareViewer() {
         </Flex>
       </Flex>
 
-      <Box position="relative" bg="#000" aspectRatio="16 / 9">
+      <Box position="relative" flex={1} minH={0} bg="#000">
         <video
           ref={videoRef}
           autoPlay
@@ -94,6 +216,31 @@ export function ScreenShareViewer() {
             </Text>
           </Flex>
         )}
+        {/* Resize handle — bottom-right corner */}
+        <Box
+          position="absolute"
+          right={0}
+          bottom={0}
+          w="16px"
+          h="16px"
+          cursor="nwse-resize"
+          style={{ touchAction: 'none' }}
+          onPointerDown={(e) =>
+            beginGesture(e, (dx, dy, start) => ({ ...start, w: start.w + dx, h: start.h + dy }))
+          }
+        >
+          <Box
+            position="absolute"
+            right="3px"
+            bottom="3px"
+            w="8px"
+            h="8px"
+            borderRight={`2px solid ${tokens.colors.text.muted}`}
+            borderBottom={`2px solid ${tokens.colors.text.muted}`}
+            opacity={0.7}
+            borderBottomRightRadius="3px"
+          />
+        </Box>
       </Box>
     </Box>
   )

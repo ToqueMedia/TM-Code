@@ -6,7 +6,8 @@ import { membershipFromDoc } from '../src/membership'
 test('policyForPlan maps max (any casing) to the max tier', () => {
   assert.equal(policyForPlan('max').maxCallMinutes, null)
   assert.equal(policyForPlan('MAX').maxCallParticipants, 8)
-  assert.equal(policyForPlan(' Max ').screenMaxHeight, 1080)
+  assert.equal(policyForPlan(' Max ').screenMaxHeight, 1440)
+  assert.equal(policyForPlan('max').screenMaxBitrateKbps, 8000)
 })
 
 test('policyForPlan is conservative for pro/unknown/null', () => {
@@ -15,8 +16,9 @@ test('policyForPlan is conservative for pro/unknown/null', () => {
     assert.equal(policy.maxCallParticipants, 4)
     assert.equal(policy.maxCallMinutes, 120)
     assert.equal(policy.maxScreenWatchers, 3)
-    assert.equal(policy.screenMaxHeight, 720)
-    assert.equal(policy.screenMaxFrameRate, 10)
+    assert.equal(policy.screenMaxHeight, 1080)
+    assert.equal(policy.screenMaxFrameRate, 12)
+    assert.equal(policy.screenMaxBitrateKbps, 3000)
   }
 })
 
