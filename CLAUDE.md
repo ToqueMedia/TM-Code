@@ -11,6 +11,8 @@ TM Code — a chat-first desktop IDE (Tauri 2 + React 18 + TypeScript + Zustand 
 ```bash
 yarn dev                      # Vite dev server (frontend only)
 yarn tauri dev                # full app in dev mode
+yarn tauri:dev:all            # app + BOTH workers (ai :8788, collab-signaling :8789), one Ctrl-C kills all
+yarn dev:workers              # only the two workers
 yarn test                     # Jest (ts-jest, jsdom)
 yarn test src/stores/__tests__/chatStore.test.ts        # single test file
 yarn test -t "name pattern"   # single test by name
