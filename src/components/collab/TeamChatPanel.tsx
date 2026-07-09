@@ -1,12 +1,40 @@
 import { useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text, Textarea } from '@chakra-ui/react'
-import { VscClose, VscSend } from 'react-icons/vsc'
+import { VscCallOutgoing, VscClose, VscMic, VscMicFilled, VscMute, VscSend } from 'react-icons/vsc'
 import { useTranslation } from '@/i18n'
 import { tokens } from '@/theme/tokens'
 import { useAuthStore } from '@/stores/authStore'
 import { useCollabStore } from '@/stores/collabStore'
 import { sendChatMessage, stopLivePreview } from '@/services/collab/collabSessionService'
+import { joinVoiceCall, leaveVoiceCall, toggleVoiceMute } from '@/services/collab/collabVoice'
 import { useTeamTyping } from '@/hooks/useTeamTyping'
+
+/** One participant pill in the voice bar: mic state + speaking highlight. */
+function VoiceChip({ name, muted, speaking }: { name: string; muted: boolean; speaking: boolean }) {
+  return (
+    <Flex
+      align="center"
+      gap={1}
+      px={1.5}
+      py="2px"
+      borderRadius="4px"
+      bg={tokens.colors.bg.panelAlt}
+      border={`1px solid ${speaking ? tokens.colors.accent.greenBright : tokens.colors.border.default}`}
+    >
+      {muted ? (
+        <VscMute size={11} color={tokens.colors.accent.red} />
+      ) : (
+        <VscMicFilled
+          size={11}
+          color={speaking ? tokens.colors.accent.greenBright : tokens.colors.text.muted}
+        />
+      )}
+      <Text fontSize="10px" color={tokens.colors.text.secondary} lineClamp={1} maxW="90px">
+        {name}
+      </Text>
+    </Flex>
+  )
+}
 
 /**
  * Floating ephemeral team-chat panel. Messages travel P2P over the WebRTC
@@ -21,6 +49,11 @@ export function TeamChatPanel() {
   const connected = useCollabStore((s) => s.connected)
   const sharing = useCollabStore((s) => s.sharingPreview)
   const setChatOpen = useCollabStore((s) => s.setChatOpen)
+  const inVoice = useCollabStore((s) => s.voiceInCall)
+  const voiceJoining = useCollabStore((s) => s.voiceJoining)
+  const voiceMuted = useCollabStore((s) => s.voiceMuted)
+  const speakingSelf = useCollabStore((s) => s.voiceSpeakingSelf)
+  const voiceRoster = useCollabStore((s) => s.voiceRoster)
   const selfUid = useAuthStore((s) => s.user?.uid)
   const { notifyTyping, stopTyping, typingLabel } = useTeamTyping()
   const [draft, setDraft] = useState('')
@@ -49,6 +82,10 @@ export function TeamChatPanel() {
     stopTyping()
     if (inputRef.current) inputRef.current.style.height = 'auto'
   }
+
+  const voicePeers = Object.entries(voiceRoster)
+  const callActive = inVoice || voicePeers.length > 0
+  const participantCount = voicePeers.length + (inVoice ? 1 : 0)
 
   return (
     <Box
@@ -90,16 +127,104 @@ export function TeamChatPanel() {
             {t('team.peersOnline').replace('{count}', String(peers.length))}
           </Text>
         </Flex>
-        <Box
-          as="button"
-          aria-label={t('team.closeChat')}
-          color={tokens.colors.text.muted}
-          _hover={{ color: tokens.colors.text.primary }}
-          onClick={() => setChatOpen(false)}
-        >
-          <VscClose size={15} />
-        </Box>
+        <Flex align="center" gap={2}>
+          {/* Start a call — once one is active, the voice bar owns the controls. */}
+          {connected && !callActive && (
+            <Box
+              as="button"
+              aria-label={t('team.voiceStartCall')}
+              title={t('team.voiceStartCall')}
+              color={tokens.colors.text.muted}
+              opacity={voiceJoining ? 0.5 : 1}
+              _hover={{ color: tokens.colors.text.primary }}
+              onClick={() => void joinVoiceCall()}
+            >
+              <VscCallOutgoing size={14} />
+            </Box>
+          )}
+          <Box
+            as="button"
+            aria-label={t('team.closeChat')}
+            color={tokens.colors.text.muted}
+            _hover={{ color: tokens.colors.text.primary }}
+            onClick={() => setChatOpen(false)}
+          >
+            <VscClose size={15} />
+          </Box>
+        </Flex>
       </Flex>
+
+      {/* Voice call bar — participants + join/mute/leave. The call itself keeps
+          running with the panel closed; this is just its control surface. */}
+      {callActive && (
+        <Flex
+          direction="column"
+          gap={1.5}
+          px={3}
+          py={2}
+          flexShrink={0}
+          bg={tokens.colors.bg.glass}
+          borderBottom={`1px solid ${tokens.colors.border.default}`}
+        >
+          <Flex align="center" justify="space-between">
+            <Text fontSize="10px" fontWeight="600" color={tokens.colors.text.muted}>
+              {t('team.voiceTitle')} ·{' '}
+              {t('team.voiceInCallCount').replace('{count}', String(participantCount))}
+            </Text>
+            {inVoice ? (
+              <Flex align="center" gap={2}>
+                <Box
+                  as="button"
+                  aria-label={voiceMuted ? t('team.voiceUnmute') : t('team.voiceMute')}
+                  title={voiceMuted ? t('team.voiceUnmute') : t('team.voiceMute')}
+                  color={voiceMuted ? tokens.colors.accent.red : tokens.colors.text.muted}
+                  _hover={{ color: tokens.colors.text.primary }}
+                  onClick={() => toggleVoiceMute()}
+                >
+                  {voiceMuted ? <VscMute size={14} /> : <VscMic size={14} />}
+                </Box>
+                <Box
+                  as="button"
+                  fontSize="10px"
+                  fontWeight="600"
+                  px="8px"
+                  py="3px"
+                  borderRadius="5px"
+                  color={tokens.colors.accent.red}
+                  bg={tokens.colors.accent.redSubtle}
+                  _hover={{ bg: tokens.colors.accent.redMuted }}
+                  onClick={() => leaveVoiceCall()}
+                >
+                  {t('team.voiceLeaveCall')}
+                </Box>
+              </Flex>
+            ) : (
+              <Box
+                as="button"
+                fontSize="10px"
+                fontWeight="600"
+                px="8px"
+                py="3px"
+                borderRadius="5px"
+                opacity={voiceJoining ? 0.6 : 1}
+                color={tokens.colors.badge.notificationText}
+                bg={tokens.colors.accent.primary}
+                onClick={() => void joinVoiceCall()}
+              >
+                {t('team.voiceJoinCall')}
+              </Box>
+            )}
+          </Flex>
+          <Flex wrap="wrap" gap={1}>
+            {inVoice && (
+              <VoiceChip name={t('team.voiceYou')} muted={voiceMuted} speaking={speakingSelf} />
+            )}
+            {voicePeers.map(([uid, p]) => (
+              <VoiceChip key={uid} name={p.name} muted={p.muted} speaking={p.speaking} />
+            ))}
+          </Flex>
+        </Flex>
+      )}
 
       {/* Messages */}
       <Box ref={listRef} flex={1} overflowY="auto" px={3} py={2}>

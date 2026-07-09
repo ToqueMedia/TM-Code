@@ -14,6 +14,7 @@ import { BulkReassembler } from '@/services/collab/bulkFraming'
 import { attachTunnel, detachTunnel, onTunnelMessage, setLocalShare } from '@/services/collab/previewTunnelService'
 import {
   buildChatControl,
+  dedupeChatById,
   parseControlMessage,
   parseStoredChat,
   type ChatMessage,
@@ -24,6 +25,15 @@ import {
   subscribeOfflineQueue,
   getTeamRoster,
 } from '@/services/collab/collabOfflineQueue'
+import {
+  attachVoiceTransport,
+  handleVoiceControl,
+  joinVoiceCall,
+  onRemoteAudioTrack,
+  onVoicePeerGone,
+  replayVoiceStateTo,
+  resetVoiceService,
+} from '@/services/collab/collabVoice'
 import { resolveCollabSignalingUrl } from '@/utils/devUrls'
 import { playMessageChime } from '@/utils/notificationSound'
 import { stopLivePreviewServer } from '@/services/collab/livePreviewServer'
@@ -57,6 +67,14 @@ let activeShareOffer: PreviewOffer | null = null
 /** Unsubscribe for the RTDB offline-chat queue (durable delivery to members who
  *  were offline at send time). Null when not subscribed / RTDB unconfigured. */
 let offlineUnsub: (() => void) | null = null
+/** Set when an UNEXPECTED socket drop interrupted an active voice call: the
+ *  next successful reconnect auto-rejoins (a network blip shouldn't kick you
+ *  out of the conversation). Cleared by intentional stops — leaving the team /
+ *  signing out must never re-arm the mic. */
+let voiceRejoin: { droppedAt: number } | null = null
+/** How stale a dropped call may be and still auto-rejoin. Beyond this,
+ *  silently re-opening the mic is a privacy surprise, not a convenience. */
+const VOICE_REJOIN_WINDOW_MS = 120_000
 /** How many of our OWN recent chat messages to replay to a peer that connects
  *  after we spoke (chat is ephemeral P2P — there is no server transcript, so the
  *  sender re-sends; the receiver dedups by message id). */
@@ -95,7 +113,9 @@ export async function startCollabSession(): Promise<void> {
   // Synchronous guard: a session for this room is already live OR being opened.
   if (activeRoom === room && (mesh || connecting)) return
 
-  stopCollabSession() // clears wantConnection + any pending reconnect
+  // Internal teardown (NOT stopCollabSession): the reconnect path re-enters
+  // here and must keep `voiceRejoin` alive to restore an interrupted call.
+  teardownSession() // clears wantConnection + any pending reconnect
   wantConnection = true
   connecting = true
   activeRoom = room
@@ -114,6 +134,7 @@ export async function startCollabSession(): Promise<void> {
         useCollabStore.getState().setConnected(true)
         useCollabStore.getState().setPeers(peers)
         reconnectAttempts = 0 // a live presence = a healthy connection
+        maybeRejoinVoice()
       },
       // Fires when a peer's channel is actually OPEN (P2P) or relay-ready — the
       // only point at which sends to it land. Presence (peer-join) is too early:
@@ -133,7 +154,11 @@ export async function startCollabSession(): Promise<void> {
         if (activeShareOffer) {
           mesh.sendControl(peer.peerId, { t: 'preview-offer' as const, offer: activeShareOffer })
         }
+        // Replay our voice-call state so the newcomer sees the ongoing call.
+        replayVoiceStateTo(peer.peerId)
       },
+      onPeerDisconnected: (peerId) => onVoicePeerGone(peerId),
+      onPeerAudioTrack: (peer, track, stream) => onRemoteAudioTrack(peer, track, stream),
       onSessionClosed: () => {
         useCollabStore.getState().setConnected(false)
         useCollabStore.getState().setPeers([])
@@ -168,12 +193,26 @@ export async function startCollabSession(): Promise<void> {
           }
         } else if (control?.t === 'preview-stop') {
           useCollabStore.getState().removeLivePreviewByUid(control.uid)
+        } else if (control?.t === 'voice-state' || control?.t === 'voice-speaking') {
+          handleVoiceControl(peerId, control)
         }
       },
     })
     mesh.connect()
     // Wire the live-preview tunnel to send over this mesh.
     attachTunnel((peerId, frame) => mesh?.sendBulk(peerId, frame))
+    // Wire voice calls to send over this mesh (closures read the live `mesh`
+    // var, so a torn-down mesh degrades to no-ops instead of stale sends).
+    attachVoiceTransport(
+      {
+        broadcastControl: (data) => mesh?.broadcastControl(data),
+        sendControl: (peerId, data) => mesh?.sendControl(peerId, data),
+        setVoiceTrackForPeer: (peerId, track) => mesh?.setVoiceTrackForPeer(peerId, track),
+        hasVoicePath: (peerId) => mesh?.hasVoicePath(peerId) ?? false,
+        peers: () => mesh?.currentPeers() ?? [],
+      },
+      () => selfIdentity(),
+    )
 
     // Rehydrate recent local chat history for continuity (best-effort).
     void loadChatHistory()
@@ -190,6 +229,14 @@ export async function startCollabSession(): Promise<void> {
 /** Reconnect after an unexpected socket drop, with capped exponential backoff. */
 function scheduleReconnect(): void {
   if (reconnectTimer || !wantConnection || !COLLAB_ENABLED) return
+  // Remember an active call across the gap (read BEFORE the reset wipes it);
+  // don't overwrite droppedAt on retry cycles — freshness counts from the drop.
+  if (useCollabStore.getState().voiceInCall && !voiceRejoin) {
+    voiceRejoin = { droppedAt: Date.now() }
+  }
+  // The mic must not stay hot across the gap — the call does not survive a
+  // dropped session (maybeRejoinVoice restores it after the mesh heals).
+  resetVoiceService()
   // Tear down the dead mesh (notify=false → no recursive onSessionClosed) so
   // startCollabSession's guard lets a fresh connect through.
   mesh?.disconnect()
@@ -208,12 +255,40 @@ async function loadChatHistory(): Promise<void> {
   const projectPath = activeProjectPath()
   if (!projectPath) return
   const lines = await CollabService.chatLoad(projectPath)
-  const messages = lines.map(parseStoredChat).filter((m): m is ChatMessage => m !== null)
+  // Dedupe on load: the JSONL is append-only and (pre-fix) replays appended
+  // the same message repeatedly — setChat with duplicated ids means duplicated
+  // React keys in both chat panels. Keeping the first occurrence heals old
+  // transcripts without needing a rewrite primitive on the Rust side.
+  const messages = dedupeChatById(
+    lines.map(parseStoredChat).filter((m): m is ChatMessage => m !== null),
+  )
   if (messages.length > 0) useCollabStore.getState().setChat(messages)
 }
 
-/** Tear down the session (team switch, leave, sign-out, project close). */
+/** Auto-rejoin the voice call after a self-healed reconnect (consume-once).
+ *  Fires on the first healthy presence; joinVoiceCall itself surfaces mic
+ *  errors, so this only announces the success case. */
+function maybeRejoinVoice(): void {
+  if (!voiceRejoin) return
+  const fresh = Date.now() - voiceRejoin.droppedAt <= VOICE_REJOIN_WINDOW_MS
+  voiceRejoin = null
+  if (!fresh) return
+  void joinVoiceCall().then(() => {
+    // Transparency: the mic just re-opened without a click — say so.
+    if (useCollabStore.getState().voiceInCall) toast('info', t('team.voiceRejoined'))
+  })
+}
+
+/** Tear down the session (team switch, leave, sign-out, project close).
+ *  Intentional by definition — also disarms any pending voice auto-rejoin. */
 export function stopCollabSession(): void {
+  voiceRejoin = null
+  teardownSession()
+}
+
+/** Shared teardown for stopCollabSession AND the (re)start path — keeps
+ *  `voiceRejoin` untouched so a reconnect can restore an interrupted call. */
+function teardownSession(): void {
   wantConnection = false
   if (reconnectTimer) {
     clearTimeout(reconnectTimer)
@@ -226,6 +301,9 @@ export function stopCollabSession(): void {
   activeShareOffer = null
   offlineUnsub?.()
   offlineUnsub = null
+  // Voice first, while the mesh is still up: releases the mic, clears the
+  // audio senders and removes every sink. Never let the mic outlive the session.
+  resetVoiceService()
   mesh?.disconnect()
   mesh = null
   activeRoom = null
@@ -250,8 +328,16 @@ function persistChat(msg: ChatMessage): void {
 }
 
 function onChatReceived(msg: ChatMessage): void {
-  const wasOpen = useCollabStore.getState().chatOpen
-  useCollabStore.getState().addChat(msg)
+  const store = useCollabStore.getState()
+  // Re-deliveries are ROUTINE, not exceptional: the P2P replay re-sends the
+  // sender's recent messages to every late joiner, and the RTDB offline queue
+  // can hand us a message that already arrived P2P. addChat always deduped the
+  // UI — but persisting unconditionally appended a duplicate JSONL line per
+  // re-delivery, which came back as a duplicated transcript (duplicate React
+  // keys) on the next load. Drop known ids before ANY side effect.
+  if (store.chat.some((m) => m.id === msg.id)) return
+  const wasOpen = store.chatOpen
+  store.addChat(msg)
   persistChat(msg)
   // Short chime to wake the user to an incoming message — ONLY when the chat
   // panel is closed (an open panel already shows the message).

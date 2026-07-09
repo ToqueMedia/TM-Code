@@ -28,6 +28,15 @@ interface CollabState {
   /// last "typing" ping (ms) — the UI expires stale entries on a short TTL so a
   /// crashed/closed peer's indicator can't get stuck on.
   typingPeers: Record<string, { name: string; at: number }>
+  /// Whether WE are in the team voice call / mid-join (mic prompt pending).
+  voiceInCall: boolean
+  voiceJoining: boolean
+  /// Our mic mute state + local voice-activity flag (for our own chip in the UI).
+  voiceMuted: boolean
+  voiceSpeakingSelf: boolean
+  /// Teammates currently in the voice call, keyed by uid — rebuilt from their
+  /// idempotent `voice-state` broadcasts; pruned when a peer goes offline.
+  voiceRoster: Record<string, VoicePeer>
 
   setConnected: (connected: boolean) => void
   setPeers: (peers: PeerInfo[]) => void
@@ -39,7 +48,35 @@ interface CollabState {
   setSharingPreview: (sharing: boolean) => void
   setStartingPreview: (starting: boolean) => void
   setPeerTyping: (uid: string, name: string, typing: boolean) => void
+  setVoiceSelf: (patch: Partial<VoiceSelf>) => void
+  /// Upsert (state) or drop (null) a teammate from the voice roster.
+  setVoicePeer: (uid: string, state: { name: string; muted: boolean } | null) => void
+  setVoicePeerSpeaking: (uid: string, speaking: boolean) => void
+  resetVoice: () => void
   reset: () => void
+}
+
+/** A teammate participating in the voice call. */
+export interface VoicePeer {
+  name: string
+  muted: boolean
+  speaking: boolean
+}
+
+/** The self-side voice fields settable via setVoiceSelf. */
+type VoiceSelf = {
+  voiceInCall: boolean
+  voiceJoining: boolean
+  voiceMuted: boolean
+  voiceSpeakingSelf: boolean
+}
+
+const VOICE_INITIAL: VoiceSelf & { voiceRoster: Record<string, VoicePeer> } = {
+  voiceInCall: false,
+  voiceJoining: false,
+  voiceMuted: false,
+  voiceSpeakingSelf: false,
+  voiceRoster: {},
 }
 
 /** A teammate's live-preview offer, with the peer id needed to tunnel to them. */
@@ -63,21 +100,27 @@ export const useCollabStore = create<CollabState>((set) => ({
   sharingPreview: false,
   startingPreview: false,
   typingPeers: {},
+  ...VOICE_INITIAL,
 
   setConnected: (connected) => set({ connected }),
   setPeers: (peers) =>
     set((s) => {
-      // Drop typing entries from teammates that are no longer present.
+      // Drop typing + voice-roster entries from teammates no longer present.
       const presentUids = new Set(peers.map((p) => p.uid))
       const typingPeers: Record<string, { name: string; at: number }> = {}
       for (const [uid, info] of Object.entries(s.typingPeers)) {
         if (presentUids.has(uid)) typingPeers[uid] = info
+      }
+      const voiceRoster: Record<string, VoicePeer> = {}
+      for (const [uid, info] of Object.entries(s.voiceRoster)) {
+        if (presentUids.has(uid)) voiceRoster[uid] = info
       }
       return {
         peers,
         // Drop preview offers from peers that are no longer present.
         livePreviews: s.livePreviews.filter((lp) => peers.some((p) => p.peerId === lp.peerId)),
         typingPeers,
+        voiceRoster,
       }
     }),
 
@@ -110,6 +153,24 @@ export const useCollabStore = create<CollabState>((set) => ({
       return { typingPeers: next }
     }),
 
+  setVoiceSelf: (patch) => set(patch),
+  setVoicePeer: (uid, state) =>
+    set((s) => {
+      const next = { ...s.voiceRoster }
+      // Preserve the transient `speaking` flag across mute-state upserts.
+      if (state) next[uid] = { ...state, speaking: next[uid]?.speaking ?? false }
+      else delete next[uid]
+      return { voiceRoster: next }
+    }),
+  setVoicePeerSpeaking: (uid, speaking) =>
+    set((s) => {
+      const entry = s.voiceRoster[uid]
+      // Speaking pings can race a leave/prune — never resurrect an entry.
+      if (!entry || entry.speaking === speaking) return s
+      return { voiceRoster: { ...s.voiceRoster, [uid]: { ...entry, speaking } } }
+    }),
+  resetVoice: () => set(VOICE_INITIAL),
+
   reset: () =>
     set({
       connected: false,
@@ -121,6 +182,7 @@ export const useCollabStore = create<CollabState>((set) => ({
       sharingPreview: false,
       startingPreview: false,
       typingPeers: {},
+      ...VOICE_INITIAL,
     }),
 }))
 

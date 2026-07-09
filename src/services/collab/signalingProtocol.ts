@@ -16,9 +16,10 @@ export interface PeerInfo {
 /** Logical data channels that can be relayed through the DO when P2P fails. */
 export type RelayChannel = 'control' | 'bulk'
 
-/** Messages the worker pushes to the client. */
+/** Messages the worker pushes to the client. `iceServers` (welcome only) are
+ *  ephemeral TURN credentials, present when the worker has a Calls TURN key. */
 export type ServerMessage =
-  | { type: 'welcome'; selfId: string; peers: PeerInfo[] }
+  | { type: 'welcome'; selfId: string; peers: PeerInfo[]; iceServers?: unknown }
   | { type: 'peer-join'; peer: PeerInfo }
   | { type: 'peer-leave'; peerId: string }
   | { type: SignalType; from: string; payload: unknown }
@@ -63,6 +64,32 @@ export function signalingSubprotocols(idToken: string): string[] {
  */
 export function shouldInitiate(selfId: string, peerId: string): boolean {
   return selfId < peerId
+}
+
+/**
+ * Validate the welcome's `iceServers` blob into a clean RTCIceServer list (or
+ * null). Defensive on purpose: the field crosses a version-skewed wire, and a
+ * malformed entry passed to RTCPeerConnection() throws — which would kill the
+ * whole mesh, not just TURN.
+ */
+export function sanitizeIceServers(value: unknown): RTCIceServer[] | null {
+  if (!Array.isArray(value)) return null
+  const out: RTCIceServer[] = []
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue
+    const e = entry as Record<string, unknown>
+    const urls = Array.isArray(e.urls)
+      ? e.urls.filter((u): u is string => typeof u === 'string')
+      : typeof e.urls === 'string'
+        ? [e.urls]
+        : []
+    if (urls.length === 0) continue
+    const server: RTCIceServer = { urls }
+    if (typeof e.username === 'string') server.username = e.username
+    if (typeof e.credential === 'string') server.credential = e.credential
+    out.push(server)
+  }
+  return out.length > 0 ? out : null
 }
 
 /** Parse a raw socket message into a typed ServerMessage, or null if invalid. */

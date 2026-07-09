@@ -5,6 +5,7 @@ import { tokens } from '@/theme/tokens'
 import { useAuthStore } from '@/stores/authStore'
 import { canShareCode, useCollabStore, type LivePreview } from '@/stores/collabStore'
 import { sendChatMessage, stopLivePreview } from '@/services/collab/collabSessionService'
+import { joinVoiceCall, leaveVoiceCall, toggleVoiceMute } from '@/services/collab/collabVoice'
 import { openPreview } from '@/services/collab/previewViewerService'
 import { useTeamTyping } from '@/hooks/useTeamTyping'
 import type { ChatMessage } from '@/services/collab/collabChat'
@@ -47,6 +48,11 @@ export function TerminalTeamChatPanel() {
   const livePreviews = useCollabStore((s) => s.livePreviews)
   const sharing = useCollabStore((s) => s.sharingPreview)
   const setChatOpen = useCollabStore((s) => s.setChatOpen)
+  const inVoice = useCollabStore((s) => s.voiceInCall)
+  const voiceJoining = useCollabStore((s) => s.voiceJoining)
+  const voiceMuted = useCollabStore((s) => s.voiceMuted)
+  const speakingSelf = useCollabStore((s) => s.voiceSpeakingSelf)
+  const voiceRoster = useCollabStore((s) => s.voiceRoster)
   const selfUid = useAuthStore((s) => s.user?.uid)
   const { notifyTyping, stopTyping, typingLabel } = useTeamTyping()
   const [draft, setDraft] = useState('')
@@ -79,6 +85,10 @@ export function TerminalTeamChatPanel() {
   }
 
   const openOffer = (lp: LivePreview) => void openPreview(lp.peerId, lp.name)
+
+  const voicePeerEntries = Object.entries(voiceRoster)
+  const callActive = inVoice || voicePeerEntries.length > 0
+  const participantCount = voicePeerEntries.length + (inVoice ? 1 : 0)
 
   return (
     <Flex
@@ -118,17 +128,33 @@ export function TerminalTeamChatPanel() {
             {t('team.peersOnline').replace('{count}', String(peers.length))}
           </Text>
         </Flex>
-        <Box
-          as="button"
-          aria-label={t('team.closeChat')}
-          color={tokens.colors.terminal.brightBlack}
-          _hover={{ color: tokens.colors.terminal.foreground }}
-          fontSize="13px"
-          lineHeight="1"
-          onClick={() => setChatOpen(false)}
-        >
-          ✕
-        </Box>
+        <Flex align="center" gap={2} flexShrink={0}>
+          {/* Start a call — once active, the voice row below owns the controls. */}
+          {connected && !callActive && (
+            <Box
+              as="button"
+              fontSize="11px"
+              color={tokens.colors.terminal.brightBlack}
+              _hover={{ color: tokens.colors.accent.purple }}
+              opacity={voiceJoining ? 0.5 : 1}
+              onClick={() => void joinVoiceCall()}
+              title={t('team.voiceStartCall')}
+            >
+              [{t('team.voiceCallShort')}]
+            </Box>
+          )}
+          <Box
+            as="button"
+            aria-label={t('team.closeChat')}
+            color={tokens.colors.terminal.brightBlack}
+            _hover={{ color: tokens.colors.terminal.foreground }}
+            fontSize="13px"
+            lineHeight="1"
+            onClick={() => setChatOpen(false)}
+          >
+            ✕
+          </Box>
+        </Flex>
       </Flex>
 
       {/* Transcript */}
@@ -172,6 +198,84 @@ export function TerminalTeamChatPanel() {
           })
         )}
       </Box>
+
+      {/* Voice call — flat status row (refined-terminal: bracket actions, the
+          single purple accent, no motion). Speaking = bright name, hard-step. */}
+      {callActive && (
+        <Box
+          flexShrink={0}
+          borderTop={`1px solid ${tokens.colors.terminal.chromeHairline}`}
+          px={3}
+          py={1.5}
+          fontSize="11px"
+        >
+          <Flex align="center" justify="space-between" gap={2}>
+            <Flex align="center" gap={2} minW={0} color={tokens.colors.accent.purple}>
+              <Text as="span" flexShrink={0}>{inVoice ? '◉' : '○'}</Text>
+              <Text as="span" lineClamp={1}>
+                {t('team.voiceInCallCount').replace('{count}', String(participantCount))}
+              </Text>
+            </Flex>
+            <Flex align="center" gap={2} flexShrink={0}>
+              {inVoice ? (
+                <>
+                  <Box
+                    as="button"
+                    color={voiceMuted ? tokens.colors.terminal.brightRed : tokens.colors.terminal.brightBlack}
+                    _hover={{ color: tokens.colors.terminal.foreground }}
+                    onClick={() => toggleVoiceMute()}
+                    title={voiceMuted ? t('team.voiceUnmute') : t('team.voiceMute')}
+                  >
+                    [{voiceMuted ? t('team.voiceUnmuteShort') : t('team.voiceMuteShort')}]
+                  </Box>
+                  <Box
+                    as="button"
+                    color={tokens.colors.terminal.brightBlack}
+                    _hover={{ color: tokens.colors.terminal.brightRed }}
+                    onClick={() => leaveVoiceCall()}
+                    title={t('team.voiceLeaveCall')}
+                  >
+                    [{t('team.voiceLeaveShort')}]
+                  </Box>
+                </>
+              ) : (
+                <Box
+                  as="button"
+                  color={tokens.colors.accent.purple}
+                  _hover={{ color: tokens.colors.terminal.foreground }}
+                  opacity={voiceJoining ? 0.5 : 1}
+                  onClick={() => void joinVoiceCall()}
+                  title={t('team.voiceJoinCall')}
+                >
+                  [{t('team.voiceJoinShort')}]
+                </Box>
+              )}
+            </Flex>
+          </Flex>
+          {/* Participant names: bright while speaking, dim otherwise. */}
+          <Flex wrap="wrap" columnGap="10px" mt="2px">
+            {inVoice && (
+              <Text
+                as="span"
+                color={speakingSelf ? tokens.colors.terminal.foreground : tokens.colors.terminal.brightBlack}
+              >
+                {t('team.voiceYou').toLowerCase()}
+                {voiceMuted ? ` [${t('team.voiceMutedTag')}]` : ''}
+              </Text>
+            )}
+            {voicePeerEntries.map(([uid, p]) => (
+              <Text
+                as="span"
+                key={uid}
+                color={p.speaking ? tokens.colors.terminal.foreground : tokens.colors.terminal.brightBlack}
+              >
+                {p.name}
+                {p.muted ? ` [${t('team.voiceMutedTag')}]` : ''}
+              </Text>
+            ))}
+          </Flex>
+        </Box>
+      )}
 
       {/* Incoming live previews — clickable system lines */}
       {livePreviews.length > 0 && (

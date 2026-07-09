@@ -9,6 +9,7 @@
 import { HttpError, jsonError } from './errors'
 import { checkMembership } from './membership'
 import { parseInbound, routeTargets, tokenFromSubprotocols } from './protocol'
+import { mintTurnIceServers, TURN_CACHE_MS, type IceServer } from './turn'
 import { COLLAB_SUBPROTOCOL, type Env, type PeerInfo, type ServerMessage } from './types'
 import { verifyToken } from './auth'
 
@@ -19,6 +20,9 @@ interface Peer extends PeerInfo {
 export class SignalingRoom {
   private readonly env: Env
   private readonly peers = new Map<WebSocket, Peer>()
+  /** Room-wide cache of minted TURN credentials (ephemeral, shared within the
+   *  team's trust boundary) so joins don't each pay a Calls API round-trip. */
+  private turnCache: { servers: IceServer[]; expiresAt: number } | null = null
 
   constructor(_state: DurableObjectState, env: Env) {
     this.env = env
@@ -57,13 +61,17 @@ export class SignalingRoom {
       )
     }
 
-    // 3) Upgrade and register the peer.
+    // 3) Mint ephemeral TURN credentials for the welcome (null → the client
+    //    stays STUN-only; TURN is an upgrade, never a join dependency).
+    const iceServers = await this.turnServers()
+
+    // 4) Upgrade and register the peer.
     const name = (url.searchParams.get('name') || '').slice(0, 120) || uid
     const pair = new WebSocketPair()
     const client = pair[0]
     const server = pair[1]
     server.accept()
-    this.registerPeer(server, uid, name)
+    this.registerPeer(server, uid, name, iceServers)
 
     return new Response(null, {
       status: 101,
@@ -72,16 +80,34 @@ export class SignalingRoom {
     })
   }
 
-  private registerPeer(socket: WebSocket, uid: string, name: string): void {
+  /** Serve TURN credentials from the room cache, minting on miss/expiry. */
+  private async turnServers(): Promise<IceServer[] | null> {
+    if (this.turnCache && Date.now() < this.turnCache.expiresAt) return this.turnCache.servers
+    const servers = await mintTurnIceServers(this.env)
+    if (servers) this.turnCache = { servers, expiresAt: Date.now() + TURN_CACHE_MS }
+    return servers
+  }
+
+  private registerPeer(
+    socket: WebSocket,
+    uid: string,
+    name: string,
+    iceServers: IceServer[] | null,
+  ): void {
     const peerId = crypto.randomUUID()
     const self: Peer = { peerId, uid, name, socket }
     this.peers.set(socket, self)
 
-    // Tell the newcomer who's already here.
+    // Tell the newcomer who's already here (+ TURN credentials when minted).
     const others: PeerInfo[] = [...this.peers.values()]
       .filter((p) => p.socket !== socket)
       .map(({ peerId: id, uid: u, name: n }) => ({ peerId: id, uid: u, name: n }))
-    this.send(socket, { type: 'welcome', selfId: peerId, peers: others })
+    this.send(socket, {
+      type: 'welcome',
+      selfId: peerId,
+      peers: others,
+      ...(iceServers ? { iceServers } : {}),
+    })
 
     // Announce the newcomer to everyone else.
     this.broadcast(socket, { type: 'peer-join', peer: { peerId, uid, name } })

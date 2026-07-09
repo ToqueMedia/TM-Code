@@ -2,6 +2,7 @@ import {
   buildSignalingUrl,
   COLLAB_SUBPROTOCOL,
   parseServerMessage,
+  sanitizeIceServers,
   shouldInitiate,
   signalingSubprotocols,
 } from '../signalingProtocol'
@@ -51,6 +52,53 @@ describe('signalingProtocol', () => {
       expect(parseServerMessage(123)).toBeNull()
       expect(parseServerMessage('{bad')).toBeNull()
       expect(parseServerMessage(JSON.stringify({ noType: 1 }))).toBeNull()
+    })
+
+    it('passes the welcome iceServers blob through untouched', () => {
+      const welcome = {
+        type: 'welcome',
+        selfId: 'p1',
+        peers: [],
+        iceServers: [{ urls: ['turn:t:3478'], username: 'u', credential: 'c' }],
+      }
+      expect(parseServerMessage(JSON.stringify(welcome))).toEqual(welcome)
+    })
+  })
+
+  describe('sanitizeIceServers', () => {
+    it('accepts valid entries and coerces a string urls field', () => {
+      expect(
+        sanitizeIceServers([
+          { urls: ['turn:t:3478?transport=udp', 'turns:t:5349'], username: 'u', credential: 'c' },
+          { urls: 'stun:s:3478' },
+        ]),
+      ).toEqual([
+        { urls: ['turn:t:3478?transport=udp', 'turns:t:5349'], username: 'u', credential: 'c' },
+        { urls: ['stun:s:3478'] },
+      ])
+    })
+
+    it('drops junk entries and junk url items, keeping the good ones', () => {
+      expect(
+        sanitizeIceServers([
+          'nope',
+          { username: 'no-urls' },
+          { urls: [42, 'turn:ok:3478'], username: 'u', credential: 'c' },
+        ]),
+      ).toEqual([{ urls: ['turn:ok:3478'], username: 'u', credential: 'c' }])
+    })
+
+    it('returns null for absent, non-array, or fully-junk input', () => {
+      expect(sanitizeIceServers(undefined)).toBeNull()
+      expect(sanitizeIceServers({ urls: ['turn:t'] })).toBeNull() // object, not array
+      expect(sanitizeIceServers([])).toBeNull()
+      expect(sanitizeIceServers([{ urls: [] }, null])).toBeNull()
+    })
+
+    it('drops non-string username/credential instead of passing them through', () => {
+      expect(sanitizeIceServers([{ urls: 'turn:t:3478', username: 42, credential: null }])).toEqual([
+        { urls: ['turn:t:3478'] },
+      ])
     })
   })
 })

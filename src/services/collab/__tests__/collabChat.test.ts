@@ -1,8 +1,11 @@
 import {
   buildChatControl,
+  buildVoiceStateControl,
+  dedupeChatById,
   parseControlMessage,
   parseStoredChat,
   type ChatMessage,
+  type VoiceState,
 } from '../collabChat'
 
 const msg = (over: Partial<ChatMessage> = {}): ChatMessage => ({
@@ -52,5 +55,48 @@ describe('collabChat', () => {
     expect(parseStoredChat(JSON.stringify(msg()))).toEqual(msg())
     expect(parseStoredChat('not json')).toBeNull()
     expect(parseStoredChat(JSON.stringify({ id: 'only' }))).toBeNull()
+  })
+
+  it('dedupeChatById keeps the first occurrence per id, preserving order', () => {
+    const a1 = msg({ id: 'a', ts: 1 })
+    const b = msg({ id: 'b', ts: 2 })
+    const a2 = msg({ id: 'a', ts: 3 })
+    const c = msg({ id: 'c', ts: 4 })
+    expect(dedupeChatById([a1, b, a2, c, b])).toEqual([a1, b, c])
+    expect(dedupeChatById([])).toEqual([])
+  })
+
+  it('round-trips a voice-state envelope and rejects bad ones', () => {
+    const state: VoiceState = { uid: 'u1', name: 'Ada', inCall: true, muted: false }
+    const env = buildVoiceStateControl(state)
+    expect(env).toEqual({ t: 'voice-state', state })
+    expect(parseControlMessage(env)).toEqual({ t: 'voice-state', state })
+    // Every field is required and strictly typed.
+    expect(parseControlMessage({ t: 'voice-state' })).toBeNull()
+    expect(parseControlMessage({ t: 'voice-state', state: { uid: 'u1', name: 'Ada' } })).toBeNull()
+    expect(
+      parseControlMessage({ t: 'voice-state', state: { ...state, inCall: 'yes' } }),
+    ).toBeNull()
+    expect(parseControlMessage({ t: 'voice-state', state: { ...state, muted: 1 } })).toBeNull()
+    // Extra unknown fields are dropped, not echoed through.
+    expect(
+      parseControlMessage({ t: 'voice-state', state: { ...state, extra: 'x' } }),
+    ).toEqual({ t: 'voice-state', state })
+  })
+
+  it('parses a voice-speaking envelope and rejects bad ones', () => {
+    expect(parseControlMessage({ t: 'voice-speaking', uid: 'u1', speaking: true })).toEqual({
+      t: 'voice-speaking',
+      uid: 'u1',
+      speaking: true,
+    })
+    expect(parseControlMessage({ t: 'voice-speaking', uid: 'u1', speaking: false })).toEqual({
+      t: 'voice-speaking',
+      uid: 'u1',
+      speaking: false,
+    })
+    expect(parseControlMessage({ t: 'voice-speaking', uid: 'u1' })).toBeNull()
+    expect(parseControlMessage({ t: 'voice-speaking', uid: 'u1', speaking: 'yes' })).toBeNull()
+    expect(parseControlMessage({ t: 'voice-speaking', speaking: true })).toBeNull()
   })
 })

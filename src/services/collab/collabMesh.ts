@@ -5,10 +5,22 @@
 //   - `control`: small JSON messages (presence, chat, share notifications)
 //   - `bulk`:    larger payloads (changeset patches), chunked by the caller
 //
-// DataChannels are DTLS-encrypted end-to-end, so nothing the team shares is
-// ever readable by the signaling server. This is STUN-only (v1): if a peer is
-// behind a symmetric NAT and no direct path exists, that peer connection simply
-// fails — surfaced via onPeerFailed. TURN is a documented follow-up.
+// Voice: every connection ALSO pre-negotiates one `sendrecv` audio transceiver
+// during the initial offer/answer, with no track attached. Joining/leaving a
+// voice call is then just `sender.replaceTrack(mic | null)` — which requires
+// NO renegotiation, so the one-shot signaling handshake stays sufficient and
+// there is no offer-glare to handle. While no one is in a call the m-line is
+// negotiated but silent (no RTP flows for a null track).
+//
+// DataChannels are DTLS-encrypted end-to-end and voice is SRTP-encrypted
+// end-to-end, so nothing the team shares is ever readable by the signaling
+// server. ICE runs STUN-first; when the worker has a Cloudflare Calls TURN key
+// configured, the `welcome` carries ephemeral TURN credentials and peers with
+// no direct path connect through TURN (which only forwards encrypted packets —
+// the E2E privacy model is preserved). Without TURN (or if even TURN fails)
+// the DO WebSocket relay remains the last resort for DATA; voice does NOT
+// survive that path (media through a WebSocket relay is unusable) — relay
+// peers can see call state but cannot send/receive audio.
 
 import { SignalingClient } from './signalingClient'
 import {
@@ -17,7 +29,8 @@ import {
   type SignalType,
 } from './signalingProtocol'
 
-/** STUN-only ICE configuration (decision: v1 has no TURN). */
+/** Base STUN config. Ephemeral TURN servers from the welcome (when the worker
+ *  has a Calls TURN key) are appended per-session — see onWelcome. */
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
@@ -52,6 +65,10 @@ export interface MeshHandlers {
   onPresence?: (peers: PeerInfo[]) => void
   /** The signaling socket dropped (not via disconnect()) — session is over. */
   onSessionClosed?: () => void
+  /** The peer's remote audio track is live (fires at initial negotiation via
+   *  the pre-negotiated voice transceiver; the track stays silent until the
+   *  peer joins a call and feeds a real mic track into it). */
+  onPeerAudioTrack?: (peer: PeerInfo, track: MediaStreamTrack, stream: MediaStream) => void
 }
 
 interface PeerState {
@@ -59,6 +76,9 @@ interface PeerState {
   pc: RTCPeerConnection
   control?: RTCDataChannel
   bulk?: RTCDataChannel
+  /** Pre-negotiated audio transceiver — voice joins/leaves via
+   *  `audioTx.sender.replaceTrack`, never via renegotiation. */
+  audioTx?: RTCRtpTransceiver
   /** 'p2p' = direct DataChannels; 'relay' = data forwarded via the DO when the
    *  WebRTC connection couldn't be established. */
   mode: 'p2p' | 'relay'
@@ -72,6 +92,9 @@ export class CollabMesh {
   private signaling: SignalingClient | null = null
   private selfId = ''
   private readonly peers = new Map<string, PeerState>()
+  /** Session ICE config: STUN base + the welcome's ephemeral TURN servers.
+   *  Set before any peer exists (peers are only created from welcome onward). */
+  private iceServers: RTCIceServer[] = ICE_SERVERS
 
   constructor(
     private readonly base: string,
@@ -83,8 +106,10 @@ export class CollabMesh {
 
   connect(): void {
     this.signaling = new SignalingClient(this.base, this.teamId, this.idToken, this.displayName, {
-      onWelcome: (selfId, peers) => {
+      onWelcome: (selfId, peers, iceServers) => {
         this.selfId = selfId
+        this.iceServers = iceServers?.length ? [...ICE_SERVERS, ...iceServers] : ICE_SERVERS
+        dlog('welcome:', peers.length, 'peers,', iceServers?.length ?? 0, 'TURN server entries')
         for (const peer of peers) this.addPeer(peer)
         this.emitPresence()
       },
@@ -141,6 +166,30 @@ export class CollabMesh {
     if (peer) this.sendOn(peer, 'bulk', data)
   }
 
+  /**
+   * Feed (or clear) our mic track toward ONE peer — `replaceTrack` on the
+   * pre-negotiated transceiver, so this never renegotiates. Who gets the track
+   * is the voice service's policy (only in-call peers); the mesh just routes.
+   * No-op for relay-mode peers: they have no RTCPeerConnection, so voice
+   * cannot reach them (see header).
+   */
+  setVoiceTrackForPeer(peerId: string, track: MediaStreamTrack | null): void {
+    const peer = this.peers.get(peerId)
+    const sender = peer?.mode === 'p2p' ? peer.audioTx?.sender : undefined
+    if (!sender) return
+    dlog('voice track', track ? 'ON' : 'off', '→', peerId)
+    void sender.replaceTrack(track).catch(() => {
+      /* pc closed mid-flight — nothing to route anymore */
+    })
+  }
+
+  /** True when a direct (P2P) audio path to this peer is negotiated. Relay
+   *  peers exchange call-state messages fine but can't carry media. */
+  hasVoicePath(peerId: string): boolean {
+    const peer = this.peers.get(peerId)
+    return Boolean(peer && peer.mode === 'p2p' && peer.audioTx)
+  }
+
   /** Route a payload to a peer over its open DataChannel, or via the DO relay
    *  when the peer fell back to relay mode. Returns the path used (or null). */
   private sendOn(peer: PeerState, channel: 'control' | 'bulk', payload: string): 'p2p' | 'relay' | null {
@@ -180,7 +229,7 @@ export class CollabMesh {
     if (this.peers.has(info.peerId)) return
     const initiate = shouldInitiate(this.selfId, info.peerId)
     dlog('addPeer', info.peerId, 'self=', this.selfId, 'initiate=', initiate)
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
+    const pc = new RTCPeerConnection({ iceServers: this.iceServers })
     const state: PeerState = { info, pc, mode: 'p2p', ready: false }
     this.peers.set(info.peerId, state)
     // Don't wait the full ICE timeout — relay if not connected within the window.
@@ -196,6 +245,13 @@ export class CollabMesh {
         dlog('local ICE gathering complete for', info.peerId)
       }
     }
+    pc.ontrack = (event) => {
+      if (event.track.kind !== 'audio') return
+      dlog('remote audio track ←', info.peerId)
+      // addTransceiver-without-stream on the far side → `streams` can be empty.
+      const stream = event.streams[0] ?? new MediaStream([event.track])
+      this.handlers.onPeerAudioTrack?.(info, event.track, stream)
+    }
     pc.oniceconnectionstatechange = () => dlog('iceConnectionState', info.peerId, pc.iceConnectionState)
     pc.onconnectionstatechange = () => {
       dlog('connectionState', info.peerId, pc.connectionState)
@@ -209,6 +265,9 @@ export class CollabMesh {
       // Initiator owns the channels; the answerer receives them via ondatachannel.
       this.attachChannel(state, pc.createDataChannel('control'), 'control')
       this.attachChannel(state, pc.createDataChannel('bulk'), 'bulk')
+      // Pre-negotiate the voice m-line (trackless) so a later call join is a
+      // pure replaceTrack — see the header. The answerer adopts it in onSignal.
+      state.audioTx = pc.addTransceiver('audio', { direction: 'sendrecv' })
       void this.makeOffer(state)
     } else {
       pc.ondatachannel = (event) => {
@@ -245,6 +304,9 @@ export class CollabMesh {
     }
     state.control = undefined
     state.bulk = undefined
+    // Closing the pc above ended any remote audio track (the voice service
+    // cleans its sink via track.onended). No transceiver → no voice path.
+    state.audioTx = undefined
     // The relay path (the WebSocket) is already up → the peer is usable now.
     this.markReady(state)
   }
@@ -277,6 +339,15 @@ export class CollabMesh {
     try {
       if (type === 'offer') {
         await state.pc.setRemoteDescription(payload as RTCSessionDescriptionInit)
+        // Adopt the audio transceiver the remote offer created and answer it
+        // sendrecv — a remotely-created transceiver defaults to recvonly, which
+        // would let us hear but never speak. Older clients whose offer carries
+        // no audio m-line simply leave audioTx undefined (voice no-ops).
+        const audioTx = state.pc.getTransceivers().find((tx) => tx.receiver.track?.kind === 'audio')
+        if (audioTx) {
+          state.audioTx = audioTx
+          audioTx.direction = 'sendrecv'
+        }
         const answer = await state.pc.createAnswer()
         await state.pc.setLocalDescription(answer)
         dlog('answer →', from)

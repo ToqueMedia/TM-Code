@@ -7,6 +7,7 @@
 import {
   buildSignalingUrl,
   parseServerMessage,
+  sanitizeIceServers,
   signalingSubprotocols,
   type PeerInfo,
   type RelayChannel,
@@ -16,7 +17,9 @@ import {
 } from './signalingProtocol'
 
 export interface SignalingHandlers {
-  onWelcome: (selfId: string, peers: PeerInfo[]) => void
+  /** `iceServers`: ephemeral TURN credentials from the worker (null when the
+   *  worker has no TURN key configured → STUN-only session). */
+  onWelcome: (selfId: string, peers: PeerInfo[], iceServers: RTCIceServer[] | null) => void
   onPeerJoin: (peer: PeerInfo) => void
   onPeerLeave: (peerId: string) => void
   onSignal: (from: string, type: SignalType, payload: unknown) => void
@@ -47,7 +50,7 @@ export class SignalingClient {
       if (!msg) return
       switch (msg.type) {
         case 'welcome':
-          this.handlers.onWelcome(msg.selfId, msg.peers)
+          this.handlers.onWelcome(msg.selfId, msg.peers, sanitizeIceServers(msg.iceServers))
           break
         case 'peer-join':
           this.handlers.onPeerJoin(msg.peer)

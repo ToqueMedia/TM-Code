@@ -32,3 +32,13 @@ FIREBASE_PROJECT_ID = "maiplayer-ac56d"
 # The control-plane reads the team with a service account. Not used on the
 # emulator path (FIRESTORE_REST_BASE set in .dev.vars).
 CONTROL_PLANE_URL = "https://api-agents.toquemedia.net"
+
+# ── TURN relay fallback (Cloudflare Calls TURN) ──────────────────────────────
+# Gives peers behind symmetric NATs a real P2P path (required for team VOICE —
+# the DO data relay cannot carry audio). Create a TURN key in the Cloudflare
+# dashboard (Calls → TURN) and set BOTH as SECRETS (never under [vars]):
+#   wrangler secret put TURN_KEY_ID
+#   wrangler secret put TURN_KEY_API_TOKEN
+# The DO then mints ephemeral per-session credentials into each `welcome` (see
+# src/turn.ts). While unset, clients silently stay STUN-only — data falls back
+# to the DO relay and voice stays unavailable to path-less peers.
