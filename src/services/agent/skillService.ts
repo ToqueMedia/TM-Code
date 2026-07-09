@@ -178,25 +178,8 @@ const RICH_ARTIFACT_SKILLS = new Set([
   'pdf-document', 'docx-document', 'xlsx-spreadsheet',
   'pptx-presentation', 'slidev-presentation', 'html-document',
 ])
-// Auth-scaffolding skills. Index-only entries (~150B in prompt each); the
-// agent fetches the body via read_skill only when it decides to wire up auth.
-const AUTH_SKILLS = new Set(['auth-proxy', 'google-signin'])
-
-/** The canonical skill the agent must read when preparing any fullstack
- *  project for publishing. Referenced from contextBuilder + toolExecutor —
- *  rename here to propagate. */
-export const PUBLISHING_SKILL_NAME = 'publish-backend'
-
-/** The canonical tool name for registering a project's publish slot.
- *  Re-export of the single source of truth in `toolNames.ts` — kept here
- *  under the legacy name so existing imports keep compiling. */
-export { PROVISION_DEPLOY as PROVISION_DEPLOY_TOOL_NAME } from './toolNames'
-
-// Deploy-scaffolding skills. Same loading shape as AUTH_SKILLS — index-only
-// in the system prompt; agent fetches via read_skill when preparing a
-// project for the Publish flow (platform-managed backend + database scoped
-// by `apps/{appId}/...` + platform security rules).
-const DEPLOY_SKILLS = new Set([PUBLISHING_SKILL_NAME])
+// Managed-platform skill sets (auth-proxy/google-signin, publish-backend)
+// removed in the dev-only pivot (v1.0.0) — those recipes live in TM Code Web.
 
 // parseSkillFrontmatter + MAX_DESCRIPTION_CHARS live in ./skillFrontmatter (zero-deps)
 // so that scripts/verify-skills.ts can import the same implementation.
@@ -276,7 +259,7 @@ class SkillService {
    * Skills the user/system has explicitly opted into for this session, even
    * when the relevance heuristic would otherwise skip them. Populated by
    * the prompt-bar hashtag handler (e.g. `#auth-google` triggers
-   * `forceLoadSkill('google-signin')`) so the `read_skill` tool, system-
+   * `forceLoadSkill('frontend-design')`) so the `read_skill` tool, system-
    * prompt skill index, and the agent's mental model stay consistent.
    *
    * Without this, the hashtag flow would inject skill bodies inline into the
@@ -562,23 +545,6 @@ ${lines.join('\n')}`
     // which instructs restraint unless the task calls for motion / typography.
     // `#design` is still the strongest signal: authCommand inlines the skill
     // body verbatim, planCommand pins it in Platform Requirements.
-
-    // Auth-scaffolding skills (auth-proxy, google-signin) need the preview
-    // workflow, so the recipe does not apply to the cwd-scoped surface. No
-    // projectType gate: empty projects are exactly when the agent is about
-    // to scaffold auth, so the index entry must be visible. The model picks
-    // it up only when the user asks for login/auth.
-    if (AUTH_SKILLS.has(skillName)) {
-      return mode === 'chat'
-    }
-
-    // Deploy-scaffolding skills (publish-backend) — chat-only.
-    // The user triggers the recipe when they ask to prepare the project
-    // for Publish or hit a fullstack-backend-not-ready state from the
-    // modal. Same load-on-demand pattern as auth.
-    if (DEPLOY_SKILLS.has(skillName)) {
-      return mode === 'chat'
-    }
 
     // Code-pattern skills (react-patterns, vue-patterns, …) — chat-only.
     // Project-type filter IS load-bearing here: a vue-patterns entry in a

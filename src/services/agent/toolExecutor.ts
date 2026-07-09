@@ -12,7 +12,6 @@ import FirebaseAuthService from '../auth/firebaseAuth'
 import { registerTaskTools } from './toolExecutor/taskOps'
 import { registerMemoryTools } from './toolExecutor/memoryOps'
 import { registerInteractionTools } from './toolExecutor/interactionOps'
-import { registerProvisionTools } from './toolExecutor/provisionOps'
 import type { ToolRegistrationContext } from './toolExecutor/context'
 import {
   isEnvFile,
@@ -24,10 +23,6 @@ import {
   DANGEROUS_COMMANDS,
   STATE_MUTATING_COMMANDS,
   normalizePath,
-  checkForbiddenAuthImports,
-  checkForbiddenItkV2,
-  checkForbiddenServiceAccountImport,
-  checkForbiddenDockerfileShape,
 } from './toolExecutor/checks'
 import { tauriFetch } from '../tauriFetch'
 import { devServerManager } from '../devServerManager'
@@ -198,12 +193,6 @@ function createLinkedAbortController(parentSignal?: AbortSignal): AbortControlle
   return child
 }
 
-// Platform-managed credential gate (`PLATFORM_MANAGED_FIELD_IDS` /
-// `describePlatformManagedField`) moved to `./toolExecutor/checks` — see
-// the import block above. The set + describer are re-exported there with
-// the same identity so the existing call sites in this file (and any
-// future caller) keep using the canonical name.
-
 // === Tool Executor ===
 
 /**
@@ -293,7 +282,7 @@ class ToolExecutor {
 
   /**
    * Plan mode — when true, /plan is active and only architecture-producing
-   * tools may run. Implementation tools (provision_auth, request_credentials,
+   * tools may run. Implementation tools (request_credentials,
    * execute_command, start_dev_server, install commands) are blocked at
    * execute() entry with an instructive error so the model is forced back
    * onto producing PLAN.md. Belt-and-braces over the architect system prompt:
@@ -932,9 +921,9 @@ class ToolExecutor {
     // cannot drift into building the project. The model's *system prompt*
     // already forbids these (see planCommand.ts:buildArchitectSystemPrompt),
     // but strong-prior models (instruction-tuned for "build the thing") have
-    // been observed to call provision_auth on turn 1 anyway. The mechanical
-    // block returns an instructive error the model has to read in its next
-    // tool result, redirecting it back onto PLAN.md.
+    // been observed to reach for implementation tools on turn 1 anyway. The
+    // mechanical block returns an instructive error the model has to read in
+    // its next tool result, redirecting it back onto PLAN.md.
     if (this.planMode) {
       const planBlock = this.checkPlanModeAccess(toolName, filePath)
       if (planBlock) return planBlock
@@ -2116,31 +2105,11 @@ ${preview}
     }
   }
 
-  // Forbidden pattern checks moved to ./toolExecutor/checks — thin wrappers
-  // kept so existing private-method call sites (this.checkForbiddenAuthImports
-  // etc.) continue to work without rewrites. Same applies to .env / sensitive
-  // detection just below. Bodies live in the imported pure functions; the
-  // class is now an orchestrator.
-  private checkForbiddenAuthImports(path: string, content: string): string | null {
-    return checkForbiddenAuthImports(path, content)
-  }
-  private checkForbiddenItkV2(path: string, content: string): string | null {
-    return checkForbiddenItkV2(path, content)
-  }
-  private checkForbiddenServiceAccountImport(path: string, content: string): string | null {
-    return checkForbiddenServiceAccountImport(path, content)
-  }
-  private async checkForbiddenDockerfileShape(path: string, content: string): Promise<string | null> {
-    return checkForbiddenDockerfileShape(path, content)
-  }
-  private checkForbiddenDataLayerDeps(path: string, newContent: string, oldContent: string = ''): string | null {
-    void path
-    void newContent
-    void oldContent
-    // Stack choice is prompt-guided. TM Code-managed database defaults are
-    // guidance and manifest capabilities, not a hard package.json block.
-    return null
-  }
+  // All managed-platform pattern gates (Dockerfile/Cloud Run shapes,
+  // firebase-auth imports, ITK v2, service-account keys, data-layer deps)
+  // were removed in the dev-only-IDE pivot (2026-07): the developer's own
+  // stack and infrastructure choices are theirs to make. What remains is
+  // genuine safety (.env / sensitive-file detection, below).
   private isEnvFile(filePath: string): boolean {
     return isEnvFile(filePath)
   }
@@ -2342,9 +2311,9 @@ ${preview}
     // turn and the developer immediately tries to type a hashtag. Covers:
     //   - package.json (payments deps)
     //   - auth-proxy / authClient / useGoogleSignIn marker files
-    // .env writes are funneled through write_env_vars (which has its own
-    // invalidation hook in provision_auth) so we don't include .env here —
-    // the agent's write_file path can't reach it (mechanical block).
+    // .env writes are funneled through write_env_vars (used by the
+    // request_credentials flow) so we don't include .env here — the agent's
+    // write_file path can't reach it (mechanical block).
     if (/(^|\/)package\.json$|(^|\/)(auth-proxy|authClient|useGoogleSignIn)\.(ts|tsx|js)$/.test(path)) {
       const root = this.getProjectRoot()
       if (root) {
@@ -3110,20 +3079,6 @@ ${preview}
         const path = this.resolveToAbsolute(input.file_path as string)
         const newContent = input.content as string
 
-        // Mechanical blocks on prompt-rule violations the model commits
-        // anyway under generation pressure. Each check has an inline
-        // comment explaining the recurring failure mode it catches.
-        // Order: cheapest checks first (regex on string) before the
-        // package.json parse.
-        const authBlock = this.checkForbiddenAuthImports(path, newContent)
-        if (authBlock) return authBlock
-        const itkBlock = this.checkForbiddenItkV2(path, newContent)
-        if (itkBlock) return itkBlock
-        const saBlock = this.checkForbiddenServiceAccountImport(path, newContent)
-        if (saBlock) return saBlock
-        const dockerfileBlock = await this.checkForbiddenDockerfileShape(path, newContent)
-        if (dockerfileBlock) return dockerfileBlock
-
         // Read current content to generate diff data
         let oldContent = ''
         let isNewFile = true
@@ -3133,9 +3088,6 @@ ${preview}
         } catch {
           isNewFile = true
         }
-
-        const dataLayerBlock = this.checkForbiddenDataLayerDeps(path, newContent, oldContent)
-        if (dataLayerBlock) return dataLayerBlock
 
         // Enforce read-before-write for existing files (like Claude Code).
         // The model must read a file before overwriting it to understand what it's replacing.
@@ -3220,18 +3172,6 @@ ${preview}
         await this.requirePathAccess(input.file_path as string)
         const path = this.resolveToAbsolute(input.file_path as string)
         const content = (input.content as string) || ''
-
-        // Mechanical blocks — see write_file for the rationale.
-        const authBlock = this.checkForbiddenAuthImports(path, content)
-        if (authBlock) return authBlock
-        const itkBlock = this.checkForbiddenItkV2(path, content)
-        if (itkBlock) return itkBlock
-        const saBlock = this.checkForbiddenServiceAccountImport(path, content)
-        if (saBlock) return saBlock
-        const dockerfileBlock = await this.checkForbiddenDockerfileShape(path, content)
-        if (dockerfileBlock) return dockerfileBlock
-        const dataLayerBlock = this.checkForbiddenDataLayerDeps(path, content)
-        if (dataLayerBlock) return dataLayerBlock
 
         // Check if file already exists
         try {
@@ -3446,17 +3386,6 @@ ${preview}
 
         await this.requirePathAccess(path)
 
-        // Mechanical blocks on the new fragment — covers partial edits
-        // that introduce forbidden code without rewriting the file.
-        const authBlock = this.checkForbiddenAuthImports(path, newStr)
-        if (authBlock) return authBlock
-        const itkBlock = this.checkForbiddenItkV2(path, newStr)
-        if (itkBlock) return itkBlock
-        const saBlock = this.checkForbiddenServiceAccountImport(path, newStr)
-        if (saBlock) return saBlock
-        const dockerfileBlock = await this.checkForbiddenDockerfileShape(path, newStr)
-        if (dockerfileBlock) return dockerfileBlock
-
         // Enforce read-before-edit: the model must have read the file to know what to edit.
         // Mirrors claude-vaz FileEditTool.ts:275-287 (readFileState + isPartialView).
         const readState = this.readFileTimestamps.get(path)
@@ -3508,11 +3437,6 @@ ${preview}
         // tests can't drift.
         const { editFileReplace } = await import('./editLiteralReplace')
         const newContent = editFileReplace(content, oldStr, newStr)
-
-        // Mechanical block on forbidden SQL data-layer deps in package.json.
-        // Edits that add Prisma/SQLite/Drizzle to a package.json get rejected.
-        const dataLayerBlock = this.checkForbiddenDataLayerDeps(path, newContent, content)
-        if (dataLayerBlock) return dataLayerBlock
 
         // Cwd-scoped execution: write directly to disk, still return diff JSON so the UI
         // renders the before/after. `alreadyApplied` skips approval queue.
@@ -4418,10 +4342,12 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     })
 
     // ── Domain extractions (SOLID decomposition) ─────────────────────
+    // provision_* tools (managed-platform auth/database/files/deploy) were
+    // deregistered in the dev-only-IDE pivot (2026-07); the managed layer
+    // lives in TM Code Web.
     registerTaskTools(this.ctx)
     registerMemoryTools(this.ctx)
     registerInteractionTools(this.ctx)
-    registerProvisionTools(this.ctx)
 
     // === agent_shell_* (persistent PTY controlled by the agent) ===
     this.tools.set('agent_shell_start', {

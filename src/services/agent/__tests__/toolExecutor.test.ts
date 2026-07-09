@@ -832,11 +832,11 @@ describe('C: Plan mode', () => {
     expect(result).toContain('execute_command')
   })
 
-  it('blocks provision_auth in plan mode', async () => {
+  it('blocks request_credentials in plan mode', async () => {
     const exec = freshExecutor()
     exec.enablePlanMode()
 
-    const result = await exec.execute('provision_auth', {})
+    const result = await exec.execute('request_credentials', {})
 
     expect(result).toContain('Blocked in /plan architect mode')
   })

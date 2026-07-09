@@ -7,7 +7,6 @@
  */
 
 import { useChatStore } from '../../../stores/chatStore'
-import { describePlatformManagedField } from './checks'
 import type { ToolRegistrationContext } from './context'
 import { t } from '@/i18n'
 
@@ -18,7 +17,7 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
     definition: {
       name: 'request_credentials',
       description:
-        'Request API keys, tokens, or other secrets from the developer via a secure form rendered inline in the chat. The form writes the values directly into the project .env (which is otherwise unreadable and unwritable by the agent). Never instruct the developer to create or edit .env manually, and never ask them to paste secrets into the chat. When this tool returns "Credentials saved to .env", the keys ARE written — that result is the confirmation; do not read .env to verify (it is blocked) and do not call this again for the same keys.\n\nUSE FOR: third-party services the developer is integrating into their app (OpenAI, Anthropic, Stripe, SendGrid, Twilio, Resend, generic webhooks, etc.).\n\nSKIP FOR: platform-managed credentials and local TM Code defaults. The platform mints these via dedicated provision/deploy flows — the developer doesn\'t have the values and never will. Mapping: TM_AUTH_*/VITE_TM_*/GIP_*/GCP_* → provision_auth; TMDB_URL/TMDB_TOKEN → deploy/provision_database only for explicit production preflight; DATABASE_URL → local default `file:./dev.db` (do not request); TM_FILES_URL/TM_FILES_TOKEN/TM_FILES_PUBLIC_BASE → provision_files; APP_ID → provision_deploy. Calling this form for any of those is incorrect.',
+        'Request API keys, tokens, or other secrets from the developer via a secure form rendered inline in the chat. The form writes the values directly into the project .env (which is otherwise unreadable and unwritable by the agent). Never instruct the developer to create or edit .env manually, and never ask them to paste secrets into the chat. When this tool returns "Credentials saved to .env", the keys ARE written — that result is the confirmation; do not read .env to verify (it is blocked) and do not call this again for the same keys.\n\nUSE FOR: any service the developer is integrating into their app (OpenAI, Anthropic, Stripe, SendGrid, Twilio, Resend, Firebase, database URLs, generic webhooks, etc.). Only request values the developer actually owns or can obtain; skip values with sensible local defaults (e.g. a local SQLite file URL) unless the developer wants to override them.',
       input_schema: {
         type: 'object',
         properties: {
@@ -91,10 +90,6 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
         }
         if (!/^[A-Z_][A-Z0-9_]*$/.test(id)) {
           return `Field id "${id}" is not a valid env var key (must match /^[A-Z_][A-Z0-9_]*$/).`
-        }
-        const blockReason = describePlatformManagedField(id)
-        if (blockReason) {
-          return blockReason
         }
         if (seenIds.has(id)) {
           return `Duplicate field id "${id}".`

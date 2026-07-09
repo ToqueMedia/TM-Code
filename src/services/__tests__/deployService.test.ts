@@ -191,27 +191,19 @@ describe('resolveDeployUrl — dev mode safety', () => {
 
 describe('deploy headers', () => {
   let deployServiceSource: string
-  let provisionOpsSource: string
 
   beforeAll(() => {
     deployServiceSource = require('fs').readFileSync(
       require('path').join(__dirname, '../deployService.ts'),
       'utf8',
     )
-    provisionOpsSource = require('fs').readFileSync(
-      require('path').join(__dirname, '../agent/toolExecutor/provisionOps.ts'),
-      'utf8',
-    )
+    // provisionOps.ts was covered here too until the dev-only-IDE pivot
+    // (2026-07) deregistered the provision_* tools and deleted the file.
   })
 
   it('deployService uses TM-Code header (not X-TM-Dev-Deploy)', () => {
     expect(deployServiceSource).toContain("'TM-Code': 'dev-deploy'")
     expect(deployServiceSource).not.toContain('X-TM-Dev-Deploy')
-  })
-
-  it('provisionOps uses TM-Code header (not X-TM-Dev-Deploy)', () => {
-    expect(provisionOpsSource).toContain("'TM-Code': 'dev-deploy'")
-    expect(provisionOpsSource).not.toContain('X-TM-Dev-Deploy')
   })
 
   it('deployService calls resolveDeployUrl (not hardcoding URL)', () => {

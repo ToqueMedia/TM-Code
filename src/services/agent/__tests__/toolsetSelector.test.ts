@@ -26,7 +26,6 @@ import {
   DELEGATE, COLLECT_RESULTS,
   SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,
   UPDATE_SESSION_MEMORY, READ_SESSION_MEMORY,
-  PROVISION_AUTH, PROVISION_DATABASE, PROVISION_FILES, PROVISION_DEPLOY,
   REQUEST_CREDENTIALS,
 } from '../toolNames'
 import type OpenAI from 'openai'
@@ -44,7 +43,6 @@ const ALL_NAMES = [
   DELEGATE, COLLECT_RESULTS,
   SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,
   UPDATE_SESSION_MEMORY, READ_SESSION_MEMORY,
-  PROVISION_AUTH, PROVISION_DATABASE, PROVISION_FILES, PROVISION_DEPLOY,
   REQUEST_CREDENTIALS,
 ]
 
@@ -127,8 +125,8 @@ describe('ToolsetSelector (on-demand)', () => {
       expect(selector.isActive(READ_SKILL)).toBe(true)
       expect(selector.isActive(WRITE_FILE)).toBe(true)
 
-      const result = selector.requestTools([PROVISION_DEPLOY])
-      expect(result.added).toEqual([PROVISION_DEPLOY])
+      const result = selector.requestTools([WEB_FETCH])
+      expect(result.added).toEqual([WEB_FETCH])
       expect(result.denied).toEqual([])
     })
   })
@@ -136,9 +134,9 @@ describe('ToolsetSelector (on-demand)', () => {
   describe('request_tools', () => {
     it('activates any registered inactive tool on demand', () => {
       const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')
-      const result = selector.requestTools([EDIT_FILE, WRITE_FILE, CREATE_FILE, DELETE_FILE, PROVISION_DEPLOY])
+      const result = selector.requestTools([EDIT_FILE, WRITE_FILE, CREATE_FILE, DELETE_FILE, WEB_FETCH])
 
-      expect(result.added).toEqual([EDIT_FILE, WRITE_FILE, CREATE_FILE, DELETE_FILE, PROVISION_DEPLOY])
+      expect(result.added).toEqual([EDIT_FILE, WRITE_FILE, CREATE_FILE, DELETE_FILE, WEB_FETCH])
       expect(result.denied).toEqual([])
       expect(result.unknown).toEqual([])
       expect(selector.isActive(WRITE_FILE)).toBe(true)
@@ -147,7 +145,7 @@ describe('ToolsetSelector (on-demand)', () => {
         WRITE_FILE,
         CREATE_FILE,
         DELETE_FILE,
-        PROVISION_DEPLOY,
+        WEB_FETCH,
       ]))
     })
 
@@ -203,23 +201,21 @@ describe('ToolsetSelector (on-demand)', () => {
       // (perguntas de verificação respondem-se pelo estado real: BD, git log)
       // — pedi-lo é um no-op, não uma adição.
       expect(names).toContain(EXECUTE_COMMAND)
-      const result = selector.requestTools([EDIT_FILE, EXECUTE_COMMAND, PROVISION_DEPLOY])
-      expect(result.added).toEqual([EDIT_FILE, PROVISION_DEPLOY])
+      const result = selector.requestTools([EDIT_FILE, EXECUTE_COMMAND, REQUEST_CREDENTIALS])
+      expect(result.added).toEqual([EDIT_FILE, REQUEST_CREDENTIALS])
       expect(result.denied).toEqual([])
     })
 
     it('hard explicit read-only denies mutating/shell tools only', () => {
       const selector = new ToolsetSelector(ALL_NAMES, 'analysis_readonly', true)
-      const result = selector.requestTools([EDIT_FILE, PROVISION_DEPLOY, START_DEV_SERVER, EXECUTE_COMMAND])
+      const result = selector.requestTools([EDIT_FILE, WEB_FETCH, START_DEV_SERVER, EXECUTE_COMMAND])
 
       // execute_command já está no set inicial do perfil — não é re-adicionado.
-      // provision_deploy deixou de ser categoria especial do selector (corte
-      // da camada MANAGED-PLATFORM, 2026-07): PROVISION_TOOLS agora contém só
-      // request_credentials. Enquanto o executor ainda registar provision_*,
-      // o nome comporta-se como qualquer tool registada — entregue on-demand.
-      expect(result.added).toEqual([PROVISION_DEPLOY])
+      // web_fetch não pertence a nenhuma categoria bloqueada — comporta-se
+      // como qualquer tool registada, entregue on-demand mesmo em read-only.
+      expect(result.added).toEqual([WEB_FETCH])
       expect(result.denied).toEqual(expect.arrayContaining([EDIT_FILE, START_DEV_SERVER]))
-      expect(result.denied).not.toContain(PROVISION_DEPLOY)
+      expect(result.denied).not.toContain(WEB_FETCH)
       expect(selector.isActive(EDIT_FILE)).toBe(false)
       expect(selector.isActive(EXECUTE_COMMAND)).toBe(true)
       expect(selector.getDeniedNames()).toEqual(expect.arrayContaining([EDIT_FILE, START_DEV_SERVER]))
@@ -230,8 +226,9 @@ describe('ToolsetSelector (on-demand)', () => {
 
       expect(selector.isActive(EDIT_FILE)).toBe(false)
       expect(selector.isActive(WRITE_FILE)).toBe(false)
-      expect(selector.isActive(PROVISION_DEPLOY)).toBe(false)
-      expect(selector.isActive(PROVISION_AUTH)).toBe(false)
+      // request_credentials (grupo PROVISION do starter) escreve no .env —
+      // bloqueado sob read-only explícito, tal como as shell tools do starter.
+      expect(selector.isActive(REQUEST_CREDENTIALS)).toBe(false)
       expect(selector.isActive(START_DEV_SERVER)).toBe(false)
       expect(selector.isActive(AGENT_SHELL_START)).toBe(false)
       expect(selector.isActive(EXECUTE_COMMAND_BACKGROUND)).toBe(false)

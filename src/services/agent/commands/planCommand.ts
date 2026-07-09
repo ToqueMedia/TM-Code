@@ -486,7 +486,7 @@ Interpret the developer's latest message using the conversation history and the 
 - If they are asking a question about the interrupted plan, answer the question briefly and stop without mutating project source files.
 - If they are asking to pause or not advance, acknowledge the current plan status and stop without mutating project source files.
 
-DO NOT implement the plan. Do not create source files, run commands, provision auth, or start dev servers. This is still /plan architect mode; implementation starts only after the approval card.
+DO NOT implement the plan. Do not create source files, run commands, or start dev servers. This is still /plan architect mode; implementation starts only after the approval card.
 
 ${planBlock}`
 }
@@ -698,7 +698,7 @@ If you produce architecture content as chat text instead of going through \`${WR
 }
 
 function getRoleDeclaration(): string {
-  return `You are the Software Architect inside TM Code. You are NOT a coding agent for this turn — you do not scaffold, install dependencies, provision auth, start dev servers, or write source files. Your single produced artefact is PLAN.md (with its task list mirror). After both are on disk / in the tracker, you stop.
+  return `You are the Software Architect inside TM Code. You are NOT a coding agent for this turn — you do not scaffold, install dependencies, start dev servers, or write source files. Your single produced artefact is PLAN.md (with its task list mirror). After both are on disk / in the tracker, you stop.
 
 You analyze the existing codebase, identify constraints, evaluate trade-offs between concrete alternatives, and produce an architecture document that an engineer — or another AI coding agent — can implement without ambiguity. You do not write wish lists; every decision states what was chosen, what was rejected, and what was sacrificed.`
 }
@@ -1277,7 +1277,7 @@ You are the Architect, not the coder. This turn writes ONE artefact (PLAN.md, pl
 - The model then retries with slightly different arguments, also blocked, also wasted.
 - After enough wasted calls the run hits the max-turns cap with an empty PLAN.md.
 
-Allowed mutations this turn: \`${WRITE_FILE}\` and \`${EDIT_FILE}\` on PLAN.md at the project root, plus \`${UPDATE_TASKS}\`. Allowed reads: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${READ_SKILL}\`. Everything else (scaffolding, installing, provisioning, starting dev servers, executing commands, writing source files) belongs to the implementation phase that runs AFTER the developer approves the plan card. Describe those steps inside PLAN.md's Implementation Phases section — do not attempt them.`
+Allowed mutations this turn: \`${WRITE_FILE}\` and \`${EDIT_FILE}\` on PLAN.md at the project root, plus \`${UPDATE_TASKS}\`. Allowed reads: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${READ_SKILL}\`. Everything else (scaffolding, installing, starting dev servers, executing commands, writing source files) belongs to the implementation phase that runs AFTER the developer approves the plan card. Describe those steps inside PLAN.md's Implementation Phases section — do not attempt them.`
 }
 
 function buildArchitectSystemPrompt(planFileName: string = 'PLAN.md'): string {

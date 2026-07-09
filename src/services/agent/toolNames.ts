@@ -63,11 +63,9 @@ export const COLLECT_RESULTS = 'collect_results'
 // Internal task tracking
 export const UPDATE_TASKS = 'update_tasks'
 
-// Platform integrations
-export const PROVISION_AUTH = 'provision_auth'
-export const PROVISION_DATABASE = 'provision_database'
-export const PROVISION_FILES = 'provision_files'
-export const PROVISION_DEPLOY = 'provision_deploy'
+// User interaction
+// (provision_auth/database/files/deploy were removed in the dev-only-IDE
+// pivot, 2026-07 — the managed layer lives in TM Code Web.)
 export const REQUEST_CREDENTIALS = 'request_credentials'
 export const ASK_USER_QUESTION = 'ask_user_question'
 
@@ -83,10 +81,10 @@ export const READ_SESSION_MEMORY = 'read_session_memory'
 
 /**
  * Every tool name registered by ToolExecutor. Walked by
- * `scripts/verify-skills.ts` to assert that every `provision_auth`-style
- * reference inside a SKILL.md still points at a real tool — a removed
- * or renamed tool that's still mentioned in markdown becomes a CI
- * failure rather than a silent prompt regression.
+ * `scripts/verify-skills.ts` to assert that every tool-name reference
+ * inside a SKILL.md still points at a real tool — a removed or renamed
+ * tool that's still mentioned in markdown becomes a CI failure rather
+ * than a silent prompt regression.
  *
  * Keep in sync with `ToolExecutor.tools.set(...)` registrations: the
  * verifier walks both surfaces and reports drift in either direction.
@@ -102,7 +100,7 @@ export const TOOL_NAMES = [
   WEB_SEARCH, WEB_FETCH,
   DELEGATE, COLLECT_RESULTS,
   UPDATE_TASKS,
-  PROVISION_AUTH, PROVISION_DATABASE, PROVISION_FILES, PROVISION_DEPLOY, REQUEST_CREDENTIALS, ASK_USER_QUESTION,
+  REQUEST_CREDENTIALS, ASK_USER_QUESTION,
   SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY, UPDATE_SESSION_MEMORY, READ_SESSION_MEMORY,
 ] as const
 

@@ -3,7 +3,7 @@ import { ToolsetSelector, REQUEST_TOOLS_NAME, BUGFIX_BASE } from '../toolsetSele
 import {
   SEARCH_FILES, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EDIT_FILE, GLOB,
   EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS, UPDATE_SESSION_MEMORY,
-  WRITE_FILE, START_DEV_SERVER, PROVISION_AUTH,
+  WRITE_FILE, START_DEV_SERVER, REQUEST_CREDENTIALS,
   READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
 } from '../toolNames'
 import {
@@ -292,7 +292,7 @@ describe('query retry handling', () => {
       READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
       SEARCH_FILES, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EDIT_FILE, GLOB,
       EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS, UPDATE_SESSION_MEMORY,
-      WRITE_FILE, START_DEV_SERVER, PROVISION_AUTH,
+      WRITE_FILE, START_DEV_SERVER, REQUEST_CREDENTIALS,
     ]
     const create = makeStreamingCreate([
       { choices: [{ delta: { content: 'done' } }] },
@@ -328,7 +328,7 @@ describe('query retry handling', () => {
     expect(sentToolNames).toContain(REQUEST_TOOLS_NAME)
     expect(sentToolNames).not.toContain(WRITE_FILE)
     expect(sentToolNames).not.toContain(START_DEV_SERVER)
-    expect(sentToolNames).not.toContain(PROVISION_AUTH)
+    expect(sentToolNames).not.toContain(REQUEST_CREDENTIALS)
   })
 
   it('retries provider credential/configuration errors 3 times with 30s backoff before failing', async () => {

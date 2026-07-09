@@ -1587,8 +1587,6 @@ const en = {
   'e2e.starting': 'Starting browser session...',
 
   // ── Auth Command ──────────────────────────────────
-  'auth.proxySkillMissing': 'Could not load the auth-proxy skill. The bundled resources may be missing — reinstall TM Code if this persists.',
-  'auth.googleSkillMissing': 'Could not load the google-signin skill. Proceeding with email/password only — re-add `#auth-google` once the skill is available.',
   'auth.designSkillMissing': 'Could not load the frontend-design skill. Proceeding without it — the UI will use the model\'s default aesthetics.',
 
   // ── Debug Command ─────────────────────────────────
@@ -3494,8 +3492,6 @@ const pt: Record<keyof typeof en, string> = {
   'e2e.starting': 'A iniciar sessão do navegador...',
 
   // ── Auth Command ──────────────────────────────────
-  'auth.proxySkillMissing': 'Não foi possível carregar a skill auth-proxy. Os recursos podem estar em falta — reinstale o TM Code.',
-  'auth.googleSkillMissing': 'Não foi possível carregar a skill google-signin. A prosseguir apenas com email/password — re-adicione `#auth-google` quando a skill estiver disponível.',
   'auth.designSkillMissing': 'Não foi possível carregar a skill frontend-design. A prosseguir sem ela — a UI usará a estética padrão do modelo.',
 
   // ── Debug Command ─────────────────────────────────
