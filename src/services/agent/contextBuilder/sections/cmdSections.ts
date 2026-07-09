@@ -27,7 +27,7 @@ import {
   extractPackageSummary,
 } from '../projectUtils'
 import type { CmdPromptContext } from '../types'
-import { composeScaffoldingAwareSection } from './chatSections'
+import { composeHashtagSkillsSection } from './chatSections'
 import {
   sharedDoingTasksCore,
   sharedIdentityReminder,
@@ -178,45 +178,32 @@ Git:
 }
 
 /**
- * Cwd-scoped equivalent of `getAppliedScaffoldingSection`. Detects hashtags
- * on the latest user message and runs filesystem-based scaffolding
- * detection on the cwd, then inlines the matched skills' CRITICAL blocks.
+ * Cwd-scoped equivalent of `getHashtagSkillsSection`. Detects hashtags
+ * on the latest user message, then inlines the matched skills' CRITICAL
+ * blocks.
  *
- * Ensures cwd-scoped prompt builds get the same scaffolding-aware
+ * Ensures cwd-scoped prompt builds get the same hashtag-aware
  * guardrails — when a user typed a skill hashtag, this path once missed
  * the detection and the model improvised from prior instead of the skill
  * recipe, producing scaffolds with placeholder strings
  * (real failure case 2026-05-12).
  */
-export async function getCmdAppliedScaffoldingSection(
+export async function getCmdHashtagSkillsSection(
   cwd: string,
   userMessage: string | undefined,
 ): Promise<string | null> {
   const hashtagSkills = skillsFromHashtags(userMessage)
 
-  let applied: string[] = []
-  let evidence: Record<string, string[]> = {}
-  try {
-    const { detectScaffolding } = await import('../../../scaffoldingDetector')
-    const detected = await detectScaffolding(cwd)
-    applied = detected.applied
-    evidence = detected.evidence
-  } catch {
-    // Cwd-scoped execution legitimately runs in non-project directories. A
-    // missing project here is not an error; just means no scaffolding
-    // detection is possible, so we fall through to the hashtag-only path.
-  }
+  if (hashtagSkills.length === 0) return null
 
-  if (applied.length === 0 && hashtagSkills.length === 0) return null
-
-  // Warm the skill content cache so composeScaffoldingAwareSection can
+  // Warm the skill content cache so composeHashtagSkillsSection can
   // read CRITICAL blocks. loadSkills is idempotent and cached — the
   // subsequent getCmdSkillsSection call will hit the same cache for free.
   try {
     await SkillService.getInstance().loadSkills(cwd, undefined, 'cmd')
   } catch { /* non-critical */ }
 
-  return composeScaffoldingAwareSection(applied, evidence, hashtagSkills)
+  return composeHashtagSkillsSection(hashtagSkills)
 }
 
 export async function getCmdSkillsSection(ctx: CmdPromptContext): Promise<string | null> {

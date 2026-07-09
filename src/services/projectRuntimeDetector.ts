@@ -1,28 +1,102 @@
 /**
- * Runtime detector — infers a DeployPlan from a project's file layout.
+ * Project runtime detector — infers a project's runtime shape (static SPA,
+ * SSR framework, backend container, fullstack composite) from its file
+ * layout.
  *
- * The core is a pure function over an FsView (`detectDeployPlan`) so the
+ * History: this lived in `src/services/deploy/runtimeDetector.ts` as the
+ * front-end of the managed Publish pipeline. The pipeline was removed with
+ * the dev-only-IDE pivot (v1.0.0 — the managed product lives in TM Code
+ * Web), but the DETECTION itself is generic project-shape analysis that the
+ * collab Live Preview tunnel still depends on: it decides between running a
+ * dev server (backend/SSR present) and serving a static build, and where a
+ * static build's output directory is. The module moved here with the
+ * Publish-specific response fields (`phase1Supported`, publish warnings,
+ * `.toquemedia-deploy.json` persistence) stripped.
+ *
+ * The core is a pure function over an FsView (`detectRuntimePlan`) so the
  * detection logic is exhaustively testable without hitting Tauri. The
  * `detectFromProjectPath` helper wires it to the real filesystem via
  * `invoke('read_file', ...)`.
  *
  * Signal priority (first match wins):
  *   1. Monorepo workspaces + client/server dirs   → composite
- *   2. next.js in deps + output:'standalone'       → next-standalone (Cloud Run)
+ *   2. next.js in deps                            → next-standalone (Node server)
  *   3. nuxt in deps                               → cf-ssr nuxt
  *   4. @sveltejs/kit in deps                      → cf-ssr sveltekit
  *   5. astro in deps + config has output:server   → cf-ssr astro
  *   6. astro in deps (default static)             → static-spa
  *   7. @angular/core in deps                      → static-spa (outputDir from angular.json)
- *   8. vite in deps + react/vue/svelte            → static-spa
- *   9. express/fastify/@nestjs/core in deps       → workers-container Node
- *  10. Non-Node runtimes (Python/Go/Rust/Ruby/Java) — out of scope for Phase 1; returns null.
- *
- * Phase 1 deploys only `static-spa` end-to-end. Non-static plans are still
- * returned by the detector so the UI can surface "this template detected,
- * deploy support comes in Phase N".
+ *   8. vite in deps + react/vue/svelte            → static-spa (composite when a
+ *      co-located backend + Dockerfile are present)
+ *   9. express/fastify/@nestjs/core in deps       → node-backend container shape
+ *  10. Non-Node runtimes (Python/Go/Rust)         → backend container shape
  */
-import type { DeployPlan, StaticSpaPlan, CfSsrPlan, NextStandalonePlan } from './deployPlan'
+import { invoke } from '@/utils/invokeMetrics'
+
+// ── Plan shapes ──────────────────────────────────────────────
+// (Formerly `deploy/deployPlan.ts` — trimmed to the shapes the detector
+// emits; consumers only branch on `kind` and read static output dirs.)
+
+export type SsrAdapter = 'sveltekit' | 'nuxt' | 'astro'
+
+export type ContainerRuntime =
+  | { lang: 'node'; version: '20' | '22' }
+  | { lang: 'python'; version: '3.12' }
+  | { lang: 'go'; version: '1.22' }
+  | { lang: 'rust'; edition: '2021' }
+  | { lang: 'ruby' | 'java'; version: string }
+
+/** Pure static SPA — Vite/Angular/Astro-static builds to a flat output dir. */
+export interface StaticSpaPlan {
+  kind: 'static-spa'
+  /** Path relative to project root, e.g. 'dist' or 'dist/my-app/browser'. */
+  outputDir: string
+  /** File served for unmatched routes (SPA routing). Default 'index.html'. */
+  spaFallback?: string
+}
+
+/** Framework-SSR build (framework emits static assets + a server entry). */
+export interface CfSsrPlan {
+  kind: 'cf-ssr'
+  adapter: SsrAdapter
+  /** Static assets dir (rendered HTML, hashed JS/CSS). */
+  assetsDir: string
+  /** Path to the framework-emitted server/worker entry. */
+  workerEntry: string
+}
+
+/** User-owned backend server (Express/Fastify/Nest, or non-Node runtimes). */
+export interface WorkersContainerPlan {
+  kind: 'workers-container'
+  runtime: ContainerRuntime
+  /** Port the user's server listens on. */
+  port: number
+  /** Names of env vars the server expects at runtime. */
+  envVars: string[]
+}
+
+/** Next.js — one standalone Node server serves SSR + routes + assets. */
+export interface NextStandalonePlan {
+  kind: 'next-standalone'
+  /** Port the standalone server listens on (server.js honours PORT). */
+  port: number
+}
+
+/** Frontend + backend side by side; /api goes to the backend. */
+export interface CompositePlan {
+  kind: 'composite'
+  frontend: StaticSpaPlan | CfSsrPlan
+  backend: WorkersContainerPlan
+  /** URL prefix routed to the backend. Default '/api'. */
+  apiPrefix: string
+}
+
+export type RuntimePlan =
+  | StaticSpaPlan
+  | CfSsrPlan
+  | WorkersContainerPlan
+  | CompositePlan
+  | NextStandalonePlan
 
 // ── FsView: minimal interface the detector needs ─────────────
 export interface FsView {
@@ -36,17 +110,9 @@ export interface FsView {
 
 export interface DetectionResult {
   /** The inferred plan, or null when the detector cannot tell. */
-  plan: DeployPlan | null
-  /** Human-readable explanation, for UI surfaces and debugging. */
+  plan: RuntimePlan | null
+  /** Human-readable explanation, for debugging. */
   reason: string
-  /** True iff Phase 1 can actually deploy this plan today. */
-  phase1Supported: boolean
-  /**
-   * Non-fatal observations the UI should surface before publishing.
-   * Example: a flat fullstack project where the SPA is deployable but a
-   * sibling backend won't be — the user should know before clicking Publish.
-   */
-  warnings: string[]
 }
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -73,14 +139,13 @@ function hasWorkspaces(pkg: PackageJson | null): boolean {
 /**
  * Detect a backend living alongside the frontend in a flat project layout.
  *
- * The composite detection at the top of `detectDeployPlan` covers the
+ * The composite detection at the top of `detectRuntimePlan` covers the
  * canonical workspaces+client+server shape. But many user-scaffolded
  * projects keep the frontend at the root and put the backend in a sibling
- * directory without declaring workspaces — e.g. the `react-express-prisma-auth`
- * template's runtime shape, or anything the agent scaffolds when asked for
- * "add auth" on a Vite project. The detector still classifies these as
- * static-spa (frontend deploys fine), but the user should know the backend
- * won't go with it before clicking Publish.
+ * directory without declaring workspaces. The detector still classifies
+ * these as static-spa when no Dockerfile is present, so consumers that need
+ * a LIVE backend (Live Preview) must check for the sibling dir themselves —
+ * this helper flags the shape.
  *
  * Signals checked:
  *  - Backend deps in the root package.json: express / fastify / @nestjs/core
@@ -88,7 +153,7 @@ function hasWorkspaces(pkg: PackageJson | null): boolean {
  *  - Sibling directory `server/` or `backend/` (presence of its
  *    package.json or a TS entry)
  */
-function detectHiddenBackend(fs: FsView, deps: Set<string>): string | null {
+function detectHiddenBackend(fs: FsView, deps: Set<string>): boolean {
   const backendDeps = ['express', 'fastify', '@nestjs/core', 'hono', 'koa', 'restify']
   const hasBackendDep = backendDeps.some((d) => deps.has(d))
   const hasServerDir =
@@ -97,41 +162,7 @@ function detectHiddenBackend(fs: FsView, deps: Set<string>): string | null {
     fs.exists('server/index.ts') ||
     fs.exists('server/index.js') ||
     fs.exists('backend/index.ts')
-  if (!hasBackendDep && !hasServerDir) return null
-  // Reached only on the static-spa fallback path — i.e. the project has a
-  // backend but no Dockerfile, so Cloud Build has nothing to package.
-  // Backend deploy IS supported (composite flow → Cloud Run); the missing
-  // piece is the Dockerfile + the publish-ready data layer. The
-  // `#deploy-backend` hashtag scaffolds both — surfacing the exact
-  // recovery path is more useful than the previous "support is coming"
-  // copy, which read as a feature gap when it was actually a project
-  // preparation gap.
-  return (
-    'Detected a backend (server/ + Express/Fastify/Hono) but no Dockerfile at the project root. ' +
-    'Without it, Publish can only ship the static frontend and `/api` calls will fail in production. ' +
-    'Ask the agent `#deploy-backend` to scaffold the Dockerfile and switch the data layer to the platform DB — then re-publish.'
-  )
-}
-
-/** Read one of next.config.{js,mjs,ts,cjs}, returning its raw text. */
-function readNextConfig(fs: FsView): string | null {
-  for (const ext of ['js', 'mjs', 'ts', 'cjs']) {
-    const text = fs.readText(`next.config.${ext}`)
-    if (text) return text
-  }
-  return null
-}
-
-/**
- * True when the Next config opts into `output: 'standalone'` — the only
- * mode the container deploy supports (it's what emits `.next/standalone/
- * server.js`). Tolerant of single/double quotes and whitespace. A regex is
- * fine here: next.config is JS we can't safely eval, and the shape is
- * unambiguous enough that an AST parse isn't worth the cost.
- */
-function nextHasStandaloneOutput(config: string | null): boolean {
-  if (!config) return false
-  return /output\s*:\s*['"]standalone['"]/.test(config)
+  return hasBackendDep || hasServerDir
 }
 
 /** Read one of astro.config.{ts,mjs,js,cjs}, returning its raw text. */
@@ -171,22 +202,22 @@ function detectAngularOutputDir(fs: FsView): string {
     proj?.targets?.build?.options?.outputPath
   if (!outputPath) return `dist/${firstName}`
   // Angular 17+ writes to <outputPath>/browser by default; older to <outputPath>.
-  // We don't know the version cheaply; both work because the strategy module
-  // will look for index.html under the given path and walk one level if not found.
+  // Both work because consumers look for index.html under the given path and
+  // walk one level if not found.
   return outputPath
 }
 
 // ── Core detector ────────────────────────────────────────────
 
-export function detectDeployPlan(fs: FsView): DetectionResult {
+export function detectRuntimePlan(fs: FsView): DetectionResult {
   const pkg = fs.readJson<PackageJson>('package.json')
 
   // 1. Composite (monorepo) — workspaces + client/server dirs ─
   if (pkg && hasWorkspaces(pkg) && fs.exists('client/package.json') && fs.exists('server/package.json')) {
     const clientFs = scopedFs(fs, 'client')
     const serverFs = scopedFs(fs, 'server')
-    const clientResult = detectDeployPlan(clientFs)
-    const serverResult = detectDeployPlan(serverFs)
+    const clientResult = detectRuntimePlan(clientFs)
+    const serverResult = detectRuntimePlan(serverFs)
     if (
       clientResult.plan &&
       (clientResult.plan.kind === 'static-spa' || clientResult.plan.kind === 'cf-ssr') &&
@@ -204,9 +235,7 @@ export function detectDeployPlan(fs: FsView): DetectionResult {
           backend: serverResult.plan,
           apiPrefix: '/api',
         },
-        reason: 'Fullstack project detected. Publish support for fullstack projects is coming soon.',
-        phase1Supported: false,
-        warnings: [],
+        reason: 'Fullstack monorepo detected (client + server workspaces).',
       }
     }
     // Workspaces exist but parts don't classify cleanly — fall through to
@@ -216,41 +245,16 @@ export function detectDeployPlan(fs: FsView): DetectionResult {
   const deps = allDeps(pkg)
 
   // 2. Next.js ─────────────────────────────────────────────────
-  // Next deploys as a standalone Node server on a Cloudflare Container
-  // (Cloud Run) — `output: 'standalone'` emits `.next/standalone/server.js`,
-  // which the container runs and which serves SSR + route handlers + its own
-  // static assets. Without that config the build never produces a server to
-  // run, so we detect the plan either way but only mark it deployable when
-  // standalone output is set, surfacing a precise fix otherwise.
   if (deps.has('next')) {
     const plan: NextStandalonePlan = { kind: 'next-standalone', port: 8080 }
-    // `output: 'standalone'` is required (it emits the self-contained server
-    // the container runs), but we no longer GATE on it — the deploy flow
-    // injects it on publish (see deployService.ensureNextStandaloneConfig),
-    // mirroring the auto-generated Dockerfile. So a Next project is always
-    // deployable; we just warn when we'll be editing the config.
-    const hasStandalone = nextHasStandaloneOutput(readNextConfig(fs))
-    return {
-      plan,
-      reason: hasStandalone
-        ? 'Next.js project detected (output: standalone).'
-        : "Next.js project detected. Publish will enable `output: 'standalone'` in your next.config.",
-      phase1Supported: true,
-      warnings: hasStandalone
-        ? []
-        : [
-            "next.config has no `output: 'standalone'` — Publish will add it (required for the container build).",
-          ],
-    }
+    return { plan, reason: 'Next.js project detected.' }
   }
 
   // 3. Nuxt ────────────────────────────────────────────────────
   if (deps.has('nuxt')) {
     return {
       plan: { kind: 'cf-ssr', adapter: 'nuxt', assetsDir: '.output/public', workerEntry: '.output/server/index.mjs' },
-      reason: 'Nuxt project detected. Publish support for Nuxt is coming soon.',
-      phase1Supported: false,
-      warnings: [],
+      reason: 'Nuxt project detected.',
     }
   }
 
@@ -258,9 +262,7 @@ export function detectDeployPlan(fs: FsView): DetectionResult {
   if (deps.has('@sveltejs/kit')) {
     return {
       plan: { kind: 'cf-ssr', adapter: 'sveltekit', assetsDir: '.svelte-kit/cloudflare', workerEntry: '.svelte-kit/cloudflare/_worker.js' },
-      reason: 'SvelteKit project detected. Publish support for SvelteKit is coming soon.',
-      phase1Supported: false,
-      warnings: [],
+      reason: 'SvelteKit project detected.',
     }
   }
 
@@ -268,45 +270,31 @@ export function detectDeployPlan(fs: FsView): DetectionResult {
   if (deps.has('astro')) {
     const mode = detectAstroOutputMode(readAstroConfig(fs))
     if (mode === 'static') {
-      const hiddenBackend = detectHiddenBackend(fs, deps)
       return {
         plan: { kind: 'static-spa', outputDir: 'dist', spaFallback: 'index.html' },
         reason: 'Astro (static) project detected.',
-        phase1Supported: true,
-        warnings: hiddenBackend ? [hiddenBackend] : [],
       }
     }
     return {
       plan: { kind: 'cf-ssr', adapter: 'astro', assetsDir: 'dist/client', workerEntry: 'dist/_worker.js' },
-      reason: 'Astro project with server-rendered output detected. Publish support is coming soon.',
-      phase1Supported: false,
-      warnings: [],
+      reason: 'Astro project with server-rendered output detected.',
     }
   }
 
   // 6. Angular ─────────────────────────────────────────────────
   if (deps.has('@angular/core')) {
-    const hiddenBackend = detectHiddenBackend(fs, deps)
     return {
       plan: { kind: 'static-spa', outputDir: detectAngularOutputDir(fs), spaFallback: 'index.html' },
       reason: 'Angular project detected.',
-      phase1Supported: true,
-      warnings: hiddenBackend ? [hiddenBackend] : [],
     }
   }
 
   // 7. Vite SPA ────────────────────────────────────────────────
   if (deps.has('vite') && (deps.has('react') || deps.has('vue') || deps.has('svelte') || deps.has('solid-js') || deps.has('preact'))) {
     const hiddenBackend = detectHiddenBackend(fs, deps)
-    // Composite-ready: hidden backend exists AND a Dockerfile is at the
-    // project root. The build steps are inlined in the worker
-    // (`cloudBuildSubmit.ts` ships `docker build`+`push` directly), so
-    // `cloudbuild.yaml` is NOT a deploy prerequisite — only the Dockerfile
-    // is. The earlier `&& fs.exists('cloudbuild.yaml')` guard came from an
-    // older design where the worker read the YAML server-side; that path
-    // was removed but the guard wasn't, demoting valid composite projects
-    // to static-spa and surfacing the stale "backend deploy is coming"
-    // warning. Dropping the YAML check restores the composite flow.
+    // Fullstack flat layout: frontend at the root + co-located backend with
+    // a Dockerfile. Classified composite so consumers know a backend rides
+    // along with the static frontend.
     if (hiddenBackend && fs.exists('Dockerfile')) {
       return {
         plan: {
@@ -320,16 +308,12 @@ export function detectDeployPlan(fs: FsView): DetectionResult {
           },
           apiPrefix: '/api',
         },
-        reason: 'Fullstack project detected (Vite + backend container) — ready for one-click deploy.',
-        phase1Supported: true,
-        warnings: [],
+        reason: 'Fullstack project detected (Vite frontend + backend container).',
       }
     }
     return {
       plan: { kind: 'static-spa', outputDir: 'dist', spaFallback: 'index.html' },
       reason: 'Frontend SPA project detected (Vite).',
-      phase1Supported: true,
-      warnings: hiddenBackend ? [hiddenBackend] : [],
     }
   }
 
@@ -342,45 +326,35 @@ export function detectDeployPlan(fs: FsView): DetectionResult {
         port: 3000,
         envVars: [],
       },
-      reason: 'Backend project detected (Express / Fastify / NestJS). Publish support for backends is coming soon.',
-      phase1Supported: false,
-      warnings: [],
+      reason: 'Backend project detected (Express / Fastify / NestJS).',
     }
   }
 
-  // 9. Non-Node runtimes — Phase 5 territory ───────────────────
+  // 9. Non-Node runtimes ───────────────────────────────────────
   if (fs.exists('pyproject.toml') || fs.exists('requirements.txt')) {
     return {
       plan: { kind: 'workers-container', runtime: { lang: 'python', version: '3.12' }, port: 8000, envVars: [] },
-      reason: 'Python project detected. Publish support is coming soon.',
-      phase1Supported: false,
-      warnings: [],
+      reason: 'Python project detected.',
     }
   }
   if (fs.exists('go.mod')) {
     return {
       plan: { kind: 'workers-container', runtime: { lang: 'go', version: '1.22' }, port: 8080, envVars: [] },
-      reason: 'Go project detected. Publish support is coming soon.',
-      phase1Supported: false,
-      warnings: [],
+      reason: 'Go project detected.',
     }
   }
   if (fs.exists('Cargo.toml')) {
     return {
       plan: { kind: 'workers-container', runtime: { lang: 'rust', edition: '2021' }, port: 8080, envVars: [] },
-      reason: 'Rust project detected. Publish support is coming soon.',
-      phase1Supported: false,
-      warnings: [],
+      reason: 'Rust project detected.',
     }
   }
 
   return {
     plan: null,
     reason: pkg
-      ? 'Could not figure out how to publish this project from its package.json. Make sure it uses a supported framework.'
+      ? 'Could not classify this project from its package.json.'
       : 'No package.json or known project manifest found at the project root.',
-    phase1Supported: false,
-    warnings: [],
   }
 }
 
@@ -396,8 +370,6 @@ function scopedFs(fs: FsView, prefix: string): FsView {
 
 // ── Tauri-backed FsView + entry helper ───────────────────────
 
-import { invoke } from '@/utils/invokeMetrics'
-
 class TauriFsView implements FsView {
   private cache = new Map<string, string | null>()
   constructor(private readonly projectPath: string) {}
@@ -405,7 +377,7 @@ class TauriFsView implements FsView {
   private read(relativePath: string): string | null {
     if (this.cache.has(relativePath)) return this.cache.get(relativePath)!
     // Tauri's read_file is async; the detector is sync — so the entry helper
-    // pre-loads candidate files into the cache before calling detectDeployPlan.
+    // pre-loads candidate files into the cache before calling detectRuntimePlan.
     return null
   }
 
@@ -451,10 +423,6 @@ export async function detectFromProjectPath(projectPath: string): Promise<Detect
   await view.preload([
     'package.json',
     'angular.json',
-    'next.config.js',
-    'next.config.mjs',
-    'next.config.ts',
-    'next.config.cjs',
     'astro.config.ts',
     'astro.config.mjs',
     'astro.config.js',
@@ -464,7 +432,6 @@ export async function detectFromProjectPath(projectPath: string): Promise<Detect
     'go.mod',
     'Cargo.toml',
     'Dockerfile',
-    'cloudbuild.yaml',
     'client/package.json',
     'server/package.json',
     'client/angular.json',
@@ -477,5 +444,5 @@ export async function detectFromProjectPath(projectPath: string): Promise<Detect
     'server/index.js',
     'backend/index.ts',
   ])
-  return detectDeployPlan(view)
+  return detectRuntimePlan(view)
 }

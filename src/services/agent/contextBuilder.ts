@@ -73,7 +73,7 @@ import {
 } from './contextBuilder/sections/sharedSections'
 import {
   getActivePlanSection,
-  getAppliedScaffoldingSection,
+  getHashtagSkillsSection,
   getBackgroundAgentsSection as getTeamSection,
   getBackgroundCommandsSection,
   getClosedLoopSection,
@@ -109,7 +109,7 @@ import {
   getTrackerStateSection,
 } from './contextBuilder/sections/chatSections'
 import {
-  getCmdAppliedScaffoldingSection,
+  getCmdHashtagSkillsSection,
   getCmdClosedLoopSection,
   getCmdCompletionContractSection,
   getCmdConstraintsSection,
@@ -428,7 +428,7 @@ class ContextBuilder {
    * Extracted from `buildSystemPrompt` so it can be started as a Promise
    * at the top of the prompt build and awaited at the section render
    * point — the selector model call (~300-600 ms) then overlaps with
-   * disk reads, scaffolding detection, etc. instead of serialising on
+   * disk reads, git context gathering, etc. instead of serialising on
    * the critical path.
    *
    * Failure path returns the inject-all fallback (`null` indexes when
@@ -673,7 +673,7 @@ class ContextBuilder {
     const now = Date.now()
     // Kick off memory work IMMEDIATELY so its network call (selector
     // model side-car, ~300-600 ms) overlaps with everything else this
-    // function does: disk I/O, scaffolding detection, MCP refresh,
+    // function does: disk I/O, git context gathering, MCP refresh,
     // skill load, even the cmdMode branch above us in the call stack.
     // The result is awaited at the section render point below. Previous
     // shape (Promise.all of disk reads, THEN memory work, THEN render)
@@ -682,8 +682,7 @@ class ContextBuilder {
     const memoryWorkPromise = this.runMemoryWork(projectPath, userMessage, accessedPaths)
 
     // Gather context in parallel for speed
-    const { detectScaffolding } = await import('../scaffoldingDetector')
-    const [treeString, pkgSummary, readme, projectManifest, templateManifest, tmsContent, planContent, todoContent, toquemediaIdRaw, appliedScaffolding, gitContext, recentFiles, pathAliases] = await Promise.all([
+    const [treeString, pkgSummary, readme, projectManifest, templateManifest, tmsContent, planContent, todoContent, toquemediaIdRaw, gitContext, recentFiles, pathAliases] = await Promise.all([
       buildFileTree(projectPath),
       extractPackageSummary(projectPath),
       safeReadFile(`${projectPath}/README.md`),
@@ -693,7 +692,6 @@ class ContextBuilder {
       safeReadFile(`${projectPath}/PLAN.md`),
       safeReadFile(`${projectPath}/TODO.md`),
       safeReadFile(`${projectPath}/.toquemedia-id`),
-      detectScaffolding(projectPath),
       gatherGitContext(projectPath),
       gatherRecentFiles(projectPath),
       readPathAliases(projectPath),
@@ -807,7 +805,6 @@ class ContextBuilder {
       mcpTools: mcpTools || [],
       coreToolCount: coreToolCount ?? 20,
       loadedSkillNames: loadedSkills.map(s => s.name),
-      appliedScaffolding,
       hashtagSkills: stickyHashtagSkills,
       currentTasks,
       userMemoryIndex,
@@ -849,7 +846,6 @@ class ContextBuilder {
       planContent,
       todoContent,
       toquemediaIdRaw,
-      appliedScaffolding,
       gitContext,
       recentFiles,
       pathAliases,
@@ -977,8 +973,8 @@ class ContextBuilder {
         'framework/deploy compatibility detected per project — null for compatible projects'),
       dynamicSection('dev_server_status', () => auxLoadedContent['delivery.dev_server'] ?? null,
         'dev server status flips null→starting→running→stopped per session'),
-      dynamicSection('applied_scaffolding', () => getAppliedScaffoldingSection(ctx),
-        'one-shot flow markers (auth, payments) appear after scaffold writes'),
+      dynamicSection('hashtag_skills', () => getHashtagSkillsSection(ctx),
+        'hashtag-signalled skills vary with the current user message'),
       // Git orientation BEFORE the file tree: branch + changed files is the
       // first thing the model wants to know ("where am I, what's dirty"),
       // and pre-empts a reflexive `git status` / `git diff` tool call.
@@ -1140,7 +1136,7 @@ class ContextBuilder {
 
     // Load skills upfront so the reminder section at the bottom can re-cite
     // their names (U-Curve recency reinforcement — without this, the
-    // scaffolding-aware section that lives in the middle of the prompt is
+    // hashtag-skills section that lives in the middle of the prompt is
     // forgotten in long sessions). loadSkills is cached so the subsequent
     // getCmdSkillsSection call hits the cache for free.
     const pkgSummaryForSkills = await extractPackageSummary(normalizedCwd)
@@ -1152,11 +1148,11 @@ class ContextBuilder {
       loadedSkillNames = skills.map(s => s.name)
     } catch { /* non-critical */ }
 
-    // Resolve scaffolding-aware section in parallel with skills section (both
+    // Resolve hashtag-skills section in parallel with skills section (both
     // touch the same SkillService cache; resolving sequentially would waste a
     // round-trip on the second call).
-    const [scaffoldingSection, skillsSection] = await Promise.all([
-      getCmdAppliedScaffoldingSection(normalizedCwd, userMessage),
+    const [hashtagSkillsSection, skillsSection] = await Promise.all([
+      getCmdHashtagSkillsSection(normalizedCwd, userMessage),
       getCmdSkillsSection(ctx),
     ])
 
@@ -1194,13 +1190,13 @@ class ContextBuilder {
         'cwd / homeDir / platform detected per session'),
       dynamicSection('dev_server_status', () => getDevServerStatusSection(),
         'dev server status flips null→starting→running→stopped per session'),
-      // Scaffolding-aware framing + hashtag-triggered sticky CRITICAL rules.
+      // Hashtag-triggered sticky CRITICAL rules.
       // Placed BEFORE the generic skills index so the matched skill rules
       // are read by the model before it sees the generic "skills available"
       // listing. Re-cited by name in the
       // reminder section below to defeat the U-Curve middle-dip.
-      dynamicSection('scaffolding', () => scaffoldingSection,
-        'scaffolding markers + sticky hashtag rules depend on user message'),
+      dynamicSection('hashtag_skills', () => hashtagSkillsSection,
+        'sticky hashtag rules depend on the current user message'),
       dynamicSection('skills', () => skillsSection,
         'skill set depends on project-type detection'),
       dynamicSection('global_memory', () => getCmdGlobalMemorySection(ctx),

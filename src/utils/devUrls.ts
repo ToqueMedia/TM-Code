@@ -31,7 +31,6 @@ import {
   VITE_WORKER_URL,
   VITE_AI_WORKER_URL,
   VITE_COLLAB_SIGNALING_URL,
-  VITE_DEPLOY_URL,
   DEFAULT_AI_WORKER_URL,
   DEFAULT_COLLAB_SIGNALING_URL,
   DEFAULT_TM_CODE_WEB_URL,
@@ -217,24 +216,6 @@ export function resolveOllamaUrl(): string {
     isViteDev: IS_VITE_DEV,
     isWindows: IS_WINDOWS,
   })
-}
-
-/**
- * Deploy URL.
- *
- * - VITE_DEPLOY_URL set: explicit override (staging Worker, etc.).
- * - IDE in Vite dev: uses the dev Worker (`resolveWorkerUrl()`). The dev
- *   Worker's `isDev(env)` bypass relaxes token verification so dev Firebase
- *   tokens pass. R2 uploads go through the Cloudflare REST API directly
- *   (not the miniflare binding) so files land in the real `tm-studio-sites`
- *   bucket that `*.toquemedia.net` serves from. Requires
- *   CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN in the Worker's `.dev.vars`.
- * - Production build: uses the production deploy URL.
- */
-export function resolveDeployUrl(): string {
-  if (VITE_DEPLOY_URL) return VITE_DEPLOY_URL
-  if (IS_VITE_DEV) return resolveWorkerUrl()
-  return PRODUCTION_DEPLOY_URL
 }
 
 /** Exposed for the settingsStore self-heal check — URLs that we may have

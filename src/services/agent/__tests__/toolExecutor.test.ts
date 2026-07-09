@@ -183,7 +183,6 @@ jest.mock('../../devServerManager', () => ({
 
 jest.mock('../../../utils/devUrls', () => ({
   resolveWorkerUrl: () => 'https://worker.test',
-  resolveDeployUrl: () => 'https://deploy.test',
 }))
 
 jest.mock('../../tauriFetch', () => ({
@@ -200,19 +199,13 @@ jest.mock('../checkpointService', () => ({
   },
 }))
 
-jest.mock('../skillService', () => ({
-  PUBLISHING_SKILL_NAME: 'publish-backend',
-}))
+jest.mock('../skillService', () => ({}))
 
 jest.mock('../../mcp/mcpService', () => ({}))
 
 jest.mock('../../fsVersion', () => ({
   bumpFsVersion: jest.fn().mockResolvedValue(undefined),
   getFsVersion: jest.fn().mockReturnValue(0),
-}))
-
-jest.mock('../../scaffoldingDetector', () => ({
-  invalidateScaffoldingCache: jest.fn(),
 }))
 
 jest.mock('../../analytics', () => ({

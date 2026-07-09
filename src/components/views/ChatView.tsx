@@ -1,7 +1,7 @@
 import { memo, useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react'
 import { Flex, Box, HStack, Text, VStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiSidebar, FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle, FiDatabase, FiEye, FiMoreHorizontal } from 'react-icons/fi'
+import { FiSidebar, FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle, FiEye, FiMoreHorizontal } from 'react-icons/fi'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { useChatStore } from '../../stores/chatStore'
 import { useProjectStore } from '../../stores/projectStore'
@@ -368,28 +368,6 @@ function ChatView() {
               the session dropdown, so sharing stays reachable while the
               preview is open. */}
           {isSidebarMode && <CollabShareControls compact />}
-          {!isSidebarMode && (
-            <Box
-              as="button"
-              data-chat-toolbar-action
-              data-chat-toolbar-wide-only
-              display="flex"
-              alignItems="center"
-              gap="5px"
-              px="8px"
-              h="28px"
-              borderRadius="6px"
-              color={tokens.colors.text.secondary}
-              cursor="pointer"
-              transition={`all ${tokens.transition.fast}`}
-              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-              onClick={() => useLayoutStore.getState().setViewMode('data')}
-              aria-label={t('view.dataManager')}
-            >
-              <FiDatabase size={13} />
-              <Text data-chat-toolbar-secondary-label fontSize="11px" fontWeight="500">{t('view.dataManager')}</Text>
-            </Box>
-          )}
         </Flex>
 
         {/* Credits + Isolation + MCP indicators — hidden in sidebar mode
@@ -851,11 +829,6 @@ function HeaderOverflowMenu() {
           borderRadius="10px"
           boxShadow="0 14px 40px rgba(0,0,0,0.45)"
         >
-          <ToolbarMenuItem
-            icon={<FiDatabase size={14} />}
-            label={t('view.dataManager')}
-            onClick={() => runAndClose(() => useLayoutStore.getState().setViewMode('data'))}
-          />
           <ToolbarMenuItem
             icon={<FiEye size={14} />}
             label={t('view.preview')}

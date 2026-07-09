@@ -315,26 +315,10 @@ export function useCmdPromptLogic() {
         )
         return
       }
-      // Smart router for /payments — same parity as the main PromptBar.
-      // The hashtag/slash flows are first-time scaffolding; subsequent fixes
-      // go through verbal requests so the agent's appliedScaffolding system-
-      // prompt section routes to fix-mode rather than re-running fetches.
-      if (command.name === '/payments' && path) {
-        const { guardScaffoldReapply } = await import('../components/prompt/scaffoldReapplyGuard')
-        const { blocked } = await guardScaffoldReapply(
-          path,
-          ['payments.momenu'],
-          () => buildCmdPaymentsReapplyMessage(),
-          () => { /* this input has no draftInput state to clear */ },
-        )
-        if (blocked) return
-      }
-      // 'terminal' = free-form surface. /plan branches on this to drop
-      // the platform-deploy invariants (firebase-admin / Dockerfile /
-      // APP_ID fallback) — the developer here is running outside the
-      // Publish flow and may target any backend / database / hosting.
-      // The architect keeps its structural rigor (full PLAN.md template,
-      // trade-offs, completion rule) but is free to recommend any stack.
+      // 'terminal' = free-form surface. The developer may target any
+      // backend / database / hosting. The architect keeps its structural
+      // rigor (full PLAN.md template, trade-offs, completion rule) but is
+      // free to recommend any stack.
       await command.execute(extractArgs(textPrompt), path, 'terminal')
       return
     }
@@ -1035,14 +1019,4 @@ export function useCmdPromptLogic() {
     // placeholders before the prompt is sent to the agent.
     preSendTransformRef,
   }
-}
-
-// ── Scaffold-reapply system messages ──
-// Same wording as usePromptBar so the UX is consistent. Pure
-// builders; resolved through i18n at call time.
-
-function buildCmdPaymentsReapplyMessage(): string {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { t } = require('../i18n') as typeof import('../i18n')
-  return t('scaffold.message.paymentsReapply')
 }

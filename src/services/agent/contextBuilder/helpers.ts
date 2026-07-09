@@ -41,9 +41,9 @@ export const CRITICAL_SECTIONS_MAX_BYTES = 12_000
  * names whose CRITICAL sections should be inlined into the prompt this turn.
  * Empty when no recognised tags are present.
  *
- * The point: turn-1 reinforcement before scaffoldingDetector has filesystem
- * markers to find. The user has already declared intent via `#design`,
- * so the rules should already be in context — not waiting for the next turn.
+ * The point: turn-1 reinforcement. The user has already declared intent via
+ * `#design`, so the rules should already be in context — not waiting for
+ * the next turn.
  *
  * NOTE (2026-07): the managed-auth tags (`#auth-google`,
  * `#auth-email-password` → auth-proxy/google-signin skills) were removed

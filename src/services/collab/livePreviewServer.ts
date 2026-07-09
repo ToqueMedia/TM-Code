@@ -16,7 +16,7 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { listen } from '@tauri-apps/api/event'
 import { detectDevCommand } from '@/services/previewActivation'
-import { detectFromProjectPath } from '@/services/deploy/runtimeDetector'
+import { detectFromProjectPath } from '@/services/projectRuntimeDetector'
 import { detectProjectPackageManager } from '@/services/packageManagerDetector'
 
 /** Dedicated, fixed port for the team Live Preview server. */

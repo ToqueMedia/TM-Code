@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type ViewMode = 'chat' | 'generating' | 'preview' | 'editor' | 'settings' | 'data'
+export type ViewMode = 'chat' | 'generating' | 'preview' | 'editor' | 'settings'
 /** UI surface in the preview area. Derived from `devServer.projectKind` + static preview state. */
 export type PreviewMode = 'server' | 'static' | 'api'
 export type DevLogLevel = 'info' | 'warn' | 'error'
@@ -70,10 +70,6 @@ interface LayoutState {
    *  Toggled from the PreviewView toolbar and reset whenever preview is left,
    *  so the chat is always back the next time the preview opens. */
   isPreviewFullscreen: boolean
-  /** Cross-component publish modal flag — both MinimalTitleBar and the
-   *  PreviewView toolbar trigger the same modal so we keep a single source
-   *  of truth here. The modal itself is mounted by MinimalTitleBar. */
-  isPublishModalOpen: boolean
   previewHtmlContent: string | null
   previewSourcePath: string | null
   /** Incremented to signal the preview iframe should reload */
@@ -145,9 +141,6 @@ interface LayoutActions {
   /** Toggle fullscreen preview — hide the chat sidebar so the preview fills
    *  the pane; toggle again to bring the chat back. */
   togglePreviewFullscreen: () => void
-  /** Open / close the deploy publish modal. Single source of truth so both
-   *  the title bar and the preview toolbar trigger the same dialog. */
-  setPublishModalOpen: (open: boolean) => void
   goBack: () => void
   setScaffoldPhase: (phase: ScaffoldPhase, message?: string) => void
   /** Set the section SettingsView should open on. Pair with setViewMode('settings'). */
@@ -178,7 +171,6 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   previewMode: 'server',
   isHttpDrawerOpen: false,
   isPreviewFullscreen: false,
-  isPublishModalOpen: false,
   previewHtmlContent: null,
   previewSourcePath: null,
   previewReloadKey: 0,
@@ -331,10 +323,6 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
 
   togglePreviewFullscreen: () => {
     set(state => ({ isPreviewFullscreen: !state.isPreviewFullscreen }))
-  },
-
-  setPublishModalOpen: (open: boolean) => {
-    set({ isPublishModalOpen: open })
   },
 
   addDevServerLog: (text: string, level: DevLogLevel = 'info') => {

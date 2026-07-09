@@ -2304,22 +2304,6 @@ ${preview}
     // (system prompt, skills) miss on the next read so the IDE sees the
     // real post-write state. Path-agnostic by design — see fsVersion.ts.
     bumpFsVersion(`write:${path}`)
-    // Invalidate scaffolding detector cache when files that change scaffold
-    // state are written. Without this, the badge / smart-router / system-
-    // prompt section would lag the agent's own writes by up to the cache TTL
-    // (3s) — short, but observable when the agent finishes a scaffolding
-    // turn and the developer immediately tries to type a hashtag. Covers:
-    //   - package.json (payments deps)
-    //   - auth-proxy / authClient / useGoogleSignIn marker files
-    // .env writes are funneled through write_env_vars (used by the
-    // request_credentials flow) so we don't include .env here — the agent's
-    // write_file path can't reach it (mechanical block).
-    if (/(^|\/)package\.json$|(^|\/)(auth-proxy|authClient|useGoogleSignIn)\.(ts|tsx|js)$/.test(path)) {
-      const root = this.getProjectRoot()
-      if (root) {
-        import('../scaffoldingDetector').then(m => m.invalidateScaffoldingCache(root)).catch(() => { /* non-critical */ })
-      }
-    }
     // Plan-mode progress: the active plan artefact at the project root unblocks update_tasks
     // and enables the strict-STOP guard once update_tasks has also run.
     if (this.planMode && isPlanArtefactAtRoot(path, this.getProjectRoot(), this.planModePlanFileName)) {

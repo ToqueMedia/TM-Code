@@ -113,13 +113,8 @@ export interface PromptContext {
    *  reminder so the model is reminded which skill contracts apply, since
    *  the skill index itself sits mid-prompt (U-curve attention dip). */
   loadedSkillNames: string[]
-  /** Already-applied scaffolding (one-shot flows like #auth-google,
-   *  /payments) detected from filesystem markers. Surfaced as a system-prompt
-   *  section so the agent reads existing files instead of re-scaffolding. */
-  appliedScaffolding: import('../../scaffoldingDetector').ScaffoldingState
   /** Skill names triggered by hashtags in the CURRENT user message
-   *  (#auth-google, #auth-email-password, #design). Used to inline CRITICAL
-   *  rules at turn 1 — before scaffoldingDetector has anything to find. */
+   *  (#design). Used to inline CRITICAL rules at turn 1. */
   hashtagSkills: string[]
   /** Live snapshot of the in-memory task tracker (the one `update_tasks`
    *  writes to via agentStore). Distinct from `todoContent` (which is the

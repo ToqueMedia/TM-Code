@@ -407,21 +407,6 @@ export const useProjectStore = create<ProjectStore>()(
             logger.warn('project', 'Failed to hydrate editor dirty buffers:', error);
           }
 
-          // Hydrate the deploy state. The orchestration source of truth is
-          // the worker; this restores the LAST IDE-visible view so a
-          // reload mid-deploy doesn't blank the panel. Once the IDE
-          // re-polls/streams from the worker, the record is updated.
-          try {
-            const [{ loadDeployStateFromDisk }, { hydrateDeployRecord }] = await Promise.all([
-              import('../services/deployPersistence'),
-              import('./deployStore'),
-            ]);
-            const record = await loadDeployStateFromDisk(path);
-            if (record) hydrateDeployRecord(record);
-          } catch (error) {
-            logger.warn('project', 'Failed to hydrate deploy state:', error);
-          }
-
           // Check for TMS.md — suggest /init only when (a) it's missing AND
           // (b) the project actually has content to analyze. Suggesting it on
           // a freshly-opened empty folder is noise: there is nothing to

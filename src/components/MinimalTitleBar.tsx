@@ -348,9 +348,7 @@ function MinimalTitleBar() {
       {/* Center spacer */}
       <Flex flex={1} />
 
-      {/* Right: project actions + User identity. The Publish button still lives
-          in the PreviewView toolbar and the Cmd/Ctrl+Shift+D shortcut keeps
-          working — both routes open the same modal via layoutStore. */}
+      {/* Right: project actions + User identity. */}
       <HStack gap={2} flexShrink={0} pr={1} data-no-drag>
         {/* Send to TM Code Web */}
         {currentProject && !cmdModeProjectPath && (

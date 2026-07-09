@@ -25,12 +25,10 @@ import ProjectsSidebar from './chat/ProjectsSidebar'
 import { ErrorBoundary } from './ErrorBoundary'
 
 import SettingsView from './views/SettingsView'
-import DataViewerView from './views/DataViewerView'
 import { useCodeEditorState } from '../hooks/useEditorState'
 import { usePermissionStore } from '../stores/permissionStore'
 import { devServerManager } from '../services/devServerManager'
 import DevServerStatus from './chat/DevServerStatus'
-import PublishModal from './dialogs/PublishModal'
 import { TeamChatPanel } from './collab/TeamChatPanel'
 import { ScreenShareViewer } from './collab/ScreenShareViewer'
 import { useCollabSession } from '@/hooks/useCollabSession'
@@ -286,19 +284,6 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
         }
       }
 
-      // Cmd+Shift+B: Toggle Data Viewer ("B for Browse"). Mirrors the
-      // editor toggle's shape — entering when not in `data`, going back
-      // when already there. Keeps the existing chat-header FiDatabase
-      // button as the discoverable entry; this is the power-user path.
-      if (isMeta && e.shiftKey && e.key === 'B') {
-        e.preventDefault()
-        const layout = useLayoutStore.getState()
-        if (layout.viewMode === 'data') {
-          layout.goBack()
-        } else {
-          layout.setViewMode('data')
-        }
-      }
     }
 
     window.addEventListener('keydown', handleKeyDown)
@@ -461,10 +446,6 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
                   <ErrorBoundary>
                     <SettingsView />
                   </ErrorBoundary>
-                ) : viewMode === 'data' ? (
-                  <ErrorBoundary>
-                    <DataViewerView />
-                  </ErrorBoundary>
                 ) : viewMode === 'generating' && !previewMounted ? (
                   <ErrorBoundary>
                     <GeneratingView />
@@ -542,7 +523,7 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
             </Flex>
 
             {/* Permission dialog / PromptBar — in preview mode, rendered inside the chat sidebar wrapper */}
-            {viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && viewMode !== 'data' && (
+            {viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && (
               pendingPermission ? (
                 <PermissionDialog
                   toolName={pendingPermission.toolName}
@@ -573,9 +554,6 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
       {/* Floating dev server status panel */}
       <DevServerStatus />
 
-      {/* Publish modal — single mount; trigger via layoutStore.setPublishModalOpen */}
-      <PublishModalMount />
-
       {/* Ephemeral team chat (P2P) — toggled from the Source Control header */}
       <TeamChatPanel />
 
@@ -585,16 +563,6 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
       {/* Requirements check dialog removed — templates disabled */}
     </Flex>
   )
-}
-
-/**
- * Thin wrapper so MainLayout doesn't re-render when only the modal-open
- * flag flips. Subscribes to just the boolean and the close action.
- */
-function PublishModalMount() {
-  const isOpen = useLayoutStore((s) => s.isPublishModalOpen)
-  const setOpen = useLayoutStore((s) => s.setPublishModalOpen)
-  return <PublishModal isOpen={isOpen} onClose={() => setOpen(false)} />
 }
 
 export default memo(MainLayout)

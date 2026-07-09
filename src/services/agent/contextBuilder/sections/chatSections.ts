@@ -419,14 +419,16 @@ export function getEnvironmentSection(ctx: PromptContext): string {
 // Tells the agent whether a dev server is already running, what kind
 // it is, and what URLs it serves. Prevents the agent from blindly
 // starting a second server and getting stuck until the 300s timeout.
-// ── Preview & deploy compatibility ───────────────────────────────
+// ── Preview compatibility ─────────────────────────────────────────
 /**
  * Warn the agent when the open project has compatibility gaps with the
- * Chat-mode preview (iframe) and/or the deploy pipeline. The agent
- * should surface these to the developer early — ideally on the first
- * turn after project open — so they can decide whether to adapt the
- * project manifest, keep working with limited preview/deploy, or use an
- * external runtime for unsupported stacks.
+ * Chat-mode preview (iframe). The agent should surface these to the
+ * developer early — ideally on the first turn after project open — so
+ * they can decide whether to adapt the project manifest, keep working
+ * with limited preview, or use an external runtime for unsupported
+ * stacks. (Manifest `capabilities.deploy` is still echoed when a project
+ * declares it — it describes the project's own external deploy contract,
+ * not an IDE feature.)
  *
  * Returns null for fully-compatible projects (React+Vite, Vue+Vite,
  * Svelte+Vite, Astro) — no noise when everything works.
@@ -439,7 +441,6 @@ export function getEnvironmentSection(ctx: PromptContext): string {
  *   scripts, which are the ones that actually need the warning.
  * - Empty/unknown projects (no pkgSummary, no markers) now get a
  *   generic compatibility note instead of silent `return null`.
- * - Tier 3 (backend-only) now mentions deploy incompatibility.
  * - One-shot: repeated injection on every turn wastes tokens. Uses a
  *   module-level Set to track warned project paths; subsequent turns
  *   inject a one-liner instead of the full block.
@@ -519,7 +520,7 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
       '',
       '**Options:**',
       '1. Tell the agent the command to start your project — it will use `start_dev_server` with that command.',
-      '2. Add `.toquemedia/project.json` with preview/deploy capabilities so future runs know the project contract.',
+      '2. Add `.toquemedia/project.json` with preview capabilities so future runs know the project contract.',
       '3. If the project is in a subdirectory, reopen it at the correct path.',
     ].join('\n')
   }
@@ -557,42 +558,7 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
       '**Options for the developer:**',
       `1. **Tell the agent your start command** — e.g. ${commands[pt] || '`./your-server`'}. The agent can call \`start_dev_server\` with any command; once it is ready, the developer opens it manually with the Preview button.`,
       '2. **Stay in Chat** — the agent can still edit files, run tests, and use commands. Start the server manually and use the HTTP Client or an external browser to verify changes.',
-      '3. **Add a project manifest** if this project has a repeatable preview/deploy contract.',
-    ].join('\n')
-  }
-
-  // ── Tier 2: JS/TS frameworks with preview but no deploy ──────
-  // These start a dev server fine (Next=3000, Nuxt=similar, Angular=4200)
-  // so the preview iframe works. But the deploy pipeline only supports
-  // Vite-shape flat `dist/` output — these frameworks produce nested or
-  // non-standard output that `collect_deploy_bundle` can't handle.
-  const noDeployFrameworks: Record<string, { name: string; note: string }> = {
-    nextjs: {
-      name: 'Next.js',
-      note: 'produces `.next/` output — requires `@cloudflare/next-on-pages` for deploy (not yet supported).',
-    },
-    nuxt: {
-      name: 'Nuxt',
-      note: 'produces `.output/` — not compatible with the current deploy pipeline.',
-    },
-    angular: {
-      name: 'Angular',
-      note: 'produces nested `dist/<app>/` — not compatible with the current deploy pipeline.',
-    },
-  }
-  const noDeploy = noDeployFrameworks[pt]
-  if (noDeploy) {
-    _compatWarnedProjects.add(projectPath)
-    return [
-      '# Project compatibility',
-      '',
-      `Detected framework: **${noDeploy.name}**. The preview iframe works (the IDE will detect the dev server URL automatically), but the **Publish (deploy)** feature is not yet supported for this framework — ${noDeploy.note}`,
-      '',
-      '**What works:** live preview, file editing, HTTP Client, Terminal, all agent tools.',
-      '',
-      '**What does NOT work yet:** the Publish button will fail at the bundle-collection step.',
-      '',
-      'If the developer needs deploy, suggest switching to a Vite-based template or using an external deployment method.',
+      '3. **Add a project manifest** if this project has a repeatable preview contract.',
     ].join('\n')
   }
 
@@ -612,8 +578,6 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
       'Detected a **backend-only** Node.js project. Chat opens the **HTTP Client panel** (not an iframe preview) — this is by design.',
       '',
       '**What works:** HTTP Client for testing API endpoints, file editing, Terminal, all agent tools.',
-      '',
-      '**Deploy note:** backend-only Node.js projects (Express, Fastify, NestJS) are **not deployable** through the Publish pipeline — it only supports Worker bundles (Hono on Cloudflare). If the developer needs deploy, suggest converting to a Hono Worker or using an external hosting service.',
       '',
       '**Note for the developer:** if you expected a visual preview, this project serves API routes only. To add a frontend, tell the agent to scaffold one (e.g. "add a React frontend with Vite").',
     ].join('\n')
@@ -665,75 +629,37 @@ export function getDevServerStatusSection(): string | null {
   return `# Dev Server (running — status captured at turn start)\n${lines.join('\n')}\n\nA dev server was RUNNING when this turn started. Do NOT call \`${START_DEV_SERVER}\` or \`npm run dev\` / \`yarn dev\` while it runs — it will fail or create a duplicate. Use \`${READ_DEV_SERVER_LOGS}\` to check for errors. If YOU stopped or restarted the server with tools later in this turn, trust your own tool results over this block.`
 }
 
-// ── 10b. Already-applied scaffolding (conditional) ─────────────
-// Tells the agent which one-shot scaffolding flows (e.g. /payments,
-// hashtag-triggered skills) have already produced artefacts in this
-// project. The model then fixes the existing impl rather than rewriting
-// the scaffolded boilerplate from scratch.
-// Keyed off filesystem markers (.env keys + package.json deps + presence
-// of marker files) — see scaffoldingDetector.ts for the rules.
-export function getAppliedScaffoldingSection(ctx: PromptContext): string | null {
-  return composeScaffoldingAwareSection(
-    ctx.appliedScaffolding.applied,
-    ctx.appliedScaffolding.evidence,
-    ctx.hashtagSkills ?? [],
-  )
+// ── 10b. Hashtag-signalled skills (conditional) ────────────────
+// When the CURRENT user message carries a recognised skill hashtag
+// (e.g. `#design`), inline the skill's CRITICAL rules at turn 1 so the
+// model commits to them before writing any code.
+export function getHashtagSkillsSection(ctx: PromptContext): string | null {
+  return composeHashtagSkillsSection(ctx.hashtagSkills ?? [])
 }
 
 /**
  * Shared composer used by both project and cwd-scoped prompt builders.
- * Detection inputs come from either PromptContext or prompt-build-time
- * filesystem checks, then this function turns them into the
- * scaffolding-aware framing + sticky CRITICAL inline blocks.
+ * Turns hashtag-signalled skill names into the intent framing + sticky
+ * CRITICAL inline blocks.
  *
  * The function depends on the SkillService cache being warm (the caller
  * must have run loadSkills earlier in the same prompt-build pass). Both
  * call sites satisfy this during their prompt-build pass.
  */
-export function composeScaffoldingAwareSection(
-  applied: string[],
-  evidence: Record<string, string[]>,
+export function composeHashtagSkillsSection(
   hashtagSkills: string[],
 ): string | null {
-  if (applied.length === 0 && hashtagSkills.length === 0) return null
+  if (hashtagSkills.length === 0) return null
 
-  const lines = applied.map(key => {
-    const ev = evidence[key] ?? []
-    return `- \`${key}\` (detected: ${ev.join(', ')})`
-  })
-  // Map applied keys to the skills the agent should re-read before
-   // fixing. Empirically observed: the existing implementation may have
-   // been written without applying every CRITICAL rule from the skill
-   // (model-prior overrides verbatim copy). Re-reading exposes the rules
-   // before the agent patches blindly. Returns a bullet listing the
-   // read_skill calls per applied area.
-  const skillReadHints: string[] = []
-  const stickySkillNames: string[] = []
-  if (applied.includes('payments.momenu')) {
-    skillReadHints.push('payments.* → call \`read_skill(\'mom-factura-payments\')\`')
-    stickySkillNames.push('mom-factura-payments')
-  }
-  // Hashtag-driven sticky: turn-1 reinforcement before scaffolding has run.
-  // Dedupe against applied scaffolding so we don't double-list a skill that
-  // is already inlined via the applied path.
-  for (const skill of hashtagSkills) {
-    if (!stickySkillNames.includes(skill)) {
-      stickySkillNames.push(skill)
-    }
-  }
-  const skillReadBlock = skillReadHints.length > 0
-    ? ` - BEFORE editing the existing implementation, RE-READ the relevant skill(s):\n   ${skillReadHints.map(h => `· ${h}`).join('\n   ')}\n   The existing files may have been written without applying every CRITICAL rule from the skill — read the skill first, compare against current code, fix the gaps. Patching from intuition is what produced the bugs the CRITICAL blocks describe.\n`
-    : ''
-
-  // Skills sticky: when scaffolding is detected, inline the CRITICAL
-  // sections of the relevant skills directly into the system prompt so
-  // they cannot be forgotten between turns. The previous behaviour (just
-  // tell the agent to read_skill) was lost across long sessions — the
-  // BugHunterKimi case study saw `tenantId` removed 30 minutes after the
-  // skill was first read, even though the skill marks it as REQUIRED.
+  // Skills sticky: inline the CRITICAL sections of the triggered skills
+  // directly into the system prompt so they cannot be forgotten between
+  // turns. The previous behaviour (just tell the agent to read_skill) was
+  // lost across long sessions — the BugHunterKimi case study saw
+  // `tenantId` removed 30 minutes after the skill was first read, even
+  // though the skill marks it as REQUIRED.
   const skillService = SkillService.getInstance()
   const stickyBlocks: string[] = []
-  for (const name of stickySkillNames) {
+  for (const name of hashtagSkills) {
     const skill = skillService.getCachedSkillContent(name)
     if (!skill) continue
     const { text: critical, stats } = extractCriticalSectionsWithStats(skill.content)
@@ -759,28 +685,11 @@ export function composeScaffoldingAwareSection(
     ? `\n\n## Reinforced skill rules\n\nThe following CRITICAL sections are inlined here so they remain in your context window even on long sessions. They govern any edit to the matching files. Treat them as binding.\n\n${stickyBlocks.join('\n\n')}`
     : ''
 
-  // Compose section: applied-scaffolding block (if any) + sticky block
-  // (if any). When applied is empty we skip the "produced artefacts" framing
-  // entirely — sticky-only output is for turn-1 hashtag triggers.
-  const appliedBlock = applied.length > 0
-    ? `# Already-applied scaffolding
-
-These one-shot scaffolding flows have already produced artefacts in this project:
-
-${lines.join('\n')}
-
-When the developer asks for changes related to these areas:
- - DO NOT re-implement the scaffolded routes/flows from scratch — they are on disk. Read the marker paths above first, locate the bug, fix only what's broken.
-${skillReadBlock} - Treat verbal requests like "fix the login" or "the payment isn't working" as DIAGNOSE-AND-FIX requests, not scaffold requests. The hashtag/slash flows for these are one-shot and have already run.`
-    : null
-
-  const hashtagBlock = applied.length === 0 && hashtagSkills.length > 0
-    ? `# Hashtag-signalled intent
+  const hashtagBlock = `# Hashtag-signalled intent
 
 The developer's message includes ${hashtagSkills.length === 1 ? 'a recognised hashtag' : 'recognised hashtags'} (${hashtagSkills.map(s => `\`${s}\``).join(', ')}). Inline the relevant skill rules below before writing any code — these are the rules most often forgotten when generating from scratch.`
-    : null
 
-  const parts = [appliedBlock, hashtagBlock, stickySection.trim() || null].filter(Boolean) as string[]
+  const parts = [hashtagBlock, stickySection.trim() || null].filter(Boolean) as string[]
   return parts.join('\n\n')
 }
 

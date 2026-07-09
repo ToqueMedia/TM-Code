@@ -32,14 +32,12 @@ import { tokens } from '@/theme/tokens'
 import { useTranslation, t } from '@/i18n'
 import type { TranslationKey } from '@/i18n'
 import ApiKeysSection from './settings/ApiKeysSection'
-import DeploysSection from './settings/DeploysSection'
 
-type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'apiKeys' | 'sandbox' | 'admin' | 'deploys'
+type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'apiKeys' | 'sandbox' | 'admin'
 
 const BASE_NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
   { id: 'profile', key: 'settings.profilePlan' },
   { id: 'editor', key: 'settings.editor' },
-  { id: 'deploys', key: 'settings.deploys' as TranslationKey },
   { id: 'sandbox', key: 'settings.sandbox' as TranslationKey },
   { id: 'shortcuts', key: 'settings.shortcuts' },
   { id: 'skills', key: 'settings.skills' },
@@ -64,7 +62,7 @@ interface SettingsViewProps {
 // `layoutStore.settingsInitialSection`. Keep aligned with the SectionId union
 // above — TS will flag any drift because we cast through `SectionId` below.
 const ALLOWED_INITIAL_SECTIONS: ReadonlyArray<SectionId> = [
-  'profile', 'editor', 'shortcuts', 'skills', 'mcp', 'apiKeys', 'sandbox', 'admin', 'deploys',
+  'profile', 'editor', 'shortcuts', 'skills', 'mcp', 'apiKeys', 'sandbox', 'admin',
 ]
 
 function SettingsView({ onBack }: SettingsViewProps = {}) {
@@ -199,7 +197,6 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
             {activeSection === 'skills' && <SkillsSection />}
             {activeSection === 'mcp' && <McpSection />}
             {activeSection === 'apiKeys' && <ApiKeysSection />}
-            {activeSection === 'deploys' && <DeploysSection />}
             {activeSection === 'admin' && showAdminNav && <AdminSection />}
           </Box>
         </Box>

@@ -27,7 +27,6 @@ import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenSe
 import { findMentionAtCursor, findMentionTokenEnd } from '../../utils/mentionParser'
 import { preprocessHashtags } from '../../services/agent/hashtagRegistry'
 import { useHashtagMenu } from './useHashtagMenu'
-import { guardScaffoldReapply } from './scaffoldReapplyGuard'
 import { t } from '@/i18n'
 import { runDesignFlow } from '../../services/agent/commands/authCommand'
 import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, resolveImageToDataUri } from '../../services/attachmentService'
@@ -213,33 +212,6 @@ export function usePromptBar() {
     return () => { cancelled = true }
     // Re-run when agent finishes a session — the agent may have created
     // package.json with a "dev" script during scaffolding.
-  }, [currentProject?.path, isAgentBusy])
-
-  // ── Already-applied scaffolding hints ─────────────────────────────
-  // Powers the "já aplicado" badge in HashtagMenu / SlashCommandMenu and
-  // the smart-router branch in handleSend below. Re-runs on project change
-  // and on agent-idle transitions (an agent turn may have just provisioned
-  // auth or scaffolded /payments). The detector caches per-projectPath so
-  // multiple subscribers don't re-scan the filesystem.
-  const [appliedHints, setAppliedHints] = useState<Map<string, string>>(new Map())
-  useEffect(() => {
-    if (!currentProject?.path) {
-      setAppliedHints(new Map())
-      return
-    }
-    let cancelled = false
-    Promise.all([
-      import('../../services/scaffoldingDetector'),
-    ]).then(async ([{ detectScaffolding, scaffoldFixHint, scaffoldUITrigger }]) => {
-      const state = await detectScaffolding(currentProject.path)
-      if (cancelled) return
-      const next = new Map<string, string>()
-      for (const key of state.applied) {
-        next.set(scaffoldUITrigger(key), scaffoldFixHint(key))
-      }
-      setAppliedHints(next)
-    }).catch(() => { /* non-critical — UI just shows no hints */ })
-    return () => { cancelled = true }
   }, [currentProject?.path, isAgentBusy])
 
   // Auto-resize lived here when `input` was a reactive read on this hook.
@@ -795,8 +767,7 @@ export function usePromptBar() {
       const coreToolCount = ToolExecutor.getInstance().getCoreToolCount()
       // Pass the raw user text so contextBuilder can detect skill-trigger
       // hashtags (#design, etc.) and inline the corresponding
-      // CRITICAL skill rules at turn 1 — before scaffoldingDetector has any
-      // filesystem markers to find.
+      // CRITICAL skill rules at turn 1.
       const userMessageText = bootstrapOnly && tmsPreflight
         ? buildTmsBootstrapOnlyPrompt(tmsPreflight, display.text)
         : display.text
@@ -1167,22 +1138,6 @@ export function usePromptBar() {
         return
       }
 
-      // Smart router for /payments: if MoMenu Payments markers are already
-      // in the project, block the re-scaffold with explanatory message.
-      // The slash command is for first-time integration; subsequent fixes
-      // go through verbal requests so the agent (which sees the
-      // appliedScaffolding system-prompt section) routes to fix-mode rather
-      // than re-running fetches.
-      if (command.name === '/payments') {
-        const { blocked } = await guardScaffoldReapply(
-          projectPath!,
-          ['payments.momenu'],
-          () => buildPaymentsReapplyMessage(),
-          () => { useChatStore.getState().setDraftInput(''); clearDraftAttachments() },
-        )
-        if (blocked) return
-      }
-
       useChatStore.getState().setDraftInput('')
       clearDraftAttachments()
 
@@ -1194,8 +1149,7 @@ export function usePromptBar() {
 
       const args = slashCommandRegistry.getArgs(prompt)
       // /plan is free-form: any stack/backend/deploy target is allowed, with
-      // trade-offs recorded in PLAN.md instead of forcing the Publish pipeline
-      // defaults.
+      // trade-offs recorded in PLAN.md.
       const commandMode = command.name === '/plan' ? 'terminal' : 'chat'
       await command.execute(args, projectPath ?? '', commandMode)
       return
@@ -1680,10 +1634,6 @@ export function usePromptBar() {
     handleMentionSelect,
     // #hashtag menu — shared hook (state + handlers)
     hashtagMenu,
-    // Already-applied scaffolding hints — drives the "já aplicado" badge in
-    // both the hashtag and slash menus. Map keyed by UI trigger (hashtag
-    // or command name like `/payments`); value is the recommended fix phrasing.
-    appliedHints,
     // Attachments
     draftAttachments,
     handleAttachFiles,
@@ -1695,14 +1645,4 @@ export function usePromptBar() {
     handleRemoveAttachment,
     isDragging,
   }
-}
-
-// ── Scaffold-reapply system messages ──────────────────────────────────
-//
-// Pure builders. Kept module-scope (not inside the hook) so they don't
-// re-allocate per render. Wording is i18n-resolved at call time so the
-// developer's IDE language drives the output.
-
-function buildPaymentsReapplyMessage(): string {
-  return t('scaffold.message.paymentsReapply')
 }

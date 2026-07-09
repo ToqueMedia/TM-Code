@@ -83,10 +83,9 @@ jest.mock('../../auth/firebaseAuth', () => ({
 jest.mock('../../devServerManager', () => ({
   devServerManager: { start: jest.fn(), stop: jest.fn(), getStatus: jest.fn() },
 }))
-jest.mock('../skillService', () => ({ PUBLISHING_SKILL_NAME: 'publish-backend' }))
+jest.mock('../skillService', () => ({}))
 jest.mock('../../mcp/mcpService', () => ({}))
 jest.mock('../../fsVersion', () => ({ bumpFsVersion: jest.fn().mockResolvedValue(undefined), getFsVersion: jest.fn().mockReturnValue(0) }))
-jest.mock('../../scaffoldingDetector', () => ({ invalidateScaffoldingCache: jest.fn() }))
 jest.mock('../../analytics', () => ({ trackEvent: jest.fn().mockResolvedValue(undefined) }))
 jest.mock('../../../utils/errors', () => ({ formatError: (err: unknown) => err instanceof Error ? err.message : String(err) }))
 jest.mock('../../browserSessionManager', () => ({ browserSession: { beginSession: jest.fn().mockResolvedValue(undefined) } }))

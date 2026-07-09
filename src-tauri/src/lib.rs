@@ -4,9 +4,7 @@ use commands::byok::*;
 use commands::checkpoint::*;
 use commands::collab::*;
 use commands::container::*;
-use commands::data_viewer::*;
 use commands::debugger::*;
-use commands::deploy::*;
 use commands::device::*;
 use commands::e2e::*;
 use commands::file_tree::*;
@@ -1374,17 +1372,6 @@ pub fn run() {
             write_memory_file,
             delete_memory_file,
             list_memory_files,
-            data_viewer_dev_query,
-            data_viewer_dev_execute,
-            collect_deploy_bundle,
-            collect_backend_tarball,
-            collect_next_db_meta,
-            collect_next_static_bundle,
-            collect_next_prebuilt_tarball,
-            stage_next_prebuilt_tarball,
-            upload_file_put,
-            probe_url_ready,
-            validate_backend_for_cloud_run,
             list_skills_bundled,
             read_skill_content,
             mcp_start_server,

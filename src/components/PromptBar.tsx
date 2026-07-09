@@ -50,7 +50,6 @@ function PromptBar() {
     selectedMentionIndex,
     handleMentionSelect,
     hashtagMenu,
-    appliedHints,
     draftAttachments,
     handleAttachFiles,
     handlePaste,
@@ -81,7 +80,6 @@ function PromptBar() {
             selectedIndex={selectedCommandIndex}
             onSelect={handleCommandSelect}
             showArgsHint={isArgMode}
-            appliedHints={appliedHints}
           />
         )}
 
@@ -101,7 +99,6 @@ function PromptBar() {
             items={hashtagMenu.items}
             selectedIndex={hashtagMenu.selectedIndex}
             onSelect={hashtagMenu.handleSelect}
-            appliedHints={appliedHints}
           />
         )}
 

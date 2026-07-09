@@ -69,14 +69,6 @@ describe('ContextBuilder', () => {
 
   describe('buildSystemPrompt', () => {
     beforeEach(() => {
-      // Reset scaffolding detector cache so tests don't pollute each other.
-      // Without this, a previous test that triggered detection caches an
-      // empty state, then a later test setting up VITE_GOOGLE_CLIENT_ID
-      // sees the cached empty state and never re-scans.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { clearAllScaffoldingCache } = require('../../scaffoldingDetector')
-      clearAllScaffoldingCache()
-
       // Default mock: file tree returns a simple tree, other reads return null
       mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
         if (cmd === 'build_file_tree') {
@@ -203,107 +195,16 @@ describe('ContextBuilder', () => {
       expect(prompt).toContain('# Reminder')
     })
 
-    it('omits "Already-applied scaffolding" section when no scaffolding is detected', async () => {
-      // Default mock has no .env keys, no marker files → detection returns
-      // empty applied list → section short-circuits to null and is filtered
-      // out of the joined prompt.
+    it('omits the scaffolding/hashtag sections for a plain message on a plain project', async () => {
+      // MANAGED-PLATFORM cut (2026-07): filesystem-marker scaffolding
+      // detection was removed with the managed layer. The prompt must not
+      // resurrect the applied-scaffolding framing, and without a hashtag in
+      // the user message the hashtag-intent section stays out too.
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
       expect(prompt).not.toContain('# Already-applied scaffolding')
-    })
-
-    it('renders "Already-applied scaffolding" section with evidence when auth.google detected', async () => {
-      mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
-        if (cmd === 'build_file_tree') {
-          return { name: 'project', is_directory: true, children: [] }
-        }
-        if (cmd === 'read_file') {
-          const path = (args as Record<string, unknown>)?.path as string
-          if (path?.endsWith('/.env')) {
-            return 'VITE_GOOGLE_CLIENT_ID=clid.apps.googleusercontent.com\n'
-          }
-          throw new Error('File not found')
-        }
-        if (cmd === 'path_exists') {
-          const path = (args as Record<string, unknown>)?.path as string
-          // auth.google requires BOTH .env key AND a marker file (useGoogleSignIn)
-          if (path?.includes('useGoogleSignIn')) return true
-          return false
-        }
-        return null
-      })
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('# Already-applied scaffolding')
-      expect(prompt).toContain('auth.google')
-      expect(prompt).toContain('.env:VITE_GOOGLE_CLIENT_ID')
-      // Instruction lines must be present so the agent knows what to do.
-      expect(prompt).toContain('DO NOT re-implement the scaffolded routes/flows from scratch')
-      expect(prompt).toContain('DIAGNOSE-AND-FIX')
-      // MANAGED-PLATFORM cut (2026-07): the provision_auth guidance, the
-      // re-provision EXCEPTION clause, and the auth-proxy/google-signin
-      // skill hints were removed — the managed layer lives in TM Code Web.
-      expect(prompt).not.toContain('provision_auth')
-      expect(prompt).not.toContain("read_skill('auth-proxy')")
-      expect(prompt).not.toContain("read_skill('google-signin')")
-    })
-
-    it('omits skill-read hint when no auth/payments scaffolding is applied', async () => {
-      // Default mock has no scaffolding markers — section is null entirely.
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      // The exact phrase only appears inside getAppliedScaffoldingSection;
-      // when that section is null, the phrase is absent.
+      expect(prompt).not.toContain('# Hashtag-signalled intent')
       expect(prompt).not.toContain("read_skill('auth-proxy')")
       expect(prompt).not.toContain("read_skill('mom-factura-payments')")
-    })
-
-    it('lists payments.momenu skill-read hint when payments detected', async () => {
-      mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
-        if (cmd === 'build_file_tree') {
-          return { name: 'project', is_directory: true, children: [] }
-        }
-        if (cmd === 'read_file') {
-          const path = (args as Record<string, unknown>)?.path as string
-          if (path?.endsWith('/package.json')) {
-            return JSON.stringify({ dependencies: { 'mom-factura': '^1.0.0' } })
-          }
-          throw new Error('File not found')
-        }
-        if (cmd === 'path_exists') return false
-        return null
-      })
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('payments.momenu')
-      expect(prompt).toContain("read_skill('mom-factura-payments')")
-      // Auth-skill hint must NOT appear (no auth scaffolding detected)
-      expect(prompt).not.toContain("read_skill('google-signin')")
-    })
-
-    it('lists multiple scaffoldings when several are detected simultaneously', async () => {
-      mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
-        if (cmd === 'build_file_tree') {
-          return { name: 'project', is_directory: true, children: [] }
-        }
-        if (cmd === 'read_file') {
-          const path = (args as Record<string, unknown>)?.path as string
-          if (path?.endsWith('/.env')) {
-            return 'VITE_FIREBASE_API_KEY=k\nVITE_GIP_TENANT_ID=t\nVITE_GOOGLE_CLIENT_ID=c\nMOM_FACTURA_API_KEY=m\n'
-          }
-          if (path?.endsWith('/package.json')) {
-            return JSON.stringify({ dependencies: { 'mom-factura': '^1.0.0' } })
-          }
-          throw new Error('File not found')
-        }
-        if (cmd === 'path_exists') {
-          // src/routes/auth-proxy.ts exists → satisfies email-password conjunction
-          const path = (args as Record<string, unknown>)?.path as string
-          return /auth-proxy\.ts$|useGoogleSignIn\.ts$/.test(path)
-        }
-        return null
-      })
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('# Already-applied scaffolding')
-      expect(prompt).toContain('auth.email-password')
-      expect(prompt).toContain('auth.google')
-      expect(prompt).toContain('payments.momenu')
     })
 
     it('includes anti-recap directive for post-compaction continuation', async () => {
