@@ -73,13 +73,27 @@ const DEFAULT_PTY_ROWS: u16 = 30;
 
 /// Build a host-local shell command.
 /// Cached full PATH from the user's login shell.
-/// Extracted once (lazily) via `$SHELL -l -c 'printf $PATH'` so that tools
+/// Extracted (lazily) via `$SHELL -l -c 'printf $PATH'` so that tools
 /// installed via brew, nvm, volta, corepack are visible without the side
 /// effects of a full login shell (motd, starship prompt, etc.)
 ///
+/// SUCCESS-ONLY cache: a failed extraction (every shell timing out because the
+/// machine was pegged at app launch, a hung .zshrc, …) is NOT cached — it
+/// retries on a later call, throttled by PATH_RETRY_INTERVAL. Caching the
+/// failure (the old `OnceLock<Option<String>>`) poisoned the whole session
+/// with the minimal fallback PATH — no pyenv/asdf/volta shims — so
+/// `python3 --version` exited 127 and the IDE asked users to install tools
+/// they had.
+///
 /// Initialized eagerly at app startup via `init_user_path()` on a background
 /// thread so it doesn't block the first command.
-static USER_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+static USER_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Timestamp of the last (failed) extraction attempt — throttles retries (one
+/// attempt can spawn up to 4 shells × 5 s timeouts) and collapses concurrent
+/// callers into a single extractor while the others use the fallback PATH.
+static PATH_RETRY_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+const PATH_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Call once at app startup (from lib.rs setup) to pre-warm the PATH cache
 /// on a background thread. Non-blocking.
@@ -90,85 +104,97 @@ pub fn init_user_path() {
 }
 
 pub fn get_user_path() -> Option<&'static str> {
-    USER_PATH
-        .get_or_init(|| {
-            // On Windows, the system PATH is already correct — no shell extraction needed.
-            if cfg!(target_os = "windows") {
-                eprintln!("[PATH] Windows detected — using inherited PATH");
-                return None;
+    if let Some(path) = USER_PATH.get() {
+        return Some(path.as_str());
+    }
+    // On Windows, the system PATH is already correct — no shell extraction needed.
+    if cfg!(target_os = "windows") {
+        return None;
+    }
+    {
+        let mut gate = PATH_RETRY_AT.lock().ok()?;
+        if let Some(last) = *gate {
+            if last.elapsed() < PATH_RETRY_INTERVAL {
+                return None; // recent attempt failed/is running — use fallback for now
             }
+        }
+        *gate = Some(std::time::Instant::now());
+    }
+    let extracted = extract_user_path()?;
+    Some(USER_PATH.get_or_init(|| extracted).as_str())
+}
 
-            let user_shell = std::env::var("SHELL").unwrap_or_default();
-            eprintln!("[PATH] Extracting user PATH... SHELL={:?}", user_shell);
+/// One extraction attempt across the shell/flag matrix. None on total failure.
+fn extract_user_path() -> Option<String> {
+    let user_shell = std::env::var("SHELL").unwrap_or_default();
+    eprintln!("[PATH] Extracting user PATH... SHELL={:?}", user_shell);
 
-            // fish has incompatible syntax ($PATH is a list, not colon-delimited).
-            // Use zsh or bash as a POSIX fallback for PATH extraction.
-            let shells: Vec<String> = if user_shell.ends_with("/fish") {
-                vec!["/bin/zsh".into(), "/bin/bash".into()]
-            } else if user_shell.is_empty() {
-                vec!["/bin/zsh".into()]
-            } else {
-                vec![user_shell, "/bin/zsh".into()]
-            };
+    // fish has incompatible syntax ($PATH is a list, not colon-delimited).
+    // Use zsh or bash as a POSIX fallback for PATH extraction.
+    let shells: Vec<String> = if user_shell.ends_with("/fish") {
+        vec!["/bin/zsh".into(), "/bin/bash".into()]
+    } else if user_shell.is_empty() {
+        vec!["/bin/zsh".into()]
+    } else {
+        vec![user_shell, "/bin/zsh".into()]
+    };
 
-            // Try interactive-login first (-i -l) to pick up .zshrc/.bashrc (nvm, volta, brew on M1),
-            // then fall back to login-only (-l) which reads .zprofile/.bash_profile.
-            let flag_sets: &[&[&str]] = &[&["-i", "-l", "-c"], &["-l", "-c"]];
-            for flags in flag_sets {
-                for shell in &shells {
-                    // Run in a thread with channel-based timeout to avoid hangs
-                    // from complex shell configs (oh-my-zsh, compinit, starship, etc.)
-                    let shell_for_thread = shell.clone();
-                    let flags_vec: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
-                    let flags_dbg = format!("{:?}", flags); // for logging
-                    let shell_dbg = shell.clone();
-                    let (tx, rx) = std::sync::mpsc::channel();
+    // Try interactive-login first (-i -l) to pick up .zshrc/.bashrc (nvm, volta, brew on M1),
+    // then fall back to login-only (-l) which reads .zprofile/.bash_profile.
+    let flag_sets: &[&[&str]] = &[&["-i", "-l", "-c"], &["-l", "-c"]];
+    for flags in flag_sets {
+        for shell in &shells {
+            // Run in a thread with channel-based timeout to avoid hangs
+            // from complex shell configs (oh-my-zsh, compinit, starship, etc.)
+            let shell_for_thread = shell.clone();
+            let flags_vec: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
+            let flags_dbg = format!("{:?}", flags); // for logging
+            let shell_dbg = shell.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
 
-                    std::thread::spawn(move || {
-                        let result = std::process::Command::new(&shell_for_thread)
-                            .args(&flags_vec)
-                            .arg("printf '%s' \"$PATH\"")
-                            .stdout(Stdio::piped())
-                            .stderr(Stdio::null())
-                            .stdin(Stdio::null())
-                            .output();
-                        let _ = tx.send(result);
-                    });
+            std::thread::spawn(move || {
+                let result = std::process::Command::new(&shell_for_thread)
+                    .args(&flags_vec)
+                    .arg("printf '%s' \"$PATH\"")
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .stdin(Stdio::null())
+                    .output();
+                let _ = tx.send(result);
+            });
 
-                    match rx.recv_timeout(Duration::from_secs(5)) {
-                        Ok(Ok(output)) if output.status.success() => {
-                            if let Ok(path) = String::from_utf8(output.stdout) {
-                                if !path.is_empty() {
-                                    eprintln!(
-                                        "[PATH] Success via {} {} ({} chars)",
-                                        shell_dbg,
-                                        flags_dbg,
-                                        path.len()
-                                    );
-                                    return Some(path);
-                                }
-                            }
-                        }
-                        Ok(Ok(output)) => {
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(Ok(output)) if output.status.success() => {
+                    if let Ok(path) = String::from_utf8(output.stdout) {
+                        if !path.is_empty() {
                             eprintln!(
-                                "[PATH] {} {} exited with {:?}",
+                                "[PATH] Success via {} {} ({} chars)",
                                 shell_dbg,
                                 flags_dbg,
-                                output.status.code()
+                                path.len()
                             );
-                        }
-                        Ok(Err(e)) => {
-                            eprintln!("[PATH] {} {} spawn error: {}", shell_dbg, flags_dbg, e);
-                        }
-                        Err(_) => {
-                            eprintln!("[PATH] {} {} timed out (5s)", shell_dbg, flags_dbg);
+                            return Some(path);
                         }
                     }
                 }
+                Ok(Ok(output)) => {
+                    eprintln!(
+                        "[PATH] {} {} exited with {:?}",
+                        shell_dbg,
+                        flags_dbg,
+                        output.status.code()
+                    );
+                }
+                Ok(Err(e)) => {
+                    eprintln!("[PATH] {} {} spawn error: {}", shell_dbg, flags_dbg, e);
+                }
+                Err(_) => {
+                    eprintln!("[PATH] {} {} timed out (5s)", shell_dbg, flags_dbg);
+                }
             }
-            None
-        })
-        .as_deref()
+        }
+    }
+    None
 }
 
 /// Prevent a visible CMD/console window from flashing on Windows.
@@ -478,8 +504,17 @@ fn build_host_command(command: &str, cwd: &PathBuf) -> Command {
             &format!("{}/.local/share/pnpm", home),
             &format!("{}/.bun/bin", home),
             &format!("{}/.cargo/bin", home),
+            // Version-manager shims: without these, a session whose login-shell
+            // PATH extraction failed reported pyenv/asdf/volta-managed tools as
+            // "command not found" (exit 127) — which the required-tools gate
+            // read as "Python/Node not installed".
+            &format!("{}/.pyenv/shims", home),
+            &format!("{}/.asdf/shims", home),
+            &format!("{}/.volta/bin", home),
+            &format!("{}/.local/bin", home),
             "/opt/homebrew/bin",
             "/usr/local/bin",
+            "/opt/local/bin",
         ];
         let prepend: String = extra_dirs
             .iter()
