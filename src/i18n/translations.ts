@@ -790,7 +790,6 @@ const en = {
   'terminalMode.cmd.livePreview': 'Start a live preview (dev server on :7773) and share it with your team',
 
   // ── Views ──────────────────────────────────────────
-  'view.toggleProjects': 'Toggle projects sidebar',
   'view.newChat': 'New Chat',
   'view.toggleSessions': 'Toggle sessions list',
   'view.chatSessions': 'Chat sessions',
@@ -2521,7 +2520,6 @@ const pt: Record<keyof typeof en, string> = {
   'terminalMode.cmd.teamChat': 'Abrir/fechar o painel lateral de chat da equipa',
   'terminalMode.cmd.livePreview': 'Arrancar um live preview (dev server na :7773) e partilhar com a equipa',
 
-  'view.toggleProjects': 'Alternar barra de projetos',
   'view.newChat': 'Novo Chat',
   'view.toggleSessions': 'Alternar lista de sessões',
   'view.chatSessions': 'Sessões de chat',

@@ -47,9 +47,6 @@ interface LayoutState {
   viewMode: ViewMode
   previousViewMode: ViewMode | null
   isSidebarVisible: boolean
-  isProjectsSidebarVisible: boolean
-  /** Tracks if sidebar was open before entering preview — to restore on exit */
-  projectsSidebarBeforePreview: boolean | null
   showTemplateSelector: boolean
   isPreviewServerLoading: boolean
   /** True while a one-click preview is installing missing `node_modules` before
@@ -112,7 +109,6 @@ interface LayoutState {
 interface LayoutActions {
   setViewMode: (mode: ViewMode) => void
   toggleSidebar: () => void
-  toggleProjectsSidebar: () => void
   setShowTemplateSelector: (show: boolean) => void
   setPreviewServerLoading: (loading: boolean) => void
   /** Toggle the "installing dependencies" phase of a one-click preview. */
@@ -162,8 +158,6 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   viewMode: 'chat',
   previousViewMode: null,
   isSidebarVisible: false,
-  isProjectsSidebarVisible: false,
-  projectsSidebarBeforePreview: null,
   showTemplateSelector: false,
   isPreviewServerLoading: false,
   isInstallingDeps: false,
@@ -189,29 +183,12 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
     const current = get().viewMode
     if (current === mode) return
 
-    const state = get()
-
-    // Entering preview — auto-hide projects sidebar, remember its state
-    if (mode === 'preview' && current !== 'preview') {
+    // Entering/leaving preview — clear fullscreen state.
+    if ((mode === 'preview') !== (current === 'preview')) {
       set({
         viewMode: mode,
         previousViewMode: current,
-        projectsSidebarBeforePreview: state.isProjectsSidebarVisible,
-        isProjectsSidebarVisible: false,
         isPreviewFullscreen: false,
-      })
-      return
-    }
-
-    // Leaving preview — restore projects sidebar if it was open before
-    if (current === 'preview' && mode !== 'preview') {
-      const restore = state.projectsSidebarBeforePreview
-      set({
-        viewMode: mode,
-        previousViewMode: current,
-        projectsSidebarBeforePreview: null,
-        isPreviewFullscreen: false,
-        ...(restore ? { isProjectsSidebarVisible: true } : {}),
       })
       return
     }
@@ -224,10 +201,6 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
 
   toggleSidebar: () => {
     set(state => ({ isSidebarVisible: !state.isSidebarVisible }))
-  },
-
-  toggleProjectsSidebar: () => {
-    set(state => ({ isProjectsSidebarVisible: !state.isProjectsSidebarVisible }))
   },
 
   setShowTemplateSelector: (show: boolean) => {

@@ -1,8 +1,7 @@
 import { memo, useRef, useEffect, useCallback, useState } from 'react'
 import { Flex, Box, Text } from '@chakra-ui/react'
-import { FiPlus, FiClock, FiChevronDown, FiTrash2, FiHome } from 'react-icons/fi'
+import { FiPlus, FiClock, FiChevronDown, FiTrash2 } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
-import { useProjectStore } from '../../stores/projectStore'
 import { SessionSummary } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
@@ -80,34 +79,6 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
     // content overflow the flex-1 wrapper and paint OVER the neighbouring
     // toolbar buttons (Data Manager / billing pills).
     <Flex align="center" gap={2} minW={0} maxW="100%">
-      {/* Home Button */}
-      {projectPath && (
-        <Box
-          as="button"
-          aria-label={t("explorer.home")}
-          display="flex"
-          alignItems="center"
-          justifyContent="center"
-          w="28px"
-          h="28px"
-          flexShrink={0}
-          borderRadius="8px"
-          border={`1px solid ${tokens.colors.border.panel}`}
-          color={tokens.colors.text.secondary}
-          bg="transparent"
-          cursor="pointer"
-          transition={`all ${tokens.transition.fast}`}
-          _hover={{
-            bg: tokens.colors.bg.panel,
-            borderColor: tokens.colors.accent.primary,
-            color: tokens.colors.text.primary,
-          }}
-          onClick={() => useProjectStore.getState().closeProject()}
-        >
-          <FiHome size={13} />
-        </Box>
-      )}
-
       {/* New Chat button */}
       <Box
         as="button"

@@ -1,7 +1,7 @@
 import { memo, useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react'
 import { Flex, Box, HStack, Text, VStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiSidebar, FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle, FiEye, FiMoreHorizontal } from 'react-icons/fi'
+import { FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle, FiEye, FiMoreHorizontal } from 'react-icons/fi'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { useChatStore } from '../../stores/chatStore'
 import { useProjectStore } from '../../stores/projectStore'
@@ -35,7 +35,6 @@ function ChatView() {
   const isStreaming = useChatStore(s => s.isStreaming)
   const isLoadingSession = useChatStore(s => s.isLoadingSession)
   const currentProject = useProjectStore(s => s.currentProject)
-  const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPlanViewerOpen = useLayoutStore(s => s.isPlanViewerOpen)
   const isCheckpointDrawerOpen = useLayoutStore(s => s.isCheckpointDrawerOpen)
@@ -337,24 +336,6 @@ function ChatView() {
           position="relative"
         >
         <Flex align="center" gap={2} minW={0} flex="1" overflow="visible">
-          <Box
-            as="button"
-            flexShrink={0}
-            display="flex"
-            alignItems="center"
-            justifyContent="center"
-            w="28px"
-            h="28px"
-            borderRadius="6px"
-            color={isProjectsSidebarVisible ? tokens.colors.accent.primary : tokens.colors.text.secondary}
-            cursor="pointer"
-            transition={`all ${tokens.transition.fast}`}
-            _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-            onClick={() => useLayoutStore.getState().toggleProjectsSidebar()}
-            aria-label={t("view.toggleProjects")}
-          >
-            <FiSidebar size={15} />
-          </Box>
           <Box flex={1} minW={0}>
             <SessionDropdown
               projectPath={projectPath}

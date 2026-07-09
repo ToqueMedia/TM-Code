@@ -21,7 +21,6 @@ import PlanViewerPanel from './chat/PlanViewerPanel'
 import CheckpointDrawerPanel from './chat/CheckpointDrawerPanel'
 import TerminalDrawerPanel from './cmd-mode/TerminalDrawerPanel'
 import { useTranslation } from '@/i18n'
-import ProjectsSidebar from './chat/ProjectsSidebar'
 import { ErrorBoundary } from './ErrorBoundary'
 
 import SettingsView from './views/SettingsView'
@@ -47,7 +46,6 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewFullscreen = useLayoutStore(s => s.isPreviewFullscreen)
   const isSidebarVisible = useLayoutStore(s => s.isSidebarVisible)
-  const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
   const previewFillsWorkspace = embedded && viewMode === 'preview'
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
   const approve = usePermissionStore(s => s.approve)
@@ -370,23 +368,8 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
       <GoalCelebration />
       {!embedded && <MinimalTitleBar />}
 
-      {/* Main area below title bar: optional projects sidebar + content column */}
+      {/* Main area below title bar */}
       <Flex flex="1" overflow="hidden">
-        {/* Projects sidebar — full height from title bar to bottom */}
-        <AnimatePresence>
-          {!embedded && isProjectsSidebarVisible && viewMode !== 'editor' && (
-            <motion.div
-              key="projects-sidebar"
-              initial={{ width: 0, opacity: 0 }}
-              animate={{ width: 240, opacity: 1 }}
-              exit={{ width: 0, opacity: 0 }}
-              transition={{ duration: 0.18, ease: 'easeOut' }}
-              style={{ overflow: 'hidden', flexShrink: 0, height: '100%' }}
-            >
-              <ProjectsSidebar />
-            </motion.div>
-          )}
-        </AnimatePresence>
 
         {/* Content + prompt area — row flex with PlanViewerPanel on the right.
             The column wrapper holds content + prompt; the plan panel is a
