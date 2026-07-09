@@ -2,7 +2,12 @@ import { cachedBuildFileTree, cachedReadFile } from './agent/ipcCache'
 import { Attachment, AttachmentType } from '../types/chat'
 import type { FileTreeNode } from '../types/fileTree'
 
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024
+// 8MB raw: base64 inflates ~1.37×, and the old 5MB ceiling rejected ordinary
+// Retina screenshots — the attach then failed silently and the model received
+// the "image did not reach you" XML fallback instead of pixels.
+// PAIRED with promptValueHelpers MAX_PER_IMAGE_BYTES (base64-side, 12MB):
+// that one MUST stay ≥ this × 4/3 — change them together.
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 const MAX_FILE_CHARS = 20_000
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'])
 

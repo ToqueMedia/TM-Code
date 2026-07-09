@@ -2,9 +2,18 @@ import { useCallback, useRef, useState } from 'react'
 import { useChatStore } from '../stores/chatStore'
 import { useBillingStore } from '../stores/billingStore'
 import { useCmdAttachmentStore } from '../stores/cmdAttachmentStore'
+import { useToastStore } from '../stores/toastStore'
 import { createAttachmentFromPath, createImageAttachmentFromClipboard } from '../services/attachmentService'
 import { logger } from '../utils/logger'
+import { t } from '../i18n'
 import type { Attachment } from '../types/chat'
+
+/** Attach failures used to die in the console — a >cap image just silently
+ *  never produced a chip, reading as "the agent didn't get my image". */
+function toastAttachError(err: unknown): void {
+  const detail = err instanceof Error ? err.message : String(err)
+  useToastStore.getState().addToast('error', t('attachments.attachFailed').replace('{error}', detail))
+}
 
 /**
  * Centralized attachment handling — paste, drop, file picker, billing validation.
@@ -109,14 +118,67 @@ export function useAttachments(options: UseAttachmentsOptions = {}) {
   }, [localState, cmdSetDragging])
 
   // ─── Paste handler ───
-  // Attaches images (native paste) and file-like clipboard items (Finder/Explorer
-  // copy-paste of a file, which arrives via clipboardData.files with a real path
-  // on platforms that expose it).
+  // ORDER MATTERS: real files must outrank clipboard bitmaps. A Finder ⌘C of
+  // an image file puts the file's ICON on the pasteboard as an image/* flavor
+  // alongside the file URL — when the bitmap scan ran first, the model
+  // received a generic "PNG document" icon instead of the user's actual file
+  // (root-caused 2026-07-09: "o agente não recebeu a imagem").
   const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
-    const items = e.clipboardData?.items
-    const files = e.clipboardData?.files
+    const dt = e.clipboardData
+    if (!dt) return
 
-    // 1. Native image paste (screenshot, cmd+c on an image in a browser, etc.)
+    // 1. OS file paste via file:// URLs (how WKWebView exposes Finder copies —
+    //    it does NOT populate clipboardData.files for them).
+    const fileUrls = (dt.getData('text/uri-list') || '')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#') && l.toLowerCase().startsWith('file://'))
+    if (fileUrls.length > 0) {
+      e.preventDefault()
+      for (const url of fileUrls) {
+        try {
+          // file:///C:/x on Windows → URL.pathname "/C:/x" — strip the slash.
+          const raw = decodeURIComponent(new URL(url).pathname)
+          const path = /^\/[A-Za-z]:[\\/]/.test(raw) ? raw.slice(1) : raw
+          addAttachment(await createAttachmentFromPath(path))
+        } catch (err) {
+          logger.error('attachments', 'Failed to attach pasted file URL:', err)
+          toastAttachError(err)
+        }
+      }
+      return
+    }
+
+    // 2. Files exposed as File objects (WebView2/Chromium do this; a plain
+    //    screenshot paste can also land here as a path-less "image.png").
+    const files = dt.files
+    if (files && files.length > 0) {
+      let consumed = false
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i] as File & { path?: string }
+        try {
+          if (file.path) {
+            addAttachment(await createAttachmentFromPath(file.path))
+            consumed = true
+          } else if (file.type.startsWith('image/')) {
+            addAttachment(await createImageAttachmentFromClipboard(file))
+            consumed = true
+          }
+        } catch (err) {
+          logger.error('attachments', 'Failed to attach pasted file:', err)
+          toastAttachError(err)
+        }
+      }
+      if (consumed) {
+        e.preventDefault()
+        return
+      }
+    }
+
+    // 3. Raw bitmap on the clipboard (screenshot, "copy image" in a browser).
+    //    Reached only when no real file was present — an icon flavor can't
+    //    shadow a file anymore.
+    const items = dt.items
     if (items) {
       for (let i = 0; i < items.length; i++) {
         const item = items[i]
@@ -125,39 +187,14 @@ export function useAttachments(options: UseAttachmentsOptions = {}) {
           const blob = item.getAsFile()
           if (!blob) continue
           try {
-            const attachment = await createImageAttachmentFromClipboard(blob)
-            addAttachment(attachment)
+            addAttachment(await createImageAttachmentFromClipboard(blob))
           } catch (err) {
             logger.error('attachments', 'Failed to paste image:', err)
+            toastAttachError(err)
           }
           return
         }
       }
-    }
-
-    // 2. File-as-file paste (Finder/Explorer copy-paste). Only hits in Tauri when
-    // the OS exposes the file via clipboardData.files. We don't preventDefault
-    // unless we actually consume something, so a user pasting text still sees text.
-    if (files && files.length > 0) {
-      let consumed = false
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i] as File & { path?: string }
-        try {
-          // Tauri exposes a `path` on File when the drop/paste originates from the OS.
-          if (file.path) {
-            const attachment = await createAttachmentFromPath(file.path)
-            addAttachment(attachment)
-            consumed = true
-          } else if (file.type.startsWith('image/')) {
-            const attachment = await createImageAttachmentFromClipboard(file)
-            addAttachment(attachment)
-            consumed = true
-          }
-        } catch (err) {
-          logger.error('attachments', 'Failed to attach pasted file:', err)
-        }
-      }
-      if (consumed) e.preventDefault()
     }
   }, [addAttachment])
 
@@ -199,6 +236,7 @@ export function useAttachments(options: UseAttachmentsOptions = {}) {
         }
       } catch (err) {
         logger.error('attachments', 'Failed to attach dropped file:', err)
+        toastAttachError(err)
       }
     }
     textareaRef?.current?.focus()

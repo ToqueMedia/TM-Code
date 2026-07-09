@@ -35,11 +35,12 @@ import type { OpenAIContentPart } from './types'
  * be ≥ captureLimit × 4/3 — otherwise images the user was ALLOWED to attach
  * get silently dropped HERE. The old 5 MB (≈ 3.7 MB raw) sat BELOW the 5 MB-RAW
  * capture limit, so 3.7–5 MB images attached fine but never reached the model
- * ("the image didn't reach me"). 8 MB covers a 5 MB-raw image (~6.67 MB base64)
- * with headroom; the active providers (Gemini/Qwen/MiMo) accept it and the
- * 20 MB total cap below still guards multi-image payloads.
+ * ("the image didn't reach me"). PAIRED VALUES: capture 8 MB raw ↔ this
+ * 12 MB base64 (8 × 4/3 ≈ 10.7 MB + prefix headroom). Change them TOGETHER.
+ * The 20 MB total cap below still guards multi-image payloads (Gemini's
+ * per-message inline limit).
  */
-export const MAX_PER_IMAGE_BYTES = 8 * 1024 * 1024
+export const MAX_PER_IMAGE_BYTES = 12 * 1024 * 1024
 
 /**
  * Hard cap on the TOTAL bytes of image data URIs in a single multimodal
