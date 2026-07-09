@@ -24,7 +24,6 @@ interface ExplorerPanelProps {
 
 function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 	const currentProject = useCurrentProject()
-	useFileTreeRepository()
 
 	const refresh = useFileTreeRepository(s => s.refresh)
 	const collapseAll = useFileTreeRepository(s => s.collapseAll)
