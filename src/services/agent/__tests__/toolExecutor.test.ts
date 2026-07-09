@@ -711,9 +711,10 @@ describe('A: execute() orchestration', () => {
   it('skips truncation for read_large_result tool', async () => {
     const exec = freshExecutor()
     // First, create a large result via truncateResult by calling a tool that
-    // produces a result > 30000 chars, then read_large_result should get it untruncated
+    // produces a result over the read_file cap (100k chars, claude-vaz parity),
+    // then read_large_result should get it untruncated.
     // This tests the `if (toolName === 'read_large_result') return result` path
-    const bigContent = 'x'.repeat(35000)
+    const bigContent = 'x'.repeat(120_000)
     mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     // First call creates the large result
@@ -1310,9 +1311,9 @@ describe('F: Concurrent modification detection', () => {
 // ═══════════════════════════════════════════════════════════════════════
 
 describe('G: Truncation and large results', () => {
-  it('truncates results over 30000 chars and returns system-reminder', async () => {
+  it('truncates results over the read cap and returns system-reminder', async () => {
     const exec = freshExecutor()
-    const bigContent = 'x'.repeat(35000)
+    const bigContent = 'x'.repeat(120_000)
     mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/big.txt' })
@@ -1335,7 +1336,7 @@ describe('G: Truncation and large results', () => {
 
   it('read_large_result retrieves truncated content by range', async () => {
     const exec = freshExecutor()
-    const bigContent = 'A'.repeat(35000)
+    const bigContent = 'A'.repeat(120_000)
     mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     // First call: creates the large result entry
@@ -1358,7 +1359,7 @@ describe('G: Truncation and large results', () => {
     // 50-char lines; the 8000-char budget lands inside a line. The cut must
     // back up to the preceding newline so the preview ends with a whole line.
     const line = 'x'.repeat(49) + '\n' // 50 chars incl newline
-    const bigContent = line.repeat(800) // 40000 chars
+    const bigContent = line.repeat(2400) // 120000 chars
     mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/lines.txt' })
@@ -1379,7 +1380,7 @@ describe('G: Truncation and large results', () => {
   it('records only model-visible lines as covered when a large Read is preview-truncated', async () => {
     const exec = freshExecutor()
     const line = (n: number) => `line ${String(n).padStart(3, '0')} ` + 'x'.repeat(40)
-    const bigContent = Array.from({ length: 800 }, (_, i) => line(i + 1)).join('\n')
+    const bigContent = Array.from({ length: 2400 }, (_, i) => line(i + 1)).join('\n')
     mockInvokeImpl.mockImplementation(async (cmd: string) => {
       if (cmd === 'file_stat') return { size: bigContent.length, modifiedMs: 1700000000000 }
       if (cmd === 'read_file_with_signature') return bigContent
@@ -1409,7 +1410,7 @@ describe('G: Truncation and large results', () => {
   it('continuation offset equals the actual chars shown (no gap skipped)', async () => {
     const exec = freshExecutor()
     const line = 'y'.repeat(49) + '\n'
-    const bigContent = line.repeat(800)
+    const bigContent = line.repeat(2400)
     mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/lines.txt' })
@@ -1426,7 +1427,7 @@ describe('G: Truncation and large results', () => {
 
   it('falls back to a hard cut for single-line (newline-free) output like minified JSON', async () => {
     const exec = freshExecutor()
-    const bigContent = '{' + '"k":"v",'.repeat(5000) + '}' // one giant line, no \n
+    const bigContent = '{' + '"k":"v",'.repeat(15000) + '}' // one giant line, no \n
     mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     const result = await exec.execute('read_file', { file_path: '/projects/test-app/min.json' })
@@ -1444,7 +1445,7 @@ describe('G: Truncation and large results', () => {
 
   it('read_large_result with end_offset > stored length is clamped', async () => {
     const exec = freshExecutor()
-    const bigContent = 'C'.repeat(35000)
+    const bigContent = 'C'.repeat(120_000)
     mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     const truncated = await exec.execute('read_file', { file_path: '/projects/test-app/big2.txt' })
@@ -1458,7 +1459,7 @@ describe('G: Truncation and large results', () => {
 
   it('resetSessionState clears large results', async () => {
     const exec = freshExecutor()
-    const bigContent = 'D'.repeat(35000)
+    const bigContent = 'D'.repeat(120_000)
     mockInvokeImpl.mockResolvedValue(bigContent as never)
 
     await exec.execute('read_file', { file_path: '/projects/test-app/big3.txt' })

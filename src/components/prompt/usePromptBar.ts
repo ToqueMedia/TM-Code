@@ -28,9 +28,8 @@ import { findMentionAtCursor, findMentionTokenEnd } from '../../utils/mentionPar
 import { preprocessHashtags } from '../../services/agent/hashtagRegistry'
 import { useHashtagMenu } from './useHashtagMenu'
 import { guardScaffoldReapply } from './scaffoldReapplyGuard'
-import { scaffoldKeyLabel, type ScaffoldKey } from '../../services/scaffoldingDetector'
 import { t } from '@/i18n'
-import { runAuthFlow, runDesignFlow } from '../../services/agent/commands/authCommand'
+import { runDesignFlow } from '../../services/agent/commands/authCommand'
 import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, resolveImageToDataUri } from '../../services/attachmentService'
 import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from '../../services/agent/atMentions'
 import {
@@ -173,7 +172,7 @@ export function usePromptBar() {
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0)
   const mentionStartRef = useRef(-1)
 
-  // #hashtag menu — closed-vocabulary skill triggers (e.g. #auth-google).
+  // #hashtag menu — closed-vocabulary skill triggers (e.g. #design).
   // State + handlers live in the shared hook used by prompt inputs.
   const hashtagMenu = useHashtagMenu({
     textareaRef,
@@ -344,7 +343,7 @@ export function usePromptBar() {
       const cursorPos = textarea.selectionStart
       const text = textarea.value
 
-      // Closed-vocabulary hashtag (e.g. #auth-email-password, #auth-google).
+      // Closed-vocabulary hashtag (e.g. #design).
       // detect() returns true when a `#` token owns the autocomplete slot —
       // including the no-matches case — so we never fall through to the file
       // picker for an unknown tag.
@@ -795,7 +794,7 @@ export function usePromptBar() {
       }))
       const coreToolCount = ToolExecutor.getInstance().getCoreToolCount()
       // Pass the raw user text so contextBuilder can detect skill-trigger
-      // hashtags (#auth-google, #design, etc.) and inline the corresponding
+      // hashtags (#design, etc.) and inline the corresponding
       // CRITICAL skill rules at turn 1 — before scaffoldingDetector has any
       // filesystem markers to find.
       const userMessageText = bootstrapOnly && tmsPreflight
@@ -1127,11 +1126,11 @@ export function usePromptBar() {
     // === Slash commands: execute directly (never queued) ===
     // Slash commands take precedence over hashtag flows. A prompt that
     // STARTS with `/plan ...` is, by construction, asking the architect
-    // command to run — even if the user mentions `#auth-google` inside the
-    // idea ("a platform with #auth-google sign-in"). Without this order,
-    // preprocessHashtags would consume the tag, route to runAuthFlow, and
+    // command to run — even if the user mentions `#design` inside the
+    // idea ("a landing page with #design"). Without this order,
+    // preprocessHashtags would consume the tag, route to runDesignFlow, and
     // the /plan command never executes. The hashtag is part of the
-    // architectural description; the architect can address auth in PLAN.md.
+    // architectural description; the architect can address it in PLAN.md.
     if (slashCommandRegistry.isSlashCommand(prompt)) {
       const command = slashCommandRegistry.getCommand(prompt)
       if (!command) return
@@ -1170,10 +1169,10 @@ export function usePromptBar() {
 
       // Smart router for /payments: if MoMenu Payments markers are already
       // in the project, block the re-scaffold with explanatory message.
-      // Same rationale as the auth-hashtag router below — the slash command
-      // is for first-time integration; subsequent fixes go through verbal
-      // requests so the agent (which sees the appliedScaffolding system-
-      // prompt section) routes to fix-mode rather than re-running fetches.
+      // The slash command is for first-time integration; subsequent fixes
+      // go through verbal requests so the agent (which sees the
+      // appliedScaffolding system-prompt section) routes to fix-mode rather
+      // than re-running fetches.
       if (command.name === '/payments') {
         const { blocked } = await guardScaffoldReapply(
           projectPath!,
@@ -1202,16 +1201,15 @@ export function usePromptBar() {
       return
     }
 
-    // === Hashtag-driven flows: detect skill triggers (e.g. #auth-google,
-    // #design) and route to the specialised flow. Replaces the legacy /auth
-    // slash command. Free-form `#tags` not in the registry are ignored and
-    // pass through to the agent untouched.
+    // === Hashtag-driven flows: detect skill triggers (e.g. #design) and
+    // route to the specialised flow. Free-form `#tags` not in the registry
+    // are ignored and pass through to the agent untouched.
     //
     // Runs AFTER the slash-command check so a prompt like
-    // `/plan ... with #auth-google ...` doesn't have the hashtag stripped
+    // `/plan ... with #design ...` doesn't have the hashtag stripped
     // out from under /plan — slash commands own the dispatch in that case.
     const pre = preprocessHashtags(prompt)
-    if (pre.authProviders.length > 0 || pre.hasDesign) {
+    if (pre.hasDesign) {
       const projectPath = currentProject?.path
       if (!projectPath) {
         useChatStore.getState().setDraftInput('')
@@ -1228,40 +1226,17 @@ export function usePromptBar() {
         layout.setViewMode('chat')
       }
 
-      // Smart router: if any requested auth provider is already applied,
-      // block the re-scaffold flow with an explanatory system message. The
-      // hashtag is for FIRST-TIME provisioning; for fixing the existing
-      // implementation the user should phrase verbally ("Corrige o login
-      // com Google"). The agent then sees the `# Already-applied
-      // scaffolding` system-prompt section and routes to fix-mode.
-      if (pre.authProviders.length > 0) {
-        const requestedKeys: import('../../services/scaffoldingDetector').ScaffoldKey[] =
-          pre.authProviders.map(p => `auth.${p}` as const)
-        const { blocked } = await guardScaffoldReapply(
-          projectPath,
-          requestedKeys,
-          (applied) => buildAuthReapplyMessage(applied),
-          () => { useChatStore.getState().setDraftInput(''); clearDraftAttachments() },
-        )
-        if (blocked) return
-      }
-
       // Preserve hashtags in the visible message and the persisted history.
       // The hashtag is still useful AFTER it routes — it documents the user's
       // intent for anyone reading the session later (debug exports, sharing
       // a repro, scrolling back), and it's what they actually typed. The
-      // skill content is force-loaded via runAuthFlow regardless of what
+      // skill content is force-loaded via runDesignFlow regardless of what
       // appears in the bubble, so stripping the tag here used to delete
       // signal for no behavioural gain.
       const bubbleText = prompt
 
-      if (pre.authProviders.length > 0) {
-        // Auth flow handles design augmentation when both are requested.
-        await runAuthFlow(pre.authProviders, pre.cleanedText, bubbleText, pre.hasDesign)
-      } else {
-        // Design-only flow: lightweight skill injection, no execution sequence.
-        await runDesignFlow(pre.cleanedText, bubbleText)
-      }
+      // Design flow: lightweight skill injection, no execution sequence.
+      await runDesignFlow(pre.cleanedText, bubbleText)
       return
     }
 
@@ -1706,8 +1681,8 @@ export function usePromptBar() {
     // #hashtag menu — shared hook (state + handlers)
     hashtagMenu,
     // Already-applied scaffolding hints — drives the "já aplicado" badge in
-    // both the hashtag and slash menus. Map keyed by tag (`#auth-google`)
-    // or command name (`/payments`); value is the recommended fix phrasing.
+    // both the hashtag and slash menus. Map keyed by UI trigger (hashtag
+    // or command name like `/payments`); value is the recommended fix phrasing.
     appliedHints,
     // Attachments
     draftAttachments,
@@ -1727,16 +1702,6 @@ export function usePromptBar() {
 // Pure builders. Kept module-scope (not inside the hook) so they don't
 // re-allocate per render. Wording is i18n-resolved at call time so the
 // developer's IDE language drives the output.
-
-function buildAuthReapplyMessage(applied: ScaffoldKey[]): string {
-  const labels = applied.map(scaffoldKeyLabel).join(' + ')
-  const fixHint = applied.includes('auth.google')
-    ? t('scaffold.message.authFixHintGoogle')
-    : t('scaffold.message.authFixHintEmail')
-  return t('scaffold.message.authReapply')
-    .replace('{labels}', labels)
-    .replace('{fixHint}', fixHint)
-}
 
 function buildPaymentsReapplyMessage(): string {
   return t('scaffold.message.paymentsReapply')

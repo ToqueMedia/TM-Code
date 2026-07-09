@@ -42,8 +42,12 @@ export const CRITICAL_SECTIONS_MAX_BYTES = 12_000
  * Empty when no recognised tags are present.
  *
  * The point: turn-1 reinforcement before scaffoldingDetector has filesystem
- * markers to find. The user has already declared intent via `#auth-google`,
+ * markers to find. The user has already declared intent via `#design`,
  * so the rules should already be in context — not waiting for the next turn.
+ *
+ * NOTE (2026-07): the managed-auth tags (`#auth-google`,
+ * `#auth-email-password` → auth-proxy/google-signin skills) were removed
+ * with the MANAGED-PLATFORM layer — see hashtagRegistry.ts.
  *
  * Exported for unit tests.
  */
@@ -53,12 +57,6 @@ export function skillsFromHashtags(message: string | undefined): string[] {
   // whitespace/punctuation. (\B is wrong here because between two `#`
   // chars it counts as non-word-boundary and would match `a###tag`.)
   const skills = new Set<string>()
-  if (/(?<!\S)#auth-(google|email-password)\b/i.test(message)) {
-    skills.add('auth-proxy')
-  }
-  if (/(?<!\S)#auth-google\b/i.test(message)) {
-    skills.add('google-signin')
-  }
   if (/(?<!\S)#design\b/i.test(message)) {
     skills.add('frontend-design')
   }

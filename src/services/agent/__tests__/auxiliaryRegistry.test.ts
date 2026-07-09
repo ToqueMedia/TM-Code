@@ -54,10 +54,12 @@ describe('auxiliaryRegistry', () => {
       expect(sel.profile).toBe('bugfix_local')
       expect(sel.loaded).toHaveLength(0)
       const omittedIds = sel.omitted.map((o) => o.id)
-      expect(omittedIds).toContain('delivery.deploy')
       expect(omittedIds).toContain('scaffold.workflow')
       expect(omittedIds).toContain('vision.image_rules')
-      expect(omittedIds).toContain('auth_database.provision')
+      // MANAGED-PLATFORM cut (2026-07): 'delivery.deploy' and
+      // 'auth_database.provision' no longer exist in the registry at all.
+      expect(omittedIds).not.toContain('delivery.deploy')
+      expect(omittedIds).not.toContain('auth_database.provision')
       expect(sel.savingsTokens).toBe(sel.totalAvailableTokens)
       expect(sel.loadedTokens).toBe(0)
     })
@@ -71,11 +73,13 @@ describe('auxiliaryRegistry', () => {
       expect(loadedIds).not.toContain('vision.image_rules')
     })
 
-    it('loads deploy + build context for deploy_publish', () => {
+    it('loads build context for deploy_publish (managed deploy auxiliary removed)', () => {
       const sel = selectAuxiliaries('deploy_publish', 'deploy to production')
       const loadedIds = sel.loaded.map((l) => l.id)
-      expect(loadedIds).toContain('delivery.deploy')
       expect(loadedIds).toContain('delivery.build_scripts')
+      // MANAGED-PLATFORM cut (2026-07): the 'delivery.deploy' publishing
+      // auxiliary was removed — deploy guidance lives in TM Code Web.
+      expect(loadedIds).not.toContain('delivery.deploy')
       expect(loadedIds).not.toContain('scaffold.workflow')
       expect(loadedIds).not.toContain('vision.image_rules')
     })
@@ -358,12 +362,15 @@ describe('auxiliaryRegistry', () => {
       const index = buildOnDemandIndex(sel)
       expect(index).not.toBeNull()
       expect(index).toContain('request_context')
-      expect(index).toContain('delivery.deploy')
       expect(index).toContain('scaffold.workflow')
       expect(index).toContain('project.symbol_index')
       expect(index).toContain('locate functions/classes/components/hooks/handlers/services')
       expect(index).toContain('verify source with Read before editing')
       expect(index).toContain('vision.image_rules')
+      // MANAGED-PLATFORM cut (2026-07): the managed auxiliaries must not be
+      // advertised to the agent anymore.
+      expect(index).not.toContain('delivery.deploy')
+      expect(index).not.toContain('auth_database.provision')
     })
   })
 

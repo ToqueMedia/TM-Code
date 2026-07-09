@@ -2,13 +2,18 @@
  * Dispatch precedence — verifies that slash commands take precedence over
  * hashtag flows when a prompt contains both.
  *
- * Why: a user's `/plan Vamos criar uma app com #auth-google` is asking for
- * the architect (`/plan`) — the `#auth-google` is part of the architectural
+ * Why: a user's `/plan landing page with #design` is asking for the
+ * architect (`/plan`) — the `#design` is part of the architectural
  * description, not a routing signal. Before the precedence fix, the hashtag
- * preprocessor consumed `#auth-google` first, routed to runAuthFlow, and the
+ * preprocessor consumed the tag first, routed to the hashtag flow, and the
  * /plan command never executed (the architect prompt + planMode never
  * activated, so the agent went into normal IDE-implementation mode and
- * called provision_auth + scaffolded the project).
+ * scaffolded the project).
+ *
+ * NOTE (2026-07): the original regression case used `#auth-google`
+ * (runAuthFlow). The managed-auth hashtag flow was removed with the
+ * MANAGED-PLATFORM layer, so the precedence contract is now exercised with
+ * `#design` — the remaining registry tag.
  *
  * This test imports `preprocessHashtags` only — `slashCommandRegistry`
  * pulls in the entire toolExecutor + Tauri/Vite stack which Jest can't
@@ -30,37 +35,36 @@ function looksLikeSlashCommand(input: string): boolean {
 }
 
 describe('slash command vs hashtag precedence', () => {
-  test('a /plan with #auth-google in the args matches BOTH detectors', () => {
-    // Real-world case from a BugHunter session — the user described an app
-    // that needs Google sign-in. Without precedence, preprocessHashtags fires
-    // first and the slash command never runs.
-    const prompt = '/plan platform with users registered via #auth-google'
+  test('a /plan with #design in the args matches BOTH detectors', () => {
+    const prompt = '/plan landing page with #design'
     const isSlash = looksLikeSlashCommand(prompt)
     const pre = preprocessHashtags(prompt)
 
     // Both detectors fire — that's the whole point of the precedence rule.
     expect(isSlash).toBe(true)
-    expect(pre.authProviders).toContain('google')
+    expect(pre.hasDesign).toBe(true)
   })
 
-  test('a /plan with #design also fires both detectors', () => {
-    const prompt = '/plan landing page with #design'
-    expect(looksLikeSlashCommand(prompt)).toBe(true)
-    expect(preprocessHashtags(prompt).hasDesign).toBe(true)
-  })
-
-  test('a NON-slash prompt with #auth-google routes only via hashtag', () => {
-    const prompt = 'add #auth-google to my app'
+  test('a NON-slash prompt with #design routes only via hashtag', () => {
+    const prompt = 'add #design polish to my app'
     expect(looksLikeSlashCommand(prompt)).toBe(false)
     const pre = preprocessHashtags(prompt)
-    expect(pre.authProviders).toContain('google')
+    expect(pre.hasDesign).toBe(true)
+  })
+
+  test('the removed #auth-google tag no longer fires the hashtag detector', () => {
+    // Managed-auth hashtags were cut with the MANAGED-PLATFORM layer; the
+    // former trigger must now pass through as plain text to the agent.
+    const prompt = 'add #auth-google to my app'
+    const pre = preprocessHashtags(prompt)
+    expect(pre.hasDesign).toBe(false)
+    expect(pre.cleanedText).toContain('#auth-google')
   })
 
   test('a plain /plan with no hashtag matches only the slash detector', () => {
     const prompt = '/plan build a todo app'
     expect(looksLikeSlashCommand(prompt)).toBe(true)
     const pre = preprocessHashtags(prompt)
-    expect(pre.authProviders).toHaveLength(0)
     expect(pre.hasDesign).toBe(false)
   })
 
@@ -68,7 +72,6 @@ describe('slash command vs hashtag precedence', () => {
     const prompt = 'fix the bug in App.tsx'
     expect(looksLikeSlashCommand(prompt)).toBe(false)
     const pre = preprocessHashtags(prompt)
-    expect(pre.authProviders).toHaveLength(0)
     expect(pre.hasDesign).toBe(false)
   })
 
@@ -78,11 +81,9 @@ describe('slash command vs hashtag precedence', () => {
   // covers the slash → executePlan path. This describe block exists so the
   // expectation is captured in tests rather than only in the source comment.
   test('the dispatch contract: slash wins when both detectors fire', () => {
-    const prompt = '/plan platform with #auth-google sign-in'
+    const prompt = '/plan platform with #design polish'
     const isSlash = looksLikeSlashCommand(prompt)
-    const wouldHashtagFire =
-      preprocessHashtags(prompt).authProviders.length > 0 ||
-      preprocessHashtags(prompt).hasDesign
+    const wouldHashtagFire = preprocessHashtags(prompt).hasDesign
 
     // Both true — the dispatcher (usePromptBar.handleSend) MUST evaluate
     // slash FIRST and return without invoking the hashtag handler.

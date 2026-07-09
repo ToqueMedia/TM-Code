@@ -236,15 +236,14 @@ describe('ContextBuilder', () => {
       expect(prompt).toContain('auth.google')
       expect(prompt).toContain('.env:VITE_GOOGLE_CLIENT_ID')
       // Instruction lines must be present so the agent knows what to do.
-      expect(prompt).toContain('DO NOT call `provision_auth` again')
-      // Exception clause must allow explicit re-provisioning.
-      expect(prompt).toContain('EXCEPTION')
-      expect(prompt).toContain('rotate credentials')
-      // Skill-read instruction must be present so the agent picks up
-      // CRITICAL rules from the skill before patching from intuition
-      // (the original scaffold may have ignored some rules).
-      expect(prompt).toContain("read_skill('auth-proxy')")
-      expect(prompt).toContain("read_skill('google-signin')")
+      expect(prompt).toContain('DO NOT re-implement the scaffolded routes/flows from scratch')
+      expect(prompt).toContain('DIAGNOSE-AND-FIX')
+      // MANAGED-PLATFORM cut (2026-07): the provision_auth guidance, the
+      // re-provision EXCEPTION clause, and the auth-proxy/google-signin
+      // skill hints were removed — the managed layer lives in TM Code Web.
+      expect(prompt).not.toContain('provision_auth')
+      expect(prompt).not.toContain("read_skill('auth-proxy')")
+      expect(prompt).not.toContain("read_skill('google-signin')")
     })
 
     it('omits skill-read hint when no auth/payments scaffolding is applied', async () => {
@@ -357,19 +356,17 @@ describe('ContextBuilder', () => {
     it('keeps selected auxiliary content below the dynamic boundary', async () => {
       const plannerJson = JSON.stringify({
         taskDomain: 'test/auxiliary-boundary',
-        requiredCapabilities: ['scaffold_workflow', 'vision', 'auth', 'dev_server', 'semantic_tokens'],
+        requiredCapabilities: ['scaffold_workflow', 'vision', 'dev_server', 'semantic_tokens'],
         minimumContextNeeded: 'summary',
         candidateContexts: [
           'scaffold.workflow',
           'vision.image_rules',
-          'auth_database.provision',
           'delivery.dev_server',
           'design_system.semantic_tokens',
         ],
         selectedContexts: [
           'scaffold.workflow',
           'vision.image_rules',
-          'auth_database.provision',
           'delivery.dev_server',
           'design_system.semantic_tokens',
         ],
@@ -408,7 +405,6 @@ describe('ContextBuilder', () => {
       const dynamicAuxiliaryMarkers = [
         '## Scaffolding workflow — REQUIRED for new projects',
         '## Vision (images)',
-        '## Authentication',
         '## Dev servers',
         '# Design system: semantic tokens',
       ]

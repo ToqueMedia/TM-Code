@@ -7,7 +7,6 @@
  *   - Shared types (PromptContext etc.)   →  `contextBuilder/types.ts`
  *   - File-tree / pkg / lang utilities    →  `contextBuilder/projectUtils.ts`
  *   - Shared snippets                     →  `contextBuilder/sections/sharedSections.ts`
- *   - The big Publishing section          →  `contextBuilder/sections/chatPublishing.ts`
  *   - Project prompt section builders     →  `contextBuilder/sections/chatSections.ts`
  *   - Cwd-scoped section builders         →  `contextBuilder/sections/cmdSections.ts`
  *
@@ -83,7 +82,6 @@ import {
   getDoingTasksSection,
   getScaffoldingInstallSection,
   getVisionSection,
-  getAuthSection,
   getDevServerRulesSection,
   getDevServerStatusSection,
   getEnvironmentSection,
@@ -134,7 +132,6 @@ import {
   getCmdToolsSection,
 } from './contextBuilder/sections/cmdSections'
 
-import { getPublishingSection } from './contextBuilder/sections/chatPublishing'
 import { ContextPlannerError, planContextWithModel } from './contextPlanner'
 import {
   classifyPromptIntent,
@@ -271,14 +268,10 @@ class ContextBuilder {
       return key && ctx?.promptCtx ? buildTmsSectionContext(ctx.promptCtx.tmsContent, key) : null
     }
     switch (resolvedId) {
-      case 'delivery.deploy':
-        return getPublishingSection()
       case 'scaffold.workflow':
         return ctx ? getScaffoldingInstallSection({ pmDetected: ctx.pmDetected }) : null
       case 'vision.image_rules':
         return getVisionSection()
-      case 'auth_database.provision':
-        return getAuthSection()
       case 'design_system.semantic_tokens':
         return [
           '# Design system: semantic tokens',
@@ -582,8 +575,8 @@ class ContextBuilder {
     } catch { /* non-critical */ }
     const mcpSig = (mcpTools ?? []).map(t => `${t.serverName}:${t.name}`).sort().join(',')
     // Hashtag-driven sticky must invalidate cache when the set of recognised
-    // tags changes — same conversation but the user just typed `#auth-google`
-    // for the first time should re-render with the auth skill inlined.
+    // tags changes — same conversation but the user just typed `#design`
+    // for the first time should re-render with the design skill inlined.
     const stickyHashtagSkills = skillsFromHashtags(userMessage)
     const stickyHashtagSig = stickyHashtagSkills.slice().sort().join(',')
     // fsVersion is a path-agnostic filesystem fingerprint — incremented on
@@ -936,9 +929,7 @@ class ContextBuilder {
         'scaffold workflow auxiliary is selected only for project-bootstrap tasks'),
       dynamicSection('additional_constraints', () => [
         auxLoadedContent['vision.image_rules'] ?? '',
-        auxLoadedContent['auth_database.provision'] ?? '',
         auxLoadedContent['delivery.dev_server'] ?? '',
-        auxLoadedContent['delivery.deploy'] ?? '',
       ].filter(Boolean).join('\n\n') || null,
         'constraint auxiliaries are selected per intent/project and may be absent'),
       dynamicSection('design_system_semantic_tokens', () => auxLoadedContent['design_system.semantic_tokens'] ?? null,

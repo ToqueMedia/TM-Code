@@ -1020,6 +1020,10 @@ export async function* query(
   // recovery attempt to nudge the model back on track.
   let runHasEdited = false;
   let noEditRecoveryCount = 0;
+  /** Whether any successful update_tasks ran this run — see the
+   *  task-reconciliation guardrail at the stop path. */
+  let runTouchedTaskTracker = false;
+  let taskGuardCount = 0;
   /** Turn number of the first successful file mutation (1-indexed). */
   let firstWriteTurn: number | undefined;
   /** Total count of successful file-mutating tool calls this run. */
@@ -2365,6 +2369,48 @@ export async function* query(
         continue;
       }
 
+      // Guardrail: run is stopping while the task tracker still has
+      // non-completed tasks AND the model never called update_tasks this run.
+      // This is the observed "claims everything is done, tracker says 0/N"
+      // failure: the model narrates completion (or calls update_session_memory
+      // believing that IS the tracker) and ends, stranding the panel on
+      // pending rows. One reconciliation nudge per run; a model that touched
+      // the tracker at all (even partially) is deliberately NOT nudged —
+      // partial sessions legitimately end with pending tasks.
+      if (taskGuardCount < 1 && !runTouchedTaskTracker) {
+        try {
+          const { useAgentStore } = await import("../../stores/agentStore");
+          const tasks = useAgentStore.getState().tasks;
+          const unfinished = tasks.filter((tk) => tk.status !== "completed");
+          if (tasks.length > 0 && unfinished.length > 0) {
+            taskGuardCount++;
+            const preview = unfinished
+              .slice(0, 4)
+              .map((tk) => `- ${tk.description ?? tk.id} (${tk.status})`)
+              .join("\n");
+            state = {
+              ...state,
+              messages: [
+                ...updatedMessages,
+                {
+                  role: "user",
+                  content:
+                    `The task tracker still shows ${unfinished.length} task(s) not completed:\n${preview}\n\n` +
+                    `Reconcile it before finishing (update_session_memory is NOT the task tracker — use update_tasks): ` +
+                    `if this work is actually done and verified, call update_tasks now marking each finished task completed (with evidence); ` +
+                    `if something remains, continue working on it now; if a task is obsolete or blocked, update its status/description to say so. ` +
+                    `Do not end the run with a stale tracker.`,
+                },
+              ],
+              continuationCount: 0,
+            };
+            continue;
+          }
+        } catch {
+          // Guardrail is best-effort — never let it break the stop path.
+        }
+      }
+
       // Model is done — return terminal
       state.messages = updatedMessages;
       return {
@@ -2464,6 +2510,13 @@ export async function* query(
           if (firstWriteTurn === undefined) {
             firstWriteTurn = state.turnCount;
           }
+        }
+        // Track whether the model touched the task tracker at all this run.
+        // Drives the task-reconciliation guardrail at the stop path: a run
+        // that ends with unfinished tasks AND never called update_tasks is
+        // the "claims done, tracker says 0/N" failure mode.
+        if (!result.isError && tc.name === "update_tasks") {
+          runTouchedTaskTracker = true;
         }
       } catch (err) {
         const errMsg = formatError(err);

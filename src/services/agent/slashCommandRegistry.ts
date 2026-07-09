@@ -177,9 +177,9 @@ class SlashCommandRegistry {
       visibleWhen: () => isSpeedModelEligible(useTmSpeedStore.getState().activeModelId),
     })
 
-    // Note: `/auth` was removed in favour of the `#auth-email-password` and
-    // `#auth-google` hashtag triggers — see `hashtagRegistry.ts` and the
-    // hashtag detection in `usePromptBar.ts` / `useCmdPromptLogic.ts`.
+    // Note: `/auth` (and later the `#auth-*` hashtag triggers that replaced
+    // it) were removed with the MANAGED-PLATFORM layer — managed auth
+    // provisioning lives in TM Code Web. See `hashtagRegistry.ts`.
   }
 
   register(command: SlashCommand): void {

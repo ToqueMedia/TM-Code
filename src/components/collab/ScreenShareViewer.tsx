@@ -5,7 +5,7 @@ import { useTranslation } from '@/i18n'
 import { tokens } from '@/theme/tokens'
 import { useCollabStore } from '@/stores/collabStore'
 import { stopWatching } from '@/services/collab/collabScreen'
-import { useElapsedLabel } from '@/hooks/useElapsedLabel'
+import { ElapsedLabel } from './ElapsedLabel'
 
 /**
  * Floating viewer for a teammate's screen share. Mounted once in MainLayout
@@ -77,7 +77,7 @@ export function ScreenShareViewer() {
   const watching = useCollabStore((s) => s.screenWatching)
   const presenter = useCollabStore((s) => s.screenPresenter)
   const stream = useCollabStore((s) => s.screenRemoteStream)
-  const elapsed = useElapsedLabel(useCollabStore((s) => s.screenPresenterSince))
+  const presenterSince = useCollabStore((s) => s.screenPresenterSince)
   const videoRef = useRef<HTMLVideoElement>(null)
   const [rect, setRect] = useState<ViewerRect>(() => loadRect())
   const rectRef = useRef(rect)
@@ -117,10 +117,13 @@ export function ScreenShareViewer() {
       const onUp = () => {
         target.removeEventListener('pointermove', onMove)
         target.removeEventListener('pointerup', onUp)
+        target.removeEventListener('pointercancel', onUp)
         persist(rectRef.current)
       }
       target.addEventListener('pointermove', onMove)
       target.addEventListener('pointerup', onUp)
+      // Cancelled gestures (OS gestures, capture loss) must not leak listeners.
+      target.addEventListener('pointercancel', onUp)
     },
     [persist],
   )
@@ -166,16 +169,13 @@ export function ScreenShareViewer() {
           <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.primary} lineClamp={1}>
             {t('team.screenPresenting').replace('{name}', presenter.name)}
           </Text>
-          {elapsed && (
-            <Text
-              fontSize="10px"
-              fontFamily={tokens.fontFamily.mono}
-              color={tokens.colors.text.muted}
-              flexShrink={0}
-            >
-              {elapsed}
-            </Text>
-          )}
+          <ElapsedLabel
+            since={presenterSince}
+            fontSize="10px"
+            fontFamily={tokens.fontFamily.mono}
+            color={tokens.colors.text.muted}
+            flexShrink={0}
+          />
         </Flex>
         <Flex align="center" gap={2} flexShrink={0}>
           <Box

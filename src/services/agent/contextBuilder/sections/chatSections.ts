@@ -666,10 +666,10 @@ export function getDevServerStatusSection(): string | null {
 }
 
 // ── 10b. Already-applied scaffolding (conditional) ─────────────
-// Tells the agent which one-shot provisioning flows (#auth-google,
-// #auth-email-password, /payments) have already produced artefacts in
-// this project. The model then fixes the existing impl rather than
-// re-running provision_auth or rewriting auth/payments boilerplate.
+// Tells the agent which one-shot scaffolding flows (e.g. /payments,
+// hashtag-triggered skills) have already produced artefacts in this
+// project. The model then fixes the existing impl rather than rewriting
+// the scaffolded boilerplate from scratch.
 // Keyed off filesystem markers (.env keys + package.json deps + presence
 // of marker files) — see scaffoldingDetector.ts for the rules.
 export function getAppliedScaffoldingSection(ctx: PromptContext): string | null {
@@ -709,10 +709,6 @@ export function composeScaffoldingAwareSection(
    // read_skill calls per applied area.
   const skillReadHints: string[] = []
   const stickySkillNames: string[] = []
-  if (applied.includes('auth.email-password') || applied.includes('auth.google')) {
-    skillReadHints.push('auth.* → call \`read_skill(\'auth-proxy\')\` AND \`read_skill(\'google-signin\')\`')
-    stickySkillNames.push('auth-proxy', 'google-signin')
-  }
   if (applied.includes('payments.momenu')) {
     skillReadHints.push('payments.* → call \`read_skill(\'mom-factura-payments\')\`')
     stickySkillNames.push('mom-factura-payments')
@@ -774,11 +770,8 @@ These one-shot scaffolding flows have already produced artefacts in this project
 ${lines.join('\n')}
 
 When the developer asks for changes related to these areas:
- - DO NOT call \`provision_auth\` again — credentials are already in \`.env\`. The backend is idempotent (returns the same tenant) but re-running wastes tokens and signals "scaffold from scratch" instead of "fix existing".
- - DO NOT re-implement the auth-proxy / payment-routes from scratch — they are on disk. Read the marker paths above first, locate the bug, fix only what's broken.
-${skillReadBlock} - Treat verbal requests like "fix the login" or "the payment isn't working" as DIAGNOSE-AND-FIX requests, not scaffold requests. The hashtag/slash flows for these are one-shot and have already run.
-
-EXCEPTION — explicit re-provisioning is allowed. If the developer says any of: "re-provision", "rotate credentials", "wipe and start over", "delete and re-create the tenant", "reset the auth", "reprovisiona", "rotaciona credenciais", "apaga e recomeça" — they have OPTED IN to a destructive re-scaffold. Then you MAY call \`provision_auth\` (the platform is idempotent — same tenant returns) and re-write the affected files. Even in that case: confirm in chat what you're about to do BEFORE calling the tool, since rotating credentials can invalidate active sessions.`
+ - DO NOT re-implement the scaffolded routes/flows from scratch — they are on disk. Read the marker paths above first, locate the bug, fix only what's broken.
+${skillReadBlock} - Treat verbal requests like "fix the login" or "the payment isn't working" as DIAGNOSE-AND-FIX requests, not scaffold requests. The hashtag/slash flows for these are one-shot and have already run.`
     : null
 
   const hashtagBlock = applied.length === 0 && hashtagSkills.length > 0
@@ -1147,16 +1140,6 @@ export function getVisionSection(): string {
  - If the image is unclear or the description seems incomplete, say so — but never disclaim vision capability entirely.`
 }
 
-// ── 14b. Authentication rules (AUXILIARY — gated by auxiliaryRegistry)
-// Extracted from getConstraintsSection. Loaded only for auth/database tasks
-// or on-demand via request_context.
-export function getAuthSection(): string {
-  return `## Authentication
- - The IDE may inject \`#auth-email-password\` or \`#auth-google\` hashtag triggers into the prompt — when present, **TREAT** them as an explicit signal to implement auth and **CONSULT** the auth skills.
- - For free-form auth requests (no hashtag): when an auth skill is listed in "Skills available", **READ** it before improvising.
- - **REQUIRED smoke test after touching \`/api/auth/*\`**: run \`execute_command: curl -s -o /dev/null -w '%{http_code} %{content_type}\\n' http://localhost:5173/api/auth/me\`. Expected: \`401 application/json\`. \`404 text/html\` = Vite proxy not wired. \`500\` = backend crashed at boot (read_dev_server_logs). Anything else is a regression — fix before claiming the phase complete.`
-}
-
 export function getDevServerRulesSection(): string {
   return `## Dev servers
  - **PICK** framework default ports (Vite=5173, Next=3000, Express=whatever your scripts bind). Do NOT prescribe custom ports — the IDE detects URLs from log output and classifies them by HTTP content-type (HTML → iframe preview; JSON/other → HTTP Client).
@@ -1191,13 +1174,6 @@ export function getConstraintsSection(ctx: PromptContext): string {
  - **TRIGGER — call \`request_credentials\` in the SAME turn**: whenever you write code that reads \`process.env.X\`, \`import.meta.env.X\`, \`Deno.env.get('X')\`, or any equivalent for a **third-party service the developer is integrating** (LLM provider like Mercury/OpenAI/Anthropic, payment processor, email API, analytics, webhook secrets, DB connection strings, etc.), you MUST call \`request_credentials\` for that key in the same agent turn. Do NOT generate the code first and "leave .env for the developer to fill later" — they cannot fill it without the form. Skipping this leaves the project broken at runtime even though every file looks correct.
  - \`.env.example\` is supplementary documentation, NOT a collection mechanism. Writing \`.env.example\` without also calling \`request_credentials\` for every key it documents is incomplete work — finish by collecting the values.
  - For NON-sensitive configuration (region, plan tier, project name, feature toggles) **PREFER** \`ask_user_question\` — those don't belong in \`.env\`.
- - **SKIP \`request_credentials\` for platform-managed credentials.** The platform mints these via dedicated \`provision_*\` tools, not via developer-supplied values. Mapping:
-   - \`TM_AUTH_*\` / \`VITE_TM_*\` / \`GIP_*\` / \`GCP_*\` → \`provision_auth\` (writes them).
-   - \`DATABASE_URL\` is local-only and should default to \`file:./dev.db\`; do not request it from the developer.
-   - \`TMDB_URL\` / \`TMDB_TOKEN\` are deploy/prod values injected by Publish/Cloud Run; use \`provision_database\` only for explicit production preflight/repair, not normal local scaffolding.
-   - \`TM_FILES_URL\` / \`TM_FILES_TOKEN\` / \`TM_FILES_PUBLIC_BASE\` → \`provision_files\` (writes them).
-   - \`APP_ID\` → \`provision_deploy\` (writes it; reserved for the Publish flow).
-   Calling \`request_credentials\` for any of these is incorrect — the developer doesn't own those tokens, the form will block on platform-managed field IDs anyway, and you'll waste a turn.
  - \`.pem\`, \`.key\`, \`credentials.json\`, \`.npmrc\`, \`*_secret*\` files require explicit developer authorization.
  - **KEEP** secrets out of text output and tool arguments.
 
@@ -1235,11 +1211,11 @@ export function getReminderSection(ctx: PromptContext): string {
   // sections; this restates only what models routinely drop after a long
   // prompt.
   const mcpReminder = ctx.mcpTools.length > 0
-    ? `\n14. **MCP available**: ${ctx.mcpTools.map(t => `\`mcp__${t.serverName}__${t.name}\``).slice(0, 8).join(', ')}${ctx.mcpTools.length > 8 ? `, +${ctx.mcpTools.length - 8} more` : ''}. Before writing code against a library/service covered by an MCP, or when the task needs live external data or a side-effect in an external system, call the matching MCP — your training data is stale and these tools are the authoritative path.`
+    ? `\n13. **MCP available**: ${ctx.mcpTools.map(t => `\`mcp__${t.serverName}__${t.name}\``).slice(0, 8).join(', ')}${ctx.mcpTools.length > 8 ? `, +${ctx.mcpTools.length - 8} more` : ''}. Before writing code against a library/service covered by an MCP, or when the task needs live external data or a side-effect in an external system, call the matching MCP — your training data is stale and these tools are the authoritative path.`
     : ''
-  // Skills bullet is 14 when no MCP, 15 when MCP block is present. Numbering
+  // Skills bullet is 13 when no MCP, 14 when MCP block is present. Numbering
   // stays sequential so the model reads it as a list, not a digest.
-  const skillIndex = ctx.mcpTools.length > 0 ? 15 : 14
+  const skillIndex = ctx.mcpTools.length > 0 ? 14 : 13
   const skillReminder = ctx.loadedSkillNames.length > 0
     ? `\n${skillIndex}. Skills loaded: ${ctx.loadedSkillNames.map(n => `\`${n}\``).join(', ')}. Read each skill's \`## CRITICAL:\` blocks before writing code in its domain. Improvising violates the invariants the CRITICAL blocks describe.`
     : ''
@@ -1249,15 +1225,14 @@ export function getReminderSection(ctx: PromptContext): string {
 2. **AFTER** file changes with a dev server running: \`${READ_DEV_SERVER_LOGS}\` and fix errors before continuing. Track the \`next_since\` cursor — without it you re-read stale entries.
 3. **FINAL CHECKPOINT**: run one highest-signal verification path for the change (dev-server logs, typecheck/build, targeted test, or endpoint curl). If it passes, update \`${UPDATE_TASKS}\` and TMS.md only when the task is significant, then stop with summary + verification + next steps. A clean \`npx tsc\`/typecheck/build/test is enough evidence for the touched files — do not re-read files just to confirm after it passes. End the report with a CTA for user-visible work: tell the developer to click the **Preview** button at the top-right of Chat to see what changed when a dev server/static preview is available. Keep dev servers running by default; use \`${STOP_DEV_SERVER}\` only on explicit request, required restart, project switch/removal, or port/process cleanup. **Do not run extra defensive checks after a clean pass.** If verification isn't possible, say so explicitly. When the task tracker has \`in_progress\` rows still open, never call the run "done" or mark everything completed in one \`${UPDATE_TASKS}\` jump; resume the in_progress row and flip statuses one at a time as each acceptance is verified.
 4. **AFTER** \`execute_command\`: **READ** the output. If exit code ≠ 0, **DIAGNOSE AND FIX** the actual error. **DO NOT BLINDLY RETRY** the exact same command.
-5. **For reading files**, use \`${READ_ALIAS}\` (internal \`${READ_FILE}\`); after a search match, use \`${READ_AROUND}\` for the local window instead of re-reading whole files. **For searching**, use \`${GREP_ALIAS}\` (internal \`${SEARCH_FILES}\`). **For listing directories**, use \`${LS_ALIAS}\` (internal \`${LIST_DIRECTORY}\`). **For finding files by pattern**, use \`${GLOB_ALIAS}\` (internal \`${GLOB}\`). Use \`${EXECUTE_COMMAND}\` to run test runners (\`jest\`, \`vitest\`), scripts (\`ts-node\`, \`bun\`), and system commands.
-6. **DEVELOPER-OWNED env vars** (third-party services the developer integrates — LLM, payments, email, SMTP, analytics, webhooks): call \`${REQUEST_CREDENTIALS}\` in the SAME turn you write \`process.env.X\`. For **PLATFORM-MANAGED** vars (\`TM_AUTH_*\`, \`TM_FILES_*\`, \`APP_ID\`) use the matching \`provision_*\` tool instead — \`request_credentials\` is the wrong path. For DB, local dev uses \`DATABASE_URL=file:./dev.db\`; \`TMDB_*\` is injected by Publish/deploy unless the developer explicitly requests production DB preflight/repair.
-7. **FILE UPLOADS** use TM Files, never base64-in-DB. When uploading user content (avatars, images, videos, audio, attachments, documents): call \`provision_files\` if \`TM_FILES_URL\` is missing from .env, generate \`backend/src/files.ts\` (or \`server/src/files.ts\` if the project uses the \`server/\` convention) from the publish-backend skill recipe, and call \`uploadFile()\` for small files or the multipart/stream helpers for videos/audio. Never use \`multer.memoryStorage()\` for media. Store the returned \`publicUrl\` in DB columns — never the bytes. Public media URLs support HTTP Range / 206 playback. The pre-deploy lint catches the common base64-in-DB shape (Drizzle \`db.insert().values({...toString('base64')...})\` and data-URI literals) but the discipline is the goal: never base64 user content into the DB even when the lint wouldn't catch it.
-8. ${sharedUiBaselineReminder()}
-9. ${sharedIdentityReminder()}
-10. **SHORT MESSAGES** are context-dependent. If you just proposed a fix/action and the developer replies briefly, that's approval — execute it. If you just asked a question, the brief reply answers it. Read your own previous turn, not the word itself.
-11. **MENTIONED FILES** (\`@path\`): already read for you — the result appears as synthetic \`read_file\` context in \`<system-reminder>\` blocks. Don't re-read unless a truncation note says so; if no block appears, you already have a fresh copy in context. Mentions hint at the developer's focus, not necessarily where the fix belongs.
-12. ${sharedThinkingEfficiencyReminder()}
-13. **TURN EFFICIENCY**: group edits in the same file into one \`${EDIT_FILE}\` (sequential old→new pairs); read one larger range instead of multiple small reads; aim for 3-4 requests on localized fixes. Past 4 is fine with a technical reason (build error, tool failure, insufficient context, edit failed) — the loop logs it. Don't burn 7 turns on a one-line fix without reason. Skip expensive verification for purely visual/low-risk changes; always verify when types/logic are involved.${mcpReminder}${skillReminder}`
+5. **For reading files**, use \`${READ_ALIAS}\` (internal \`${READ_FILE}\`); after a search match, use \`${READ_AROUND}\` for the local window instead of re-reading whole files. Do NOT re-read a file you just edited/wrote — the tool result already confirms the applied state (it would have errored otherwise), and files read earlier stay in your context unless a note says they changed. **For searching**, use \`${GREP_ALIAS}\` (internal \`${SEARCH_FILES}\`). **For listing directories**, use \`${LS_ALIAS}\` (internal \`${LIST_DIRECTORY}\`). **For finding files by pattern**, use \`${GLOB_ALIAS}\` (internal \`${GLOB}\`). Use \`${EXECUTE_COMMAND}\` to run test runners (\`jest\`, \`vitest\`), scripts (\`ts-node\`, \`bun\`), and system commands.
+6. **DEVELOPER-OWNED env vars** (third-party services the developer integrates — LLM, payments, email, SMTP, analytics, webhooks): call \`${REQUEST_CREDENTIALS}\` in the SAME turn you write \`process.env.X\`. For DB, local dev uses \`DATABASE_URL=file:./dev.db\`.
+7. ${sharedUiBaselineReminder()}
+8. ${sharedIdentityReminder()}
+9. **SHORT MESSAGES** are context-dependent. If you just proposed a fix/action and the developer replies briefly, that's approval — execute it. If you just asked a question, the brief reply answers it. Read your own previous turn, not the word itself.
+10. **MENTIONED FILES** (\`@path\`): already read for you — the result appears as synthetic \`read_file\` context in \`<system-reminder>\` blocks. Don't re-read unless a truncation note says so; if no block appears, you already have a fresh copy in context. Mentions hint at the developer's focus, not necessarily where the fix belongs.
+11. ${sharedThinkingEfficiencyReminder()}
+12. **TURN EFFICIENCY**: group edits in the same file into one \`${EDIT_FILE}\` (sequential old→new pairs); read one larger range instead of multiple small reads; aim for 3-4 requests on localized fixes. Past 4 is fine with a technical reason (build error, tool failure, insufficient context, edit failed) — the loop logs it. Don't burn 7 turns on a one-line fix without reason. Skip expensive verification for purely visual/low-risk changes; always verify when types/logic are involved.${mcpReminder}${skillReminder}`
 }
 
 // ── 15a. Critical reminder (mid-conversation re-injection) ─────────────────
@@ -1283,6 +1258,6 @@ export function getCriticalReinjectionReminder(): string {
   return `<system-reminder>Active constraints (recap):
 1. COMPLETE every file you write. Output goes to disk as-is — omitted code is deleted code.
 2. AFTER file changes with a dev server running: call read_dev_server_logs and fix errors before continuing. Track the next_since cursor across calls — without it you re-read stale entries. The Preview view does not open automatically; final handoff must point the developer to the Preview button. Keep dev servers running by default; stop_dev_server only on explicit request, required restart, project switch/removal, or port/process cleanup.
-3. DEVELOPER-OWNED env vars (LLM, payments, email, SMTP, analytics, webhooks): call request_credentials in the SAME turn you write process.env.X. For PLATFORM-MANAGED vars (TM_AUTH_*, TM_FILES_*, APP_ID) use the matching provision_* tool instead. For DB, local dev uses DATABASE_URL=file:./dev.db; TMDB_* is deploy-injected unless the developer explicitly requests production DB preflight/repair.
+3. DEVELOPER-OWNED env vars (LLM, payments, email, SMTP, analytics, webhooks): call request_credentials in the SAME turn you write process.env.X. For DB, local dev uses DATABASE_URL=file:./dev.db.
 </system-reminder>`
 }

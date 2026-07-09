@@ -22,7 +22,7 @@ import QuickOpenService, { type QuickOpenItem } from '../services/quickOpenServi
 import { findMentionAtCursor, findMentionTokenEnd } from '../utils/mentionParser'
 import { preprocessHashtags } from '../services/agent/hashtagRegistry'
 import { useHashtagMenu } from '../components/prompt/useHashtagMenu'
-import { runAuthFlow, runDesignFlow } from '../services/agent/commands/authCommand'
+import { runDesignFlow } from '../services/agent/commands/authCommand'
 import { t } from '../i18n/useTranslation'
 import { classifyPendingPlanIntent } from '../services/agent/planResumeIntent'
 import {
@@ -79,7 +79,7 @@ export function useCmdPromptLogic() {
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // #hashtag menu — closed-vocabulary skill triggers (e.g. #auth-google).
+  // #hashtag menu — closed-vocabulary skill triggers (e.g. #design).
   // State + handlers live in the shared hook used by the main prompt.
   // Declared after textareaRef because the hook captures the ref at call time.
   const hashtagMenu = useHashtagMenu({
@@ -339,14 +339,14 @@ export function useCmdPromptLogic() {
       return
     }
 
-    // ── Hashtag-driven flows (e.g. #auth-google, #design) — load the
-    // relevant skills inline and route to a specialised flow. Free-form
-    // `#tags` not in the registry pass through untouched.
+    // ── Hashtag-driven flows (e.g. #design) — load the relevant skills
+    // inline and route to a specialised flow. Free-form `#tags` not in the
+    // registry pass through untouched.
     const pre = preprocessHashtags(textPrompt)
-    if (pre.authProviders.length > 0 || pre.hasDesign) {
+    if (pre.hasDesign) {
       // Skill flows inherently write files into a project — gate on a
       // project being open. Without this the call falls through to
-      // provision_auth or scaffolding tools which fail with cryptic errors.
+      // scaffolding tools which fail with cryptic errors.
       if (!path) {
         useChatStore.getState().addSystemMessage(
           t('hook.noProjectOpen'),
@@ -355,26 +355,11 @@ export function useCmdPromptLogic() {
         return
       }
 
-      // Smart router: if any requested auth provider is already applied,
-      // block the re-scaffold flow with explanatory system message.
-      if (pre.authProviders.length > 0) {
-        const { guardScaffoldReapply } = await import('../components/prompt/scaffoldReapplyGuard')
-        const requestedKeys: import('../services/scaffoldingDetector').ScaffoldKey[] =
-          pre.authProviders.map(p => `auth.${p}` as const)
-        const { blocked } = await guardScaffoldReapply(
-          path,
-          requestedKeys,
-          (applied) => buildCmdAuthReapplyMessage(applied),
-          () => { /* this input has no draftInput state to clear */ },
-        )
-        if (blocked) return
-      }
-
       // Preserve hashtags in the visible message and the persisted history.
       // The hashtag is still useful AFTER it routes — it documents the user's
       // intent for anyone reading the session later (debug exports, sharing
       // a repro, scrolling back), and it's what they actually typed. The
-      // skill content is force-loaded via runAuthFlow regardless of what
+      // skill content is force-loaded via runDesignFlow regardless of what
       // appears in the bubble, so stripping the tag here used to delete
       // signal for no behavioural gain.
       const bubbleText = textPrompt
@@ -382,11 +367,7 @@ export function useCmdPromptLogic() {
       // cmdOnlyMode=true makes runAgentWithCallbacks scope tool execution to cwd.
       // Without this, hashtag flows fail every tool call with "No project is open"
       // because this surface does not populate useProjectStore.currentProject.
-      if (pre.authProviders.length > 0) {
-        await runAuthFlow(pre.authProviders, pre.cleanedText, bubbleText, pre.hasDesign, true)
-      } else {
-        await runDesignFlow(pre.cleanedText, bubbleText, true)
-      }
+      await runDesignFlow(pre.cleanedText, bubbleText, true)
       return
     }
 
@@ -554,7 +535,7 @@ export function useCmdPromptLogic() {
 
     const cursorPos = textareaRef.current?.selectionStart ?? value.length
 
-    // Closed-vocabulary hashtag (e.g. #auth-email-password, #auth-google).
+    // Closed-vocabulary hashtag (e.g. #design).
     // detect() returns true when a `#` token owns the autocomplete slot —
     // including the no-matches case — so we never fall through to the file
     // picker for an unknown tag.
@@ -1059,22 +1040,6 @@ export function useCmdPromptLogic() {
 // ── Scaffold-reapply system messages ──
 // Same wording as usePromptBar so the UX is consistent. Pure
 // builders; resolved through i18n at call time.
-
-function buildCmdAuthReapplyMessage(
-  applied: import('../services/scaffoldingDetector').ScaffoldKey[],
-): string {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { scaffoldKeyLabel } = require('../services/scaffoldingDetector') as typeof import('../services/scaffoldingDetector')
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { t } = require('../i18n') as typeof import('../i18n')
-  const labels = applied.map(scaffoldKeyLabel).join(' + ')
-  const fixHint = applied.includes('auth.google')
-    ? t('scaffold.message.authFixHintGoogle')
-    : t('scaffold.message.authFixHintEmail')
-  return t('scaffold.message.authReapply')
-    .replace('{labels}', labels)
-    .replace('{fixHint}', fixHint)
-}
 
 function buildCmdPaymentsReapplyMessage(): string {
   // eslint-disable-next-line @typescript-eslint/no-require-imports

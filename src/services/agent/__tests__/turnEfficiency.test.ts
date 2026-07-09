@@ -90,13 +90,10 @@ describe('inferContinuationReason', () => {
     expect(reason).toBe('sub-agent dispatched — collecting results')
   })
 
-  it('classifies provision_* as "platform provisioning"', () => {
-    const reason = inferContinuationReason({
-      toolCalls: [{ name: 'provision_auth' }],
-      toolResults: [{ content: 'Auth provisioned', isError: false }],
-    })
-    expect(reason).toBe('platform provisioning — setting up infrastructure')
-  })
+  // NOTE (2026-07): the 'classifies provision_* as "platform provisioning"'
+  // test was removed with the MANAGED-PLATFORM layer — inferContinuationReason
+  // no longer has a provisioning category; provision_* calls now fall through
+  // to the generic patterns below.
 
   it('flags "no clear technical reason" for unrecognised tool patterns', () => {
     const reason = inferContinuationReason({

@@ -105,12 +105,7 @@ export function inferContinuationReason(snapshot: TurnSnapshot): string {
     return 'sub-agent dispatched — collecting results'
   }
 
-  // 6. Provisioning — auth/database/files/deploy setup.
-  if (toolNames.some((n) => n.startsWith('provision_'))) {
-    return 'platform provisioning — setting up infrastructure'
-  }
-
-  // 7. No tool calls at all (continuation via steering/max_tokens) — unusual
+  // 6. No tool calls at all (continuation via steering/max_tokens) — unusual
   //    past the target; flag as no clear reason.
   if (toolCalls.length === 0) {
     return 'no tool calls — continued via steering or max_tokens recovery'

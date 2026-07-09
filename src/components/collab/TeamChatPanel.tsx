@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text, Textarea } from '@chakra-ui/react'
 import {
   VscCallOutgoing,
@@ -7,9 +7,7 @@ import {
   VscMic,
   VscMicFilled,
   VscMute,
-  VscScreenFull,
   VscSend,
-  VscWindow,
 } from 'react-icons/vsc'
 import { useTranslation } from '@/i18n'
 import { tokens } from '@/theme/tokens'
@@ -17,14 +15,50 @@ import { useAuthStore } from '@/stores/authStore'
 import { useCollabStore } from '@/stores/collabStore'
 import { sendChatMessage, stopLivePreview } from '@/services/collab/collabSessionService'
 import { joinVoiceCall, leaveVoiceCall, toggleVoiceMute } from '@/services/collab/collabVoice'
-import {
-  startScreenShare,
-  stopScreenShare,
-  watchPresenter,
-  type ScreenSurface,
-} from '@/services/collab/collabScreen'
+import { startScreenShare, stopScreenShare, watchPresenter } from '@/services/collab/collabScreen'
 import { useTeamTyping } from '@/hooks/useTeamTyping'
-import { useElapsedLabel } from '@/hooks/useElapsedLabel'
+import { ElapsedLabel } from './ElapsedLabel'
+import type { ChatMessage } from '@/services/collab/collabChat'
+
+/** Memoized transcript — the panel re-renders on every roster/typing/voice
+ *  tick, and hundreds of message rows must not re-reconcile for any of that.
+ *  Only a `chat` change re-renders this subtree. */
+const ChatMessages = memo(function ChatMessages({
+  chat,
+  selfUid,
+}: {
+  chat: ChatMessage[]
+  selfUid?: string
+}) {
+  return (
+    <>
+      {chat.map((m) => {
+        const mine = m.uid === selfUid
+        return (
+          <Flex key={m.id} direction="column" align={mine ? 'flex-end' : 'flex-start'} mb={2}>
+            {!mine && (
+              <Text fontSize="9px" color={tokens.colors.text.muted} mb="2px">
+                {m.name}
+              </Text>
+            )}
+            <Box
+              maxW="80%"
+              px={2.5}
+              py={1.5}
+              borderRadius="8px"
+              bg={mine ? tokens.colors.accent.primary : tokens.colors.bg.panelAlt}
+              color={mine ? tokens.colors.badge.notificationText : tokens.colors.text.primary}
+            >
+              <Text fontSize="12px" whiteSpace="pre-wrap" wordBreak="break-word">
+                {m.text}
+              </Text>
+            </Box>
+          </Flex>
+        )
+      })}
+    </>
+  )
+})
 
 /** One participant pill in the voice bar: mic state + speaking highlight. */
 function VoiceChip({ name, muted, speaking }: { name: string; muted: boolean; speaking: boolean }) {
@@ -79,12 +113,13 @@ export function TeamChatPanel() {
   const selfUid = useAuthStore((s) => s.user?.uid)
   const { notifyTyping, stopTyping, typingLabel } = useTeamTyping()
   const [draft, setDraft] = useState('')
-  const [shareMenuOpen, setShareMenuOpen] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  const voiceElapsed = useElapsedLabel(useCollabStore((s) => s.voiceCallStartedAt))
-  const screenElapsed = useElapsedLabel(
-    useCollabStore((s) => (s.screenSharing ? s.screenSharingSince : s.screenPresenterSince)),
+  // Raw timestamps only — the ticking label lives in <ElapsedLabel/> so the
+  // 1 Hz timer never re-renders this panel (the chat list is expensive).
+  const voiceStartedAt = useCollabStore((s) => s.voiceCallStartedAt)
+  const screenSince = useCollabStore((s) =>
+    s.screenSharing ? s.screenSharingSince : s.screenPresenterSince,
   )
 
   useEffect(() => {
@@ -155,63 +190,21 @@ export function TeamChatPanel() {
           </Text>
         </Flex>
         <Flex align="center" gap={2}>
-          {/* Present our screen — hidden while a presentation is running. The
-              button opens a surface pre-pick (Chromium honors it; WKWebView
-              shows the system picker regardless). */}
+          {/* Present our screen — ONE click straight into the OS surface
+              picker (screen vs window is chosen THERE; the picker is the
+              platform's privacy gate for getDisplayMedia and cannot be
+              skipped — a pre-menu on our side was just a redundant step). */}
           {connected && !screenPresenter && !screenSharing && (
-            <Box position="relative">
-              <Box
-                as="button"
-                aria-label={t('team.screenShare')}
-                title={t('team.screenShare')}
-                color={shareMenuOpen ? tokens.colors.text.primary : tokens.colors.text.muted}
-                opacity={screenStarting ? 0.5 : 1}
-                _hover={{ color: tokens.colors.text.primary }}
-                onClick={() => setShareMenuOpen((v) => !v)}
-              >
-                <VscDeviceCameraVideo size={14} />
-              </Box>
-              {shareMenuOpen && (
-                <Flex
-                  position="absolute"
-                  top="22px"
-                  right={0}
-                  zIndex={10}
-                  direction="column"
-                  minW="150px"
-                  py={1}
-                  bg={tokens.colors.bg.overlay}
-                  border={`1px solid ${tokens.colors.border.default}`}
-                  borderRadius="6px"
-                  boxShadow="0 8px 24px rgba(0,0,0,0.4)"
-                >
-                  {(
-                    [
-                      { surface: 'monitor', icon: <VscScreenFull size={13} />, label: t('team.screenShareMonitor') },
-                      { surface: 'window', icon: <VscWindow size={13} />, label: t('team.screenShareWindow') },
-                    ] as { surface: ScreenSurface; icon: ReactNode; label: string }[]
-                  ).map((opt) => (
-                    <Flex
-                      key={opt.surface}
-                      as="button"
-                      align="center"
-                      gap={2}
-                      px={2.5}
-                      py={1.5}
-                      fontSize="11px"
-                      color={tokens.colors.text.secondary}
-                      _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-                      onClick={() => {
-                        setShareMenuOpen(false)
-                        void startScreenShare(opt.surface)
-                      }}
-                    >
-                      {opt.icon}
-                      <Text as="span">{opt.label}</Text>
-                    </Flex>
-                  ))}
-                </Flex>
-              )}
+            <Box
+              as="button"
+              aria-label={t('team.screenShare')}
+              title={t('team.screenShare')}
+              color={tokens.colors.text.muted}
+              opacity={screenStarting ? 0.5 : 1}
+              _hover={{ color: tokens.colors.text.primary }}
+              onClick={() => void startScreenShare()}
+            >
+              <VscDeviceCameraVideo size={14} />
             </Box>
           )}
           {/* Start a call — once one is active, the voice bar owns the controls. */}
@@ -258,15 +251,14 @@ export function TeamChatPanel() {
                 {t('team.voiceTitle')} ·{' '}
                 {t('team.voiceInCallCount').replace('{count}', String(participantCount))}
               </Text>
-              {inVoice && voiceElapsed && (
-                <Text
+              {inVoice && (
+                <ElapsedLabel
+                  since={voiceStartedAt}
                   fontSize="10px"
                   fontFamily={tokens.fontFamily.mono}
                   color={tokens.colors.text.secondary}
                   flexShrink={0}
-                >
-                  {voiceElapsed}
-                </Text>
+                />
               )}
               {voiceCountdown !== null && (
                 <Text fontSize="10px" fontWeight="700" color={tokens.colors.accent.red} flexShrink={0}>
@@ -351,16 +343,13 @@ export function TeamChatPanel() {
                 ? t('team.screenYouArePresenting')
                 : t('team.screenPresenting').replace('{name}', screenPresenter?.name ?? '')}
             </Text>
-            {screenElapsed && (
-              <Text
-                fontSize="10px"
-                fontFamily={tokens.fontFamily.mono}
-                color={tokens.colors.text.muted}
-                flexShrink={0}
-              >
-                {screenElapsed}
-              </Text>
-            )}
+            <ElapsedLabel
+              since={screenSince}
+              fontSize="10px"
+              fontFamily={tokens.fontFamily.mono}
+              color={tokens.colors.text.muted}
+              flexShrink={0}
+            />
           </Flex>
           {screenSharing ? (
             <Box
@@ -408,30 +397,7 @@ export function TeamChatPanel() {
             {t('team.chatEmpty')}
           </Text>
         ) : (
-          chat.map((m) => {
-            const mine = m.uid === selfUid
-            return (
-              <Flex key={m.id} direction="column" align={mine ? 'flex-end' : 'flex-start'} mb={2}>
-                {!mine && (
-                  <Text fontSize="9px" color={tokens.colors.text.muted} mb="2px">
-                    {m.name}
-                  </Text>
-                )}
-                <Box
-                  maxW="80%"
-                  px={2.5}
-                  py={1.5}
-                  borderRadius="8px"
-                  bg={mine ? tokens.colors.accent.primary : tokens.colors.bg.panelAlt}
-                  color={mine ? tokens.colors.badge.notificationText : tokens.colors.text.primary}
-                >
-                  <Text fontSize="12px" whiteSpace="pre-wrap" wordBreak="break-word">
-                    {m.text}
-                  </Text>
-                </Box>
-              </Flex>
-            )
-          })
+          <ChatMessages chat={chat} selfUid={selfUid} />
         )}
       </Box>
 

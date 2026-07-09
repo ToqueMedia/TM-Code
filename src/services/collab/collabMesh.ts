@@ -215,9 +215,27 @@ export class CollabMesh {
     const sender = peer?.mode === 'p2p' ? peer.audioTx?.sender : undefined
     if (!sender) return
     dlog('voice track', track ? 'ON' : 'off', '→', peerId)
-    void sender.replaceTrack(track).catch(() => {
-      /* pc closed mid-flight — nothing to route anymore */
-    })
+    void sender
+      .replaceTrack(track)
+      .then(() => {
+        if (!track) return
+        // Voice must survive a concurrent screen share on a congested uplink:
+        // mark the audio sender high-priority so the congestion controller
+        // starves the video first, never the narration. Best-effort — the
+        // fields are Chromium-first; engines without them ignore the hint.
+        const params = sender.getParameters()
+        if (!params.encodings?.length) params.encodings = [{}]
+        const enc = params.encodings[0] as RTCRtpEncodingParameters & {
+          priority?: string
+          networkPriority?: string
+        }
+        enc.priority = 'high'
+        enc.networkPriority = 'high'
+        return sender.setParameters(params)
+      })
+      .catch(() => {
+        /* pc closed mid-flight — nothing to route anymore */
+      })
   }
 
   /** True when a direct (P2P) audio path to this peer is negotiated. Relay

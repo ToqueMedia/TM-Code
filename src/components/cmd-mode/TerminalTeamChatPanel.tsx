@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { useTranslation } from '@/i18n'
 import { tokens } from '@/theme/tokens'
@@ -9,7 +9,7 @@ import { joinVoiceCall, leaveVoiceCall, toggleVoiceMute } from '@/services/colla
 import { startScreenShare, stopScreenShare, watchPresenter } from '@/services/collab/collabScreen'
 import { openPreview } from '@/services/collab/previewViewerService'
 import { useTeamTyping } from '@/hooks/useTeamTyping'
-import { useElapsedLabel } from '@/hooks/useElapsedLabel'
+import { ElapsedLabel } from '../collab/ElapsedLabel'
 import type { ChatMessage } from '@/services/collab/collabChat'
 
 // Shell-style team chat — a side panel (mounted alongside the PTY
@@ -41,6 +41,41 @@ function hhmm(ts: number): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
+/** Memoized transcript — the panel re-renders on every voice/typing/presence
+ *  tick; hundreds of `HH:MM <nick> msg` rows only re-reconcile on new chat. */
+const TerminalChatMessages = memo(function TerminalChatMessages({
+  chat,
+  selfUid,
+}: {
+  chat: ChatMessage[]
+  selfUid?: string
+}) {
+  return (
+    <>
+      {chat.map((m: ChatMessage) => {
+        const mine = m.uid === selfUid
+        return (
+          <Box key={m.id} mb="3px" fontSize="12px" lineHeight="1.5" wordBreak="break-word">
+            <Text as="span" color={tokens.colors.terminal.brightBlack}>
+              {hhmm(m.ts)}{' '}
+            </Text>
+            <Text
+              as="span"
+              color={mine ? tokens.colors.accent.purple : nickColor(m.uid)}
+              fontWeight="600"
+            >
+              {'<'}{m.name}{'>'}{' '}
+            </Text>
+            <Text as="span" color={tokens.colors.terminal.foreground} whiteSpace="pre-wrap">
+              {m.text}
+            </Text>
+          </Box>
+        )
+      })}
+    </>
+  )
+})
+
 export function TerminalTeamChatPanel() {
   const t = useTranslation()
   const open = useCollabStore((s) => s.chatOpen)
@@ -65,9 +100,11 @@ export function TerminalTeamChatPanel() {
   const [draft, setDraft] = useState('')
   const listRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  const voiceElapsed = useElapsedLabel(useCollabStore((s) => s.voiceCallStartedAt))
-  const screenElapsed = useElapsedLabel(
-    useCollabStore((s) => (s.screenSharing ? s.screenSharingSince : s.screenPresenterSince)),
+  // Raw timestamps only — the ticking label lives in <ElapsedLabel/> so the
+  // 1 Hz timer never re-renders this panel (the transcript is expensive).
+  const voiceStartedAt = useCollabStore((s) => s.voiceCallStartedAt)
+  const screenSince = useCollabStore((s) =>
+    s.screenSharing ? s.screenSharingSince : s.screenPresenterSince,
   )
 
   useEffect(() => {
@@ -201,26 +238,7 @@ export function TerminalTeamChatPanel() {
             {t('team.chatEmpty')}
           </Text>
         ) : (
-          chat.map((m: ChatMessage) => {
-            const mine = m.uid === selfUid
-            return (
-              <Box key={m.id} mb="3px" fontSize="12px" lineHeight="1.5" wordBreak="break-word">
-                <Text as="span" color={tokens.colors.terminal.brightBlack}>
-                  {hhmm(m.ts)}{' '}
-                </Text>
-                <Text
-                  as="span"
-                  color={mine ? tokens.colors.accent.purple : nickColor(m.uid)}
-                  fontWeight="600"
-                >
-                  {'<'}{m.name}{'>'}{' '}
-                </Text>
-                <Text as="span" color={tokens.colors.terminal.foreground} whiteSpace="pre-wrap">
-                  {m.text}
-                </Text>
-              </Box>
-            )
-          })
+          <TerminalChatMessages chat={chat} selfUid={selfUid} />
         )}
       </Box>
 
@@ -240,10 +258,13 @@ export function TerminalTeamChatPanel() {
               <Text as="span" lineClamp={1}>
                 {t('team.voiceInCallCount').replace('{count}', String(participantCount))}
               </Text>
-              {inVoice && voiceElapsed && (
-                <Text as="span" flexShrink={0} color={tokens.colors.terminal.brightBlack}>
-                  {voiceElapsed}
-                </Text>
+              {inVoice && (
+                <ElapsedLabel
+                  as="span"
+                  since={voiceStartedAt}
+                  flexShrink={0}
+                  color={tokens.colors.terminal.brightBlack}
+                />
               )}
               {voiceCountdown !== null && (
                 <Text as="span" flexShrink={0} color={tokens.colors.terminal.brightRed}>
@@ -331,11 +352,12 @@ export function TerminalTeamChatPanel() {
                 ? t('team.screenYouArePresenting')
                 : t('team.screenPresenting').replace('{name}', screenPresenter?.name ?? '')}
             </Text>
-            {screenElapsed && (
-              <Text as="span" flexShrink={0} color={tokens.colors.terminal.brightBlack}>
-                {screenElapsed}
-              </Text>
-            )}
+            <ElapsedLabel
+              as="span"
+              since={screenSince}
+              flexShrink={0}
+              color={tokens.colors.terminal.brightBlack}
+            />
           </Flex>
           <Flex align="center" gap={2} flexShrink={0}>
             {screenSharing ? (

@@ -14,7 +14,7 @@ import {
   READ_ALIAS,
   READ_SKILL, WRITE_FILE, EDIT_FILE, CREATE_FILE,
   EXECUTE_COMMAND, START_DEV_SERVER,
-  PROVISION_AUTH, REQUEST_CREDENTIALS, UPDATE_TASKS,
+  DELETE_FILE, REQUEST_CREDENTIALS, UPDATE_TASKS,
   ASK_USER_QUESTION, DELEGATE, COLLECT_RESULTS,
 } from '../toolNames'
 import { t } from '@/i18n'
@@ -144,7 +144,7 @@ export async function executePlan(
   const agentService = AgentService.getInstance()
   agentService.setRequestType('plan')
   // Mechanical enforcement of architect mode at the tool layer. Even if the
-  // model ignores its system prompt and tries to call provision_auth /
+  // model ignores its system prompt and tries to call delete_file /
   // execute_command / etc., the executor returns a block message instead.
   // Pairs with the buildArchitectSystemPrompt — prompt is the soft contract,
   // this is the hard one.
@@ -158,13 +158,11 @@ export async function executePlan(
     // app), skipping PLAN.md entirely. By making "you are the architect,
     // produce PLAN.md and stop" the only system prompt for this turn,
     // there is no other role to fall back to.
-    // Detect routing hashtags (`#auth-google`, `#auth-email-password`,
-    // `#design`) inside the args. Slash precedence means /plan dispatches
-    // ahead of the hashtag flow — without this we'd lose the signal entirely
-    // and the architect would propose generic auth (passport-google-oauth20)
-    // instead of the TM Code-managed `provision_auth` + `auth-proxy`
-    // pattern. Pass the detected requirements to the architect prompt so
-    // the plan reflects the platform's canonical integrations.
+    // Detect routing hashtags (`#design`) inside the args. Slash precedence
+    // means /plan dispatches ahead of the hashtag flow — without this we'd
+    // lose the signal entirely and the architect would skip the design
+    // requirement. Pass the detected requirements to the architect prompt
+    // so the plan reflects them.
     const hashtagSignals = preprocessHashtags(args)
     const aiAgentSignal = detectAiAgentIntent(args)
     await runAgentWithCallbacks(buildArchitectUserMessage(args, projectPath, hashtagSignals, aiAgentSignal, planArtifact), {
@@ -444,7 +442,7 @@ The current ${planArtifact.fileName} (your previous version) is below. Your job 
 4. Flip frontmatter \`Status:\` back to \`PENDING APPROVAL\` (or leave as-is if it's already there) — the IDE waits for this marker before re-rendering the approval card.
 5. Post a 3-sentence chat summary of what you changed, then STOP. The developer will re-approve / re-request changes / reject from the new card.
 
-**DO NOT implement the plan.** This is a revision turn, not an execution turn. Edits to ${planArtifact.fileName} only — no source files, no \`provision_auth\`, no \`start_dev_server\`, no \`execute_command\`. The tool executor enforces this mechanically; ignoring this rule produces tool blocks.
+**DO NOT implement the plan.** This is a revision turn, not an execution turn. Edits to ${planArtifact.fileName} only — no source files, no \`delete_file\`, no \`start_dev_server\`, no \`execute_command\`. The tool executor enforces this mechanically; ignoring this rule produces tool blocks.
 
 **DO NOT re-write ${planArtifact.fileName} from scratch unless the feedback explicitly asks for restructuring.** Targeted Edits preserve the parts the developer was happy with and keep the diff reviewable.
 
@@ -601,33 +599,14 @@ Update TMS.md's Memory section as you complete milestone phases. Start with the 
 function buildArchitectUserMessage(
   userIdea: string,
   projectPath: string,
-  signals?: { authProviders: ('google' | 'email-password')[]; hasDesign: boolean },
+  signals?: { hasDesign: boolean },
   aiAgent?: { namedModels: string[]; isConversational: boolean },
   planArtifact: PlanArtifact = planArtifactFromPath(projectPath),
 ): string {
-  // Architect-side platform context: when the developer's idea included
-  // `#auth-google` / `#auth-email-password` / `#design`, surface them as
-  // explicit requirements so the architect uses TM Code's canonical
-  // integrations instead of inventing generic equivalents (e.g. passport
-  // libraries, custom OAuth flows). The execution agent will then call
-  // `provision_auth` to set up the GIP tenant when the plan runs.
+  // Architect-side context: when the developer's idea included `#design`,
+  // surface it as an explicit requirement so the architect reflects it in
+  // the plan instead of dropping the signal.
   const platformLines: string[] = []
-  if (signals?.authProviders.length) {
-    const providers = signals.authProviders.map((p) =>
-      p === 'google' ? 'Google sign-in' : 'email/password sign-in',
-    ).join(' + ')
-    platformLines.push(
-      `Auth: the developer requested ${providers}. ` +
-      `Use TM Code's canonical pattern — call \`provision_auth({ provider: "gip" })\` ` +
-      `to create the per-project GIP tenant (writes VITE_FIREBASE_* + GIP_* keys to ` +
-      `.env automatically), then implement the auth-proxy skill (Identity ` +
-      `Toolkit REST endpoints + JWT verification via Google JWKS, no Firebase Admin ` +
-      `SDK needed). Do NOT propose passport-google-oauth20, NextAuth, Auth0, or any ` +
-      `other auth library — those would not integrate with the platform-managed ` +
-      `tenant. Mention provision_auth + auth-proxy skill explicitly in the ` +
-      `Implementation Phases.`
-    )
-  }
   if (signals?.hasDesign) {
     platformLines.push(
       `Design: the developer requested polished UI. Read the \`design\` skill ` +
@@ -743,7 +722,7 @@ function getAllowedToolsSection(): string {
 
 For understanding the existing code: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${READ_SKILL}\`. For research: \`${DELEGATE}\` — delegate a research or exploration sub-task (e.g., \`delegate({ subagent_type: "Research", description: "Find WebSocket libraries for Deno", prompt: "..." })\`). Call \`${COLLECT_RESULTS}\` to collect results. For structured clarifying questions: \`${ASK_USER_QUESTION}\` — see "Clarifying questions" below. For the deliverable: \`${WRITE_FILE}\` (lays down the scaffold) and \`${EDIT_FILE}\` (fills each section, then flips Status to PENDING APPROVAL) — both restricted to PLAN.md at the project root by the executor. \`${UPDATE_TASKS}\` to seed the task tracker.
 
-You MUST NOT call: \`${PROVISION_AUTH}\`, \`${REQUEST_CREDENTIALS}\`, \`${START_DEV_SERVER}\`, \`${EXECUTE_COMMAND}\`, \`${CREATE_FILE}\` for anything other than PLAN.md, or any tool that mutates the project beyond writing PLAN.md. If the architecture requires those steps, describe them in PLAN.md's Implementation Phases — the coding agent will run them after the developer approves the plan.`
+You MUST NOT call: \`${DELETE_FILE}\`, \`${REQUEST_CREDENTIALS}\`, \`${START_DEV_SERVER}\`, \`${EXECUTE_COMMAND}\`, \`${CREATE_FILE}\` for anything other than PLAN.md, or any tool that mutates the project beyond writing PLAN.md. If the architecture requires those steps, describe them in PLAN.md's Implementation Phases — the coding agent will run them after the developer approves the plan.`
 }
 
 function getApprovalFlowSection(): string {

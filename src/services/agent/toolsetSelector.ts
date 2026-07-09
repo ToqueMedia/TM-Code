@@ -44,7 +44,6 @@ import {
   DELEGATE, COLLECT_RESULTS,
   SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,
   UPDATE_SESSION_MEMORY, READ_SESSION_MEMORY,
-  PROVISION_AUTH, PROVISION_DATABASE, PROVISION_FILES, PROVISION_DEPLOY,
   REQUEST_CREDENTIALS,
 } from './toolNames'
 import type { PromptProfile } from './contextBuilder/auxiliaryRegistry'
@@ -83,9 +82,14 @@ export const MEMORY_TOOLS = [
   UPDATE_SESSION_MEMORY, READ_SESSION_MEMORY,
 ] as const
 
-/** Platform provisioning tools (auth, database, files, deploy, credentials). */
+/**
+ * Credential-collection tools (developer-owned third-party env vars).
+ * Platform provisioning (provision_auth/database/files/deploy) was removed
+ * from the IDE agent's toolset — this IDE is a pure dev tool; the managed
+ * layer lives in TM Code Web. `request_credentials` stays: it collects the
+ * developer's OWN third-party keys (LLM, payments, email, …), which is core.
+ */
 export const PROVISION_TOOLS = [
-  PROVISION_AUTH, PROVISION_DATABASE, PROVISION_FILES, PROVISION_DEPLOY,
   REQUEST_CREDENTIALS,
 ] as const
 
@@ -193,10 +197,10 @@ const PROFILE_TOOLSETS: Record<PromptProfile, ProfileToolset> = {
   // New project — broad starter set (needs everything to scaffold).
   scaffold_project: { base: [...BUGFIX_BASE, EDIT_FILE, WRITE_FILE, CREATE_FILE] },
 
-  // Deploy/publish — Publishing + shell + read.
+  // Deploy/publish — shell + credentials + read.
   deploy_publish: { base: [...BUGFIX_BASE, ...PROVISION_TOOLS, ...SHELL_TOOLS] },
 
-  // Auth/database — provisioning + read.
+  // Auth/database — credentials + read.
   auth_database: { base: [...BUGFIX_BASE, ...PROVISION_TOOLS] },
 
   // Image/attachment — web fetch + read.
@@ -263,7 +267,7 @@ export function requestToolsDefinition(allInactiveNames: string[]): OpenAI.ChatC
       description:
         'Request additional tools that are NOT in the current active toolset. ' +
         'Use this when you need a capability that is not currently available ' +
-        '(e.g. write_file, create_file, delegate, save_memory, provision_*). ' +
+        '(e.g. write_file, create_file, delegate, save_memory). ' +
         'The requested tools will be available on the next model step, then may be dropped if not requested again. ' +
         'Call this ONCE with all the tools you need — do not call it repeatedly ' +
         'for individual tools. After calling this, wait for its tool result, then continue in the same run ' +

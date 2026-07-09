@@ -156,10 +156,12 @@ describe('executePlan call sequence', () => {
     expect(sysPrompt).toContain('NOT a coding agent')
     // Forbidden tools listed in the system prompt — names interpolated
     // from toolNames.ts so a rename in the registry does not silently
-    // break the architect's tool-blocklist.
-    expect(sysPrompt).toContain('provision_auth')
+    // break the architect's tool-blocklist. (MANAGED-PLATFORM cut 2026-07:
+    // provision_auth was replaced by delete_file as the destructive example.)
+    expect(sysPrompt).toContain('delete_file')
     expect(sysPrompt).toContain('execute_command')
     expect(sysPrompt).toContain('start_dev_server')
+    expect(sysPrompt).not.toContain('provision_auth')
   })
 
   test('passes the user idea verbatim in the prompt', async () => {
@@ -342,7 +344,13 @@ describe('executePlan call sequence', () => {
     expect(mockRunAgentWithCallbacks).not.toHaveBeenCalled()
   })
 
-  test('forwards #auth-google requirement into the architect prompt', async () => {
+  // NOTE (2026-07): the 'forwards #auth-google requirement' and 'forwards
+  // #auth-email-password requirement' tests were removed with the
+  // MANAGED-PLATFORM layer — the architect no longer receives a managed-auth
+  // platform block (provision_auth / auth-proxy); those hashtags now pass
+  // through to the user idea as plain text. The test below asserts that.
+
+  test('the removed #auth-* tags no longer produce a platform-auth block', async () => {
     let capturedPrompt: string | undefined
     mockRunAgentWithCallbacks.mockImplementation(async (prompt: string) => {
       capturedPrompt = prompt
@@ -351,26 +359,11 @@ describe('executePlan call sequence', () => {
     await executePlan('platform with users registered via #auth-google', '/projects/foo')
 
     expect(capturedPrompt).toBeDefined()
-    // The architect must be told to use TM Code's canonical auth pattern,
-    // not a generic auth library invented from scratch.
-    expect(capturedPrompt).toContain('Google sign-in')
-    expect(capturedPrompt).toContain('provision_auth')
-    expect(capturedPrompt).toContain('auth-proxy')
-    // Negative: must explicitly tell the architect NOT to suggest passport-google-oauth20
-    expect(capturedPrompt).toContain('passport-google-oauth20')
-    expect(capturedPrompt).toMatch(/Do NOT propose/i)
-  })
-
-  test('forwards #auth-email-password requirement', async () => {
-    let capturedPrompt: string | undefined
-    mockRunAgentWithCallbacks.mockImplementation(async (prompt: string) => {
-      capturedPrompt = prompt
-    })
-
-    await executePlan('app with #auth-email-password', '/projects/foo')
-
-    expect(capturedPrompt).toContain('email/password sign-in')
-    expect(capturedPrompt).toContain('provision_auth')
+    // The idea text (with the now-unrecognised tag) is forwarded verbatim…
+    expect(capturedPrompt).toContain('platform with users registered via #auth-google')
+    // …and no managed-auth guidance is injected.
+    expect(capturedPrompt).not.toContain('provision_auth')
+    expect(capturedPrompt).not.toContain('auth-proxy')
   })
 
   test('forwards #design requirement', async () => {

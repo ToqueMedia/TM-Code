@@ -208,16 +208,21 @@ describe('ToolsetSelector (on-demand)', () => {
       expect(result.denied).toEqual([])
     })
 
-    it('hard explicit read-only denies mutating/provision/shell tools only', () => {
+    it('hard explicit read-only denies mutating/shell tools only', () => {
       const selector = new ToolsetSelector(ALL_NAMES, 'analysis_readonly', true)
       const result = selector.requestTools([EDIT_FILE, PROVISION_DEPLOY, START_DEV_SERVER, EXECUTE_COMMAND])
 
       // execute_command já está no set inicial do perfil — não é re-adicionado.
-      expect(result.added).toEqual([])
-      expect(result.denied).toEqual(expect.arrayContaining([EDIT_FILE, PROVISION_DEPLOY, START_DEV_SERVER]))
+      // provision_deploy deixou de ser categoria especial do selector (corte
+      // da camada MANAGED-PLATFORM, 2026-07): PROVISION_TOOLS agora contém só
+      // request_credentials. Enquanto o executor ainda registar provision_*,
+      // o nome comporta-se como qualquer tool registada — entregue on-demand.
+      expect(result.added).toEqual([PROVISION_DEPLOY])
+      expect(result.denied).toEqual(expect.arrayContaining([EDIT_FILE, START_DEV_SERVER]))
+      expect(result.denied).not.toContain(PROVISION_DEPLOY)
       expect(selector.isActive(EDIT_FILE)).toBe(false)
       expect(selector.isActive(EXECUTE_COMMAND)).toBe(true)
-      expect(selector.getDeniedNames()).toEqual(expect.arrayContaining([EDIT_FILE, PROVISION_DEPLOY, START_DEV_SERVER]))
+      expect(selector.getDeniedNames()).toEqual(expect.arrayContaining([EDIT_FILE, START_DEV_SERVER]))
     })
 
     it('deploy_publish with hard read-only strips blocked starter tools', () => {

@@ -1194,7 +1194,13 @@ class ToolExecutor {
         return 8_000
       case READ_AROUND:
       case 'read_file':
-        return 12_000
+        // claude-vaz parity (FileReadTool limits.ts): ~25k TOKENS per read
+        // (~100k chars), not 12k chars. The old cap forced every real file
+        // through preview+paging round-trips — the model kept "re-reading"
+        // because no single read ever satisfied it. Anthropic A/B-tested
+        // capping reads harder and REVERTED: mean tokens went UP, because
+        // paginated re-reads cost more than one complete read.
+        return 100_000
       case 'edit_file':
       case 'write_file':
       case 'create_file':
