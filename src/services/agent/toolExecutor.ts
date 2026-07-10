@@ -4233,7 +4233,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('delegate', {
       definition: {
         name: 'delegate',
-        description: `Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (${GLOB_ALIAS}, ${GREP_ALIAS}, ${READ_ALIAS}, ${LS_ALIAS}). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup + read-only diagnostics (web_search, web_fetch, read_skill, curl via execute_command). Use for "find the API docs for X", "what's the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn.\n  • If you have nothing else to do, end your turn. Team results will be available on your next interaction. Tell the user you delegated the task and will synthesize results when ready.\n  • Do NOT call collect_results immediately after spawning unless you need the results right now to continue your current work.\n\nWhen NOT to use:\n  • The task is a single ${READ_ALIAS} call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.`,
+        description: `Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (${GLOB_ALIAS}, ${GREP_ALIAS}, ${READ_ALIAS}, ${LS_ALIAS}). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup + read-only diagnostics (web_search, web_fetch, read_skill, curl via execute_command). Use for "find the API docs for X", "what's the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. Results are DELIVERED to you automatically when each member finishes — mid-run at your next step if you are still working, or by an auto-wake if you are idle. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn — results will arrive as you work.\n  • If you have nothing else to do, end your turn and tell the user you delegated and will synthesize when the results arrive.\n  • NEVER poll collect_results while members are running — it is a manual fallback for full untruncated text, not a waiting mechanism.\n\nWhen NOT to use:\n  • The task is a single ${READ_ALIAS} call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -4453,51 +4453,37 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           return 'No team tasks are active. Use the delegate tool to assign work to team members first.'
         }
 
-        const summaries = store.getRunSummaries()
-        const lines: string[] = ['## Team Results\n']
+        const { buildTeamResultsReport } = await import('./subAgents/resultsReport')
+        const { markSubAgentResultsDelivered } = await import('./subAgents/autoWake')
 
-        let runningCount = 0
-
-        for (const s of summaries) {
-          const duration = (s.duration / 1000).toFixed(0)
-          const icon = s.status === 'completed' ? '✅'
-            : s.status === 'error' ? '❌'
-            : s.status === 'timeout' ? '⏰'
-            : s.status === 'aborted' ? '🛑'
-            : '⏳'
-
-          if (s.status === 'running') {
-            runningCount++
-            // Show last tool call so the user/model can see the sub-agent is making progress
-            const run = store.runs.get(s.id)
+        const report = buildTeamResultsReport(store.getRunSummaries(), {
+          includeRunning: true,
+          lastActionFor: (id) => {
+            // Last tool call so the model can see the sub-agent is progressing.
+            const run = store.runs.get(id)
             const lastTc = run?.toolCalls.length ? run.toolCalls[run.toolCalls.length - 1] : null
-            const lastAction = lastTc ? ` — last action: ${lastTc.toolName} (${lastTc.status})` : ''
-            lines.push(`### ${icon} ${s.agentType}: "${s.description}" — still running (${duration}s, ${s.toolCallCount} tool calls so far${lastAction})`)
-          } else {
-            lines.push(`### ${icon} ${s.agentType}: "${s.description}" (${duration}s, ${s.toolCallCount} tool calls)`)
-            if (s.tokenUsage) {
-              lines.push(`Tokens: ${s.tokenUsage.input.toLocaleString()} in / ${s.tokenUsage.output.toLocaleString()} out`)
-            }
-            if (s.status === 'error' && s.errorText) {
-              lines.push(`Error: ${s.errorText}`)
-            } else if (s.finalText) {
-              lines.push(s.finalText)
-            } else if (s.status === 'aborted') {
-              lines.push('Task was aborted.')
-            }
-          }
-          lines.push('') // blank separator
-        }
+            return lastTc ? `${lastTc.toolName} (${lastTc.status})` : null
+          },
+        })
 
-        if (runningCount > 0) {
-          lines.push(`${runningCount} team member${runningCount > 1 ? 's are' : ' is'} still working. Do not call collect_results again in this turn; end your turn and wait for the auto-wake unless you have independent work to do.`)
+        // These results are now in the model's context — the push-delivery
+        // path must never re-send them.
+        markSubAgentResultsDelivered(report.finishedIds)
+
+        const lines = [report.text]
+        if (report.runningCount > 0) {
+          lines.push(
+            `${report.runningCount} team member${report.runningCount > 1 ? 's are' : ' is'} still working. ` +
+            `Do NOT call collect_results again to wait — their results are DELIVERED to you automatically ` +
+            `(mid-run or via auto-wake). End your turn unless you have independent work to do.`,
+          )
         }
 
         // Only clear completed runs when ALL runs are done (no running left).
         // If some are still running, keep completed ones so the model can still
-        // reference them in its next turn (the auto-wake will fire again when
-        // the remaining ones finish).
-        if (runningCount === 0) {
+        // reference them in its next turn (deliveries fire again as the
+        // remaining ones finish).
+        if (report.runningCount === 0) {
           store.clearCompleted()
         }
 

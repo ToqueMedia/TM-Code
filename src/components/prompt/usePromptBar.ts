@@ -945,13 +945,27 @@ export function usePromptBar() {
         // steered message onto the NEXT turn of the live run. This path is
         // always foreground (runAgentForPrompt), so there's no background gate.
         collectSteeringMessages: async (): Promise<string | OpenAIContentPart[] | null> => {
+          // Sub-agent results are PUSHED here (never polled): finished team
+          // members queue their formatted reports and the live run picks them
+          // up at this turn boundary.
+          const { drainSubAgentDeliveries } = await import('../../services/agent/subAgents/autoWake')
+          const deliveries = drainSubAgentDeliveries()
+          const withDeliveries = (
+            v: string | OpenAIContentPart[],
+          ): string | OpenAIContentPart[] =>
+            !deliveries
+              ? v
+              : typeof v === 'string'
+                ? `${deliveries}\n\n${v}`
+                : [{ type: 'text', text: deliveries }, ...v]
+
           // Only plain prompt-mode messages steer. Slash/bash/task-notif
           // commands need executeInput's per-command handling, so they stay
           // queued for the idle drain when this run ends.
           const drained = dequeueAllMatching(
             c => !isSlashCommand(c) && c.mode === 'prompt',
           )
-          if (drained.length === 0) return null
+          if (drained.length === 0) return deliveries
 
           // Coalesce a burst into ONE steered turn (joinPromptValues preserves
           // block ordering, same as the queue's batched dispatch).
@@ -970,12 +984,12 @@ export function usePromptBar() {
           // silently degraded to text even when the active BYOK model can see.
           if (planAllowsImagePipeline && display.attachments.some(a => a.type === 'image')) {
             const parts = await buildContentParts(merged, promptResolvers)
-            if (parts && activeModelSupportsImageParts) return parts
+            if (parts && activeModelSupportsImageParts) return withDeliveries(parts)
             if (parts) {
               const description = await describeImagesViaSidecar(parts)
               if (description) {
                 const textOnly = await buildAugmentedPrompt(merged, promptResolvers)
-                return `${textOnly}\n\n<image_description source="image-analysis">\n${description}\n</image_description>`
+                return withDeliveries(`${textOnly}\n\n<image_description source="image-analysis">\n${description}\n</image_description>`)
               }
             }
           }
@@ -987,7 +1001,7 @@ export function usePromptBar() {
             resolveAttachmentXml: resolveAttachments,
             resolveImageDataUri: resolveImageToDataUri,
           })
-          return text && text.trim().length > 0 ? text : display.text
+          return withDeliveries(text && text.trim().length > 0 ? text : display.text)
         },
       })
     } catch (error) {

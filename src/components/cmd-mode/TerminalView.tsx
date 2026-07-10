@@ -12,6 +12,7 @@ import { useLayoutStore } from '../../stores/layoutStore'
 import { useSettingsStore, CHAT_TEXT_FONT_SIZE_OPTIONS, DEFAULT_CHAT_TEXT_FONT_SIZE } from '../../stores/settingsStore'
 import { stopAgent, loadSessionById } from '../../services/agent/cmdModeCommands'
 import CmdModePromptInput, { type CmdModePromptInputRef } from './CmdModePromptInput'
+import SubAgentStatusBar from '../chat/SubAgentStatusBar'
 import { TerminalTitleBar } from './TerminalTitleBar'
 import { TerminalStatusLine } from './TerminalStatusLine'
 import { TerminalWorkingTips } from './TerminalWorkingTips'
@@ -992,6 +993,9 @@ const TerminalView: React.FC<TerminalViewProps> = ({ projectPath, onBack }) => {
       </Box>
 
       <Box display={(pendingPermission || hasPendingAskUserQuestion || !projectStateReady) ? 'none' : undefined} flexShrink={0} data-no-focus-steal>
+        {/* Running sub-agents indicator — the team must be VISIBLY working
+            in both surfaces, not only in the chat panel. */}
+        <SubAgentStatusBar />
         <CmdModePromptInput ref={promptInputRef} />
       </Box>
       </ErrorBoundary>

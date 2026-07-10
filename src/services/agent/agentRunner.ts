@@ -764,13 +764,19 @@ async function runAgentInternal(
       collectSteeringMessages: isBackgroundRun
         ? undefined
         : async (): Promise<string | null> => {
+            // Sub-agent results are PUSHED here (never polled): finished team
+            // members queue their formatted reports and the live run picks
+            // them up at this turn boundary.
+            const { drainSubAgentDeliveries } = await import('./subAgents/autoWake')
+            const deliveries = drainSubAgentDeliveries()
+
             // Only plain prompt-mode messages steer. Slash/bash/task-notif
             // commands need executeInput's per-command handling, so they stay
             // queued for the idle drain when this run ends.
             const drained = dequeueAllMatching(
               c => !isSlashCommand(c) && c.mode === 'prompt',
             )
-            if (drained.length === 0) return null
+            if (drained.length === 0) return deliveries
 
             // Coalesce a burst into ONE steered turn (same as the queue's
             // batched dispatch — joinPromptValues preserves block ordering).
@@ -796,7 +802,8 @@ async function runAgentInternal(
               resolveAttachmentXml: resolveAttachments,
               resolveImageDataUri: resolveImageToDataUri,
             })
-            return text && text.trim().length > 0 ? text : display.text
+            const userText = text && text.trim().length > 0 ? text : display.text
+            return deliveries ? `${deliveries}\n\n${userText}` : userText
           },
     })
 
