@@ -7,6 +7,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { ChatMessage } from '../../types/chat'
 import { useChatStore } from '../../stores/chatStore'
+import { useAuthStore } from '../../stores/authStore'
 import { renderHighlightedPrompt } from '../prompt/promptHighlight'
 import CodeBlockAction from './CodeBlockAction'
 import ToolCallDisplayComponent from './ToolCallDisplay'
@@ -322,6 +323,9 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const updateCodeBlockStatus = useChatStore(s => s.updateCodeBlockStatus)
   const toggleReasoning = useChatStore(s => s.toggleReasoning)
   const toggleReasoningBlock = useChatStore(s => s.toggleReasoningBlock)
+  // Gates the raw-session (JSON + env snapshot) export — internal debug
+  // structure, admin-only. Regular users download the clean transcript.
+  const isAdmin = useAuthStore(s => s.user?.isAdmin === true)
   const [messageCopied, setMessageCopied] = useState(false)
 
   // Single stable handler for both reasoning surfaces (legacy message-level
@@ -455,18 +459,23 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     const session = useChatStore.getState().getActiveSession()
     if (!session) return
     setExportMenuOpen(false)
-    const filename = defaultExportFilename(session, format)
-    // Build the environment snapshot (system prompt + TMS/PLAN/TODO + skills
-    // + hashtag detection) before serialising. Async and may take a second on
-    // the first call (loadSkills + buildSystemPrompt both walk the project),
-    // so this happens BEFORE we open the save dialog — that way the user
-    // doesn't see a stale dialog while we crunch in the background. The fn
-    // never throws (failures land in envSnapshot.systemPromptError).
-    const envSnapshot = await buildEnvironmentSnapshot(session)
-    const content = format === 'json'
+    // Product decision (2026-07-10): the raw session structure (JSON) and the
+    // environment snapshot (system prompt + TMS/PLAN/TODO + skills + hashtag
+    // detection) are internal debug artefacts — admin-only. Everyone else
+    // downloads exactly what "Copy session" produces: the clean Markdown
+    // transcript, as a file.
+    const effectiveFormat = isAdmin ? format : 'md'
+    const filename = defaultExportFilename(session, effectiveFormat)
+    // Build the environment snapshot before serialising. Async and may take a
+    // second on the first call (loadSkills + buildSystemPrompt both walk the
+    // project), so this happens BEFORE we open the save dialog — that way the
+    // user doesn't see a stale dialog while we crunch in the background. The
+    // fn never throws (failures land in envSnapshot.systemPromptError).
+    const envSnapshot = isAdmin ? await buildEnvironmentSnapshot(session) : undefined
+    const content = effectiveFormat === 'json'
       ? sessionToJson(session, { envSnapshot })
-      : sessionToMarkdown(session, { envSnapshot })
-    const mimeType = format === 'json' ? 'application/json' : 'text/markdown'
+      : sessionToMarkdown(session, envSnapshot ? { envSnapshot } : undefined)
+    const mimeType = effectiveFormat === 'json' ? 'application/json' : 'text/markdown'
     try {
       const savedPath = await triggerDownload(filename, content, mimeType)
       if (savedPath) {
@@ -483,7 +492,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       console.error('[sessionExport] save failed:', err)
       useToastStore.getState().addToast('error', t('chat.exportFailed').replace('{message}', msg))
     }
-  }, [])
+  }, [isAdmin])
 
   const handleApply = useCallback(
     (block: { id: string; code: string }) => {
@@ -1033,11 +1042,18 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                 cursor="pointer"
                 transition={`all ${tokens.transition.fast}`}
                 _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.secondary }}
-                onClick={() => setExportMenuOpen(v => !v)}
+                // Non-admins have exactly one export shape (the clean Markdown
+                // transcript), so the click downloads directly — a one-item
+                // menu would be ceremony. Admins get the format menu with the
+                // raw JSON debug structure.
+                onClick={() => {
+                  if (isAdmin) setExportMenuOpen(v => !v)
+                  else void handleExportSession('md')
+                }}
                 title={t('chat.downloadSession')}
                 aria-label={t('chat.downloadSession')}
-                aria-haspopup="menu"
-                aria-expanded={exportMenuOpen}
+                aria-haspopup={isAdmin ? 'menu' : undefined}
+                aria-expanded={isAdmin ? exportMenuOpen : undefined}
               >
                 <FiDownload size={12} />
                 <Text fontSize="11px" fontWeight={500}>
