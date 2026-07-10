@@ -16,7 +16,14 @@ import { verifyToken } from './auth'
 
 interface Peer extends PeerInfo {
   socket: WebSocket
+  /** Last time anything arrived from this socket (ms) — heartbeat liveness. */
+  lastSeen: number
 }
+
+/** Ping cadence and the silence deadline after which a socket is presumed
+ *  half-open and force-closed (3 missed pings). */
+const HEARTBEAT_INTERVAL_MS = 30_000
+const HEARTBEAT_DEADLINE_MS = 95_000
 
 export class SignalingRoom {
   private readonly env: Env
@@ -26,6 +33,12 @@ export class SignalingRoom {
   private turnCache: { servers: IceServer[]; expiresAt: number } | null = null
   /** One "TURN not configured" log per DO lifetime, not one per join. */
   private loggedTurnUnconfigured = false
+  /** Heartbeat: half-open sockets (crash, sleep, cable pull) never fire
+   *  'close', so the dead peer stays in presence forever — teammates keep
+   *  seeing them online/sharing. Ping every peer periodically; anything
+   *  inbound counts as life; silence past the deadline closes the socket,
+   *  which routes through onClose → peer-leave like a normal exit. */
+  private heartbeat: ReturnType<typeof setInterval> | null = null
 
   constructor(_state: DurableObjectState, env: Env) {
     this.env = env
@@ -58,7 +71,11 @@ export class SignalingRoom {
 
     // 2) Gate on authoritative team membership (fails closed). The same read
     //    resolves the team's plan tier → per-plan media policy in the welcome.
-    const membership = await checkMembership(room, uid, token, this.env)
+    //    Rooms are `teamId` (legacy) or `teamId~projectKey` (per-project chat:
+    //    one DO per team+project so members only see teammates in the SAME
+    //    project) — membership is always checked against the teamId part.
+    const teamId = room.includes('~') ? room.slice(0, room.indexOf('~')) : room
+    const membership = await checkMembership(teamId, uid, token, this.env)
     if (!membership.member) {
       return jsonError(
         new HttpError(403, 'tm_not_team_member', 'You are not a member of this team.'),
@@ -111,8 +128,9 @@ export class SignalingRoom {
     mediaPolicy: MediaPolicy,
   ): void {
     const peerId = crypto.randomUUID()
-    const self: Peer = { peerId, uid, name, socket }
+    const self: Peer = { peerId, uid, name, socket, lastSeen: Date.now() }
     this.peers.set(socket, self)
+    this.ensureHeartbeat()
 
     // Tell the newcomer who's already here (+ TURN credentials when minted,
     // + the per-plan media policy the client enforces).
@@ -135,7 +153,31 @@ export class SignalingRoom {
     socket.addEventListener('error', () => this.onClose(self))
   }
 
+  private ensureHeartbeat(): void {
+    if (this.heartbeat) return
+    this.heartbeat = setInterval(() => {
+      const now = Date.now()
+      for (const peer of [...this.peers.values()]) {
+        if (now - peer.lastSeen > HEARTBEAT_DEADLINE_MS) {
+          // Half-open socket — close() routes through onClose, which
+          // broadcasts the peer-leave exactly like a normal exit.
+          try {
+            peer.socket.close(1011, 'heartbeat timeout')
+          } catch {
+            /* already dying */
+          }
+          this.onClose(peer)
+        } else {
+          this.send(peer.socket, { type: 'ping' })
+        }
+      }
+    }, HEARTBEAT_INTERVAL_MS)
+  }
+
   private onMessage(sender: Peer, data: string | ArrayBuffer): void {
+    // ANY inbound frame proves the socket is alive — including the client's
+    // 'pong' answer, which parseInbound then drops as an unknown type.
+    sender.lastSeen = Date.now()
     const raw = typeof data === 'string' ? data : new TextDecoder().decode(data)
     const msg = parseInbound(raw)
     if (!msg) return
@@ -159,6 +201,11 @@ export class SignalingRoom {
     if (!this.peers.has(peer.socket)) return
     this.peers.delete(peer.socket)
     this.broadcast(peer.socket, { type: 'peer-leave', peerId: peer.peerId })
+    // Empty room → stop ticking so the DO can hibernate.
+    if (this.peers.size === 0 && this.heartbeat) {
+      clearInterval(this.heartbeat)
+      this.heartbeat = null
+    }
   }
 
   private send(socket: WebSocket, message: ServerMessage): void {

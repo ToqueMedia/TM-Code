@@ -79,6 +79,16 @@ export class SignalingClient {
         case 'relay':
           this.handlers.onRelay(msg.from, msg.channel, msg.payload)
           break
+        case 'ping':
+          // Room heartbeat — answering proves this socket isn't half-open.
+          // A dead peer never answers; the room times it out and broadcasts
+          // its peer-leave, so teammates stop seeing it online/sharing.
+          try {
+            ws.send(JSON.stringify({ type: 'pong' }))
+          } catch {
+            /* socket mid-close — the room will time us out */
+          }
+          break
       }
     }
     ws.onclose = (event) => this.handlers.onClose(event.code, event.reason)

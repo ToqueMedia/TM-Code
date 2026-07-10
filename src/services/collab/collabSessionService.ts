@@ -42,6 +42,7 @@ import {
   replayScreenStateTo,
   resetScreenService,
 } from '@/services/collab/collabScreen'
+import { invoke } from '@/utils/invokeMetrics'
 import { resolveCollabSignalingUrl } from '@/utils/devUrls'
 import { playMessageChime } from '@/utils/notificationSound'
 import { stopLivePreviewServer } from '@/services/collab/livePreviewServer'
@@ -119,16 +120,66 @@ function activeProjectPath(): string | null {
   return useProjectStore.getState().currentProject?.path ?? null
 }
 
+/** Normalise a git remote URL into a machine-independent identity: protocol,
+ *  credentials and `.git` stripped, `git@host:path` → `host/path`, lowercase.
+ *  Two teammates who cloned the same repo produce the same string. */
+function normalizeGitRemote(url: string): string {
+  let out = url.trim().toLowerCase()
+  const scp = /^[\w.-]+@([^:]+):(.+)$/.exec(out)
+  if (scp) out = `${scp[1]}/${scp[2]}`
+  out = out.replace(/^[a-z+]+:\/\//, '').replace(/^[^@/]+@/, '')
+  return out.replace(/\.git$/, '').replace(/\/+$/, '')
+}
+
+/**
+ * Stable project identity for the room key. Team chat is PER PROJECT — two
+ * members only meet when they're in the SAME project. Cross-machine identity:
+ * the git remote (teammates clone the same repo) hashed short; projects
+ * without a remote fall back to the folder name (same team + same project
+ * name = same room, which matches how teams talk about "the project").
+ */
+async function deriveProjectRoomKey(projectPath: string): Promise<string> {
+  let identity = ''
+  try {
+    const cfg = await invoke<string>('read_file', { path: `${projectPath}/.git/config` })
+    const m = /\[remote "origin"\][^[]*?url\s*=\s*([^\n\r]+)/i.exec(cfg)
+    if (m) identity = `git:${normalizeGitRemote(m[1])}`
+  } catch {
+    /* not a git repo (or worktree indirection) — fall back to the name */
+  }
+  if (!identity) {
+    const base = projectPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? projectPath
+    identity = `name:${base.toLowerCase()}`
+  }
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(identity))
+  return Array.from(new Uint8Array(digest).slice(0, 8))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+
 /**
  * Start (or restart) the collaboration session for the team the user belongs
- * to. Idempotent: re-calling for the same room is a no-op; switching teams
- * tears down the old mesh first. Silently does nothing when not in a team.
+ * to. Idempotent: re-calling for the same room is a no-op; switching teams OR
+ * projects tears down the old mesh first (the room is team+project scoped).
+ * Silently does nothing when not in a team or without an open project.
  */
 export async function startCollabSession(): Promise<void> {
   if (!COLLAB_ENABLED) return
-  const room = useBillingStore.getState().teamMemberOf
-  if (!room) return
+  const teamId = useBillingStore.getState().teamMemberOf
+  if (!teamId) return
+  // Per-project scope: no open project → no room. A teammate in a DIFFERENT
+  // project must not appear online (the room key isolates them), and someone
+  // on the Welcome screen is in NO room at all.
+  const projectPath = activeProjectPath()
+  if (!projectPath) {
+    stopCollabSession()
+    return
+  }
+  const room = `${teamId}~${await deriveProjectRoomKey(projectPath)}`
   // Synchronous guard: a session for this room is already live OR being opened.
+  // (Two rapid calls both awaiting the key resolve to the SAME room string, so
+  // the second lands here and bails; a project switch mid-flight is rescued by
+  // the post-token `activeRoom !== room` check below.)
   if (activeRoom === room && (mesh || connecting)) return
 
   // Internal teardown (NOT stopCollabSession): the reconnect path re-enters
@@ -347,6 +398,18 @@ function maybeRejoinVoice(): void {
 export function stopCollabSession(): void {
   voiceRejoin = null
   teardownSession()
+}
+
+// Closing the IDE window must end the session IMMEDIATELY — mic, screen
+// share, live-preview server and presence die with it. On macOS the window
+// can close while the PROCESS lives on (dock convention), leaving a zombie
+// socket that kept "B is sharing a live preview" alive for the whole team.
+// pagehide fires on webview teardown in WKWebView and WebView2 alike, and
+// socket.close() flushes the FIN synchronously → the room broadcasts our
+// peer-leave right away. The worker-side heartbeat covers the remaining
+// cases (crash, sleep, cable pull) where no unload event ever runs.
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', () => stopCollabSession())
 }
 
 /** Shared teardown for stopCollabSession AND the (re)start path — keeps

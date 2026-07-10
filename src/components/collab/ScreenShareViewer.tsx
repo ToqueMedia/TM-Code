@@ -1,12 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
-import { VscClose, VscScreenFull } from 'react-icons/vsc'
+import { VscClose, VscMultipleWindows, VscScreenFull } from 'react-icons/vsc'
 import { useTranslation } from '@/i18n'
 import { tokens } from '@/theme/tokens'
 import { useCollabStore } from '@/stores/collabStore'
+import { useToastStore } from '@/stores/toastStore'
 import { stopWatching } from '@/services/collab/collabScreen'
 import { ElapsedLabel } from './ElapsedLabel'
 import { PeerPathBadge } from './PeerPathBadge'
+
+/** The webkit presentation-mode surface WKWebView exposes on <video> (macOS)
+ *  — the standard requestPictureInPicture path is Chromium/WebView2. */
+type PipVideoElement = HTMLVideoElement & {
+  webkitSupportsPresentationMode?: (mode: string) => boolean
+  webkitSetPresentationMode?: (mode: string) => void
+  webkitPresentationMode?: string
+}
 
 /**
  * Floating viewer for a teammate's screen share. Mounted once in MainLayout
@@ -96,6 +105,60 @@ export function ScreenShareViewer() {
     if (stream) void el.play().catch(() => {/* retried implicitly by autoPlay */})
   }, [stream, watching])
 
+  // ── "Fora da IDE" — Picture-in-Picture (system floating window) ──────────
+  // The <video> stays mounted while PiP is active (removing it would close
+  // the system window); the in-app panel just turns invisible + click-through.
+  const [pip, setPip] = useState(false)
+
+  useEffect(() => {
+    const el = videoRef.current as PipVideoElement | null
+    if (!el) return
+    const onEnter = () => setPip(true)
+    const onLeave = () => setPip(false)
+    // WKWebView signals mode changes through a single webkit event.
+    const onModeChange = () => {
+      if (typeof el.webkitPresentationMode === 'string') {
+        setPip(el.webkitPresentationMode === 'picture-in-picture')
+      }
+    }
+    el.addEventListener('enterpictureinpicture', onEnter)
+    el.addEventListener('leavepictureinpicture', onLeave)
+    el.addEventListener('webkitpresentationmodechanged', onModeChange)
+    return () => {
+      el.removeEventListener('enterpictureinpicture', onEnter)
+      el.removeEventListener('leavepictureinpicture', onLeave)
+      el.removeEventListener('webkitpresentationmodechanged', onModeChange)
+    }
+  }, [watching])
+
+  const enterPip = useCallback(async () => {
+    const el = videoRef.current as PipVideoElement | null
+    if (!el) return
+    try {
+      // Chromium (WebView2 / Windows) — the standard API.
+      if (typeof el.requestPictureInPicture === 'function') {
+        await el.requestPictureInPicture()
+        return
+      }
+      // WKWebView (macOS) — webkit presentation mode.
+      if (el.webkitSupportsPresentationMode?.('picture-in-picture')) {
+        el.webkitSetPresentationMode?.('picture-in-picture')
+        return
+      }
+      useToastStore.getState().addToast('warning', t('team.screenPipUnsupported'))
+    } catch {
+      useToastStore.getState().addToast('warning', t('team.screenPipUnsupported'))
+    }
+  }, [t])
+
+  const exitPip = useCallback(() => {
+    const el = videoRef.current as PipVideoElement | null
+    void (document as Document & { exitPictureInPicture?: () => Promise<void> })
+      .exitPictureInPicture?.()
+      .catch(() => {})
+    el?.webkitSetPresentationMode?.('inline')
+  }, [])
+
   const persist = useCallback((r: ViewerRect) => {
     try {
       localStorage.setItem(RECT_STORAGE_KEY, JSON.stringify(r))
@@ -137,6 +200,7 @@ export function ScreenShareViewer() {
   if (!watching || !presenter) return null
 
   return (
+    <>
     <Box
       position="fixed"
       left={`${rect.x}px`}
@@ -151,6 +215,11 @@ export function ScreenShareViewer() {
       borderRadius="8px"
       boxShadow="0 12px 40px rgba(0,0,0,0.45)"
       overflow="hidden"
+      // While the video lives in the system PiP window the in-app panel goes
+      // invisible + click-through — but stays MOUNTED: unmounting the <video>
+      // would close the floating window.
+      visibility={pip ? 'hidden' : 'visible'}
+      pointerEvents={pip ? 'none' : 'auto'}
     >
       {/* Header — drag handle */}
       <Flex
@@ -185,6 +254,16 @@ export function ScreenShareViewer() {
           />
         </Flex>
         <Flex align="center" gap={2} flexShrink={0}>
+          <Box
+            as="button"
+            aria-label={t('team.screenPopOut')}
+            title={t('team.screenPopOut')}
+            color={tokens.colors.text.muted}
+            _hover={{ color: tokens.colors.text.primary }}
+            onClick={() => void enterPip()}
+          >
+            <VscMultipleWindows size={14} />
+          </Box>
           <Box
             as="button"
             aria-label={t('team.screenFullscreen')}
@@ -250,5 +329,52 @@ export function ScreenShareViewer() {
         </Box>
       </Box>
     </Box>
+
+    {/* Compact pill while the presentation lives in the system PiP window */}
+    {pip && (
+      <Flex
+        position="fixed"
+        bottom="16px"
+        right="16px"
+        zIndex={49}
+        align="center"
+        gap={2}
+        px={3}
+        py={2}
+        bg={tokens.colors.bg.overlay}
+        border={`1px solid ${tokens.colors.border.default}`}
+        borderRadius="8px"
+        boxShadow="0 12px 40px rgba(0,0,0,0.45)"
+      >
+        <VscMultipleWindows size={13} color={tokens.colors.text.muted} />
+        <Text fontSize="11px" color={tokens.colors.text.secondary}>
+          {t('team.screenPipActive')}
+        </Text>
+        <Box
+          as="button"
+          fontSize="10px"
+          fontWeight="600"
+          px="8px"
+          py="3px"
+          borderRadius="5px"
+          color={tokens.colors.badge.notificationText}
+          bg={tokens.colors.accent.primary}
+          onClick={exitPip}
+        >
+          {t('team.screenPipRestore')}
+        </Box>
+        <Box
+          as="button"
+          aria-label={t('team.screenStopWatch')}
+          title={t('team.screenStopWatch')}
+          color={tokens.colors.text.muted}
+          _hover={{ color: tokens.colors.text.primary }}
+          onClick={() => stopWatching()}
+        >
+          <VscClose size={14} />
+        </Box>
+      </Flex>
+    )}
+    </>
   )
 }

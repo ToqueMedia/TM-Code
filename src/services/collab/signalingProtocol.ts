@@ -25,6 +25,8 @@ export type ServerMessage =
   | { type: 'peer-leave'; peerId: string }
   | { type: SignalType; from: string; payload: unknown }
   | { type: 'relay'; from: string; channel: RelayChannel; payload: string }
+  /** Room heartbeat probe — answered with `{type:'pong'}` (liveness only). */
+  | { type: 'ping' }
 
 /**
  * Per-plan voice/screen limits the worker hands out on welcome. Absent (old

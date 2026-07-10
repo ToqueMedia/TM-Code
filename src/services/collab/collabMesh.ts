@@ -187,7 +187,17 @@ interface PeerState {
   ready: boolean
   /** Pending relay-fallback timer (cleared once ready or switched). */
   timer?: ReturnType<typeof setTimeout>
+  /** Pending P2P-recovery retry while in relay mode. */
+  retryTimer?: ReturnType<typeof setTimeout>
+  /** Consecutive failed P2P attempts — drives the retry backoff. */
+  retryAttempts?: number
 }
+
+/** P2P-recovery backoff while a peer sits in relay mode: 15s, 30s, then every
+ *  60s forever. Networks change (VPN off, firewall prompt accepted, wifi swap)
+ *  — a peer must never be STUCK on the dead-end relay until a full restart. */
+const P2P_RETRY_BASE_MS = 15_000
+const P2P_RETRY_MAX_MS = 60_000
 
 export class CollabMesh {
   private signaling: SignalingClient | null = null
@@ -385,11 +395,23 @@ export class CollabMesh {
 
   private addPeer(info: PeerInfo): void {
     if (this.peers.has(info.peerId)) return
-    const initiate = shouldInitiate(this.selfId, info.peerId)
-    dlog('addPeer', info.peerId, 'self=', this.selfId, 'initiate=', initiate)
-    const pc = new RTCPeerConnection({ iceServers: this.iceServers })
-    const state: PeerState = { info, pc, mode: 'p2p', ready: false }
+    const state: PeerState = {
+      info,
+      pc: new RTCPeerConnection({ iceServers: this.iceServers }),
+      mode: 'p2p',
+      ready: false,
+    }
     this.peers.set(info.peerId, state)
+    this.wirePeer(state)
+  }
+
+  /** (Re)wire a peer's RTCPeerConnection — shared by the initial addPeer and
+   *  the relay-recovery rebuild. Assumes `state.pc` is a FRESH connection. */
+  private wirePeer(state: PeerState): void {
+    const info = state.info
+    const pc = state.pc
+    const initiate = shouldInitiate(this.selfId, info.peerId)
+    dlog('wirePeer', info.peerId, 'self=', this.selfId, 'initiate=', initiate)
     // Don't wait the full ICE timeout — relay if not connected within the window.
     state.timer = setTimeout(() => {
       if (!state.ready) this.switchToRelay(state)
@@ -512,6 +534,56 @@ export class CollabMesh {
     state.videoTx = undefined
     // The relay path (the WebSocket) is already up → the peer is usable now.
     this.markReady(state)
+    // Relay is a dead end for media — keep trying to get P2P back. Only the
+    // deterministic initiator drives retries (no glare); the answerer joins in
+    // when the fresh offer arrives (see onSignal's relay-mode rebuild).
+    if (shouldInitiate(this.selfId, state.info.peerId)) this.scheduleP2PRetry(state)
+  }
+
+  /** Schedule the next P2P attempt for a relay-mode peer (15s → 30s → 60s cap,
+   *  forever — network conditions change and a retry is one signaling round). */
+  private scheduleP2PRetry(state: PeerState): void {
+    if (state.retryTimer) return
+    const attempt = (state.retryAttempts = (state.retryAttempts ?? 0) + 1)
+    const delay = Math.min(P2P_RETRY_MAX_MS, P2P_RETRY_BASE_MS * 2 ** (attempt - 1))
+    dlog('scheduleP2PRetry', state.info.peerId, 'attempt', attempt, 'in', delay, 'ms')
+    state.retryTimer = setTimeout(() => {
+      state.retryTimer = undefined
+      if (this.peers.get(state.info.peerId) !== state || state.mode !== 'relay') return
+      this.rebuildPeer(state)
+    }, delay)
+  }
+
+  /**
+   * Tear down a relay-mode peer's dead RTCPeerConnection and negotiate a fresh
+   * one IN PLACE (the peer never leaves presence). `ready` flips back to false
+   * so the recovered connection re-fires onPeerConnected — the session then
+   * replays chat (deduped), voice/screen state and the path classification,
+   * restoring media both ways. If the attempt fails, the fallback timer lands
+   * back in switchToRelay and the backoff schedules the next try.
+   */
+  private rebuildPeer(state: PeerState): void {
+    dlog('rebuildPeer', state.info.peerId)
+    if (state.timer) {
+      clearTimeout(state.timer)
+      state.timer = undefined
+    }
+    try {
+      state.pc.close()
+    } catch {
+      /* already closed */
+    }
+    state.control = undefined
+    state.bulk = undefined
+    state.audioTx = undefined
+    state.videoTx = undefined
+    state.mode = 'p2p'
+    state.ready = false
+    // Honest UI while rebuilding: the session clears this peer's voice/screen/
+    // path state; a successful handshake brings it all back via the replays.
+    this.handlers.onPeerDisconnected?.(state.info.peerId)
+    state.pc = new RTCPeerConnection({ iceServers: this.iceServers })
+    this.wirePeer(state)
   }
 
   /** Fire onPeerConnected once per peer (P2P channels open OR relay ready). */
@@ -519,6 +591,14 @@ export class CollabMesh {
     if (state.timer) {
       clearTimeout(state.timer)
       state.timer = undefined
+    }
+    if (state.mode === 'p2p') {
+      // Real P2P is back — stop the recovery loop and reset its backoff.
+      if (state.retryTimer) {
+        clearTimeout(state.retryTimer)
+        state.retryTimer = undefined
+      }
+      state.retryAttempts = 0
     }
     if (state.ready) return
     state.ready = true
@@ -541,6 +621,14 @@ export class CollabMesh {
     dlog('signal', type, '←', from)
     try {
       if (type === 'offer') {
+        // A fresh offer for a peer we already gave up on (relay mode, closed
+        // pc) is the initiator's P2P-recovery attempt — rebuild our side and
+        // answer it. This is the answerer half of the retry loop; no extra
+        // coordination message needed.
+        if (state.mode === 'relay') {
+          dlog('offer for relay-mode peer — rebuilding to answer', from)
+          this.rebuildPeer(state)
+        }
         await state.pc.setRemoteDescription(payload as RTCSessionDescriptionInit)
         // Adopt the audio/video transceivers the remote offer created and
         // answer them sendrecv — a remotely-created transceiver defaults to
@@ -577,6 +665,7 @@ export class CollabMesh {
     const state = this.peers.get(peerId)
     if (!state) return
     if (state.timer) clearTimeout(state.timer)
+    if (state.retryTimer) clearTimeout(state.retryTimer)
     try {
       state.pc.close()
     } catch {

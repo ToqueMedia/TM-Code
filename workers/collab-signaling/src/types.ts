@@ -95,6 +95,9 @@ export type ServerMessage =
   | { type: 'peer-leave'; peerId: string }
   | { type: SignalType; from: string; payload: unknown }
   | { type: 'relay'; from: string; channel: 'control' | 'bulk'; payload: string }
+  /** Heartbeat probe — the client answers `{type:'pong'}`; ANY inbound frame
+   *  (pong included) refreshes the peer's liveness in the room. */
+  | { type: 'ping' }
 
 export interface PeerInfo {
   peerId: string
