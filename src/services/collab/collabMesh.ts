@@ -584,6 +584,11 @@ export class CollabMesh {
     // Honest UI while rebuilding: the session clears this peer's voice/screen/
     // path state; a successful handshake brings it all back via the replays.
     this.handlers.onPeerDisconnected?.(state.info.peerId)
+    // …but keep the badge STEADY on relay while the attempt runs — the
+    // disconnect above wiped it, and a blank-then-red blink every retry
+    // cycle reads as instability. Success overwrites this with the real
+    // classification; failure lands back here anyway.
+    this.handlers.onPeerPath?.(state.info.peerId, 'relay')
     state.pc = new RTCPeerConnection({ iceServers: this.iceServers })
     this.wirePeer(state)
   }

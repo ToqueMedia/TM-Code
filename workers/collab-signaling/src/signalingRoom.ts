@@ -18,6 +18,12 @@ interface Peer extends PeerInfo {
   socket: WebSocket
   /** Last time anything arrived from this socket (ms) — heartbeat liveness. */
   lastSeen: number
+  /** True once the client answered a ping — proves it SPEAKS heartbeat.
+   *  Enforcement is gated on this: old builds never pong, and an idle old
+   *  client must not be force-closed every deadline (a reconnect flap) just
+   *  because it predates the protocol. They keep the legacy behaviour
+   *  (stale-until-close); new builds get the crash detection. */
+  ponged: boolean
 }
 
 /** Ping cadence and the silence deadline after which a socket is presumed
@@ -128,7 +134,7 @@ export class SignalingRoom {
     mediaPolicy: MediaPolicy,
   ): void {
     const peerId = crypto.randomUUID()
-    const self: Peer = { peerId, uid, name, socket, lastSeen: Date.now() }
+    const self: Peer = { peerId, uid, name, socket, lastSeen: Date.now(), ponged: false }
     this.peers.set(socket, self)
     this.ensureHeartbeat()
 
@@ -158,7 +164,7 @@ export class SignalingRoom {
     this.heartbeat = setInterval(() => {
       const now = Date.now()
       for (const peer of [...this.peers.values()]) {
-        if (now - peer.lastSeen > HEARTBEAT_DEADLINE_MS) {
+        if (peer.ponged && now - peer.lastSeen > HEARTBEAT_DEADLINE_MS) {
           // Half-open socket — close() routes through onClose, which
           // broadcasts the peer-leave exactly like a normal exit.
           try {
@@ -179,6 +185,12 @@ export class SignalingRoom {
     // 'pong' answer, which parseInbound then drops as an unknown type.
     sender.lastSeen = Date.now()
     const raw = typeof data === 'string' ? data : new TextDecoder().decode(data)
+    // Exact frame the client's heartbeat answer sends — marks this peer as
+    // heartbeat-capable, which arms the force-close enforcement for it.
+    if (raw === '{"type":"pong"}') {
+      sender.ponged = true
+      return
+    }
     const msg = parseInbound(raw)
     if (!msg) return
 

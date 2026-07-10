@@ -109,6 +109,22 @@ export function ScreenShareViewer() {
   // The <video> stays mounted while PiP is active (removing it would close
   // the system window); the in-app panel just turns invisible + click-through.
   const [pip, setPip] = useState(false)
+  // Feature-detected on mount: engines without either API (some WKWebView
+  // configs) simply don't get the button — better than a dead control that
+  // toasts on click. The toast path in enterPip stays as the belt.
+  const [pipSupported, setPipSupported] = useState(false)
+
+  useEffect(() => {
+    const el = videoRef.current as PipVideoElement | null
+    if (!el) return
+    const chromiumPip =
+      (document as Document & { pictureInPictureEnabled?: boolean }).pictureInPictureEnabled === true &&
+      typeof el.requestPictureInPicture === 'function'
+    const webkitPip =
+      typeof el.webkitSetPresentationMode === 'function' &&
+      el.webkitSupportsPresentationMode?.('picture-in-picture') === true
+    setPipSupported(chromiumPip || webkitPip)
+  }, [watching])
 
   useEffect(() => {
     const el = videoRef.current as PipVideoElement | null
@@ -254,16 +270,18 @@ export function ScreenShareViewer() {
           />
         </Flex>
         <Flex align="center" gap={2} flexShrink={0}>
-          <Box
-            as="button"
-            aria-label={t('team.screenPopOut')}
-            title={t('team.screenPopOut')}
-            color={tokens.colors.text.muted}
-            _hover={{ color: tokens.colors.text.primary }}
-            onClick={() => void enterPip()}
-          >
-            <VscMultipleWindows size={14} />
-          </Box>
+          {pipSupported && (
+            <Box
+              as="button"
+              aria-label={t('team.screenPopOut')}
+              title={t('team.screenPopOut')}
+              color={tokens.colors.text.muted}
+              _hover={{ color: tokens.colors.text.primary }}
+              onClick={() => void enterPip()}
+            >
+              <VscMultipleWindows size={14} />
+            </Box>
+          )}
           <Box
             as="button"
             aria-label={t('team.screenFullscreen')}
