@@ -32,6 +32,24 @@ use tauri::webview::NewWindowResponse;
 use tauri::{Emitter, Manager};
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 
+// WebView2 (Windows) browser args para TODAS as janelas — no-op nas outras
+// plataformas. Definir isto SUBSTITUI os defaults do wry, por isso os dois
+// primeiros blocos re-incluem exatamente o comportamento por omissão
+// (mini-menu/SmartScreen off + autoplay livre — o áudio remoto das chamadas
+// de voz toca em <audio> sem gesto do utilizador e depende disto).
+// A adição é `WebRtcHideLocalIpsWithMdns`: o Chromium esconde os IPs locais
+// dos host candidates atrás de hostnames mDNS (.local); no WebView2 a
+// resolução mDNS exige a regra "mDNS-In" da firewall, cujo prompt reaparece
+// a CADA update do runtime (MicrosoftEdge/WebView2Feedback#2252) e é
+// frequentemente recusado/bloqueado — sem resolução, pares na MESMA rede não
+// se ligam direto e caem para TURN. Desativar a ofuscação põe IPs reais nos
+// host candidates (expostos apenas aos colegas da chamada, aceitável num
+// produto de equipa) e devolve a ligação direta em LAN. NAT simétrico
+// continua a precisar de TURN — isso é topologia, não Windows.
+// IMPORTANTE: a mesma string em TODAS as janelas — args diferentes exigiriam
+// data directories diferentes (aviso do wry).
+const WEBVIEW2_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,WebRtcHideLocalIpsWithMdns --autoplay-policy=no-user-gesture-required";
+
 // ── Preview webview (separate window approach — reliable on all platforms) ────
 
 // ── Native preview via wry::build_as_child ──────────────────────────────────
@@ -764,6 +782,7 @@ pub fn run() {
 
             #[allow(unused_mut)]
             let mut splash_builder = WebviewWindowBuilder::new(app, "splash", splash_url)
+                .additional_browser_args(WEBVIEW2_BROWSER_ARGS)
                 .title("TM Code")
                 .inner_size(360.0, 200.0)
                 .resizable(false)
@@ -1013,6 +1032,7 @@ pub fn run() {
             //   inconsistent across distros).
             #[allow(unused_mut)]
             let mut builder = WebviewWindowBuilder::new(app, "main", main_url)
+                .additional_browser_args(WEBVIEW2_BROWSER_ARGS)
                 .title("TM Code")
                 .icon(icon.clone())
                 .expect("Failed to set window icon")
@@ -1127,6 +1147,7 @@ pub fn run() {
                                     "oauth-popup",
                                     WebviewUrl::External(parsed_url),
                                 )
+                                .additional_browser_args(WEBVIEW2_BROWSER_ARGS)
                                 .title("Sign in with Google")
                                 .inner_size(500.0, 700.0)
                                 .center()
