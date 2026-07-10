@@ -1075,7 +1075,7 @@ export function getConstraintsSection(ctx: PromptContext): string {
   return `# Constraints
 
 ## Files
- - The IDE blocks operations outside the project directory.
+ - Paths outside the project are NOT off-limits: the first operation on an outside directory prompts the developer for access, and approval adds it to the session's allowed roots. When the task needs an outside path (another repo, \`~\` config, general computer tasks), **CALL the tool directly** — the IDE handles the consent prompt. Never refuse or scale down a task because it lives outside the project directory.
  - \`create_file\` is for new files ONLY. **USE** \`write_file\` to overwrite existing files.
 
 ## Safety
