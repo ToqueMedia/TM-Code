@@ -25,6 +25,8 @@ export const GLOB = 'glob'
 export const READ_SKILL = 'read_skill'
 export const READ_LARGE_RESULT = 'read_large_result'
 export const READ_DEV_SERVER_LOGS = 'read_dev_server_logs'
+/** Code intelligence (Monaco TS worker): definitions/references/hover/symbols/diagnostics. */
+export const LSP = 'lsp'
 
 // Claude-like read aliases — exposed to the model, mapped internally to the
 // TM Code tools above. Keep internal names stable for history/telemetry.
@@ -92,7 +94,7 @@ export const READ_SESSION_MEMORY = 'read_session_memory'
 export const TOOL_NAMES = [
   READ_FILE, READ_AROUND, LIST_DIRECTORY, SEARCH_FILES, GLOB,
   READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
-  READ_SKILL, READ_LARGE_RESULT, READ_DEV_SERVER_LOGS,
+  READ_SKILL, READ_LARGE_RESULT, READ_DEV_SERVER_LOGS, LSP,
   WRITE_FILE, CREATE_FILE, EDIT_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
   EXECUTE_COMMAND, EXECUTE_COMMAND_BACKGROUND, CHECK_BACKGROUND_COMMANDS,
   AGENT_SHELL_START, AGENT_SHELL_WRITE, AGENT_SHELL_READ, AGENT_SHELL_STOP,

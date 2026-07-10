@@ -44,7 +44,7 @@ import {
   DELEGATE, COLLECT_RESULTS,
   SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,
   UPDATE_SESSION_MEMORY, READ_SESSION_MEMORY,
-  REQUEST_CREDENTIALS,
+  REQUEST_CREDENTIALS, LSP,
 } from './toolNames'
 import type { PromptProfile } from './contextBuilder/auxiliaryRegistry'
 
@@ -53,7 +53,7 @@ import type { PromptProfile } from './contextBuilder/auxiliaryRegistry'
 /** The minimal toolset for a localized code task. Always active. */
 export const CORE_TOOLS = [
   GREP_ALIAS, READ_ALIAS, GLOB_ALIAS, LS_ALIAS,
-  SEARCH_FILES, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EDIT_FILE, GLOB,
+  SEARCH_FILES, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EDIT_FILE, GLOB, LSP,
   EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS, UPDATE_SESSION_MEMORY,
 ] as const
 
@@ -115,7 +115,7 @@ const GROUP_TOOLS: Record<ToolsetGroupName, readonly string[]> = {
 /** Verification/audit without editing files (Parte B: read-only set). */
 const READONLY_BASE = [
   READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
-  READ_FILE, READ_AROUND, SEARCH_FILES, GLOB, LIST_DIRECTORY, READ_LARGE_RESULT,
+  READ_FILE, READ_AROUND, SEARCH_FILES, GLOB, LIST_DIRECTORY, READ_LARGE_RESULT, LSP,
   // Shell no perfil read-only DE PROPÓSITO: perguntas de verificação
   // ("qual é o username do admin?") muitas vezes respondem-se pelo ESTADO
   // real (consultar a BD, git log, node -e), não pelo código — o claude-vaz
@@ -139,7 +139,7 @@ const PROJECT_BOOTSTRAP_BASE = [
  *  this keeps a verification-style bugfix at ~6 tools, not 8. */
 const BUGFIX_BASE = [
   READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
-  READ_FILE, READ_AROUND, SEARCH_FILES, GLOB, READ_LARGE_RESULT, EXECUTE_COMMAND,
+  READ_FILE, READ_AROUND, SEARCH_FILES, GLOB, READ_LARGE_RESULT, LSP, EXECUTE_COMMAND,
   ASK_USER_QUESTION, UPDATE_SESSION_MEMORY,
 ] as const
 /** Exported for tests + the usage-log to reference the bugfix base set. */

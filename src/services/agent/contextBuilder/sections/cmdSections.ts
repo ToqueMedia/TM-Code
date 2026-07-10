@@ -18,6 +18,7 @@ import {
   READ_SKILL,
   EXECUTE_COMMAND, EXECUTE_COMMAND_BACKGROUND, START_DEV_SERVER, STOP_DEV_SERVER,
   UPDATE_TASKS,
+  LSP,
 } from '../../toolNames'
 import { sanitizeProjectContent, skillsFromHashtags } from '../helpers'
 import { markTmsStubSent } from '../../tmsContext'
@@ -398,7 +399,7 @@ export function getCmdReminderSection(loadedSkillNames: string[] = []): string {
 1. **COMPLETE** every task and run one highest-signal verification path before reporting done. If it passes, stop with summary + verification + next steps — do not keep re-checking or re-read files just to confirm after a clean \`npx tsc\`/typecheck/build/test. Say so when verification is not possible.
 2. File writes go to disk immediately — **DOUBLE-CHECK** paths and content.
 3. **AFTER** execute_command: **READ** full output. Exit code ≠ 0 → **FIX** the actual error and move on. **DO NOT BLINDLY RETRY** the exact same command.
-4. **For reading files**, use \`${READ_ALIAS}\` (internal \`${READ_FILE}\`); after a search match, use \`${READ_AROUND}\` for the local window instead of re-reading whole files. Do NOT re-read a file you just edited/wrote — the tool result already confirms the applied state (it would have errored otherwise), and files read earlier stay in your context unless a note says they changed. **For searching**, use \`${GREP_ALIAS}\` (internal \`${SEARCH_FILES}\`). **For listing directories**, use \`${LS_ALIAS}\` (internal \`${LIST_DIRECTORY}\`). **For finding files by pattern**, use \`${GLOB_ALIAS}\` (internal \`${GLOB}\`). Use \`${EXECUTE_COMMAND}\` to run test runners (\`jest\`, \`vitest\`), scripts (\`ts-node\`, \`bun\`), and system commands.
+4. **For reading files**, use \`${READ_ALIAS}\` (internal \`${READ_FILE}\`); after a search match, use \`${READ_AROUND}\` for the local window instead of re-reading whole files. Do NOT re-read a file you just edited/wrote — the tool result already confirms the applied state (it would have errored otherwise), and files read earlier stay in your context unless a note says they changed. **For SYMBOL questions** (where is X defined, what is its type, who uses it) and for type-checking ONE file after an edit, use \`${LSP}\` (goToDefinition/findReferences/hover/documentSymbol/diagnostics) — compiler-grade answers, cheaper than grep + speculative reads. **For searching**, use \`${GREP_ALIAS}\` (internal \`${SEARCH_FILES}\`). **For listing directories**, use \`${LS_ALIAS}\` (internal \`${LIST_DIRECTORY}\`). **For finding files by pattern**, use \`${GLOB_ALIAS}\` (internal \`${GLOB}\`). Use \`${EXECUTE_COMMAND}\` to run test runners (\`jest\`, \`vitest\`), scripts (\`ts-node\`, \`bun\`), and system commands.
 5. **CONFIRM** dependencies are installed before importing. **INSTALL** first when missing.
 6. For destructive or shared-state actions: **CONFIRM** with the user first.
 7. ${sharedIdentityReminder()}

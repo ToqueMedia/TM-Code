@@ -38,6 +38,7 @@ import {
   WRITE_FILE,
   EDIT_FILE,
   STOP_DEV_SERVER,
+  LSP,
   canonicalToolName,
   normalizeToolInputForCanonical,
 } from './toolNames'
@@ -2942,6 +2943,54 @@ ${preview}
     })
 
     // === list_directory ===
+    // === lsp — code intelligence (claude-vaz LSPTool contract, TS/JS) ===
+    this.tools.set(LSP, {
+      definition: {
+        name: LSP,
+        description:
+          'Code intelligence for TypeScript/JavaScript via the project language service — compiler-grade answers instead of grep guesses. Operations: ' +
+          'goToDefinition (where is the symbol at file/line/character defined), ' +
+          'findReferences (usages of that symbol across files loaded so far; use Grep for an exhaustive project-wide sweep), ' +
+          'hover (type signature + docs for the symbol at the position), ' +
+          'documentSymbol (outline of functions/classes/exports in a file), ' +
+          'diagnostics (type + syntax errors for ONE file — much cheaper than running tsc after editing a single file). ' +
+          'line/character are 1-based, exactly as shown by Read. Prefer this over Grep when the question is about a SYMBOL (definition, type, usages); prefer Grep for text/strings.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            operation: {
+              type: 'string',
+              enum: ['goToDefinition', 'findReferences', 'hover', 'documentSymbol', 'diagnostics'],
+              description: 'The code-intelligence operation to run',
+            },
+            file_path: { type: 'string', description: 'Absolute path to the file' },
+            line: { type: 'number', description: '1-based line of the symbol (required for goToDefinition/findReferences/hover)' },
+            character: { type: 'number', description: '1-based character offset of the symbol (required for goToDefinition/findReferences/hover)' },
+          },
+          required: ['operation', 'file_path'],
+        },
+        concurrencySafe: true,
+      },
+      execute: async (input) => {
+        const requestedPath = input.file_path as string | undefined
+        if (!requestedPath) return 'Error: lsp requires file_path.'
+        await this.requirePathAccess(requestedPath)
+        const absolute = this.resolveToAbsolute(requestedPath)
+        // Lazy import: keeps Monaco out of the agent module graph until the
+        // model actually asks a code-intelligence question.
+        const { executeLspTool } = await import('./lspTool')
+        return executeLspTool(
+          {
+            operation: input.operation as never,
+            file_path: absolute,
+            line: input.line as number | undefined,
+            character: input.character as number | undefined,
+          },
+          this.getProjectRoot(),
+        )
+      },
+    })
+
     this.tools.set('list_directory', {
       definition: {
         name: 'list_directory',
