@@ -444,7 +444,9 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
                       overflow="hidden"
                       display={previewFillsWorkspace ? 'none' : 'flex'}
                       flexDirection="column"
-                      transition={isResizing ? 'none' : 'width 0.3s ease'}
+                      // Width snaps (no transition) — same policy as the side
+                      // drawers: animating this column's width re-wraps the
+                      // agent transcript on every frame (text wobble).
                     >
                       <ErrorBoundary>
                         <ChatView />

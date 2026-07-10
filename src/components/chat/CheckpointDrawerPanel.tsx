@@ -37,7 +37,9 @@ function CheckpointDrawerPanel() {
       bg={tokens.colors.bg.mainLayout}
       borderLeft={isOpen ? '1px solid rgba(255, 255, 255, 0.06)' : 'none'}
       overflow="hidden"
-      transition="width 0.35s cubic-bezier(0.32, 0.72, 0, 1), border-left 0.25s ease"
+      // Width snaps (no transition): animating it re-wraps the agent
+      // transcript on every frame — text wobble. One reflow, VS Code-style;
+      // the inner translate keeps the slide-in feel.
     >
       <Flex
         direction="column"

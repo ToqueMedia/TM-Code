@@ -44,7 +44,9 @@ function TerminalDrawerPanel() {
       bg={tokens.colors.terminal.background}
       borderLeft={isOpen ? '1px solid rgba(255, 255, 255, 0.08)' : 'none'}
       overflow="hidden"
-      transition="width 0.35s cubic-bezier(0.32, 0.72, 0, 1), border-left 0.25s ease"
+      // Width snaps (no transition): animating it re-wraps the agent
+      // transcript on every frame — text wobble (and xterm refits mid-anim).
+      // One reflow, VS Code-style; the inner translate keeps the slide-in.
     >
       <Flex
         direction="column"

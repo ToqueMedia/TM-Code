@@ -314,7 +314,11 @@ export function TeamChatPanel() {
       bg={tokens.colors.bg.panel}
       borderLeft={open ? '1px solid rgba(255, 255, 255, 0.08)' : 'none'}
       overflow="hidden"
-      transition="width 0.35s cubic-bezier(0.32, 0.72, 0, 1), border-left 0.25s ease"
+      // Width SNAPS on purpose (no transition): animating it makes the agent
+      // transcript re-wrap on every frame for 350ms — visible text wobble,
+      // with use-stick-to-bottom re-pinning per frame on top. A snap is ONE
+      // reflow (VS Code panels behave the same); the inner translate below
+      // keeps the perceived slide-in on open.
     >
       <Flex
         direction="column"
