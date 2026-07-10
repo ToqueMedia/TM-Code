@@ -280,7 +280,14 @@ function InlineDiff({
         css={{
           '&::-webkit-scrollbar': { width: '4px', height: '4px' },
           '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.14)', borderRadius: '2px' },
-          '@media (max-width: 560px)': {
+          // Container query on the diff body itself: the transcript column
+          // shrinks with the preview split and the side drawers (team chat,
+          // terminal) while the viewport stays put, so a viewport @media
+          // never fired on desktop — diffs kept the wide 44px gutters even
+          // inside a 380px sidebar chat. Measuring the diff's own box makes
+          // the narrow gutters kick in wherever the diff actually renders.
+          containerType: 'inline-size',
+          '@container (max-width: 560px)': {
             '& [data-diff-row], & [data-diff-gap]': {
               gridTemplateColumns: '34px 34px 18px minmax(0, 1fr)',
             },

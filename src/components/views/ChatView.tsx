@@ -255,6 +255,16 @@ function ChatView() {
     const bodySize = `${chatTextFontSize}px`
     const codeSize = `${Math.max(12, chatTextFontSize - 1)}px`
     return {
+      // The chat COLUMN is the responsive unit, not the window. Side drawers
+      // (team chat 360px, terminal, checkpoints) squeeze this column without
+      // changing the viewport, so a viewport @media query left the toolbar's
+      // wide-only cluster visible while 360px of room vanished — the
+      // flexShrink=0 indicators painted over the session dropdown. The
+      // container query below measures THIS element instead. The file-tree
+      // sidebar is an overlay (takes no width), so in plain chat mode
+      // container width ≈ viewport width and the 1180px threshold keeps its
+      // original meaning exactly.
+      containerType: 'inline-size',
       '--chat-a11y-text-size': bodySize,
       '--chat-a11y-code-size': codeSize,
       '& [data-chat-transcript]': {
@@ -302,7 +312,7 @@ function ChatView() {
       '& [data-chat-toolbar-overflow-trigger]': {
         display: 'none',
       },
-      '@media (max-width: 1180px)': {
+      '@container (max-width: 1180px)': {
         '& [data-chat-toolbar-wide-only]': {
           display: 'none !important',
         },

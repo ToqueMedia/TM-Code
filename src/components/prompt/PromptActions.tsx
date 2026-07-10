@@ -146,7 +146,13 @@ function PromptActions({
       py={2}
       borderTop="1px solid rgba(255, 255, 255, 0.035)"
       css={{
-        '@media (max-width: 760px)': {
+        // Container query, not viewport: the prompt column gets squeezed by
+        // side drawers (team chat, terminal, checkpoints) and by the preview
+        // split, none of which change the window width. Measuring this row
+        // directly collapses the labels exactly when the row itself runs out
+        // of room, regardless of what stole the space.
+        containerType: 'inline-size',
+        '@container (max-width: 760px)': {
           '& [data-prompt-action-label]': { display: 'none' },
           '& [data-prompt-tool-button]': {
             paddingLeft: '8px',
