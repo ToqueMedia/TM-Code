@@ -62,6 +62,10 @@ export const WEB_FETCH = 'web_fetch'
 export const DELEGATE = 'delegate'
 export const COLLECT_RESULTS = 'collect_results'
 
+// Worktree session (claude-vaz parity) — ONLY when the user explicitly asks
+export const ENTER_WORKTREE = 'enter_worktree'
+export const EXIT_WORKTREE = 'exit_worktree'
+
 // Internal task tracking
 export const UPDATE_TASKS = 'update_tasks'
 
@@ -101,6 +105,7 @@ export const TOOL_NAMES = [
   START_DEV_SERVER, STOP_DEV_SERVER,
   WEB_SEARCH, WEB_FETCH,
   DELEGATE, COLLECT_RESULTS,
+  ENTER_WORKTREE, EXIT_WORKTREE,
   UPDATE_TASKS,
   REQUEST_CREDENTIALS, ASK_USER_QUESTION,
   SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY, UPDATE_SESSION_MEMORY, READ_SESSION_MEMORY,

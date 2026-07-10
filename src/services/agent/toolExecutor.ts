@@ -39,9 +39,12 @@ import {
   EDIT_FILE,
   STOP_DEV_SERVER,
   LSP,
+  ENTER_WORKTREE,
+  EXIT_WORKTREE,
   canonicalToolName,
   normalizeToolInputForCanonical,
 } from './toolNames'
+import { ENTER_WORKTREE_DESCRIPTION, EXIT_WORKTREE_DESCRIPTION } from './toolExecutor/worktrees'
 import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileState, type FileStateCache } from './toolExecutor/fileStateCache'
 import { FILE_UNCHANGED_STUB } from './toolExecutor/readDedup'
 import { checkReadRangeOverlap, recordReadRange, clearReadRangeTracker } from './toolExecutor/readRangeTracker'
@@ -280,6 +283,10 @@ class ToolExecutor {
    * directory instead of the open-project root.
    */
   private cmdModeCwd: string | null = null
+  /** Active worktree session (enter_worktree) — while set, getProjectRoot()
+   *  resolves here so every file/shell operation lands in the isolated
+   *  checkout. Forked to delegate children; cleared on session reset. */
+  private worktreeState: import('./toolExecutor/worktrees').WorktreeState | null = null
 
   /**
    * Plan mode — when true, /plan is active and only architecture-producing
@@ -363,6 +370,7 @@ class ToolExecutor {
   createIsolatedChild(): ToolExecutor {
     const child = new ToolExecutor()
     child.cmdModeCwd = this.cmdModeCwd
+    child.worktreeState = this.worktreeState
     child.requestType = this.requestType
     child.planMode = this.planMode
     child.planModePlanFileName = this.planModePlanFileName
@@ -454,6 +462,9 @@ class ToolExecutor {
   /** Clears session-scoped state. Call on new sessions. */
   resetSessionState(): void {
     clearMentionContextTracker()
+    // A worktree session never survives a session reset — the next run must
+    // resolve against the real project root, not a possibly-stale worktree.
+    this.worktreeState = null
     this.readFileTimestamps.clear()
     this.readFileState.clear()
     clearReadRangeTracker()
@@ -1930,7 +1941,25 @@ ${preview}
     }
   }
 
+  /** Run a git (or small shell) command for the worktree tools. Never throws. */
+  private async runGit(command: string, cwd: string): Promise<{ ok: boolean; out: string }> {
+    try {
+      const r = await invoke<{ stdout: string; stderr: string; exitCode: number; success: boolean }>(
+        'execute_command',
+        { command, cwd, timeoutSecs: 60 },
+      )
+      const out = [r.stdout, r.stderr].filter(Boolean).join('\n').trim()
+      return { ok: r.success && r.exitCode === 0, out }
+    } catch (e) {
+      return { ok: false, out: formatError(e) }
+    }
+  }
+
   private getProjectRoot(): string {
+    // Active worktree session (enter_worktree) redirects the WHOLE session —
+    // file resolution and shell cwd — into the isolated checkout until
+    // exit_worktree. The app/editor keeps pointing at the main checkout.
+    if (this.worktreeState) return this.worktreeState.path
     const project = useProjectStore.getState().currentProject
     if (project?.path) return project.path
     // Cwd-scoped fallback: this path may be opened without populating
@@ -2943,6 +2972,108 @@ ${preview}
     })
 
     // === list_directory ===
+    // === enter_worktree / exit_worktree (claude-vaz parity) ===
+    this.tools.set(ENTER_WORKTREE, {
+      definition: {
+        name: ENTER_WORKTREE,
+        description: ENTER_WORKTREE_DESCRIPTION,
+        input_schema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Optional worktree name (slug). Random when omitted.' },
+          },
+          required: [],
+        },
+        concurrencySafe: false,
+      },
+      execute: async (input) => {
+        if (this.worktreeState) {
+          return `Error: already in worktree "${this.worktreeState.name}" (${this.worktreeState.path}). Call exit_worktree first.`
+        }
+        let root: string
+        try {
+          root = this.getProjectRoot()
+        } catch (e) {
+          return `Error: ${formatError(e)}`
+        }
+        const head = await this.runGit('git rev-parse HEAD', root)
+        if (!head.ok) {
+          return `Error: enter_worktree requires a git repository with at least one commit. git said: ${head.out || 'not a git repository'}`
+        }
+        const { sanitizeWorktreeName, worktreeBranch, WORKTREES_REL_DIR } = await import('./toolExecutor/worktrees')
+        const name = sanitizeWorktreeName(input.name) ?? `wt-${Date.now().toString(36)}`
+        const branch = worktreeBranch(name)
+        const dir = `${root}/${WORKTREES_REL_DIR}/${name}`
+        // Keep the worktrees dir out of the MAIN checkout's git status via the
+        // repo-local (never versioned) exclude file. Best-effort.
+        await this.runGit(
+          `mkdir -p .git/info && { grep -qxF '${WORKTREES_REL_DIR}/' .git/info/exclude 2>/dev/null || echo '${WORKTREES_REL_DIR}/' >> .git/info/exclude; }`,
+          root,
+        )
+        const add = await this.runGit(`git worktree add "${dir}" -b "${branch}"`, root)
+        if (!add.ok) {
+          return `Error: git worktree add failed — ${add.out}`
+        }
+        this.worktreeState = { originalRoot: root, path: dir, branch, name, baseRef: head.out.split('\n')[0] }
+        return (
+          `Entered worktree "${name}".\n` +
+          `- path: ${dir}\n- branch: ${branch} (off ${this.worktreeState.baseRef.slice(0, 10)})\n` +
+          `All file tools and shell commands now resolve inside the worktree until exit_worktree. ` +
+          `Note for the developer: the editor still shows the MAIN checkout — this session's work lives under ${WORKTREES_REL_DIR}/${name}.`
+        )
+      },
+    })
+
+    this.tools.set(EXIT_WORKTREE, {
+      definition: {
+        name: EXIT_WORKTREE,
+        description: EXIT_WORKTREE_DESCRIPTION,
+        input_schema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['keep', 'remove'], description: '"keep" leaves the worktree on disk; "remove" deletes it (and its branch)' },
+            discard_changes: { type: 'boolean', description: 'Only with action "remove": delete even when there is uncommitted/unmerged work. Confirm with the user first.' },
+          },
+          required: ['action'],
+        },
+        concurrencySafe: false,
+      },
+      execute: async (input) => {
+        const state = this.worktreeState
+        if (!state) {
+          return 'No worktree session is active — nothing to exit. Filesystem unchanged.'
+        }
+        const action = input.action as string
+        if (action !== 'keep' && action !== 'remove') {
+          return 'Error: exit_worktree requires action: "keep" | "remove".'
+        }
+        if (action === 'keep') {
+          this.worktreeState = null
+          return (
+            `Exited worktree "${state.name}" (kept on disk).\n` +
+            `- path: ${state.path}\n- branch: ${state.branch}\n` +
+            `Session root restored to ${state.originalRoot}. The branch can be merged or revisited later.`
+          )
+        }
+        const { decideRemove } = await import('./toolExecutor/worktrees')
+        const status = await this.runGit('git status --porcelain', state.path)
+        const aheadRes = await this.runGit(`git rev-list --count ${state.baseRef}..HEAD`, state.path)
+        const ahead = aheadRes.ok ? parseInt(aheadRes.out, 10) || 0 : 0
+        const decision = decideRemove(status.ok ? status.out : '', ahead, input.discard_changes === true)
+        if (!decision.proceed) {
+          return decision.refusal as string
+        }
+        // Restore the root BEFORE deleting — a failed removal must never
+        // leave the session pointing into a half-deleted directory.
+        this.worktreeState = null
+        const remove = await this.runGit(`git worktree remove --force "${state.path}"`, state.originalRoot)
+        await this.runGit(`git branch -D "${state.branch}"`, state.originalRoot)
+        return remove.ok
+          ? `Exited and removed worktree "${state.name}" (directory + branch deleted). Session root restored to ${state.originalRoot}.`
+          : `Exited worktree "${state.name}" (session root restored), but removal reported: ${remove.out}. You may need to clean ${state.path} manually.`
+      },
+    })
+
     // === lsp — code intelligence (claude-vaz LSPTool contract, TS/JS) ===
     this.tools.set(LSP, {
       definition: {
