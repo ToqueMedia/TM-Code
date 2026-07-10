@@ -358,19 +358,21 @@ export class CollabMesh {
     return Boolean(peer && peer.mode === 'p2p' && peer.videoTx)
   }
 
-  /** Route a payload to a peer over its open DataChannel, or via the DO relay
-   *  when the peer fell back to relay mode. Returns the path used (or null). */
-  private sendOn(peer: PeerState, channel: 'control' | 'bulk', payload: string): 'p2p' | 'relay' | null {
+  /** Route a payload to a peer over its open DataChannel, falling back to the
+   *  DO relay whenever the channel isn't open — not just in relay MODE. The
+   *  P2P-recovery loop re-opens the handshake window on an established peer
+   *  every retry cycle; without the unconditional fallback, control/bulk
+   *  messages sent during those seconds were silently dropped (the relay —
+   *  the signaling socket — is always there). Receivers treat relayed data
+   *  identically, and control state is idempotent / chat dedups by id. */
+  private sendOn(peer: PeerState, channel: 'control' | 'bulk', payload: string): 'p2p' | 'relay' {
     const dc = channel === 'control' ? peer.control : peer.bulk
     if (dc?.readyState === 'open') {
       dc.send(payload)
       return 'p2p'
     }
-    if (peer.mode === 'relay') {
-      this.signaling?.sendRelay(peer.info.peerId, channel, payload)
-      return 'relay'
-    }
-    return null
+    this.signaling?.sendRelay(peer.info.peerId, channel, payload)
+    return 'relay'
   }
 
   private dispatchControl(peerId: string, raw: string): void {

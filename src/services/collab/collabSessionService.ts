@@ -92,8 +92,10 @@ let offlineUnsub: (() => void) | null = null
 /** Set when an UNEXPECTED socket drop interrupted an active voice call: the
  *  next successful reconnect auto-rejoins (a network blip shouldn't kick you
  *  out of the conversation). Cleared by intentional stops — leaving the team /
- *  signing out must never re-arm the mic. */
-let voiceRejoin: { droppedAt: number } | null = null
+ *  signing out must never re-arm the mic. Scoped to the ROOM the call lived
+ *  in: rooms are per-project, and switching projects inside the rejoin window
+ *  must not silently re-open the mic in a DIFFERENT project's call. */
+let voiceRejoin: { droppedAt: number; room: string } | null = null
 /** How stale a dropped call may be and still auto-rejoin. Beyond this,
  *  silently re-opening the mic is a privacy surprise, not a convenience. */
 const VOICE_REJOIN_WINDOW_MS = 120_000
@@ -342,8 +344,8 @@ function scheduleReconnect(): void {
   if (reconnectTimer || !wantConnection || !COLLAB_ENABLED) return
   // Remember an active call across the gap (read BEFORE the reset wipes it);
   // don't overwrite droppedAt on retry cycles — freshness counts from the drop.
-  if (useCollabStore.getState().voiceInCall && !voiceRejoin) {
-    voiceRejoin = { droppedAt: Date.now() }
+  if (useCollabStore.getState().voiceInCall && !voiceRejoin && activeRoom) {
+    voiceRejoin = { droppedAt: Date.now(), room: activeRoom }
   }
   // The mic must not stay hot across the gap — the call does not survive a
   // dropped session (maybeRejoinVoice restores it after the mesh heals). The
@@ -385,8 +387,9 @@ async function loadChatHistory(): Promise<void> {
 function maybeRejoinVoice(): void {
   if (!voiceRejoin) return
   const fresh = Date.now() - voiceRejoin.droppedAt <= VOICE_REJOIN_WINDOW_MS
+  const sameRoom = voiceRejoin.room === activeRoom
   voiceRejoin = null
-  if (!fresh) return
+  if (!fresh || !sameRoom) return
   void joinVoiceCall().then(() => {
     // Transparency: the mic just re-opened without a click — say so.
     if (useCollabStore.getState().voiceInCall) toast('info', t('team.voiceRejoined'))
