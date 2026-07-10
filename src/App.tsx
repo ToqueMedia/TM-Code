@@ -60,6 +60,7 @@ function StandaloneEditorApp({ files }: { files: string[] }) {
 			overflow="hidden"
 		>
 			<FileViewer
+				standalone
 				filePath={files[0]}
 				onClose={() => {
 					import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
@@ -903,10 +904,15 @@ function App() {
 						onOpenProject={handleOpenProject}
 					/>
 				) : standaloneFiles.length > 0 && !currentProject ? (
-						<FileViewer
-							filePath={standaloneFiles[0]}
-							onClose={() => setStandaloneFiles([])}
-						/>
+						// The viewer now sizes to its container (h=100%) instead of
+						// hardcoding 100vh — inline it must discount the 35px title
+						// bar or its status bar lands below the fold.
+						<Box h="calc(100vh - 35px)">
+							<FileViewer
+								filePath={standaloneFiles[0]}
+								onClose={() => setStandaloneFiles([])}
+							/>
+						</Box>
 					) : (
 						<WelcomeScreen
 							onOpenProject={handleOpenProject}

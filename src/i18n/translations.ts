@@ -513,7 +513,7 @@ const en = {
   'chat.copyConversation': 'Copy reply',
   'chat.copySession': 'Copy whole session',
   'chat.downloadSession': 'Download',
-  'chat.downloadJson': 'Download as JSON',
+  'chat.downloadJson': 'Download as JSON (debug)',
   'chat.downloadMarkdown': 'Download as Markdown',
   'chat.contextEfficiency': 'Context efficiency',
   'chat.efficiencyRequests': 'Requests',
@@ -1138,6 +1138,11 @@ const en = {
   'fileViewer.loading': 'Loading {fileName}...',
   'fileViewer.failedOpen': 'Failed to open {fileName}',
   'fileViewer.close': 'Close',
+  'fileViewer.save': 'Save',
+  'fileViewer.saved': 'Saved',
+  'fileViewer.unsaved': 'Unsaved changes',
+  'fileViewer.copyPath': 'Copy path',
+  'fileViewer.lines': '{count} lines',
 
   // ── Network Status ────────────────────────────────
   'network.offline': 'No internet connection',
@@ -2127,7 +2132,7 @@ const pt: Record<keyof typeof en, string> = {
   'chat.copyConversation': 'Copiar conversa',
   'chat.copySession': 'Copiar sessão',
   'chat.downloadSession': 'Baixar',
-  'chat.downloadJson': 'Baixar como JSON',
+  'chat.downloadJson': 'Baixar como JSON (debug)',
   'chat.downloadMarkdown': 'Baixar como Markdown',
   'chat.contextEfficiency': 'Eficiência de contexto',
   'chat.efficiencyRequests': 'Pedidos',
@@ -2743,6 +2748,11 @@ const pt: Record<keyof typeof en, string> = {
   'fileViewer.loading': 'A carregar {fileName}...',
   'fileViewer.failedOpen': 'Falha ao abrir {fileName}',
   'fileViewer.close': 'Fechar',
+  'fileViewer.save': 'Guardar',
+  'fileViewer.saved': 'Guardado',
+  'fileViewer.unsaved': 'Alterações por guardar',
+  'fileViewer.copyPath': 'Copiar caminho',
+  'fileViewer.lines': '{count} linhas',
 
   // ── Network Status ────────────────────────────────
   'network.offline': 'Sem ligação à internet',
