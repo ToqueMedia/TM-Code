@@ -2,12 +2,10 @@ import { invoke } from '@/utils/invokeMetrics'
 import { t } from '../../../i18n'
 import { useChatStore } from '../../../stores/chatStore'
 import { runAgentWithCallbacks } from '../agentRunner'
-import type { SlashCommandMode } from '../slashCommandRegistry'
 
 export async function executeInit(
   args: string,
   projectPath: string,
-  mode: SlashCommandMode = 'chat',
 ): Promise<void> {
   const chatStore = useChatStore.getState()
 
@@ -44,10 +42,6 @@ export async function executeInit(
       confidence: 'high',
       reason: '/init selected project_bootstrap to create or refresh TMS.md',
     },
-    // Cwd-scoped execution may not populate useProjectStore.currentProject;
-    // without this, the tool executor's getProjectRoot can fall back to an
-    // empty store and every file tool fails with "No project is open."
-    cmdOnlyMode: mode === 'terminal',
   })
 }
 

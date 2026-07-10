@@ -1,6 +1,5 @@
 import { buildMemoryGuidanceSection } from '../memoryGuidance'
 import { getMemoryToolsGuidanceSection } from '../contextBuilder/sections/chatSections'
-import { getCmdMemoryToolsGuidanceSection } from '../contextBuilder/sections/cmdSections'
 
 describe('buildMemoryGuidanceSection', () => {
   const guidance = buildMemoryGuidanceSection()
@@ -65,13 +64,5 @@ describe('buildMemoryGuidanceSection', () => {
 describe('memory guidance parity', () => {
   it('getMemoryToolsGuidanceSection returns the same content as buildMemoryGuidanceSection', () => {
     expect(getMemoryToolsGuidanceSection()).toBe(buildMemoryGuidanceSection())
-  })
-
-  it('getCmdMemoryToolsGuidanceSection returns the same content as buildMemoryGuidanceSection', () => {
-    expect(getCmdMemoryToolsGuidanceSection()).toBe(buildMemoryGuidanceSection())
-  })
-
-  it('project and cwd-scoped guidance are identical', () => {
-    expect(getMemoryToolsGuidanceSection()).toBe(getCmdMemoryToolsGuidanceSection())
   })
 })

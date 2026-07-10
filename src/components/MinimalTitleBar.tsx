@@ -76,7 +76,6 @@ function buildSendToWebConfirmMessage(template: string, prepared: PreparedWebExp
 
 function MinimalTitleBar() {
   const currentProject = useProjectStore(s => s.currentProject)
-  const cmdModeProjectPath = useProjectStore(s => s.cmdModeProjectPath)
   const user = useAuthStore(s => s.user)
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showIssueReporter, setShowIssueReporter] = useState(false)
@@ -204,10 +203,8 @@ function MinimalTitleBar() {
   function handleOpenSettings() {
     setShowUserMenu(false)
     const project = useProjectStore.getState()
-    if (!project.currentProject || project.cmdModeProjectPath) {
-      project.setWelcomeScreen(project.welcomeScreen === 'settings'
-        ? (project.cmdModeProjectPath ? null : 'hero')
-        : 'settings')
+    if (!project.currentProject) {
+      project.setWelcomeScreen(project.welcomeScreen === 'settings' ? 'hero' : 'settings')
       return
     }
 
@@ -351,7 +348,7 @@ function MinimalTitleBar() {
       {/* Right: project actions + User identity. */}
       <HStack gap={2} flexShrink={0} pr={1} data-no-drag>
         {/* Send to TM Code Web */}
-        {currentProject && !cmdModeProjectPath && (
+        {currentProject && (
           <Flex
             as="button"
             align="center"

@@ -227,7 +227,7 @@ const SUBAGENT_SPAWNERS = new Set(['research', 'verify', 'spawn_background_agent
 
 function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps) {
   const [expanded, setExpanded] = useState(false)
-  const projectPath = useProjectStore(s => s.currentProject?.path || s.cmdModeProjectPath || '')
+  const projectPath = useProjectStore(s => s.currentProject?.path || '')
   const displayToolName = canonicalToolName(toolCall.toolName)
   const displayInput = normalizeToolInputForCanonical(toolCall.toolName, toolCall.input)
   const filePath = (displayInput?.file_path || displayInput?.path || displayInput?.oldPath || '') as string

@@ -44,35 +44,6 @@ export interface PathAlias {
 }
 
 /**
- * Inputs every cwd-scoped section function needs. Built once per
- * `buildCmdModeSystemPrompt` call.
- */
-export interface CmdPromptContext {
-  // Paths and platform
-  cwd: string
-  normalizedCwd: string
-  homeDir: string | null
-  normalizedHome: string | null
-  // Memory
-  globalTmsContent: string | null
-  /** Project-level TMS.md content (<project>/TMS.md). Null when missing. */
-  tmsContent: string | null
-  /** Session-scoped memory notes. */
-  sessionMemory: string | null
-  /** Pre-loaded user-scope MEMORY.md index content (cross-project facts).
-   *  Null when no user memory exists yet. */
-  userMemoryIndex: string | null
-  /** Pre-loaded project-scope MEMORY.md index content (project-bound facts).
-   *  Null when none exists yet. */
-  projectMemoryIndex: string | null
-  /** True iff at least one injected memory file is past the stale threshold. */
-  memoryHasStale: boolean
-  // Runtime config
-  langInstruction: string
-  mcpTools: { name: string; description: string; serverName: string }[]
-}
-
-/**
  * Inputs every project prompt section function needs. Built once per
  * `buildSystemPrompt` call from the parallel gather phase, then passed
  * through. Lets section functions stay pure (input → string | null), so

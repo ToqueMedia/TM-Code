@@ -101,12 +101,9 @@ function selfIdentity(): { uid: string; name: string; email: string } {
   }
 }
 
-/** Project path that works from either the open-project store or the
- *  cwd-scoped project path. Without the fallback, chat history would neither
- *  load nor persist for cwd-scoped sessions. */
+/** Path of the currently open project (null when none is open). */
 function activeProjectPath(): string | null {
-  const ps = useProjectStore.getState()
-  return ps.currentProject?.path ?? ps.cmdModeProjectPath ?? null
+  return useProjectStore.getState().currentProject?.path ?? null
 }
 
 /**

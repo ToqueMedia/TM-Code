@@ -12,8 +12,7 @@
 // ─── Section rendering (pure functions, no mocks needed) ──────────
 
 import { getSessionMemorySection } from '../contextBuilder/sections/chatSections'
-import { getCmdSessionMemorySection } from '../contextBuilder/sections/cmdSections'
-import type { PromptContext, CmdPromptContext } from '../contextBuilder/types'
+import type { PromptContext } from '../contextBuilder/types'
 
 describe('getSessionMemorySection', () => {
   const baseCtx = {
@@ -50,11 +49,9 @@ describe('getSessionMemorySection', () => {
     expect(result).not.toBeNull()
     expect(result!).toContain('compaction')
   })
-})
 
-describe('getCmdSessionMemorySection', () => {
-  it('returns null when no session memory available', () => {
-    const ctx = {} as unknown as CmdPromptContext
-    expect(getCmdSessionMemorySection(ctx)).toBeNull()
+  it('returns null when the context carries no sessionMemory field at all', () => {
+    const ctx = {} as unknown as PromptContext
+    expect(getSessionMemorySection(ctx)).toBeNull()
   })
 })

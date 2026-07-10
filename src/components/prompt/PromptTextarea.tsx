@@ -205,9 +205,7 @@ function PromptTextarea({ textareaRef, onChange, onKeyDown, onBlur, onPaste, dis
  * span. Pure visual — the textarea value is untouched.
  *
  * Mirrors the `/loop [interval] [prompt]` CLI placeholder pattern from
- * the screenshot in the user feedback. Replicated in `CmdModePromptInput`
- * via the same `resolveInlineArgHint` helper so prompt parity is
- * mechanical, not duplicated.
+ * the screenshot in the user feedback.
  */
 const InlineArgHint = memo(function InlineArgHint({ value }: { value: string }) {
   // useMemo so resolving the hint runs once per `value` change, not on

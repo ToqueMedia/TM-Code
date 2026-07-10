@@ -36,7 +36,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
  *   - Manage scroll position. The caller owns the scroll container and is
  *     in the best position to capture `scrollHeight` before the next
  *     paint and restore the relative offset after `loadMore` runs (see
- *     ChatView / TerminalView for the wiring).
+ *     ChatView for the wiring).
  *   - Hook up the IntersectionObserver / scroll listener that decides
  *     WHEN to fire `loadMore`. That's a render-time concern (need a DOM
  *     element to observe) and lives in the consumer.

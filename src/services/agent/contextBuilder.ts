@@ -8,14 +8,14 @@
  *   - File-tree / pkg / lang utilities    →  `contextBuilder/projectUtils.ts`
  *   - Shared snippets                     →  `contextBuilder/sections/sharedSections.ts`
  *   - Project prompt section builders     →  `contextBuilder/sections/chatSections.ts`
- *   - Cwd-scoped section builders         →  `contextBuilder/sections/cmdSections.ts`
  *
  * This file keeps the class itself: cache state, the public
- * `buildSystemPrompt` / `buildCmdModeSystemPrompt` entry points, and
- * `invalidatePromptCache`. Section content is composed by importing the
- * pure builder functions and concatenating them in the documented U-Curve
- * order (primacy → middle → recency). Re-exports preserve the legacy
- * import surface so existing call sites (and tests) keep working.
+ * `buildSystemPrompt` entry point, and `invalidatePromptCache`. Section
+ * content is composed by importing the pure builder functions and
+ * concatenating them in the documented U-Curve order (primacy → middle →
+ * recency). Re-exports preserve the legacy import surface so existing call
+ * sites (and tests) keep working. (The cwd-scoped `buildCmdModeSystemPrompt`
+ * + `sections/cmdSections.ts` were removed with the Terminal chat surface.)
  */
 
 import SkillService from './skillService'
@@ -33,7 +33,6 @@ import {
   splitOnBoundary,
 } from './contextBuilder/helpers'
 import type {
-  CmdPromptContext,
   MCPToolSummary,
   PackageSummary,
   PromptCacheEntry,
@@ -108,29 +107,6 @@ import {
   getToolsSection,
   getTrackerStateSection,
 } from './contextBuilder/sections/chatSections'
-import {
-  getCmdHashtagSkillsSection,
-  getCmdClosedLoopSection,
-  getCmdCompletionContractSection,
-  getCmdConstraintsSection,
-  getCmdDoingTasksSection,
-  getCmdEnvironmentSection,
-  getCmdExecutingActionsSection,
-  getCmdGlobalMemorySection,
-  getCmdLanguageReinforcementSection,
-  getCmdMemorySection,
-  getCmdMemoryToolsGuidanceSection,
-  getCmdTmsContentSection,
-  getCmdTmsGuidanceSection,
-  getCmdReminderSection,
-  getCmdSessionMemorySection,
-  getCmdRoleSection,
-  getCmdSecuritySection,
-  getCmdSessionGuidanceSection,
-  getCmdSkillsSection,
-  getCmdSystemSection,
-  getCmdToolsSection,
-} from './contextBuilder/sections/cmdSections'
 
 import { ContextPlannerError, planContextWithModel } from './contextPlanner'
 import {
@@ -165,38 +141,14 @@ export {
   extractCriticalSectionsWithStats,
   skillsFromHashtags,
 }
-export type { PromptContext, CmdPromptContext, MCPToolSummary, PackageSummary }
-
-/**
- * Helper for cwd-scoped memory index loading. Loads the MEMORY.md index
- * and mtime map in parallel, checks for stale entries.
- * Consolidates the two identical IIFEs that were previously inline.
- */
-async function loadCmdMemoryIndex(
-  scope: 'user' | 'project',
-  projectPath?: string,
-): Promise<{ content: string | null; hasStale: boolean }> {
-  try {
-    const { loadMemoryIndex, loadMemoryMtimes } = await import('./memdir')
-    const { isMemoryStale } = await import('./memoryAge')
-    const [result, mtimes] = await Promise.all([
-      loadMemoryIndex(scope, projectPath),
-      loadMemoryMtimes(scope, projectPath),
-    ])
-    if (result.content) {
-      const hasStale = Array.from(mtimes.values()).some(m => isMemoryStale(m))
-      return { content: result.content, hasStale }
-    }
-    return { content: null, hasStale: false }
-  } catch { return { content: null, hasStale: false } }
-}
+export type { PromptContext, MCPToolSummary, PackageSummary }
 
 class ContextBuilder {
   private static instance: ContextBuilder
   private promptCache = new Map<string, PromptCacheEntry>()
 
   // ── Auxiliary context selection (on-demand architecture) ──
-  // Set during buildSystemPrompt / buildCmdModeSystemPrompt. Read by:
+  // Set during buildSystemPrompt. Read by:
   //   - payloadInspector (core/auxiliary token split + loaded/omitted)
   //   - the `request_context` meta-tool handler in agentService (loads an
   //     omitted auxiliary's content on demand mid-run).
@@ -1070,194 +1022,13 @@ class ContextBuilder {
     })
     return full
   }
-
-  async buildCmdModeSystemPrompt(
-    cwd: string,
-    homeDir: string | null,
-    mcpTools?: { name: string; description: string; serverName: string }[],
-    userMessage?: string,
-    intentOverride?: IntentOverride,
-  ): Promise<string> {
-    const normalizedCwd = cwd.replace(/\\/g, '/')
-    const normalizedHome = homeDir ? homeDir.replace(/\\/g, '/') : null
-    this.lastAuxiliarySelection = intentOverride
-      ? selectAuxiliaries(
-        intentOverride.profile,
-        userMessage,
-        intentOverride.readOnly,
-        intentOverride.reason,
-        intentOverride.source
-          ? {
-              source: intentOverride.source,
-              confidence: intentOverride.confidence,
-              error: intentOverride.error,
-              diagnostics: intentOverride.diagnostics,
-            }
-          : undefined,
-        undefined,
-        undefined,
-        intentOverride.requiresMutation === true,
-      )
-      : null
-
-    // Parallel gather — language + memory files + session memory + memdir indexes
-    const [langInstruction, globalTmsContent, tmsContent, sessionMemory, userMemIdx, projectMemIdx] = await Promise.all([
-      getLangInstruction(),
-      normalizedHome ? safeReadFile(`${normalizedHome}/.toquemedia-studio/TMS.md`) : Promise.resolve(null),
-      safeReadFile(`${normalizedCwd}/TMS.md`),
-      (async () => {
-        try {
-          const { useChatStore } = await import('../../stores/chatStore')
-          return useChatStore.getState().getActiveSession()?.sessionMemory ?? null
-        } catch { return null }
-      })(),
-      // Persistent memory indexes — same I/O as runMemoryWork, but without
-      // the selector because indexes are cheap at this point.
-      loadCmdMemoryIndex('user'),
-      loadCmdMemoryIndex('project', normalizedCwd),
-    ])
-
-    const memoryHasStale = userMemIdx.hasStale || projectMemIdx.hasStale
-
-    const ctx: CmdPromptContext = {
-      cwd,
-      normalizedCwd,
-      homeDir,
-      normalizedHome,
-      globalTmsContent,
-      tmsContent,
-      sessionMemory,
-      userMemoryIndex: userMemIdx.content,
-      projectMemoryIndex: projectMemIdx.content,
-      memoryHasStale,
-      langInstruction,
-      mcpTools: mcpTools || [],
-    }
-
-    // Load skills upfront so the reminder section at the bottom can re-cite
-    // their names (U-Curve recency reinforcement — without this, the
-    // hashtag-skills section that lives in the middle of the prompt is
-    // forgotten in long sessions). loadSkills is cached so the subsequent
-    // getCmdSkillsSection call hits the cache for free.
-    const pkgSummaryForSkills = await extractPackageSummary(normalizedCwd)
-    const detectedTypeForSkills = detectProjectType(pkgSummaryForSkills)
-      ?? await detectProjectTypeFromFiles(normalizedCwd)
-    let loadedSkillNames: string[] = []
-    try {
-      const skills = await SkillService.getInstance().loadSkills(normalizedCwd, detectedTypeForSkills, 'cmd')
-      loadedSkillNames = skills.map(s => s.name)
-    } catch { /* non-critical */ }
-
-    // Resolve hashtag-skills section in parallel with skills section (both
-    // touch the same SkillService cache; resolving sequentially would waste a
-    // round-trip on the second call).
-    const [hashtagSkillsSection, skillsSection] = await Promise.all([
-      getCmdHashtagSkillsSection(normalizedCwd, userMessage),
-      getCmdSkillsSection(ctx),
-    ])
-
-    const sections = [
-      // ── Static block (cacheable cross-session) ──────────────────
-      getCmdCompletionContractSection(),
-      getCmdRoleSection(ctx),
-      sharedIdentity(),
-      getCmdSystemSection(),
-      getCmdDoingTasksSection(),
-      getCmdExecutingActionsSection(),
-      sharedShellExecutionLoop('cmd'),
-      getCmdClosedLoopSection(),
-      getCmdToolsSection(),
-      getCmdSessionGuidanceSection(),
-      getCmdSecuritySection(),
-      getCmdConstraintsSection(ctx),
-      `${sharedUiBaselineCore()}\n\n${sharedTasteDefaults()}`,
-      sharedToneAndStyle(),
-      sharedOutputEfficiency(),
-      sharedContextPreservation(),
-      sharedTurnEfficiency(),
-      // Memory taxonomy + save/forget discipline. The rules are stable
-      // across sessions.
-      getCmdMemoryToolsGuidanceSection(),
-      // ── Boundary: everything below varies per session / per turn ──
-      SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
-      // ── Dynamic block (per-session / per-turn) ──────────────────
-      // Wrapped with dynamicSection() — see the project prompt block for the
-      // contract: every section below must declare a non-empty reason or
-      // the wrapper throws at build time.
-      dynamicSection('mcp', () => sharedMcpBlock(ctx.mcpTools, 'user'),
-        'MCP server list changes when user connects/disconnects servers'),
-      dynamicSection('environment', () => getCmdEnvironmentSection(ctx),
-        'cwd / homeDir / platform detected per session'),
-      dynamicSection('dev_server_status', () => getDevServerStatusSection(),
-        'dev server status flips null→starting→running→stopped per session'),
-      // Hashtag-triggered sticky CRITICAL rules.
-      // Placed BEFORE the generic skills index so the matched skill rules
-      // are read by the model before it sees the generic "skills available"
-      // listing. Re-cited by name in the
-      // reminder section below to defeat the U-Curve middle-dip.
-      dynamicSection('hashtag_skills', () => hashtagSkillsSection,
-        'sticky hashtag rules depend on the current user message'),
-      dynamicSection('skills', () => skillsSection,
-        'skill set depends on project-type detection'),
-      dynamicSection('global_memory', () => getCmdGlobalMemorySection(ctx),
-        '~/.toquemedia-studio/TMS.md is user-editable'),
-      // TMS.md content stub — injects headings/metadata, not the full project
-      // memory body. Placed before guidance so the agent knows whether TMS.md
-      // exists before it receives maintenance rules.
-      dynamicSection('tms_content', () => getCmdTmsContentSection(ctx),
-        'TMS.md content changes as the agent updates it'),
-      // TMS.md guidance — asks for creation only when missing, otherwise
-      // keeps maintenance compact and tied to durable project facts.
-      dynamicSection('tms_guidance', () => getCmdTmsGuidanceSection(ctx),
-        'TMS.md existence is a per-session check (file may be created mid-session)'),
-      // Persistent memory — user-scope + project-scope MEMORY.md indexes.
-      // Placed after TMS.md content so the model reads project memory first,
-      // then cross-session memory facts.
-      dynamicSection('memory', () => getCmdMemorySection(ctx),
-        'MEMORY.md indexes mutate as save_memory / forget_memory run'),
-      // Session memory — agent-maintained notes that survive compaction.
-      dynamicSection('session_memory', () => getCmdSessionMemorySection(ctx),
-        'session memory is updated by update_session_memory tool calls mid-session'),
-      dynamicSection('language_reinforcement', () => getCmdLanguageReinforcementSection(ctx),
-        'reinforcement is conditional on detected agent language'),
-      // Reminder stays at the very end — U-Curve recency outweighs cache
-      // alignment here (the bookend rule depends on being last seen).
-      dynamicSection('reminder', () => getCmdReminderSection(loadedSkillNames),
-        'cites loaded skill names captured from current session state'),
-    ].filter((s): s is string => s !== null && s !== undefined && s !== '')
-
-    const cmdSectionBreakdown = sections
-      .map(s => {
-        const headingMatch = s.match(/^#{1,2}\s+(.+?)$/m)
-        const name = headingMatch ? headingMatch[1].slice(0, 50) : s.slice(0, 40).replace(/\n/g, ' ')
-        return { name, bytes: s.length, tokens_est: Math.ceil(s.length / 3.5) }
-      })
-      .sort((a, b) => b.bytes - a.bytes)
-      .slice(0, 15)
-
-    const fullCmd = sections.join('\n\n')
-    // Cwd-scoped prompt builds may not have a billing-plan or fsVersion
-    // concept, so emit "n/a" for dimensions that do not apply.
-    emitPromptBuiltTelemetry({
-      mode: 'cmd',
-      sectionBreakdown: cmdSectionBreakdown,
-      cacheHit: false,
-      prompt: fullCmd,
-      plan: 'n/a',
-      agentLang: ctx.langInstruction ? 'detected' : 'en',
-      fsVersion: 0,
-      mcpToolCount: (mcpTools ?? []).length,
-      loadedSkillNames,
-    })
-    return fullCmd
-  }
 }
 
 /**
  * Fire-and-forget telemetry for assembled system prompts (technique #22).
- * Emits one event per `buildSystemPrompt` / `buildCmdModeSystemPrompt` call
- * — including cache hits — so we can compute hit-rate and watch the
- * static/dynamic byte split over time. Never throws, never blocks.
+ * Emits one event per `buildSystemPrompt` call — including cache hits — so
+ * we can compute hit-rate and watch the static/dynamic byte split over
+ * time. Never throws, never blocks.
  *
  * Why aggregate (not per-section): firing 30 events per turn is expensive
  * in analytics ingest without a specific question to answer. The aggregate
@@ -1265,7 +1036,7 @@ class ContextBuilder {
  * cache health, MCP/skill load shape) with one event.
  */
 function emitPromptBuiltTelemetry(args: {
-  mode: 'chat' | 'cmd'
+  mode: 'chat'
   cacheHit: boolean
   prompt: string
   plan: string

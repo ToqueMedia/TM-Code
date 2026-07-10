@@ -2,12 +2,10 @@ import { useChatStore } from '../../../stores/chatStore'
 import { useTmSpeedStore, isSpeedModelEligible } from '../../../stores/tmSpeedStore'
 import FirebaseAuthService from '../../auth/firebaseAuth'
 import { t } from '../../../i18n'
-import type { SlashCommandMode } from '../slashCommandRegistry'
 
 export async function executeSpeed(
   args: string,
   _projectPath: string,
-  _mode: SlashCommandMode = 'chat',
 ): Promise<void> {
   const chatStore = useChatStore.getState()
 
@@ -16,8 +14,8 @@ export async function executeSpeed(
     return
   }
 
-  // SEM gate de plano aqui: o dispatcher de slash commands (usePromptBar.ts /
-  // useCmdPromptLogic.ts) já bloqueia não-Pro/Max ANTES de executar, via
+  // SEM gate de plano aqui: o dispatcher de slash commands (usePromptBar.ts)
+  // já bloqueia não-Pro/Max ANTES de executar, via
   // `requiresPaidPlan` + `allowedPlans: ['pro','max']` no registry. Duplicar a
   // verificação aqui era código inalcançável e uma 2ª cópia da lista a drift.
   //

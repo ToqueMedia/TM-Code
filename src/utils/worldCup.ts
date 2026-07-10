@@ -31,8 +31,7 @@ export const GOAL_CONFETTI_COLORS = [
 ] as const
 
 /**
- * Honour the OS "reduce motion" setting. Mirrors the guard in
- * terminalSpinner.ts (kept local there to stay dependency-free); exported here
+ * Honour the OS "reduce motion" setting. Exported here
  * so both the GUI and ASCII celebrations collapse to a static frame instead of
  * animating. Defensive try/catch — `matchMedia` is absent in some test envs.
  */

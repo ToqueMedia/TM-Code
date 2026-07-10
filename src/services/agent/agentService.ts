@@ -628,8 +628,8 @@ class AgentService {
       // and only known after the first response.
       getContextLimits: () => {
         const { modelContextWindow, modelName } = useAgentStore.getState();
-        // Resolve the window EXACTLY like the UI pill (ContextWindowIndicator /
-        // TerminalStatusLine): server header → known profile → conservative
+        // Resolve the window EXACTLY like the UI pill (ContextWindowIndicator):
+        // server header → known profile → conservative
         // FALLBACK_CONTEXT_WINDOW (200K). Unknown model (no header, not in
         // MODEL_PROFILES) assumes 200K — NOT the plan profile's 1M — so a small
         // or unknown model compacts early instead of overflowing; the admin

@@ -501,8 +501,8 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
   }, [sessionId, projectPath])
 
   return (
-    // data-pty-terminal: marcador que os handlers globais de teclado do
-    // TerminalView usam para NÃO interceptar teclas destinadas ao shell
+    // data-pty-terminal: marcador para handlers globais de teclado NÃO
+    // interceptarem teclas destinadas ao shell
     // (^C/^L/^K/^U/Esc) — o helper-textarea do xterm vive dentro deste Box.
     <Box ref={containerRef} flex="1" minH={0} px="6px" py="4px" position="relative" data-pty-terminal>
       {(completions.length > 0 || isLoading) && menuPosition && (

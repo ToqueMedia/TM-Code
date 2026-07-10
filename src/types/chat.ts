@@ -441,7 +441,6 @@ export interface PlanResumePending {
   originalArgs: string
   planPath: string
   planFileName: string
-  mode: 'chat' | 'terminal'
   updatedAt: number
 }
 

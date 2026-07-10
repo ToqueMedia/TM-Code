@@ -8,7 +8,6 @@
  */
 
 import { useAgentStore } from '../../../stores/agentStore'
-import { useProjectStore } from '../../../stores/projectStore'
 import { logger } from '../../../utils/logger'
 
 interface BackgroundCommandWake {
@@ -87,13 +86,9 @@ function doWake(): void {
   logger.info('agent', `→ Background command auto-wake: ${summaryParts.join(', ')}`)
 
   import('../agentRunner').then(({ runAgentWithCallbacks }) => {
-    const { currentProject, cmdModeProjectPath } = useProjectStore.getState()
-    const cmdOnlyMode = !currentProject && !!cmdModeProjectPath
-
     runAgentWithCallbacks(wakeMessage, {
       addUserMessage: false,
       useConversationHistory: true,
-      cmdOnlyMode,
       isBackgroundRun: true,
     })
   }).catch((err) => {

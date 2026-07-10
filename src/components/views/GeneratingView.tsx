@@ -40,7 +40,7 @@ function GeneratingView() {
   const activeDiffs = pendingDiffs.filter(d => d.status === 'pending')
 
   // Pagination — match the other chat surfaces (ChatView / ChatPanel /
-  // PreviewView's sidebar / TerminalView). Render the last 30 messages,
+  // PreviewView's sidebar). Render the last 30 messages,
   // expand on scroll up. Less critical here since GeneratingView is
   // transient (visible only while the scaffold is in flight), but a single
   // long scaffold can still produce hundreds of tool-call cards by the end,

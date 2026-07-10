@@ -8,7 +8,7 @@ import { IS_WINDOWS } from '@/utils/platform'
  * The agent shells out to these constantly (git ops, npm/npx, python scripts),
  * so without them it can't work. Onboarding's ToolsStep already gates the wizard
  * on them, but this store is the RUNTIME safety net: prompt sending is blocked
- * while they're missing (see useCmdPromptLogic / usePromptBar handleSend).
+ * while they're missing (see usePromptBar handleSend).
  *
  * Detection mirrors ToolsStep: `<tool> --version` + output check, NOT
  * `command_exists`, because on Windows `where python` matches the Microsoft

@@ -22,9 +22,8 @@ interface UseHashtagMenuOptions {
 /**
  * Closed-vocabulary `#hashtag` autocomplete state + handlers.
  *
- * Shared between the chat prompt (`usePromptBar`) and CMD prompt
- * (`useCmdPromptLogic`). The hook owns the menu state, the cursor-aware
- * detection, and the keyboard navigation. Callers wire up:
+ * Used by the chat prompt (`usePromptBar`). The hook owns the menu state,
+ * the cursor-aware detection, and the keyboard navigation. Callers wire up:
  *
  *   - `detect(text, cursorPos)` from the input change handler — returns
  *     true when a hashtag is in progress so the caller can short-circuit

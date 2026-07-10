@@ -1,6 +1,6 @@
 // goalFrames.ts — the ASCII "GOAL!" animation for shell-styled surfaces.
 //
-// Refined-terminal contract (see terminalSpinner.ts): native terminals animate
+// Refined-terminal contract: native terminals animate
 // by swapping a CHARACTER at a fixed cell, frame by frame — never a smooth
 // tween. So the terminal celebration is a precomputed list of single-line
 // frames the component steps through once (no loop), at a discrete cadence.

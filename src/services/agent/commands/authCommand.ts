@@ -13,8 +13,8 @@ import { logger } from '../../../utils/logger'
  * pre-loads the authoritative skill content and injects it into the agent's
  * prompt as inline skill blocks — no round-trip to read_skill mid-turn.
  *
- * Wired in both prompt inputs (`usePromptBar.ts` and `useCmdPromptLogic.ts`)
- * through the handleSend / executePrompt branches.
+ * Wired in the prompt input (`usePromptBar.ts`) through the handleSend
+ * branches.
  *
  * NOTE (2026-07): the managed GIP auth scaffolding flow (`runAuthFlow`,
  * `#auth-email-password` / `#auth-google`, provision_auth) was removed with
@@ -57,7 +57,6 @@ async function fetchBundledSkill(name: string): Promise<string | null> {
 export async function runDesignFlow(
   instructions: string,
   userMessageText: string,
-  cmdOnlyMode: boolean = false,
 ): Promise<void> {
   const chatStore = useChatStore.getState()
   const designSkill = await fetchBundledSkill('frontend-design')
@@ -71,7 +70,6 @@ export async function runDesignFlow(
       addUserMessage: true,
       userMessageText,
       useConversationHistory: true,
-      cmdOnlyMode,
     })
     return
   }
@@ -119,6 +117,5 @@ export async function runDesignFlow(
     addUserMessage: true,
     userMessageText,
     useConversationHistory: true,
-    cmdOnlyMode,
   })
 }

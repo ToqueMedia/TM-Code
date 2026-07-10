@@ -26,7 +26,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     closeOnEscape: !cloneBusy,
     closeOnInteractOutside: !cloneBusy,
   })
-  const { recentProjects, loadRecentProjects, cmdModeProjectPath, setCmdModeProjectPath, clearAllRecent, welcomeScreen, setWelcomeScreen } = useProjectStore()
+  const { recentProjects, loadRecentProjects, clearAllRecent, welcomeScreen, setWelcomeScreen } = useProjectStore()
   const currentProject = useProjectStore(s => s.currentProject)
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewFullscreen = useLayoutStore(s => s.isPreviewFullscreen)
@@ -42,14 +42,6 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     manager.startManaging()
     return () => manager.stopManaging()
   }, [loadRecentProjects])
-
-  // If a previous session persisted a cwd-scoped project, normalize back to
-  // the main entry.
-  useEffect(() => {
-    if (cmdModeProjectPath) {
-      setCmdModeProjectPath(null)
-    }
-  }, [cmdModeProjectPath, setCmdModeProjectPath])
 
   // Mark that the user is on the Welcome screen so the next app start
   // returns here instead of auto-opening the most recent project.

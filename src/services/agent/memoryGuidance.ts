@@ -6,7 +6,6 @@
 /**
  * Build the full memory tools guidance section. Used by:
  * - getMemoryToolsGuidanceSection() in chatSections.ts
- * - getCmdMemoryToolsGuidanceSection() in cmdSections.ts
  */
 export function buildMemoryGuidanceSection(): string {
   return `# Memory — persistent + session

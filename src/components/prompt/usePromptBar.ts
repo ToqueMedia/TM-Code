@@ -1098,7 +1098,7 @@ export function usePromptBar() {
       clearDraftAttachments()
       try {
         const { executePlanRevision } = await import('../../services/agent/commands/planCommand')
-        await executePlanRevision(prompt, revisionTarget.projectPath, 'terminal', revisionTarget.planPath)
+        await executePlanRevision(prompt, revisionTarget.projectPath, revisionTarget.planPath)
       } catch (err) {
         logger.error('prompt', 'executePlanRevision failed:', err)
         useChatStore.getState().addSystemMessage(
@@ -1162,10 +1162,7 @@ export function usePromptBar() {
       }
 
       const args = slashCommandRegistry.getArgs(prompt)
-      // /plan is free-form: any stack/backend/deploy target is allowed, with
-      // trade-offs recorded in PLAN.md.
-      const commandMode = command.name === '/plan' ? 'terminal' : 'chat'
-      await command.execute(args, projectPath ?? '', commandMode)
+      await command.execute(args, projectPath ?? '')
       return
     }
 

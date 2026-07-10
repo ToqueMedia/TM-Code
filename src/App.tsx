@@ -482,14 +482,14 @@ function App() {
 
 			// Read directly from the store — not from the effect closure — to avoid
 			// stale values if the store updated between renders and the effect firing.
-			const { currentProject: proj, cmdModeProjectPath: cmd, recentProjects: recent, welcomeScreen } = useProjectStore.getState();
+			const { currentProject: proj, recentProjects: recent, welcomeScreen } = useProjectStore.getState();
 
 			// If the user was explicitly on the Welcome screen last time the app
 			// closed, honour that on restart — do NOT auto-open the most recent
 			// project. `welcomeScreen === null` means "no Welcome preference yet"
 			// (first-ever launch or pre-0.3.0 persisted state), in which case the
 			// legacy auto-open-last-project behaviour still applies.
-			if (!proj && !cmd && !welcomeScreen && recent.length > 0) {
+			if (!proj && !welcomeScreen && recent.length > 0) {
 				const lastProject = recent[0];
 				if (lastProject.path) {
 					try {
@@ -543,7 +543,7 @@ function App() {
 		useChatStore.getState().clearAllSessions();
 		// Reset transient agent state so last-response model/provider and BYOK
 		// confirmation don't leak from the previous project. Keep the task
-		// tracker intact here: projectStore / TerminalView hydrate it from the
+		// tracker intact here: projectStore hydrates it from the
 		// new project's app-managed state, and clearing in this effect can
 		// race after hydration and make the task panel disappear.
 		useAgentStore.getState().resetTransientState();
@@ -560,7 +560,7 @@ function App() {
 	}, [currentProject]);
 
 	// Frontend-design discoverability now lives in the rotating command tips
-	// (ChatWorkingTips / TerminalWorkingTips) instead of a toast on project
+	// (ChatWorkingTips) instead of a toast on project
 	// open — the toast nagged on every frontend project even before the user
 	// did anything. Removed per user request (2026-06-20).
 

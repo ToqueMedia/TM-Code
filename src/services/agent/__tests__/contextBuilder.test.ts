@@ -17,7 +17,6 @@ jest.mock('../../auth/firebaseAuth', () => ({
 
 // invoke is already mocked in setupTests.ts
 const mockedInvoke = invoke as jest.MockedFunction<typeof invoke>
-const LEGACY_TERMINAL_HEADING = ['**Mode:', 'TERMINAL**'].join(' ')
 
 function completionEnvelope(content: string): string {
   return JSON.stringify({
@@ -314,51 +313,6 @@ describe('ContextBuilder', () => {
         expect(afterBoundary).toContain(marker)
         expect(beforeBoundary).not.toContain(marker)
       }
-    })
-
-    it('includes shell execution loop guidance in cwd-scoped prompts', async () => {
-      const prompt = await builder.buildCmdModeSystemPrompt('/test/project', '/test/home')
-      expect(prompt).not.toContain(LEGACY_TERMINAL_HEADING)
-      expect(prompt).toContain('# Shell execution loop')
-      expect(prompt).toContain('Operate like an interactive shell operator')
-      expect(prompt).toContain('execute_command_background')
-      expect(prompt).toContain('check_background_commands')
-    })
-
-    it('applies explicit profile overrides in cwd-scoped prompts', async () => {
-      const prompt = await builder.buildCmdModeSystemPrompt(
-        '/test/project',
-        '/test/home',
-        [],
-        '/init',
-        {
-          profile: 'project_bootstrap',
-          readOnly: false,
-          source: 'keyword',
-          confidence: 'high',
-          reason: '/init selected project_bootstrap',
-        },
-      )
-      const selection = builder.getLastAuxiliarySelection()
-
-      expect(prompt).not.toContain(LEGACY_TERMINAL_HEADING)
-      expect(selection?.profile).toBe('project_bootstrap')
-      expect(selection?.readOnly).toBe(false)
-      expect(selection?.contextPlan.taskDomain).toBe('project_bootstrap')
-    })
-
-    it('clears cwd-scoped auxiliary selection when no override is provided', async () => {
-      await builder.buildCmdModeSystemPrompt('/test/project', '/test/home', [], '/init', {
-        profile: 'project_bootstrap',
-        readOnly: false,
-        source: 'keyword',
-        confidence: 'high',
-        reason: '/init selected project_bootstrap',
-      })
-
-      await builder.buildCmdModeSystemPrompt('/test/project', '/test/home')
-
-      expect(builder.getLastAuxiliarySelection()).toBeNull()
     })
 
     it('includes package.json summary when available', async () => {

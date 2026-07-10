@@ -48,7 +48,7 @@ Consequence: `curl` tests prove nothing about the browser path, and login/billin
 
 ### Agent loop
 
-`src/services/agent/agentService.ts` orchestrates: gets ID token → `createAgentClient` (`sdkClient.ts`, normalizes baseURL to end in `/v1`) → `QueryEngine` (`queryEngine.ts`) runs the streaming tool-call loop with `refreshClient` for token expiry. Tool execution goes through `toolExecutor.ts` gated by `permissionStore` (per-project grants persisted in `permissions.json`). System prompt assembly lives in `contextBuilder/`. Slash commands for terminal mode live in `cmdModeCommands.ts`. Conversation compaction in `compact/`, agent memory in `memory*.ts`.
+`src/services/agent/agentService.ts` orchestrates: gets ID token → `createAgentClient` (`sdkClient.ts`, normalizes baseURL to end in `/v1`) → `QueryEngine` (`queryEngine.ts`) runs the streaming tool-call loop with `refreshClient` for token expiry. Tool execution goes through `toolExecutor.ts` gated by `permissionStore` (per-project grants persisted in `permissions.json`). System prompt assembly lives in `contextBuilder/`. Slash commands live in `slashCommandRegistry.ts` + `commands/`, dispatched from the chat prompt (`usePromptBar.ts`). Conversation compaction in `compact/`, agent memory in `memory*.ts`.
 
 ### State
 
@@ -56,7 +56,7 @@ Zustand stores in `src/stores/` — one store per domain (`chatStore` sessions/m
 
 ### UI modes
 
-`MainLayout.tsx` switches between Welcome, Chat mode (`components/chat/`), and Terminal/CMD mode (`components/cmd-mode/`, entry `TerminalView.tsx`). Both chat surfaces render the same `chatStore` data. The embedded PTY terminal panel (xterm.js) is separate from CMD mode. Editor is Monaco (`components/editor/`).
+`MainLayout.tsx` switches between Welcome and the workspace view modes (`layoutStore.viewMode`): Chat (`components/chat/`), Preview, Editor (Monaco, `components/editor/`), and Settings. The old Terminal/CMD chat mode was removed; what remains of `components/cmd-mode/` is only the embedded PTY terminal drawer (xterm.js — `TerminalDrawerPanel.tsx`/`TerminalPanel.tsx`), which is not a chat surface.
 
 ### Rust side
 

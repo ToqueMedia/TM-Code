@@ -10,7 +10,6 @@ import { languageDirective } from './_languageInstruction'
 import { logger } from '../../../utils/logger'
 import { t } from '../../../i18n'
 import { GLOB_ALIAS, GREP_ALIAS, LS_ALIAS, READ_ALIAS } from '../toolNames'
-import type { SlashCommandMode } from '../slashCommandRegistry'
 
 /**
  * Cap on how many files we ask the sub-agent to review when scope is
@@ -74,15 +73,13 @@ interface ResolvedScope {
 export async function executeReview(
   args: string,
   projectPath: string,
-  mode: SlashCommandMode = 'chat',
 ): Promise<void> {
   const chatStore = useChatStore.getState()
   const agentStore = useAgentStore.getState()
   const trimmed = args.trim()
 
   // Pre-condition: a project must be open. Trust the dispatcher-provided
-  // projectPath (resolved from currentProject?.path || cmdModeProjectPath)
-  // so cwd-scoped runs do not depend on useProjectStore.currentProject.
+  // projectPath (resolved from currentProject?.path).
   if (!projectPath) {
     chatStore.addSystemMessage(t('review.noProject'))
     return
@@ -156,16 +153,6 @@ export async function executeReview(
   }
 
   const toolExecutor = ToolExecutor.getInstance()
-  // /review's read-only tools resolve paths via toolExecutor.getProjectRoot()
-  // which checks cmdModeCwd first, then falls back to currentProject.path.
-  // /review goes through createLightweight + runAgentLoop directly (not
-  // through runAgentWithCallbacks), so the standard cmdOnlyMode wiring in
-  // agentRunner.ts doesn't apply. Enable cwd-scoped execution ourselves here
-  // when needed, and clear it in the finally block below.
-  const enabledCmdModeHere = mode === 'terminal'
-  if (enabledCmdModeHere) {
-    toolExecutor.enableCmdMode(projectPath)
-  }
   // Read-only tool palette. Crucially excludes write/edit/create/delete/
   // execute_command — the sub-agent must reason about the code, not change
   // it. Includes diagnostics so it can spot type errors as evidence, and
@@ -312,9 +299,6 @@ export async function executeReview(
     agentStore.setStatus('error')
   } finally {
     subAgent.setRequestType(null)
-    if (enabledCmdModeHere) {
-      toolExecutor.disableCmdMode()
-    }
     if (typeof window !== 'undefined') {
       window.removeEventListener('agent-stop-requested', stopHandler)
     }

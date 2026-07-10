@@ -21,7 +21,6 @@
  */
 
 import { useAgentStore } from '../../../stores/agentStore'
-import { useProjectStore } from '../../../stores/projectStore'
 import { useSubAgentStore } from '../../../stores/subAgentStore'
 import { logger } from '../../../utils/logger'
 import { buildTeamResultsReport } from './resultsReport'
@@ -142,13 +141,9 @@ function doDeliver(): void {
   logger.info('agent', `→ Team delivery: waking idle agent with ${report.finishedIds.length} result(s)`)
   import('../agentRunner')
     .then(({ runAgentWithCallbacks }) => {
-      const { currentProject, cmdModeProjectPath } = useProjectStore.getState()
-      const cmdOnlyMode = !currentProject && !!cmdModeProjectPath
-
       runAgentWithCallbacks(payload, {
         addUserMessage: false,
         useConversationHistory: true,
-        cmdOnlyMode,
         isBackgroundRun: true,
       })
     })

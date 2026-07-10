@@ -43,14 +43,8 @@ export class WindowTitleManager {
 
   private updateWindowTitle() {
     try {
-      const { currentProject, cmdModeProjectPath } = useProjectStore.getState();
+      const { currentProject } = useProjectStore.getState();
       const { activeFile, openFiles } = useEditorRepository.getState();
-
-      if (cmdModeProjectPath) {
-        const folderName = cmdModeProjectPath.split(/[\/\\]/).pop() || cmdModeProjectPath;
-        document.title = `${folderName} - ${t('window.baseTitle')}`;
-        return;
-      }
 
       if (!currentProject) {
         document.title = t('window.baseTitle');

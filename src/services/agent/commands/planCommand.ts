@@ -110,10 +110,8 @@ async function readPlanReadiness(path: string): Promise<PlanReadiness> {
 export async function executePlan(
   args: string,
   projectPath: string,
-  _mode: 'chat' | 'terminal' = 'terminal',
 ): Promise<void> {
   const chatStore = useChatStore.getState()
-  const mode: 'terminal' = 'terminal'
 
   if (!args.trim()) {
     chatStore.addSystemMessage(
@@ -136,7 +134,6 @@ export async function executePlan(
     originalArgs: args,
     planPath: planArtifact.path,
     planFileName: planArtifact.fileName,
-    mode,
     updatedAt: Date.now(),
   })
 
@@ -174,7 +171,7 @@ export async function executePlan(
       // Cwd-scoped execution requires the tool executor to know the cwd;
       // without cmdOnlyMode it falls back to useProjectStore.currentProject,
       // which may be empty, and file tools fail with "No project is open."
-      cmdOnlyMode: mode === 'terminal',
+      cmdOnlyMode: true,
     })
   } finally {
     agentService.setRequestType(null)
@@ -215,9 +212,6 @@ export async function executePlanResume(
   promptBlocks?: PromptBlock[],
 ): Promise<void> {
   const chatStore = useChatStore.getState()
-  // Older saved sessions may carry a mode field; planning now always resumes
-  // through the free-form architect prompt.
-  const mode: 'terminal' = 'terminal'
   const planArtifact: PlanArtifact = {
     fileName: pending.planFileName,
     path: pending.planPath,
@@ -260,7 +254,7 @@ export async function executePlanResume(
         userMessageBlocks: promptBlocks,
         modelMessageBlocks: modelBlocks,
         systemPromptOverride: buildArchitectSystemPrompt(planArtifact.fileName),
-        cmdOnlyMode: mode === 'terminal',
+        cmdOnlyMode: true,
       },
     )
   } finally {
@@ -355,12 +349,10 @@ export function handlePlanRequestChanges(projectPath: string, planPath?: string)
 export async function executePlanRevision(
   feedback: string,
   projectPath: string,
-  _mode: 'chat' | 'terminal' = 'terminal',
   planPath?: string,
 ): Promise<void> {
   const chatStore = useChatStore.getState()
   const planArtifact = planArtifactFromPath(projectPath, planPath)
-  const mode: 'terminal' = 'terminal'
 
   // Read the current plan so the architect sees what to modify. If it's
   // gone (deleted, corrupted), fall back to re-running /plan from scratch
@@ -372,7 +364,7 @@ export async function executePlanRevision(
     chatStore.addSystemMessage(
       t('plan.missing'),
     )
-    await executePlan(feedback, projectPath, mode)
+    await executePlan(feedback, projectPath)
     return
   }
 
@@ -393,7 +385,7 @@ export async function executePlanRevision(
       addUserMessage: true,
       userMessageText: feedback,
       systemPromptOverride: buildArchitectSystemPrompt(planArtifact.fileName),
-      cmdOnlyMode: mode === 'terminal',
+      cmdOnlyMode: true,
     })
   } finally {
     agentService.setRequestType(null)

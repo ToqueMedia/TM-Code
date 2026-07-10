@@ -48,6 +48,11 @@ interface RunAgentOptions {
    * Run with cwd-scoped tools: no project-store entry required, file writes go
    * directly to disk without diff approval, and CWD defaults to the project
    * path or the user's home directory. Must be set explicitly by the caller.
+   * Today the only caller is /plan (planCommand.ts) — the architect turn needs
+   * the tool executor to resolve paths via its own cwd (enableCmdMode) instead
+   * of useProjectStore.currentProject, and must skip the TMS preflight. Always
+   * paired with `systemPromptOverride`; the old cwd-scoped system prompt
+   * (buildCmdModeSystemPrompt) was removed with the Terminal chat surface.
    */
   cmdOnlyMode?: boolean
   /**
@@ -176,18 +181,15 @@ async function runAgentInternal(
   const agentStore = useAgentStore.getState()
   const projectStore = useProjectStore.getState()
   const currentProject = projectStore.currentProject
-  const cmdModePath = projectStore.cmdModeProjectPath
-  const projectPath = currentProject?.path || cmdModePath || ''
+  const projectPath = currentProject?.path || ''
 
-  // Resolve CWD and home directory for cwd-scoped tool execution.
+  // Resolve CWD for cwd-scoped tool execution.
   // Prefer the open project path so the agent operates in context;
   // fall back to home directory when launched without a project.
   let cmdCwd = ''
-  let cmdHomeDir: string | null = null
   if (cmdOnlyMode) {
     try {
       const home = await invoke<string>('get_home_directory')
-      cmdHomeDir = home
       cmdCwd = projectPath || home
     } catch {
       cmdCwd = projectPath || ''
@@ -353,13 +355,6 @@ async function runAgentInternal(
   const promptBuildStart = Date.now()
   if (systemPromptOverride) {
     systemPrompt = systemPromptOverride
-  } else if (cmdOnlyMode && cmdCwd) {
-    // userMessageText is forwarded so cwd-scoped prompt builds can detect
-    // skill-trigger hashtags (#auth-google etc.) and inline the corresponding
-    // CRITICAL rules at turn 1. Without this, the hashtag regex never fires and
-    // the model improvises auth from training prior, producing placeholder
-    // credentials.
-    systemPrompt = await contextBuilder.buildCmdModeSystemPrompt(cmdCwd, cmdHomeDir, mcpToolSummaries, userMessageText, intentOverride)
   } else {
     const projectType = currentProject?.projectType || 'unknown'
     // userMessageText carries the raw user input so contextBuilder can detect

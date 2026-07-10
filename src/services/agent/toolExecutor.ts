@@ -1962,10 +1962,8 @@ ${preview}
     if (this.worktreeState) return this.worktreeState.path
     const project = useProjectStore.getState().currentProject
     if (project?.path) return project.path
-    // Cwd-scoped fallback: this path may be opened without populating
-    // currentProject. cmdModeProjectPath preserves the active workspace root.
-    const cmdPath = useProjectStore.getState().cmdModeProjectPath
-    if (cmdPath) return cmdPath
+    // Cwd-scoped fallback (enableCmdMode, used by /plan): the run may be
+    // executing without a populated currentProject.
     if (this.cmdModeCwd) return this.cmdModeCwd
     throw new Error('No project is open. Cannot perform file operations without an active project.')
   }

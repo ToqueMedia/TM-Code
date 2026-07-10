@@ -220,7 +220,6 @@ describe('executePlan call sequence', () => {
       originalArgs: 'build inventory',
       planPath: '/projects/foo/PLAN.md',
       planFileName: 'PLAN.md',
-      mode: 'terminal',
     }))
     expect(mockSetPlanResumePending).not.toHaveBeenCalledWith(null)
     expect(mockAddSystemMessage).toHaveBeenCalled()
@@ -290,7 +289,6 @@ describe('executePlan call sequence', () => {
       originalArgs: 'build inventory',
       planPath: '/projects/foo/PLAN.md',
       planFileName: 'PLAN.md',
-      mode: 'chat',
       updatedAt: 123,
     })
 
@@ -326,7 +324,6 @@ describe('executePlan call sequence', () => {
       originalArgs: 'build inventory',
       planPath: '/projects/foo/PLAN.md',
       planFileName: 'PLAN.md',
-      mode: 'chat',
       updatedAt: 123,
     }, [attachment as never], userBlocks as never)
 

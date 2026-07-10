@@ -10,7 +10,6 @@ import { trackEvent } from '../../analytics'
 import { logger } from '../../../utils/logger'
 import { t } from '../../../i18n'
 import { languageDirective } from './_languageInstruction'
-import type { SlashCommandMode } from '../slashCommandRegistry'
 
 /**
  * Classify a `browserSession.start()` failure so we surface the right fix.
@@ -87,7 +86,6 @@ function diagnoseBrowserStartFailure(message: string): { kind: string; remedy: s
 export async function executeE2E(
   args: string,
   projectPath: string,
-  mode: SlashCommandMode = 'chat',
 ): Promise<void> {
   const chatStore = useChatStore.getState()
 
@@ -173,9 +171,6 @@ export async function executeE2E(
       // Bubbles already created above — don't duplicate.
       addUserMessage: false,
       skipStartAssistantMessage: true,
-      // Cwd-scoped tool executor so read_dev_server_logs / browser controls /
-      // project reads resolve against the active workspace root.
-      cmdOnlyMode: mode === 'terminal',
     })
   } finally {
     agentService.setRequestType(null)

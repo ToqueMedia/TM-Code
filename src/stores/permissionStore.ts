@@ -189,8 +189,8 @@ interface PendingPermission {
 }
 
 interface PermissionState {
-  /** Current project path — set by whoever opens a project (projectStore
-   *  or TerminalView) so persistPermissions
+  /** Current project path — set by whoever opens a project (projectStore)
+   *  so persistPermissions
    *  writes to the correct project without depending on projectStore. */
   projectPath: string | null
   /** Scopes where user clicked "Accept All" — 'core' and 'mcp' are independent */
