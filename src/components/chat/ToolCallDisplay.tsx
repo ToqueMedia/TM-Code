@@ -122,7 +122,10 @@ function inputForDisplay(value: unknown, projectPath?: string | null, key?: stri
   return value
 }
 
-function getInputSummary(
+// Exported for ExplorationBatch — the group header shows the live target
+// ("⎿ src/stores/chatStore.ts") using the same summary the individual row
+// would have shown, so collapsed and expanded views always agree.
+export function getInputSummary(
   toolName: string,
   input: Record<string, unknown>,
   result?: string,

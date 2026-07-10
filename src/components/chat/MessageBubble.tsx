@@ -12,7 +12,8 @@ import { renderHighlightedPrompt } from '../prompt/promptHighlight'
 import CodeBlockAction from './CodeBlockAction'
 import ToolCallDisplayComponent from './ToolCallDisplay'
 import ReadOutputBatch from './ReadOutputBatch'
-import { groupConsecutiveLargeReads, computeContentBlockBatches } from '../../utils/groupToolCalls'
+import ExplorationBatch from './ExplorationBatch'
+import { groupExplorationRuns, computeContentBlockBatches } from '../../utils/groupToolCalls'
 import { isAgentShellTool, ShellSessionBlock } from '../shell/ShellCommandBlock'
 import AgentLogo from '../ui/AgentLogo'
 import CompactSummary from './CompactSummary'
@@ -345,10 +346,11 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     [toggleReasoning, toggleReasoningBlock],
   )
 
-  // Pre-compute read_large_result batching directives ONCE per render so
-  // the contentBlocks .map below can read them by index without an IIFE
-  // or per-iteration look-ahead. Strict adjacency on text/tool boundaries;
-  // reasoning between same-id reads is swallowed into the batch.
+  // Pre-compute grouping directives (exploration runs + read_large_result
+  // streaks) ONCE per render so the contentBlocks .map below can read them
+  // by index without an IIFE or per-iteration look-ahead. Strict adjacency
+  // on text/tool boundaries; reasoning between members is swallowed only
+  // when another member follows; failures always pop out as own rows.
   const batchDirectives = useMemo(() => {
     if (!message.contentBlocks || message.contentBlocks.length === 0) return []
     return computeContentBlockBatches(
@@ -361,7 +363,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     if (!message.toolCalls || message.toolCalls.length === 0) return []
     const groups: Array<
       | { kind: 'agent_shell_session'; calls: NonNullable<ChatMessage['toolCalls']> }
-      | ReturnType<typeof groupConsecutiveLargeReads>[number]
+      | ReturnType<typeof groupExplorationRuns>[number]
     > = []
 
     for (let i = 0; i < message.toolCalls.length; i++) {
@@ -381,7 +383,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
         ordinaryCalls.push(message.toolCalls[i + 1])
         i++
       }
-      groups.push(...groupConsecutiveLargeReads(ordinaryCalls))
+      groups.push(...groupExplorationRuns(ordinaryCalls))
     }
 
     return groups
@@ -692,9 +694,20 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
         {message.contentBlocks && message.contentBlocks.length > 0 ? (
           <>
             {message.contentBlocks.map((block, idx) => {
-              // Batch handling — runs before the existing block-type switch.
+              // Grouping directives — run before the existing block-type
+              // switch. exploration_start = the consolidated sentence row;
+              // batch_start = a lone paginated-read streak (range pills).
               const directive = batchDirectives[idx]
               if (directive?.kind === 'batch_member') return null
+              if (directive?.kind === 'exploration_start') {
+                return (
+                  <ExplorationBatch
+                    key={`explore-${directive.calls[0].id}`}
+                    calls={directive.calls}
+                    messageId={message.id}
+                  />
+                )
+              }
               if (directive?.kind === 'batch_start') {
                 return <ReadOutputBatch key={`batch-${idx}`} calls={directive.calls} />
               }
@@ -884,6 +897,9 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                 {fallbackToolCallGroups.map(group => {
                   if (group.kind === 'agent_shell_session') {
                     return <ShellSessionBlock key={group.calls[0].id} toolCalls={group.calls} mode="chat" />
+                  }
+                  if (group.kind === 'exploration') {
+                    return <ExplorationBatch key={group.calls[0].id} calls={group.calls} messageId={message.id} />
                   }
                   return group.kind === 'large_read_batch'
                     ? <ReadOutputBatch key={group.calls[0].id} calls={group.calls} />
