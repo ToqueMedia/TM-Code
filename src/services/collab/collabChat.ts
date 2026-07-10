@@ -60,6 +60,13 @@ export type ControlMessage =
   | { t: 'screen-watch'; uid: string; watching: boolean }
   /** Presenter → viewer: the watcher slots are full (plan limit). */
   | { t: 'screen-full'; max: number }
+  /** Directed (never broadcast): MY classification of OUR pair's media path.
+   *  Needed because the selected pair is one and the traffic symmetric, but
+   *  each side only sees its own candidates: the side sending through ITS
+   *  TURN allocation knows ('turn'), while the far side receives from the
+   *  TURN server's address as a prflx candidate and would report 'direct'.
+   *  Both UIs show worst(mine, theirs). */
+  | { t: 'path-state'; path: 'direct' | 'turn' }
 
 /** Wrap a chat message for broadcast over the control channel. */
 export function buildChatControl(msg: ChatMessage): ControlMessage {
@@ -144,6 +151,9 @@ export function parseControlMessage(value: unknown): ControlMessage | null {
   }
   if (env.t === 'screen-full' && typeof env.max === 'number' && Number.isFinite(env.max)) {
     return { t: 'screen-full', max: env.max }
+  }
+  if (env.t === 'path-state' && (env.path === 'direct' || env.path === 'turn')) {
+    return { t: 'path-state', path: env.path }
   }
   return null
 }

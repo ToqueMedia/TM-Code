@@ -9,7 +9,7 @@
 
 import FirebaseAuthService from '@/services/auth/firebaseAuth'
 import { CollabService } from '@/services/collabService'
-import { CollabMesh } from '@/services/collab/collabMesh'
+import { CollabMesh, reconcilePeerPath, type PeerPath } from '@/services/collab/collabMesh'
 import { BulkReassembler } from '@/services/collab/bulkFraming'
 import { attachTunnel, detachTunnel, onTunnelMessage, setLocalShare } from '@/services/collab/previewTunnelService'
 import {
@@ -72,6 +72,19 @@ let reconnectAttempts = 0
 const MAX_RECONNECT_DELAY_MS = 30_000
 /** Our currently-advertised live-preview offer, replayed to new joiners. */
 let activeShareOffer: PreviewOffer | null = null
+/** Per-peer media-path classifications, reconciled worst-of for the UI.
+ *  `local` = what MY getStats says about the pair; `remote` = what the PEER's
+ *  getStats says (arrives as a directed 'path-state' control message). One
+ *  map per side — see reconcilePeerPath for why a single side can honestly
+ *  get it wrong (TURN allocations surface as prflx on the far end). */
+const localPeerPaths = new Map<string, PeerPath>()
+const remotePeerPaths = new Map<string, PeerPath>()
+
+/** Push the reconciled (worst-of) path for a peer into the store badges. */
+function publishPeerPath(peerId: string): void {
+  const effective = reconcilePeerPath(localPeerPaths.get(peerId), remotePeerPaths.get(peerId))
+  if (effective) useCollabStore.getState().setPeerPath(peerId, effective)
+}
 /** Unsubscribe for the RTDB offline-chat queue (durable delivery to members who
  *  were offline at send time). Null when not subscribed / RTDB unconfigured. */
 let offlineUnsub: (() => void) | null = null
@@ -163,14 +176,33 @@ export async function startCollabSession(): Promise<void> {
         // ongoing call/presentation.
         replayVoiceStateTo(peer.peerId)
         replayScreenStateTo(peer.peerId)
+        // Replay our path classification: it computes at ICE 'connected',
+        // milliseconds BEFORE the channels open — the eager send in
+        // onPeerPath can race a closed channel and drop.
+        const knownPath = localPeerPaths.get(peer.peerId)
+        if (knownPath && knownPath !== 'relay') {
+          mesh.sendControl(peer.peerId, { t: 'path-state' as const, path: knownPath })
+        }
       },
       onPeerDisconnected: (peerId) => {
+        localPeerPaths.delete(peerId)
+        remotePeerPaths.delete(peerId)
         onVoicePeerGone(peerId)
         onScreenPeerGone(peerId)
       },
       onPeerAudioTrack: (peer, track, stream) => onRemoteAudioTrack(peer, track, stream),
       onPeerVideoTrack: (peer, track, stream) => onRemoteVideoTrack(peer, track, stream),
-      onPeerPath: (peerId, path) => useCollabStore.getState().setPeerPath(peerId, path),
+      onPeerPath: (peerId, path) => {
+        localPeerPaths.set(peerId, path)
+        publishPeerPath(peerId)
+        // Tell the peer what OUR stats say about the pair — the side flowing
+        // through its own TURN allocation is the only one that knows for sure
+        // (the far side sees the relay as a prflx candidate and reads 'direct').
+        // 'relay' needs no telling: the DO fallback is symmetric by definition.
+        if (path !== 'relay' && mesh) {
+          mesh.sendControl(peerId, { t: 'path-state' as const, path })
+        }
+      },
       onMediaPolicy: (policy) => useCollabStore.getState().setMediaPolicy(policy),
       onSessionClosed: () => {
         useCollabStore.getState().setConnected(false)
@@ -214,6 +246,10 @@ export async function startCollabSession(): Promise<void> {
           control?.t === 'screen-full'
         ) {
           handleScreenControl(peerId, control)
+        } else if (control?.t === 'path-state') {
+          // The peer's view of OUR shared pair — worst-of wins (see the maps).
+          remotePeerPaths.set(peerId, control.path)
+          publishPeerPath(peerId)
         }
       },
     })
@@ -339,6 +375,8 @@ function teardownSession(): void {
   connecting = false
   detachTunnel()
   bulkReassembler = new BulkReassembler()
+  localPeerPaths.clear()
+  remotePeerPaths.clear()
   const store = useCollabStore.getState()
   store.setConnected(false)
   store.setPeers([])

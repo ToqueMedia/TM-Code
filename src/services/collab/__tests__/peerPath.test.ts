@@ -1,4 +1,4 @@
-import { classifySelectedPair } from '../collabMesh'
+import { classifySelectedPair, reconcilePeerPath } from '../collabMesh'
 
 // Synthetic getStats() reports — a Map satisfies the Iterable<[id, stats]>
 // contract the classifier consumes (RTCStatsReport is maplike/iterable).
@@ -70,6 +70,19 @@ describe('classifySelectedPair', () => {
     expect(classifySelectedPair(stats)).toBe('turn')
   })
 
+  it('classifies a remote prflx pair as direct — the case reconciliation exists for', () => {
+    // A TURN allocation on the FAR side surfaces here as a prflx remote
+    // candidate: locally this honestly reads 'direct'. reconcilePeerPath
+    // (fed by the peer's path-state message) is what corrects the badge.
+    const stats = report({
+      T1: { type: 'transport', selectedCandidatePairId: 'P1' },
+      P1: { type: 'candidate-pair', localCandidateId: 'L1', remoteCandidateId: 'R1' },
+      ...candidate('L1', 'host'),
+      ...candidate('R1', 'prflx'),
+    })
+    expect(classifySelectedPair(stats)).toBe('direct')
+  })
+
   it('returns null while nothing is selected yet or candidates are missing', () => {
     expect(classifySelectedPair(report({}))).toBeNull()
     expect(
@@ -88,5 +101,30 @@ describe('classifySelectedPair', () => {
         }),
       ),
     ).toBeNull()
+  })
+})
+
+describe('reconcilePeerPath', () => {
+  it('mirrors the user-reported asymmetry: B says turn, C says direct → both show turn', () => {
+    // B (its local candidate is a TURN allocation) reports 'turn'; C sees the
+    // relay address as prflx and reports 'direct'. Worst-of wins on BOTH ends.
+    expect(reconcilePeerPath('turn', 'direct')).toBe('turn')
+    expect(reconcilePeerPath('direct', 'turn')).toBe('turn')
+  })
+
+  it('agreeing sides pass through', () => {
+    expect(reconcilePeerPath('direct', 'direct')).toBe('direct')
+    expect(reconcilePeerPath('turn', 'turn')).toBe('turn')
+  })
+
+  it('DO relay short-circuits everything', () => {
+    expect(reconcilePeerPath('relay', 'direct')).toBe('relay')
+    expect(reconcilePeerPath('direct', 'relay')).toBe('relay')
+  })
+
+  it('tolerates a missing side (old client / not yet reported)', () => {
+    expect(reconcilePeerPath('direct', undefined)).toBe('direct')
+    expect(reconcilePeerPath(undefined, 'turn')).toBe('turn')
+    expect(reconcilePeerPath(undefined, undefined)).toBeUndefined()
   })
 })

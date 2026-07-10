@@ -122,6 +122,25 @@ export function classifySelectedPair(
   return isRelay(local) || isRelay(remote) ? 'turn' : 'direct'
 }
 
+/**
+ * Worst-of reconciliation of the two sides' path classifications. The
+ * selected pair is ONE and its traffic symmetric, but getStats is per-side:
+ * the peer sending through ITS TURN allocation sees local=relay ('turn'),
+ * while the far side receives from the TURN server's address as a prflx
+ * remote candidate and honestly reports 'direct'. Trust the pessimist.
+ * (DO relay is symmetric by construction — the RTCPeerConnection failed for
+ * both — so 'relay' short-circuits first.)
+ */
+export function reconcilePeerPath(
+  local: PeerPath | undefined,
+  remote: PeerPath | undefined,
+): PeerPath | undefined {
+  if (local === 'relay' || remote === 'relay') return 'relay'
+  if (local === 'turn' || remote === 'turn') return 'turn'
+  if (local === 'direct' || remote === 'direct') return 'direct'
+  return undefined
+}
+
 export interface MeshHandlers {
   /** A peer's DataChannels are open and ready. */
   onPeerConnected?: (peer: PeerInfo) => void
