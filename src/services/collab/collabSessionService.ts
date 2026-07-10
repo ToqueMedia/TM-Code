@@ -170,6 +170,7 @@ export async function startCollabSession(): Promise<void> {
       },
       onPeerAudioTrack: (peer, track, stream) => onRemoteAudioTrack(peer, track, stream),
       onPeerVideoTrack: (peer, track, stream) => onRemoteVideoTrack(peer, track, stream),
+      onPeerPath: (peerId, path) => useCollabStore.getState().setPeerPath(peerId, path),
       onMediaPolicy: (policy) => useCollabStore.getState().setMediaPolicy(policy),
       onSessionClosed: () => {
         useCollabStore.getState().setConnected(false)

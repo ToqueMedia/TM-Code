@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { useBillingStore } from '@/stores/billingStore'
 import type { MediaPolicy, PeerInfo } from '@/services/collab/signalingProtocol'
+import type { PeerPath } from '@/services/collab/collabMesh'
 import type { ChatMessage } from '@/services/collab/collabChat'
 
 // Team collaboration store: presence, ephemeral team chat, and live-preview
@@ -11,6 +12,9 @@ interface CollabState {
   connected: boolean
   /// Online teammates (excluding self), from signaling presence.
   peers: PeerInfo[]
+  /// How MY connection to each teammate flows (direct P2P / TURN / DO relay),
+  /// keyed by peerId — feeds the badges on call chips and the presentation.
+  peerPaths: Record<string, PeerPath>
   /// Ephemeral team chat transcript (oldest → newest).
   chat: ChatMessage[]
   /// Whether the team chat panel is open.
@@ -69,6 +73,7 @@ interface CollabState {
   setSharingPreview: (sharing: boolean) => void
   setStartingPreview: (starting: boolean) => void
   setPeerTyping: (uid: string, name: string, typing: boolean) => void
+  setPeerPath: (peerId: string, path: PeerPath) => void
   setMediaPolicy: (policy: MediaPolicy | null) => void
   setVoiceSelf: (patch: Partial<VoiceSelf>) => void
   /// Upsert (state) or drop (null) a teammate from the voice roster.
@@ -138,6 +143,7 @@ const MAX_CHAT_IN_MEMORY = 500
 export const useCollabStore = create<CollabState>((set) => ({
   connected: false,
   peers: [],
+  peerPaths: {},
   chat: [],
   chatOpen: false,
   chatUnread: 0,
@@ -150,6 +156,8 @@ export const useCollabStore = create<CollabState>((set) => ({
   ...SCREEN_INITIAL,
 
   setConnected: (connected) => set({ connected }),
+  setPeerPath: (peerId, path) =>
+    set((s) => (s.peerPaths[peerId] === path ? s : { peerPaths: { ...s.peerPaths, [peerId]: path } })),
   setMediaPolicy: (policy) => set({ mediaPolicy: policy }),
   setPeers: (peers) =>
     set((s) => {
@@ -166,12 +174,19 @@ export const useCollabStore = create<CollabState>((set) => ({
       // A presenter that went offline takes the presentation (and our watching
       // state) down with it.
       const presenterGone = s.screenPresenter && !presentUids.has(s.screenPresenter.uid)
+      // Connection-path badges only make sense for peers that still exist.
+      const presentPeerIds = new Set(peers.map((p) => p.peerId))
+      const peerPaths: Record<string, PeerPath> = {}
+      for (const [peerId, path] of Object.entries(s.peerPaths)) {
+        if (presentPeerIds.has(peerId)) peerPaths[peerId] = path
+      }
       return {
         peers,
         // Drop preview offers from peers that are no longer present.
         livePreviews: s.livePreviews.filter((lp) => peers.some((p) => p.peerId === lp.peerId)),
         typingPeers,
         voiceRoster,
+        peerPaths,
         ...(presenterGone
           ? {
               screenPresenter: null,
@@ -250,6 +265,7 @@ export const useCollabStore = create<CollabState>((set) => ({
     set({
       connected: false,
       peers: [],
+      peerPaths: {},
       chat: [],
       chatOpen: false,
       chatUnread: 0,

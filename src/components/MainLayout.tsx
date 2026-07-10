@@ -529,6 +529,9 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
           <PlanViewerPanel />
           <CheckpointDrawerPanel />
           <TerminalDrawerPanel />
+          {/* Ephemeral team chat (P2P) — drawer like the terminal, toggled
+              from the Source Control header */}
+          <TeamChatPanel />
         </Flex>
       </Flex>
 
@@ -537,10 +540,8 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
       {/* Floating dev server status panel */}
       <DevServerStatus />
 
-      {/* Ephemeral team chat (P2P) — toggled from the Source Control header */}
-      <TeamChatPanel />
-
-      {/* Teammate screen-share viewer (P2P video) — shows while watching */}
+      {/* Teammate screen-share viewer (P2P video) — shows while watching;
+          stays floating/draggable on purpose (it is a video window). */}
       <ScreenShareViewer />
 
       {/* Requirements check dialog removed — templates disabled */}

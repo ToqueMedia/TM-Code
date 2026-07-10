@@ -77,6 +77,51 @@ function candidateKind(candidate: string): string {
   return `${typ}${candidate.includes('.local') ? ' MDNS' : ''} ${addr}`
 }
 
+/** How my connection to a given peer is actually flowing.
+ *  'direct' = P2P (host↔host on the LAN or srflx across NATs);
+ *  'turn'   = P2P through a TURN relay (media works, no direct line);
+ *  'relay'  = DO WebSocket data relay (WebRTC failed — data only, NO media). */
+export type PeerPath = 'direct' | 'turn' | 'relay'
+
+/**
+ * Classify the SELECTED ICE candidate pair from a getStats() report.
+ * Standard path: the 'transport' stat carries selectedCandidatePairId.
+ * Fallback: a 'candidate-pair' with selected=true (pre-standard) or
+ * nominated+succeeded. Either side being a 'relay' candidate means the
+ * media is flowing through TURN. Returns null while nothing is selected.
+ * Pure and Map-friendly on purpose — unit-tested with synthetic reports.
+ */
+export function classifySelectedPair(
+  report: Iterable<[string, Record<string, unknown>]>,
+): 'direct' | 'turn' | null {
+  const stats = new Map<string, Record<string, unknown>>()
+  for (const [id, entry] of report) stats.set(id, entry)
+
+  let pair: Record<string, unknown> | undefined
+  for (const entry of stats.values()) {
+    if (entry.type === 'transport' && typeof entry.selectedCandidatePairId === 'string') {
+      pair = stats.get(entry.selectedCandidatePairId)
+      if (pair) break
+    }
+  }
+  if (!pair) {
+    for (const entry of stats.values()) {
+      if (entry.type !== 'candidate-pair') continue
+      if (entry.selected === true || (entry.nominated === true && entry.state === 'succeeded')) {
+        pair = entry
+        break
+      }
+    }
+  }
+  if (!pair) return null
+
+  const local = typeof pair.localCandidateId === 'string' ? stats.get(pair.localCandidateId) : undefined
+  const remote = typeof pair.remoteCandidateId === 'string' ? stats.get(pair.remoteCandidateId) : undefined
+  if (!local && !remote) return null
+  const isRelay = (c?: Record<string, unknown>) => c?.candidateType === 'relay'
+  return isRelay(local) || isRelay(remote) ? 'turn' : 'direct'
+}
+
 export interface MeshHandlers {
   /** A peer's DataChannels are open and ready. */
   onPeerConnected?: (peer: PeerInfo) => void
@@ -100,6 +145,10 @@ export interface MeshHandlers {
   /** Per-plan voice/screen limits from the welcome (null = no limits — old
    *  worker). Fires once per (re)connect, before any peer exists. */
   onMediaPolicy?: (policy: MediaPolicy | null) => void
+  /** How data/media to this peer is flowing (direct P2P, TURN, DO relay).
+   *  Fires when the connection establishes and again if the selected pair
+   *  changes (ICE promotion/restart) or WebRTC falls back to the DO relay. */
+  onPeerPath?: (peerId: string, path: PeerPath) => void
 }
 
 interface PeerState {
@@ -345,6 +394,12 @@ export class CollabMesh {
     pc.oniceconnectionstatechange = () => dlog('iceConnectionState', info.peerId, pc.iceConnectionState)
     pc.onconnectionstatechange = () => {
       dlog('connectionState', info.peerId, pc.connectionState)
+      if (pc.connectionState === 'connected') {
+        // Report whether traffic flows direct or through TURN (UI badges), and
+        // keep reporting if ICE later promotes/demotes the selected pair.
+        this.reportPeerPath(state)
+        this.watchSelectedPair(state)
+      }
       // P2P couldn't establish (symmetric NAT, mDNS across a VM, …) → don't drop
       // the peer; fall back to relaying its data through the DO. 'closed' here is
       // our own teardown (relay switch / dropPeer) — ignore it.
@@ -385,11 +440,46 @@ export class CollabMesh {
     }
   }
 
+  /** Ask the live stats for the selected pair and report direct/TURN to the UI.
+   *  Async by nature — guarded so a relay switch or peer drop mid-await can't
+   *  publish a stale 'p2p' classification. */
+  private reportPeerPath(state: PeerState): void {
+    void state.pc
+      .getStats()
+      .then((report) => {
+        if (this.peers.get(state.info.peerId) !== state || state.mode !== 'p2p') return
+        const path = classifySelectedPair(report as Iterable<[string, Record<string, unknown>]>)
+        if (path) {
+          dlog('peerPath', state.info.peerId, path)
+          this.handlers.onPeerPath?.(state.info.peerId, path)
+        }
+      })
+      .catch(() => {
+        /* stats unavailable — keep the last known path */
+      })
+  }
+
+  /** Re-classify when ICE switches the selected pair (promotion after a late
+   *  direct route appears, or demotion to TURN). Chromium-only event; absent
+   *  support just means the connect-time classification stands. */
+  private watchSelectedPair(state: PeerState): void {
+    try {
+      const dtls = state.pc.getSenders().find((s) => s.transport)?.transport
+      const ice = dtls?.iceTransport as
+        | (RTCIceTransport & { onselectedcandidatepairchange: (() => void) | null })
+        | undefined
+      if (ice) ice.onselectedcandidatepairchange = () => this.reportPeerPath(state)
+    } catch {
+      /* older engine without RTCIceTransport surface */
+    }
+  }
+
   /** WebRTC failed for this peer — keep it, route its data via the DO relay. */
   private switchToRelay(state: PeerState): void {
     if (state.mode === 'relay') return
     dlog('switchToRelay', state.info.peerId)
     state.mode = 'relay'
+    this.handlers.onPeerPath?.(state.info.peerId, 'relay')
     try {
       state.pc.close()
     } catch {

@@ -6,6 +6,7 @@ import { tokens } from '@/theme/tokens'
 import { useCollabStore } from '@/stores/collabStore'
 import { stopWatching } from '@/services/collab/collabScreen'
 import { ElapsedLabel } from './ElapsedLabel'
+import { PeerPathBadge } from './PeerPathBadge'
 
 /**
  * Floating viewer for a teammate's screen share. Mounted once in MainLayout
@@ -78,6 +79,11 @@ export function ScreenShareViewer() {
   const presenter = useCollabStore((s) => s.screenPresenter)
   const stream = useCollabStore((s) => s.screenRemoteStream)
   const presenterSince = useCollabStore((s) => s.screenPresenterSince)
+  // The presenter is known by uid; the connection path by mesh peerId.
+  const presenterPath = useCollabStore((s) => {
+    const peerId = s.peers.find((p) => p.uid === s.screenPresenter?.uid)?.peerId
+    return peerId ? s.peerPaths[peerId] : undefined
+  })
   const videoRef = useRef<HTMLVideoElement>(null)
   const [rect, setRect] = useState<ViewerRect>(() => loadRect())
   const rectRef = useRef(rect)
@@ -169,6 +175,7 @@ export function ScreenShareViewer() {
           <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.primary} lineClamp={1}>
             {t('team.screenPresenting').replace('{name}', presenter.name)}
           </Text>
+          <PeerPathBadge path={presenterPath} size={12} />
           <ElapsedLabel
             since={presenterSince}
             fontSize="10px"
