@@ -370,6 +370,16 @@ function App() {
 		return () => { active = false; unlisten?.() }
 	}, []);
 
+	// Multi-window parallel work: mirror this window's agent-run state to the
+	// project's on-disk status file so OTHER windows can badge it in their
+	// recents lists (each window is a separate OS process — disk is the only
+	// shared channel). Reader side: useProjectAgentStatuses.
+	useEffect(() => {
+		void import('./services/projectAgentStatusService')
+			.then(m => m.initProjectAgentStatusWriter())
+			.catch(() => { /* Tauri not present (jsdom tests) */ })
+	}, []);
+
 	// Native file drop — drag a folder from Finder/Explorer onto the window
 	// to open it as a project. Uses Tauri's window-level drag-drop event
 	// (which gives real filesystem paths), distinct from the HTML5 drop in
@@ -479,6 +489,26 @@ function App() {
 			if (!isAuthenticated) {
 				setInitializing(false);
 				return;
+			}
+
+			// Window launched with `--open-project <dir>` ("Open in New Window"
+			// on another instance): that explicit target beats BOTH the
+			// persisted welcomeScreen preference and the auto-open-last-project
+			// fallback — the user asked for THIS project in THIS window.
+			try {
+				const { invoke } = await import('@tauri-apps/api/core');
+				const pendingProject = await invoke<string | null>('take_pending_open_project');
+				if (pendingProject) {
+					try {
+						await openProject(pendingProject);
+					} catch (error) {
+						logger.error('app', 'Failed to open --open-project target:', error);
+					}
+					setInitializing(false);
+					return;
+				}
+			} catch {
+				// Tauri not present (jsdom tests, etc.)
 			}
 
 			// Read directly from the store — not from the effect closure — to avoid

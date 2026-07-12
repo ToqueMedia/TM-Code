@@ -22,7 +22,26 @@ import { getVersion } from '@tauri-apps/api/app'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { showProjectContextMenu } from '@/components/projectContextMenu'
+import { useProjectAgentStatuses, type ProjectAgentStatus } from '@/hooks/useProjectAgentStatuses'
 import type { RecentProject } from '@/types/project'
+
+// ─── Agent-run badge (multi-window parallel work) ──────────────────────
+// Which colour/label a project row shows for the agent-status file state.
+// `running` comes from ANOTHER window's live agent (or this one's, when the
+// user is back on Welcome mid-run); `done`/`error` persist until the user
+// visits that project. See services/projectAgentStatusService.ts.
+function agentBadgeFor(state: ProjectAgentStatus['state']): { color: string; label: string } | null {
+  switch (state) {
+    case 'running':
+      return { color: tokens.colors.accent.primary, label: t('welcome.agentWorking') }
+    case 'done':
+      return { color: tokens.colors.status.running, label: t('welcome.agentDone') }
+    case 'error':
+      return { color: tokens.colors.status.error, label: t('welcome.agentError') }
+    default:
+      return null
+  }
+}
 
 // Cache the version promise — it never changes during the session.
 let versionPromise: Promise<string> | null = null
@@ -85,6 +104,11 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   onClearRecent,
 }) => {
   const [appVersion, setAppVersion] = useState('')
+
+  // Cross-window agent activity for every project in the list. Polling-based
+  // on purpose: each window is a separate OS process, disk is the only
+  // shared channel (see useProjectAgentStatuses).
+  const agentStatuses = useProjectAgentStatuses(recentProjects.map(p => p.path))
 
   useEffect(() => {
     getAppVersion().then(setAppVersion)
@@ -355,6 +379,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
                 project={project}
                 truncatePath={truncatePath}
                 isActive={activeProjectPath === project.path}
+                agentStatus={agentStatuses[project.path] ?? null}
                 onClick={() => project.path && onOpenProject(project.path)}
                 onContextMenu={(e) => handleProjectContextMenu(e, project)}
               />
@@ -413,6 +438,7 @@ interface ProjectRowProps {
   project: RecentProject
   truncatePath: (path: string, maxLen?: number) => string
   isActive?: boolean
+  agentStatus?: ProjectAgentStatus | null
   onClick: () => void
   onContextMenu: (e: React.MouseEvent) => void
 }
@@ -421,10 +447,12 @@ const ProjectRow: React.FC<ProjectRowProps> = ({
   project,
   truncatePath,
   isActive = false,
+  agentStatus = null,
   onClick,
   onContextMenu,
 }) => {
   const timeLabel = relativeTime(project.lastOpened)
+  const badge = agentStatus ? agentBadgeFor(agentStatus.state) : null
 
   return (
     <Flex
@@ -490,7 +518,45 @@ const ProjectRow: React.FC<ProjectRowProps> = ({
           >
             {truncatePath(project.path)}
           </Text>
-          {timeLabel && (
+          {badge ? (
+            // Agent-run badge wins the slot over the relative time — "this
+            // project is working / finished" is the information the user is
+            // scanning the list for while running things in parallel.
+            <Flex
+              data-sidebar-project-agent
+              align="center"
+              gap="5px"
+              flexShrink={0}
+              title={agentStatus?.label || undefined}
+            >
+              <Box
+                width="6px"
+                height="6px"
+                borderRadius="full"
+                bg={badge.color}
+                css={{
+                  '@keyframes tmAgentPulse': {
+                    '0%, 100%': { opacity: 1, transform: 'scale(1)' },
+                    '50%': { opacity: 0.3, transform: 'scale(0.75)' },
+                  },
+                  animation:
+                    agentStatus?.state === 'running'
+                      ? 'tmAgentPulse 1.2s ease-in-out infinite'
+                      : undefined,
+                }}
+              />
+              <Text
+                fontSize="9px"
+                fontWeight="700"
+                color={badge.color}
+                textTransform="uppercase"
+                letterSpacing="0.06em"
+                whiteSpace="nowrap"
+              >
+                {badge.label}
+              </Text>
+            </Flex>
+          ) : timeLabel && (
             <Text
               data-sidebar-project-time
               fontSize="9px"

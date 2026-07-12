@@ -821,6 +821,7 @@ const en = {
   'misc.createFirstProject': 'Create your first project to get started',
   'misc.newProjectBtn': 'New Project',
   'misc.openInEditorMenu': 'Open in Editor',
+  'misc.openInNewWindow': 'Open in New Window',
   'misc.revealInFinder': 'Reveal in Finder',
   'misc.revealInExplorer': 'Reveal in File Explorer',
   'misc.removeFromRecent': 'Remove from Recent',
@@ -974,6 +975,16 @@ const en = {
   'welcome.today': 'today',
   'welcome.yesterday': 'yesterday',
   'welcome.daysAgo': '{n}d ago',
+  'welcome.agentWorking': 'Working…',
+  'welcome.agentDone': 'Done',
+  'welcome.agentError': 'Failed',
+
+  // ── Parallel projects (agent busy on switch/close) ──
+  'project.agentBusyTitle': 'Agent is working',
+  'project.switchWhileRunning': 'The agent is still working on "{name}". Switching projects cancels the task in progress.\n\nTip: right-click a project (or use the ⧉ icon in the project menu) and choose "Open in New Window" to keep both working at the same time.',
+  'project.closeWhileRunning': 'The agent is still working on "{name}". Closing the project cancels the task in progress.',
+  'project.agentBusyConfirm': 'Cancel task and continue',
+  'project.agentBusyStay': 'Keep working',
 
   // ── Clone Dialog ────────────────────────────────────
   'clone.title': 'Clone Repository',
@@ -2457,6 +2468,7 @@ const pt: Record<keyof typeof en, string> = {
   'misc.createFirstProject': 'Crie o seu primeiro projeto para começar',
   'misc.newProjectBtn': 'Novo Projeto',
   'misc.openInEditorMenu': 'Abrir no Editor',
+  'misc.openInNewWindow': 'Abrir em Nova Janela',
   'misc.revealInFinder': 'Mostrar no Finder',
   'misc.revealInExplorer': 'Mostrar no Explorador de Ficheiros',
   'misc.removeFromRecent': 'Remover dos Recentes',
@@ -2610,6 +2622,16 @@ const pt: Record<keyof typeof en, string> = {
   'welcome.today': 'hoje',
   'welcome.yesterday': 'ontem',
   'welcome.daysAgo': 'há {n}d',
+  'welcome.agentWorking': 'A trabalhar…',
+  'welcome.agentDone': 'Terminou',
+  'welcome.agentError': 'Falhou',
+
+  // ── Projetos em paralelo (agente ocupado ao trocar/fechar) ──
+  'project.agentBusyTitle': 'Agente a trabalhar',
+  'project.switchWhileRunning': 'O agente ainda está a trabalhar em "{name}". Trocar de projeto cancela a tarefa em curso.\n\nDica: clique com o botão direito num projeto (ou use o ícone ⧉ no menu de projetos) e escolha "Abrir em Nova Janela" para manter os dois a trabalhar ao mesmo tempo.',
+  'project.closeWhileRunning': 'O agente ainda está a trabalhar em "{name}". Fechar o projeto cancela a tarefa em curso.',
+  'project.agentBusyConfirm': 'Cancelar tarefa e continuar',
+  'project.agentBusyStay': 'Continuar a trabalhar',
 
   // ── Clone Dialog ────────────────────────────────────
   'clone.title': 'Clonar Repositório',

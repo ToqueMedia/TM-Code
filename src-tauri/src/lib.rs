@@ -559,6 +559,26 @@ fn take_pending_open_files() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Project queued by a `--open-project <dir>` launch argument. Used by
+/// "Open in New Window": the spawning instance passes the target project so
+/// the new process opens it directly instead of landing on Welcome (or worse,
+/// auto-reopening the SAME project the spawning window still has open).
+/// Drained once by the frontend after auth/hydration — see App.tsx
+/// initializeApp, where it takes priority over the persisted last-project.
+static PENDING_OPEN_PROJECT: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+fn pending_open_project() -> &'static std::sync::Mutex<Option<String>> {
+    PENDING_OPEN_PROJECT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[tauri::command]
+fn take_pending_open_project() -> Option<String> {
+    pending_open_project()
+        .lock()
+        .map(|mut v| v.take())
+        .unwrap_or(None)
+}
+
 /// Cheap path-is-directory probe. Used by the file-drop handler to tell a
 /// folder drop (open as project) from a file drop (likely an image targeted
 /// at the prompt — handled by the HTML5 path). Doesn't validate suitability,
@@ -583,11 +603,22 @@ fn is_directory(path: String) -> bool {
 /// We intentionally do NOT add `tauri-plugin-single-instance`; that plugin
 /// would defeat this command. If it ever gets added, this command becomes a
 /// no-op surface.
+///
+/// `project_path` (optional) is forwarded as `--open-project <dir>` so the
+/// new window opens straight into that project — the parallel-work flow:
+/// keep the agent running here, work on another project in the new window.
 #[tauri::command]
-fn open_new_instance() -> std::result::Result<(), String> {
+fn open_new_instance(project_path: Option<String>) -> std::result::Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe failed: {}", e))?;
-    std::process::Command::new(&exe)
-        .spawn()
+    let mut cmd = std::process::Command::new(&exe);
+    if let Some(p) = project_path {
+        // Only forward real directories — a bogus path would strand the new
+        // window on Welcome with an error it can't explain.
+        if std::path::Path::new(&p).is_dir() {
+            cmd.arg("--open-project").arg(p);
+        }
+    }
+    cmd.spawn()
         .map(|_| ())
         .map_err(|e| format!("spawn failed: {}", e))
 }
@@ -714,6 +745,24 @@ pub fn run() {
             // servers lançados dentro do TM Code saltem automaticamente
             // para o próximo porto livre. Ver commands/port_guard.rs.
             commands::port_guard::start_port_guard();
+
+            // ── New-window launch args ─────────────────────────────────
+            // `open_new_instance` spawns the binary directly (bypassing
+            // Launch Services on macOS), so argv IS delivered on every
+            // platform — unlike the file-association path below, which
+            // macOS routes through RunEvent::Opened. Parsed unconditionally.
+            {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                if let Some(i) = args.iter().position(|a| a == "--open-project") {
+                    if let Some(p) = args.get(i + 1) {
+                        if std::path::Path::new(p).is_dir() {
+                            if let Ok(mut slot) = pending_open_project().lock() {
+                                *slot = Some(p.clone());
+                            }
+                        }
+                    }
+                }
+            }
 
             // ── File-association launch args ───────────────────────────
             // On Windows/Linux, "Open with TM Code" launches the binary
@@ -934,7 +983,7 @@ pub fn run() {
                     // the frontend. The current instance keeps its state; the
                     // new process starts with a clean splash + window.
                     if safe_id == "new-window" {
-                        if let Err(err) = open_new_instance() {
+                        if let Err(err) = open_new_instance(None) {
                             eprintln!("[menu] new-window spawn failed: {}", err);
                         }
                         return;
@@ -1255,6 +1304,21 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 if window.label() == "main" {
+                    // Remove the on-disk agent-run badge for this window's
+                    // project. Other windows poll that file for the recents
+                    // badge; once this process dies nothing can heartbeat it,
+                    // so an explicit remove beats making every reader wait
+                    // out the staleness timeout.
+                    if let Some(ap) = window.try_state::<commands::container::ActiveProjectState>()
+                    {
+                        if let Ok(guard) = ap.lock() {
+                            if let Some(active) = guard.as_ref() {
+                                commands::project_state::clear_project_agent_status(
+                                    &active.project_path,
+                                );
+                            }
+                        }
+                    }
                     if let Some(pm) = window.try_state::<commands::terminal::ProcessMap>() {
                         if let Ok(mut map) = pm.lock() {
                             for (pid, child) in map.iter_mut() {
@@ -1466,8 +1530,11 @@ pub fn run() {
             detect_test_browsers,
             app_ready,
             take_pending_open_files,
+            take_pending_open_project,
             is_directory,
-            open_new_instance
+            open_new_instance,
+            set_project_agent_status,
+            get_project_agent_statuses
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

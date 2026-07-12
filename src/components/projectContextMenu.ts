@@ -1,6 +1,7 @@
 import { Menu, MenuItem, PredefinedMenuItem } from '@tauri-apps/api/menu'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { t } from '@/i18n'
+import { invoke } from '@/utils/invokeMetrics'
 import { useChatStore } from '@/stores/chatStore'
 import { useLayoutStore } from '@/stores/layoutStore'
 import { useProjectStore } from '@/stores/projectStore'
@@ -28,6 +29,7 @@ export async function openProjectInEditor(projectPath: string): Promise<void> {
 export async function showProjectContextMenu(project: RecentProject): Promise<void> {
   const [
     openEditorItem,
+    newWindowItem,
     revealItem,
     separator1,
     removeItem,
@@ -37,6 +39,12 @@ export async function showProjectContextMenu(project: RecentProject): Promise<vo
     MenuItem.new({
       text: t('misc.openInEditorMenu'),
       action: () => { void openProjectInEditor(project.path) },
+    }),
+    MenuItem.new({
+      text: t('misc.openInNewWindow'),
+      action: () => {
+        void invoke('open_new_instance', { projectPath: project.path }).catch(() => {})
+      },
     }),
     MenuItem.new({
       text: isMac ? t('misc.revealInFinder') : t('misc.revealInExplorer'),
@@ -58,9 +66,15 @@ export async function showProjectContextMenu(project: RecentProject): Promise<vo
     }),
   ])
 
-  const menu = await Menu.new({
-    items: [openEditorItem, revealItem, separator1, removeItem, separator2, deleteItem],
-  })
+  // Opening a SECOND window on the project this window already has open
+  // would put two processes on the same sessions/state dir — hide the
+  // affordance instead of letting the user race themselves.
+  const isCurrentProject = useProjectStore.getState().currentProject?.path === project.path
+  const items = isCurrentProject
+    ? [openEditorItem, revealItem, separator1, removeItem, separator2, deleteItem]
+    : [openEditorItem, newWindowItem, revealItem, separator1, removeItem, separator2, deleteItem]
+
+  const menu = await Menu.new({ items })
 
   await menu.popup()
 }

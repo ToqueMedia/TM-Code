@@ -3620,6 +3620,12 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       // its `set()` is skipped — prevents the previous project's data from
       // landing in the new project's chat state on rapid A → B → C switches.
       bumpProjectEpoch()
+      // Reject any diff approval a run is still blocked on. The promise map
+      // is module-level, so it SURVIVES the set() below — and not every
+      // caller goes through cancelLoop() first (project switch paths). An
+      // unresolved entry keeps the orphaned run's executor awaiting forever
+      // and keeps the global tool-pause gate engaged for the next project.
+      resolveAllPendingDiffApprovals(false)
       // Clear message queue — queued messages belong to the previous project
       clearMessageQueue()
       // Clear module-level timers to prevent stale writes

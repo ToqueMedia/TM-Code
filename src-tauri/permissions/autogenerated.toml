@@ -84,6 +84,8 @@ commands.allow = [
   "ensure_toquemedia_gitignore_cmd",
   "get_project_state_dir",
   "migrate_project_state",
+  "set_project_agent_status",
+  "get_project_agent_statuses",
   "read_memory_file",
   "write_memory_file",
   "delete_memory_file",
@@ -160,6 +162,7 @@ commands.allow = [
   "detect_test_browsers",
   "app_ready",
   "take_pending_open_files",
+  "take_pending_open_project",
   "is_directory",
   "open_new_instance",
 ]

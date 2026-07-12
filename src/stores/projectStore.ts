@@ -18,6 +18,7 @@ import { useProblemsStore } from './problemsStore';
 import { IS_VITE_DEV } from '../utils/viteEnv';
 import { devServerManager } from '../services/devServerManager';
 import { logger } from '../utils/logger';
+import { t } from '@/i18n';
 
 
 /**
@@ -104,6 +105,62 @@ const getRecoveryService = () => RecoveryService.getInstance();
 const getWindowService = () => WindowService.getInstance();
 
 /**
+ * Switching/closing a project with the agent mid-task is destructive — the
+ * run gets cancelled (see openProject/tearDownProject). Ask first, and point
+ * the user at the non-destructive alternative ("Open in New Window", which
+ * keeps both projects working in parallel). Returns true to proceed. When the
+ * agent is idle there is nothing to lose, so no dialog.
+ */
+async function confirmCancelActiveRun(kind: 'switch' | 'close'): Promise<boolean> {
+  let busy = false;
+  try {
+    // Dynamic imports: same circular-dep avoidance as tearDownProject
+    // (projectStore → agentService → toolExecutor → projectStore).
+    const agentService = (await import('../services/agent/agentService')).default.getInstance();
+    busy = agentService.isAgentRunning();
+    if (!busy) {
+      const { useSubAgentStore } = await import('./subAgentStore');
+      busy = useSubAgentStore.getState().getPendingCount() > 0;
+    }
+  } catch {
+    busy = false;
+  }
+  if (!busy) return true;
+
+  const name = useProjectStore.getState().currentProject?.name || '';
+  const body = t(kind === 'switch' ? 'project.switchWhileRunning' : 'project.closeWhileRunning')
+    .replace('{name}', name);
+  return tauriConfirm(body, {
+    title: t('project.agentBusyTitle'),
+    kind: 'warning',
+    okLabel: t('project.agentBusyConfirm'),
+    cancelLabel: t('project.agentBusyStay'),
+  });
+}
+
+/**
+ * Cancels the in-flight agent work (main loop + sub-agents) for the CURRENT
+ * project. Must run BEFORE `set_active_project` re-points the Rust clamp at
+ * the next project — without this, the orphaned run kept burning tokens, its
+ * pending diff approvals hung forever, and (worst) its next shell/PTY tool
+ * calls were clamped to the NEW project's directory and executed there
+ * (cross-project contamination). cancelLoop() already resolves diffs and
+ * clears permission/credential/question prompts for every cancel path.
+ */
+async function cancelActiveRunForProjectExit(): Promise<void> {
+  try {
+    const [{ default: agentServiceModule }, { useSubAgentStore }] = await Promise.all([
+      import('../services/agent/agentService'),
+      import('./subAgentStore'),
+    ]);
+    useSubAgentStore.getState().abortAll();
+    agentServiceModule.getInstance().cancelLoop();
+  } catch (e) {
+    logger.warn('project', 'Failed to cancel agent before project exit:', e);
+  }
+}
+
+/**
  * Tears down the current project: cancels agent, stops all monitors/watchers,
  * closes editor files, stops dev server, clears preview, and resets state.
  * No confirmation dialog. No state save. Use for forced teardowns
@@ -115,6 +172,13 @@ function tearDownProject() {
   import('../services/agent/agentService').then(m => {
     m.default.getInstance().cancelLoop();
   });
+
+  // Sub-agents run outside the main loop's AbortController (own registry,
+  // own controllers) — cancelLoop() alone left them alive after teardown,
+  // still executing read tools against a project the UI already left.
+  import('./subAgentStore').then(m => {
+    m.useSubAgentStore.getState().abortAll();
+  }).catch(() => {});
 
   // Shutdown MCP servers (dynamic import to avoid circular deps)
   import('../services/mcp/mcpService').then(m => {
@@ -211,11 +275,22 @@ export const useProjectStore = create<ProjectStore>()(
       },
 
       openProject: async (path: string, options?: { initGit?: boolean }) => {
+        // Clean up previous project's state before loading the new one
+        const prevProject = get().currentProject;
+
+        // Switching away from a project with the agent mid-task: confirm,
+        // then cancel BEFORE anything re-points global state (Rust clamp,
+        // dev server, chat wipe) at the new project. Same-path re-opens are
+        // exempt — reloading the project you're in shouldn't kill its run.
+        if (prevProject && prevProject.path !== path) {
+          const proceed = await confirmCancelActiveRun('switch');
+          if (!proceed) return;
+          await cancelActiveRunForProjectExit();
+        }
+
         // Opening a project exits any Welcome state — clear the persisted marker.
         set({ loading: true, error: null, welcomeScreen: null });
 
-        // Clean up previous project's state before loading the new one
-        const prevProject = get().currentProject;
         if (prevProject) {
           // Stop old dev server and clear preview — await to ensure port is freed
           try {
@@ -568,6 +643,12 @@ export const useProjectStore = create<ProjectStore>()(
 
       closeProject: async () => {
         const { currentProject } = get();
+
+        // Closing cancels the in-flight run (tearDownProject → cancelLoop);
+        // give the user the chance to keep it working instead.
+        const proceedBusy = await confirmCancelActiveRun('close');
+        if (!proceedBusy) return;
+
         const editorState = useEditorRepository.getState();
         const hasDirtyFiles = editorState.openFiles.some(f => f.isDirty);
 
