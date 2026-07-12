@@ -70,6 +70,17 @@ let runningPath: string | null = null
 let runningLabel: string | null = null
 /** Last terminal (`done`/`error`) write — cleared on user acknowledgement. */
 let terminalWrite: { path: string; state: 'done' | 'error' } | null = null
+/**
+ * Set by the budget-stop watcher right before it aborts the run: the coming
+ * busy→not-busy transition is an "out of credits" interruption, not a user
+ * cancel — badge it `error` with this label instead of silently going idle,
+ * so OTHER windows see WHY their sibling project stopped.
+ */
+let budgetStopLabel: string | null = null
+
+export function markNextStopAsBudgetStop(label: string): void {
+  budgetStopLabel = label
+}
 
 function writeStatus(
   projectPath: string,
@@ -158,6 +169,7 @@ function onAgentStatusChange(status: AgentStatus, prevStatus: AgentStatus): void
     runningPath = path
     runningLabel = extractTaskLabel()
     terminalWrite = null
+    budgetStopLabel = null
     cancelAttendedClear()
     writeStatus(path, 'running', runningLabel)
     startHeartbeat()
@@ -168,8 +180,19 @@ function onAgentStatusChange(status: AgentStatus, prevStatus: AgentStatus): void
     stopHeartbeat()
     const path = runningPath
     runningPath = null
-    if (!path) return
-    if (status === 'error') {
+    if (!path) {
+      budgetStopLabel = null
+      return
+    }
+    if (budgetStopLabel) {
+      // Budget-stop interruption. Checked FIRST and regardless of the final
+      // status value — depending on where the abort lands, the run can end
+      // as 'cancelled', 'error' or plain 'idle', and all of them mean the
+      // same thing here: stopped because credits ran out.
+      terminalWrite = { path, state: 'error' }
+      writeStatus(path, 'error', budgetStopLabel)
+      scheduleAttendedClear()
+    } else if (status === 'error') {
       terminalWrite = { path, state: 'error' }
       writeStatus(path, 'error', runningLabel)
       scheduleAttendedClear()
@@ -182,6 +205,7 @@ function onAgentStatusChange(status: AgentStatus, prevStatus: AgentStatus): void
       writeStatus(path, 'done', runningLabel)
       scheduleAttendedClear()
     }
+    budgetStopLabel = null
     runningLabel = null
   }
 }

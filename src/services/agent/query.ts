@@ -17,6 +17,7 @@ import type { ContentBlockAPI, ProviderState, RequestUsageEntry } from "../../ty
 // literal "[object Object]" the model then sees as the tool result. formatError
 // resolves a useful message from every shape.
 import { formatError } from "../../utils/errors";
+import { t } from "../../i18n";
 import {
   applyToolResultBudget,
   snipCompactIfNeeded,
@@ -1727,12 +1728,20 @@ export async function* query(
         } catch {
           /* non-critical */
         }
+        // Códigos conhecidos → mensagem localizada; tm_* desconhecido usa a
+        // mensagem do worker verbatim; sem tipo, heurística por contexto.
+        const TM_402_MESSAGES: Record<string, string> = {
+          tm_budget_exhausted: t("billing.budgetExhaustedError"),
+          tm_team_slice_exhausted: t("billing.teamSliceExhaustedError"),
+          tm_team_byok_exhausted: t("billing.teamByokExhaustedError"),
+        };
         const message =
-          apiInfo.type?.startsWith("tm_") && apiInfo.message
+          (apiInfo.type && TM_402_MESSAGES[apiInfo.type]) ||
+          (apiInfo.type?.startsWith("tm_") && apiInfo.message
             ? apiInfo.message
             : teamMemberBlocked
-              ? "Your team slice is exhausted for this cycle. Ask your team admin to increase your allocation."
-              : "Token budget exhausted for this cycle. Buy extra usage or wait for the cycle reset.";
+              ? t("billing.teamSliceExhaustedError")
+              : t("billing.budgetExhaustedError"));
         yield {
           type: "error",
           message,

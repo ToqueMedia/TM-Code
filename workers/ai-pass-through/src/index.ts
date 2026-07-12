@@ -9,6 +9,7 @@ import {
   resolveEnforcementMode,
   resolvePlanBudgetFor,
   resolveSpeedMultiplier,
+  shortenBudgetStateCacheTtl,
   type CostBudgetCheck,
   type UserBudgetState,
 } from './billing'
@@ -279,6 +280,17 @@ async function handleChatCompletions(
       // gate 402 e o consumedPct dos headers divergem da web/control-plane.
       planBudget = await resolvePlanBudgetFor(env, budgetState.plan, idToken, fetcher)
       budgetCheck = checkCostBudget(budgetState, { [budgetState.plan]: planBudget })
+      // Perto do limite (≥95% / em overage) ou já rejeitado: encurta o TTL
+      // da cache de estado (60s → ≤10s). Ver shortenBudgetStateCacheTtl —
+      // trava o overshoot de runs paralelos e desbloqueia compras de extra
+      // sem esperar o minuto inteiro.
+      if (
+        !budgetCheck.allowed ||
+        budgetCheck.status === 'allowed_critical' ||
+        budgetCheck.status === 'allowed_overage'
+      ) {
+        shortenBudgetStateCacheTtl(user.userId)
+      }
     }
     if (budgetCheck && !budgetCheck.allowed) {
       // EQUIPA: o hard cap da fatia é o CONTRATO da feature e não há

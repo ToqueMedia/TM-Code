@@ -164,4 +164,37 @@ describe('projectAgentStatusService (writer)', () => {
     useAgentStore.getState().setStatus('idle')
     expect(statusWrites(invoke)).toHaveLength(0)
   })
+
+  it('badges a budget stop as error with the budget label (any terminal status)', () => {
+    const { invoke, useAgentStore, useProjectStore, service } = setup()
+    useProjectStore.setState({ currentProject: { path: '/p/a', name: 'a' } })
+
+    useAgentStore.getState().setStatus('generating')
+    service.markNextStopAsBudgetStop('Consumo esgotado — tarefas interrompidas')
+    // O abort do budget-stop pode aterrar como cancelled/idle/error — a
+    // marca tem de vencer o mapeamento normal (cancelled→idle).
+    useAgentStore.getState().setStatus('cancelled')
+
+    const writes = statusWrites(invoke)
+    expect(writes[writes.length - 1]).toEqual({
+      projectPath: '/p/a',
+      state: 'error',
+      label: 'Consumo esgotado — tarefas interrompidas',
+    })
+  })
+
+  it('a new run clears a stale budget-stop mark', () => {
+    const { invoke, useAgentStore, useProjectStore, service } = setup()
+    useProjectStore.setState({ currentProject: { path: '/p/a', name: 'a' } })
+
+    service.markNextStopAsBudgetStop('stale')
+    useAgentStore.getState().setStatus('generating') // run start consome/limpa a marca
+    useAgentStore.getState().setStatus('cancelled')
+
+    const writes = statusWrites(invoke)
+    expect(writes[writes.length - 1]).toMatchObject({
+      projectPath: '/p/a',
+      state: 'idle',
+    })
+  })
 })

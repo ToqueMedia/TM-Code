@@ -378,6 +378,12 @@ function App() {
 		void import('./services/projectAgentStatusService')
 			.then(m => m.initProjectAgentStatusWriter())
 			.catch(() => { /* Tauri not present (jsdom tests) */ })
+		// Budget exhausted → stop EVERYTHING in this window (main run +
+		// sub-agents) with a descriptive system message, instead of letting
+		// each parallel run burn one more turn until its own 402.
+		void import('./services/budgetStopService')
+			.then(m => m.initBudgetStopWatcher())
+			.catch(() => { /* Tauri not present (jsdom tests) */ })
 	}, []);
 
 	// Native file drop — drag a folder from Finder/Explorer onto the window

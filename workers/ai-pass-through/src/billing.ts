@@ -173,10 +173,38 @@ export interface UserBudgetState {
 }
 
 const STATE_CACHE_MS = 60_000
+/** TTL curto para utilizadores que o gate viu perto/em cima do limite. */
+const NEAR_LIMIT_STATE_CACHE_MS = 10_000
 let stateCache = new Map<string, { state: UserBudgetState | null; expiresAt: number }>()
 
 export function clearBudgetStateCache(): void {
   stateCache = new Map()
+}
+
+/**
+ * Encurta a validade da cache do estado de orçamento deste utilizador para
+ * ≤10s. Chamado pelo gate quando o pedido foi visto perto do limite
+ * (allowed_critical / allowed_overage) ou já rejeitado. Duas razões:
+ *
+ *  1. Overshoot concorrente — com N runs em paralelo (multi-janela na IDE),
+ *     a cache de 60s admitia até 60s de pedidos sobre um snapshot velho; o
+ *     overshoot cresce com o paralelismo. Perto do limite, o snapshot tem de
+ *     envelhecer depressa para os commits (deste e de outros isolates, via
+ *     re-read do Firestore) travarem a tempo.
+ *  2. Desbloqueio pós-compra — uma rejeição cacheada "colava" por até 60s
+ *     depois de o utilizador comprar consumo extra; com TTL curto o próximo
+ *     pedido relê o saldo novo em ≤10s.
+ *
+ * Só encurta — nunca alonga — e não toca no caminho feliz (longe do limite
+ * mantém o TTL barato de 60s).
+ */
+export function shortenBudgetStateCacheTtl(userId: string, now = Date.now()): void {
+  const cached = stateCache.get(userId)
+  if (!cached) return
+  const cap = now + NEAR_LIMIT_STATE_CACHE_MS
+  if (cached.expiresAt > cap) {
+    stateCache.set(userId, { state: cached.state, expiresAt: cap })
+  }
 }
 
 const DEFAULT_FIRESTORE_BASE = 'https://firestore.googleapis.com'

@@ -507,6 +507,13 @@ const en = {
   'chat.extraCreditsRemaining': 'extra credits remaining.',
   'chat.noCreditsRemaining': 'No credits remaining.',
   'chat.buyCredits': 'Buy credits',
+
+  // ── Budget exhaustion (global stop) ──────────────────
+  'billing.budgetStopMessage': 'The cycle token budget ran out — all agent tasks in this window were stopped.',
+  'billing.budgetStopBadge': 'Out of credits — tasks stopped',
+  'billing.budgetExhaustedError': 'Token budget exhausted for this cycle. Buy extra usage or wait for the cycle reset.',
+  'billing.teamSliceExhaustedError': 'Your team slice is exhausted for this cycle. Ask your team admin to increase your allocation.',
+  'billing.teamByokExhaustedError': 'The team BYOK budget is exhausted. Ask your team admin to top it up.',
   'chat.tokensUsed': 'percentage used',
   'chat.copyMessage': 'Copy',
   'chat.copied': 'Copied!',
@@ -2163,6 +2170,13 @@ const pt: Record<keyof typeof en, string> = {
   'chat.extraCreditsRemaining': 'de consumo extra restantes.',
   'chat.noCreditsRemaining': 'Sem consumo restantes.',
   'chat.buyCredits': 'Comprar Consumo',
+
+  // ── Consumo esgotado (paragem global) ────────────────
+  'billing.budgetStopMessage': 'O consumo do ciclo esgotou — todas as tarefas do agente nesta janela foram interrompidas.',
+  'billing.budgetStopBadge': 'Consumo esgotado — tarefas interrompidas',
+  'billing.budgetExhaustedError': 'O consumo deste ciclo esgotou. Compre consumo extra ou aguarde o reinício do ciclo.',
+  'billing.teamSliceExhaustedError': 'A fatia da equipa esgotou neste ciclo. Peça ao admin da equipa para aumentar a alocação.',
+  'billing.teamByokExhaustedError': 'O orçamento BYOK da equipa esgotou. Peça ao admin da equipa para o reforçar.',
   'chat.tokensUsed': 'percentagem usada',
   'chat.copyMessage': 'Copiar',
   'chat.copied': 'Copiado!',
