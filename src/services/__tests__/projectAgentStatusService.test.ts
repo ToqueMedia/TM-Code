@@ -3,6 +3,9 @@
  * projectAgentStatusService.ts). Each scenario re-requires the module —
  * the writer keeps module-level run state (runningPath/heartbeat), so
  * isolation needs a fresh module registry, not just cleared mocks.
+ *
+ * Writes are SERIALIZED through a promise chain (heartbeat vs transition
+ * ordering), so assertions flush microtasks first — statusWrites() is async.
  */
 
 // Sem imports top-level (tudo via require nos setups), o ficheiro seria um
@@ -59,8 +62,14 @@ function setup() {
   return { invoke, useAgentStore, useProjectStore, service }
 }
 
+/** Drain the write chain's microtasks (works under fake timers too). */
+async function flushWrites(): Promise<void> {
+  for (let i = 0; i < 10; i++) await Promise.resolve()
+}
+
 /** Only the set_project_agent_status payloads, in call order. */
-function statusWrites(invoke: jest.Mock): Array<Record<string, unknown>> {
+async function statusWrites(invoke: jest.Mock): Promise<Array<Record<string, unknown>>> {
+  await flushWrites()
   return invoke.mock.calls
     .filter(call => call[0] === 'set_project_agent_status')
     .map(call => call[1])
@@ -71,7 +80,7 @@ afterEach(() => {
 })
 
 describe('projectAgentStatusService (writer)', () => {
-  it('writes running (with task label) when a run starts, once per run', () => {
+  it('writes running (with task label) when a run starts, once per run', async () => {
     const { invoke, useAgentStore, useProjectStore } = setup()
     useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
 
@@ -80,58 +89,61 @@ describe('projectAgentStatusService (writer)', () => {
     useAgentStore.getState().setStatus('generating')
     useAgentStore.getState().setStatus('applying')
 
-    const writes = statusWrites(invoke)
+    const writes = await statusWrites(invoke)
     expect(writes).toHaveLength(1)
     expect(writes[0]).toEqual({
       projectPath: '/p/a',
       state: 'running',
       label: 'Corrige o bug do login',
+      onlyIfOwn: false,
     })
   })
 
-  it('writes done when the run completes', () => {
+  it('writes done when the run completes', async () => {
     const { invoke, useAgentStore, useProjectStore } = setup()
     useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
 
     useAgentStore.getState().setStatus('generating')
     useAgentStore.getState().setStatus('idle')
 
-    const writes = statusWrites(invoke)
+    const writes = await statusWrites(invoke)
     expect(writes[writes.length - 1]).toMatchObject({
       projectPath: '/p/a',
       state: 'done',
     })
   })
 
-  it('writes idle (no badge) when the user cancels', () => {
+  it('writes idle (no badge) when the user cancels', async () => {
     const { invoke, useAgentStore, useProjectStore } = setup()
     useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
 
     useAgentStore.getState().setStatus('generating')
     useAgentStore.getState().setStatus('cancelled')
 
-    const writes = statusWrites(invoke)
+    const writes = await statusWrites(invoke)
     expect(writes[writes.length - 1]).toMatchObject({
       projectPath: '/p/a',
       state: 'idle',
+      // Clears are ownership-guarded: never stamp over another window's badge.
+      onlyIfOwn: true,
     })
   })
 
-  it('writes error when the run fails', () => {
+  it('writes error when the run fails', async () => {
     const { invoke, useAgentStore, useProjectStore } = setup()
     useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
 
     useAgentStore.getState().setStatus('reasoning')
     useAgentStore.getState().setStatus('error')
 
-    const writes = statusWrites(invoke)
+    const writes = await statusWrites(invoke)
     expect(writes[writes.length - 1]).toMatchObject({
       projectPath: '/p/a',
       state: 'error',
     })
   })
 
-  it('heartbeats running so readers can detect a crashed writer', () => {
+  it('heartbeats running so readers can detect a crashed writer', async () => {
     jest.useFakeTimers()
     const { invoke, useAgentStore, useProjectStore, service } = setup()
     useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
@@ -139,18 +151,18 @@ describe('projectAgentStatusService (writer)', () => {
     useAgentStore.getState().setStatus('generating')
     jest.advanceTimersByTime(service.PROJECT_AGENT_STATUS_HEARTBEAT_MS * 2 + 50)
 
-    const running = statusWrites(invoke).filter(w => w.state === 'running')
+    const running = (await statusWrites(invoke)).filter(w => w.state === 'running')
     expect(running.length).toBeGreaterThanOrEqual(3) // initial + 2 heartbeats
 
     // Run ends → heartbeat must stop refreshing `running`.
     useAgentStore.getState().setStatus('idle')
-    const countAfterEnd = statusWrites(invoke).length
+    const countAfterEnd = (await statusWrites(invoke)).length
     jest.advanceTimersByTime(service.PROJECT_AGENT_STATUS_HEARTBEAT_MS * 3)
-    const late = statusWrites(invoke).slice(countAfterEnd)
+    const late = (await statusWrites(invoke)).slice(countAfterEnd)
     expect(late.filter(w => w.state === 'running')).toHaveLength(0)
   })
 
-  it('marks the previous project idle on switch', () => {
+  it('marks the previous project idle on switch (ownership-guarded)', async () => {
     const { invoke, useAgentStore, useProjectStore } = setup()
     useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
     useAgentStore.getState().setStatus('generating')
@@ -159,23 +171,23 @@ describe('projectAgentStatusService (writer)', () => {
     useAgentStore.getState().setStatus('cancelled')
     useProjectStore.setState({ currentProject: mkProject('/p/b', 'b') })
 
-    const writes = statusWrites(invoke)
+    const writes = await statusWrites(invoke)
     const forA = writes.filter(w => w.projectPath === '/p/a')
-    expect(forA[forA.length - 1]).toMatchObject({ state: 'idle' })
+    expect(forA[forA.length - 1]).toMatchObject({ state: 'idle', onlyIfOwn: true })
     // And nothing was ever written for the new project as a side effect of
     // the old one's run (clearStaleStatusOnOpen only READS here — the mocked
     // get_project_agent_statuses returns {}).
     expect(writes.filter(w => w.projectPath === '/p/b')).toHaveLength(0)
   })
 
-  it('never writes when no project is open', () => {
+  it('never writes when no project is open', async () => {
     const { invoke, useAgentStore } = setup()
     useAgentStore.getState().setStatus('generating')
     useAgentStore.getState().setStatus('idle')
-    expect(statusWrites(invoke)).toHaveLength(0)
+    expect(await statusWrites(invoke)).toHaveLength(0)
   })
 
-  it('badges a budget stop as error with the budget label (any terminal status)', () => {
+  it('badges a budget stop as error with the budget label (any terminal status)', async () => {
     const { invoke, useAgentStore, useProjectStore, service } = setup()
     useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
 
@@ -185,15 +197,16 @@ describe('projectAgentStatusService (writer)', () => {
     // marca tem de vencer o mapeamento normal (cancelled→idle).
     useAgentStore.getState().setStatus('cancelled')
 
-    const writes = statusWrites(invoke)
+    const writes = await statusWrites(invoke)
     expect(writes[writes.length - 1]).toEqual({
       projectPath: '/p/a',
       state: 'error',
       label: 'Consumo esgotado — tarefas interrompidas',
+      onlyIfOwn: false,
     })
   })
 
-  it('a new run clears a stale budget-stop mark', () => {
+  it('a new run clears a stale budget-stop mark', async () => {
     const { invoke, useAgentStore, useProjectStore, service } = setup()
     useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
 
@@ -201,7 +214,7 @@ describe('projectAgentStatusService (writer)', () => {
     useAgentStore.getState().setStatus('generating') // run start consome/limpa a marca
     useAgentStore.getState().setStatus('cancelled')
 
-    const writes = statusWrites(invoke)
+    const writes = await statusWrites(invoke)
     expect(writes[writes.length - 1]).toMatchObject({
       projectPath: '/p/a',
       state: 'idle',

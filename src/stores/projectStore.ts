@@ -72,7 +72,13 @@ interface ProjectStore {
   openProject: (path: string, options?: { initGit?: boolean }) => Promise<void>;
   createProject: (path: string, template: string) => Promise<void>;
   loadRecentProjects: () => Promise<void>;
-  closeProject: () => Promise<void>;
+  /**
+   * Close to Welcome. Can DECLINE (returns false) when the user answers
+   * "keep working" to the busy/dirty confirms — callers that continue with
+   * side effects (sign-out!) must check the result. `force` skips both
+   * confirms for non-interactive paths (project directory deleted).
+   */
+  closeProject: (options?: { force?: boolean }) => Promise<boolean>;
   /**
    * Forced, non-interactive teardown back to the Welcome screen — no
    * dirty-file prompt, no state save. Used when an admin blocks/deletes the
@@ -576,9 +582,9 @@ export const useProjectStore = create<ProjectStore>()(
           // If removing the current project, close it first
           const { currentProject } = get();
           if (currentProject?.id === projectId) {
-            await get().closeProject();
-            // User cancelled the close dialog — abort
-            if (get().currentProject?.id === projectId) return;
+            const closed = await get().closeProject();
+            // User declined the close (busy/dirty confirm) — abort
+            if (!closed) return;
           }
           await invoke('remove_from_recent_projects', { projectId });
           set(state => ({
@@ -641,31 +647,41 @@ export const useProjectStore = create<ProjectStore>()(
         }
       },
 
-      closeProject: async () => {
+      closeProject: async (options?: { force?: boolean }) => {
         const { currentProject } = get();
 
         // Closing cancels the in-flight run (tearDownProject → cancelLoop);
-        // give the user the chance to keep it working instead.
-        const proceedBusy = await confirmCancelActiveRun('close');
-        if (!proceedBusy) return;
+        // give the user the chance to keep it working instead. `force` is
+        // for non-interactive closes (deleted project dir) where prompting
+        // would strand the app on a modal nobody can answer meaningfully.
+        if (!options?.force) {
+          const proceedBusy = await confirmCancelActiveRun('close');
+          if (!proceedBusy) return false;
 
-        const editorState = useEditorRepository.getState();
-        const hasDirtyFiles = editorState.openFiles.some(f => f.isDirty);
-
-        if (hasDirtyFiles) {
-          const dirtyCount = editorState.openFiles.filter(f => f.isDirty).length;
-          const ok = await tauriConfirm(`There are ${dirtyCount} unsaved file(s). Close project and discard changes?`, { title: 'Unsaved changes', kind: 'warning' });
-          if (!ok) return;
+          const editorState = useEditorRepository.getState();
+          const hasDirtyFiles = editorState.openFiles.some(f => f.isDirty);
+          if (hasDirtyFiles) {
+            const dirtyCount = editorState.openFiles.filter(f => f.isDirty).length;
+            const ok = await tauriConfirm(`There are ${dirtyCount} unsaved file(s). Close project and discard changes?`, { title: 'Unsaved changes', kind: 'warning' });
+            if (!ok) return false;
+          }
         }
 
         // Save current project state before closing
         if (currentProject) {
           await get().saveProjectState().catch(console.error);
+          // Save the chat session BEFORE teardown wipes it. Centralised
+          // here for EVERY close path (Home button, keyboard shortcut,
+          // sign-out, status monitor) — sign-out used to do this from the
+          // outside and the other paths could lose the final seconds of
+          // conversation between the last auto-save tick and the close.
+          await useChatStore.getState().cleanupOnExit(currentProject.path).catch(() => {});
         }
         tearDownProject();
         // User is now back on Welcome — remember that so a restart doesn't
         // auto-reopen the project they just closed.
         set({ welcomeScreen: 'hero', noTmsFile: false, tmsBootstrapping: false });
+        return true;
       },
 
       expelToWelcome: () => {

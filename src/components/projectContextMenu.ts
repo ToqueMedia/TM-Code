@@ -2,28 +2,29 @@ import { Menu, MenuItem, PredefinedMenuItem } from '@tauri-apps/api/menu'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { t } from '@/i18n'
 import { invoke } from '@/utils/invokeMetrics'
-import { useChatStore } from '@/stores/chatStore'
 import { useLayoutStore } from '@/stores/layoutStore'
 import { useProjectStore } from '@/stores/projectStore'
 import type { RecentProject } from '@/types/project'
 
 const isMac = /Mac/.test(navigator.platform || '')
 
-async function switchProject(projectPath: string): Promise<void> {
+/** Returns true when the switch actually happened (openProject can DECLINE
+ *  via the agent-busy confirm, leaving the current project in place). */
+async function switchProject(projectPath: string): Promise<boolean> {
   const currentProject = useProjectStore.getState().currentProject
-  if (currentProject?.path === projectPath) return
+  if (currentProject?.path === projectPath) return true
 
-  const chatStore = useChatStore.getState()
-  if (currentProject) {
-    await chatStore.cleanupOnExit(currentProject.path).catch(() => {})
-  }
-
+  // No cleanupOnExit here: the project-change effect in App.tsx already
+  // saves the previous session when currentProject flips — and openProject
+  // can now DECLINE ("keep working"). Tearing chat state down BEFORE the
+  // confirm left the project the user chose to stay in with auto-save dead.
   await useProjectStore.getState().openProject(projectPath)
+  return useProjectStore.getState().currentProject?.path === projectPath
 }
 
 export async function openProjectInEditor(projectPath: string): Promise<void> {
-  await switchProject(projectPath)
-  useLayoutStore.getState().setViewMode('editor')
+  const switched = await switchProject(projectPath)
+  if (switched) useLayoutStore.getState().setViewMode('editor')
 }
 
 export async function showProjectContextMenu(project: RecentProject): Promise<void> {

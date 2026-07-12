@@ -44,6 +44,15 @@ jest.mock('@/services/projectAgentStatusService', () => ({
   markNextStopAsBudgetStop: mockMarkBudgetStop,
 }))
 
+// O serviço usa o messageQueue REAL (parquear tarefas); só o log de
+// operações (Tauri) é mockado.
+jest.mock('@/services/agent/queueOperationLog', () => ({
+  getQueueLogSessionId: () => 'test',
+  getQueueLogProjectPath: () => null,
+  recordQueueOperation: jest.fn().mockResolvedValue(undefined),
+  setQueueLogContext: jest.fn(),
+}))
+
 jest.mock('@/i18n', () => ({ t: (key: string) => key }))
 
 jest.mock('@/utils/logger', () => ({
@@ -51,15 +60,18 @@ jest.mock('@/utils/logger', () => ({
 }))
 
 type BillingStoreModule = typeof import('@/stores/billingStore')
+type MessageQueueModule = typeof import('@/services/agent/messageQueue')
 
 function setup() {
   jest.resetModules()
   jest.clearAllMocks()
   const { useBillingStore } = require('@/stores/billingStore') as BillingStoreModule
+  const messageQueue = require('@/services/agent/messageQueue') as MessageQueueModule
+  messageQueue.resetCommandQueue()
   useBillingStore.getState().clearNoCredits()
   const service = require('../budgetStopService') as typeof import('../budgetStopService')
   service.initBudgetStopWatcher()
-  return { useBillingStore }
+  return { useBillingStore, messageQueue }
 }
 
 /** stopAllAgentWork é async (dynamic imports) — dá-lhe os microtasks. */
@@ -106,6 +118,37 @@ describe('budgetStopService', () => {
     await flush()
 
     expect(mockAbortAll).not.toHaveBeenCalled()
+    expect(mockCancelLoop).not.toHaveBeenCalled()
+    expect(mockAddSystemMessage).not.toHaveBeenCalled()
+  })
+
+  it('parks queued tasks (paused) and drops steering on exhaustion', async () => {
+    const { useBillingStore, messageQueue } = setup()
+    mockIsAgentRunning.mockReturnValue(true)
+    messageQueue.enqueue({ value: 'usa a lib X', mode: 'prompt', uuid: 's1' })
+    messageQueue.enqueue({ value: 'faz a feature B', mode: 'prompt', uuid: 't1', asTask: true })
+
+    useBillingStore.getState().setNoCredits()
+    await flush()
+
+    // A orientação morre com o run; a tarefa sobrevive PARQUEADA — nada é
+    // despachado (nem queima um 402) e nada se perde para depois da compra.
+    expect(messageQueue.getCommandQueueSnapshot().map(c => c.uuid)).toEqual(['t1'])
+    expect(messageQueue.isQueuePaused()).toBe(true)
+  })
+
+  it('parks the queue even when the run already ended on its own 402', async () => {
+    const { useBillingStore, messageQueue } = setup()
+    mockIsAgentRunning.mockReturnValue(false)
+    mockGetPendingCount.mockReturnValue(0)
+    messageQueue.enqueue({ value: 'tarefa pendente', mode: 'prompt', uuid: 't1', asTask: true })
+
+    useBillingStore.getState().setNoCredits()
+    await flush()
+
+    expect(messageQueue.isQueuePaused()).toBe(true)
+    // Sem run vivo não há nada para cancelar nem mensagem duplicada — a
+    // mensagem tipada do 402 do próprio run já está no chat.
     expect(mockCancelLoop).not.toHaveBeenCalled()
     expect(mockAddSystemMessage).not.toHaveBeenCalled()
   })

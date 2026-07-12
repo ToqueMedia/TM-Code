@@ -60,6 +60,31 @@ const commandQueue: QueuedCommand[] = []
 let snapshot: readonly QueuedCommand[] = Object.freeze([])
 const queueChanged = createSignal()
 
+// === Queue pause ===
+//
+// True while the idle drain must NOT dispatch anything. Set by Stop (queued
+// tasks survive the stop, parked instead of firing the instant the guard
+// goes idle — "Stop doesn't stop" bug), by the budget-stop watcher (parked
+// work must not burn 402s and must survive until credits return), and on
+// snapshot rehydrate when tasks are present (auto-firing agent runs at app
+// boot without a user action would be a surprise). Cleared by the strip's
+// "Resume" button, by any manual send (pressing Enter IS the intent to
+// continue), and automatically when the queue empties.
+let queuePaused = false
+const pauseChanged = createSignal()
+
+export const subscribeToQueuePause = pauseChanged.subscribe
+
+export function isQueuePaused(): boolean {
+  return queuePaused
+}
+
+export function setQueuePaused(paused: boolean): void {
+  if (queuePaused === paused) return
+  queuePaused = paused
+  pauseChanged.emit()
+}
+
 // === Snapshot persistence ===
 //
 // Every queue mutation triggers a debounced write to
@@ -112,6 +137,9 @@ function notifySubscribers(): void {
   snapshot = Object.freeze([...commandQueue])
   queueChanged.emit()
   scheduleSnapshotPersist()
+  // Nothing left to resume — a lingering pause would silently freeze the
+  // NEXT thing the user queues.
+  if (commandQueue.length === 0) setQueuePaused(false)
 }
 
 /**
@@ -130,6 +158,13 @@ export function hydrateCommandQueue(items: QueuedCommand[]): void {
   snapshot = Object.freeze([...commandQueue])
   queueChanged.emit()
   // Don't trigger a write here — the items came FROM disk, no new state.
+  //
+  // Rehydrated TASKS start paused: a task is a full agent run, and firing
+  // one at app boot with zero user action (possibly hours after it was
+  // queued) is a surprise — and, post budget-stop, a token burn. Steer-only
+  // snapshots keep the historical auto-restore behaviour. The strip shows
+  // the paused banner with a Resume button.
+  setQueuePaused(items.some(c => c.asTask === true))
 }
 
 // ============================================================================
@@ -304,10 +339,11 @@ export function clearCommandQueue(): void {
   notifySubscribers()
 }
 
-/** Test helper — clear queue and reset snapshot to a fresh frozen array. */
+/** Test helper — clear queue, pause flag, and snapshot. */
 export function resetCommandQueue(): void {
   commandQueue.length = 0
   snapshot = Object.freeze([])
+  queuePaused = false
 }
 
 // ============================================================================
@@ -345,6 +381,33 @@ export function isSlashCommand(cmd: QueuedCommand): boolean {
  */
 export function isSteerable(cmd: QueuedCommand): boolean {
   return !isSlashCommand(cmd) && cmd.mode === 'prompt' && cmd.asTask !== true
+}
+
+/**
+ * Drain the steerable messages the live run may absorb NOW: only those
+ * enqueued BEFORE the first task in queue order. A steer message the user
+ * placed (or reordered) BELOW a task belongs to the run that task will
+ * start, not to the current one — draining it here would make the strip's
+ * order a lie. This is the steering-collector counterpart of the batch
+ * window in queueProcessor; both enforce "queue order is execution order".
+ */
+export function drainSteerableMessages(): QueuedCommand[] {
+  const firstTaskIdx = commandQueue.findIndex(c => c.asTask === true)
+  const window = firstTaskIdx === -1 ? commandQueue : commandQueue.slice(0, firstTaskIdx)
+  const eligible = new Set(window.filter(isSteerable))
+  if (eligible.size === 0) return []
+  return dequeueAllMatching(c => eligible.has(c))
+}
+
+/**
+ * Drop every steerable message, keeping tasks (and slash/bash) in place.
+ * Used by Stop: a steer message is a course correction for the run being
+ * killed — meaningless afterwards — while queued TASKS are independent
+ * units of work the user queued deliberately; they get parked (paused),
+ * not destroyed.
+ */
+export function removeSteerableMessages(): void {
+  dequeueAllMatching(isSteerable)
 }
 
 /**

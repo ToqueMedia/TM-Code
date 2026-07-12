@@ -239,11 +239,17 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Monotonic suffix for the temp file: two concurrent invokes from the SAME
+/// process (heartbeat tick + run-end transition) must never share a temp
+/// path, or one write could truncate the other's inode mid-publish.
+static AGENT_STATUS_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[tauri::command]
 pub async fn set_project_agent_status(
     project_path: String,
     state: String,
     label: Option<String>,
+    only_if_own: Option<bool>,
 ) -> Result<(), String> {
     if !matches!(state.as_str(), "running" | "done" | "error" | "idle") {
         return Err(format!("Invalid agent status state: {}", state));
@@ -251,6 +257,22 @@ pub async fn set_project_agent_status(
     let root = project_state_root(&project_path)?;
     std::fs::create_dir_all(&root)
         .map_err(|e| format!("Failed to create project state directory: {}", e))?;
+
+    // only_if_own: "only touch state this process owns". Used by the
+    // frontend's idle-clears so a window leaving a project never stamps
+    // over the truthful badge of ANOTHER window that has the same project
+    // open and running. No file (nothing owned) → skip too, instead of
+    // materialising a noise `idle` file.
+    if only_if_own == Some(true) {
+        let Ok(existing) = std::fs::read_to_string(root.join(AGENT_STATUS_FILE)) else {
+            return Ok(());
+        };
+        match serde_json::from_str::<ProjectAgentStatus>(&existing) {
+            Ok(prev) if prev.pid != std::process::id() => return Ok(()),
+            _ => {}
+        }
+    }
+
     let status = ProjectAgentStatus {
         state,
         label,
@@ -261,7 +283,12 @@ pub async fn set_project_agent_status(
         .map_err(|e| format!("Failed to serialize agent status: {}", e))?;
     // temp + rename: readers in OTHER processes poll this file — they must
     // never observe a torn write (a parse failure reads as "no status").
-    let tmp = root.join(format!(".agent-status.tmp-{}", std::process::id()));
+    let seq = AGENT_STATUS_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = root.join(format!(
+        ".agent-status.tmp-{}-{}",
+        std::process::id(),
+        seq
+    ));
     std::fs::write(&tmp, &json).map_err(|e| format!("Failed to write agent status: {}", e))?;
     std::fs::rename(&tmp, root.join(AGENT_STATUS_FILE))
         .map_err(|e| format!("Failed to publish agent status: {}", e))?;
@@ -293,8 +320,21 @@ pub async fn get_project_agent_statuses(
 /// WindowEvent::Destroyed handler. Once this process dies nothing can
 /// heartbeat the file, so an explicit remove beats making every other window
 /// wait out the reader-side staleness timeout.
+///
+/// Ownership-aware: if the file was written by ANOTHER (possibly live)
+/// process — two windows on the same project — leave it alone; removing it
+/// would erase their truthful badge. An unparseable file is removed (torn
+/// garbage helps nobody).
 pub(crate) fn clear_project_agent_status(project_path: &str) {
     if let Some(root) = project_state_root_readonly(project_path) {
-        let _ = std::fs::remove_file(root.join(AGENT_STATUS_FILE));
+        let file = root.join(AGENT_STATUS_FILE);
+        if let Ok(existing) = std::fs::read_to_string(&file) {
+            if let Ok(prev) = serde_json::from_str::<ProjectAgentStatus>(&existing) {
+                if prev.pid != std::process::id() {
+                    return;
+                }
+            }
+            let _ = std::fs::remove_file(file);
+        }
     }
 }

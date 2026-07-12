@@ -33,11 +33,11 @@ import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAt
 import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from '../../services/agent/atMentions'
 import {
   enqueue as enqueueMessage,
-  clearCommandQueue as clearMessageQueue,
-  dequeueAllMatching,
-  isSteerable,
+  drainSteerableMessages,
   joinPromptValues,
+  setQueuePaused,
 } from '../../services/agent/messageQueue'
+import { stopAgentRun } from '../../services/agent/stopAgentRun'
 import type { OpenAIContentPart } from '../../services/agent/agentService'
 // getModelProfile removed — model decided by backend based on plan
 import {
@@ -975,11 +975,12 @@ export function usePromptBar() {
                 ? `${deliveries}\n\n${v}`
                 : [{ type: 'text', text: deliveries }, ...v]
 
-          // Only steerable messages ride the live run (isSteerable):
-          // slash/bash need executeInput's per-command handling, and queued
-          // TASKS (`asTask`) wait for the idle drain on purpose — they are
-          // a separate unit of work, not a course correction.
-          const drained = dequeueAllMatching(isSteerable)
+          // Only steerable messages BEFORE the first queued task ride the
+          // live run (drainSteerableMessages): slash/bash need
+          // executeInput's per-command handling, tasks wait for the idle
+          // drain, and a steer message the user reordered BELOW a task
+          // belongs to that task's run — not to this one.
+          const drained = drainSteerableMessages()
           if (drained.length === 0) return deliveries
 
           // Coalesce a burst into ONE steered turn (joinPromptValues preserves
@@ -1223,6 +1224,27 @@ export function usePromptBar() {
     // === ALL other messages: ALWAYS enqueue first ===
     // The queue processor will dequeue when the agent is idle.
     // This matches Claude Code's behavior — no conditional gating on isAgentBusy.
+
+    // Billing gate at the door: the Chat dispatch path has no server-side
+    // pre-flight of its own, and the queue processor HOLDS (not drains) the
+    // queue while blocked — so accepting this message would just park it
+    // with no explanation. Refuse with the same message the agentRunner
+    // pre-flight uses, and keep the draft so nothing is lost.
+    {
+      const billing = useBillingStore.getState()
+      if (billing.noCredits || billing.status === 'rejected') {
+        useChatStore.getState().addSystemMessage(
+          `${t('chat.noCredits')}: ${t('chat.noCreditsRemaining')} ${t('chat.buyCredits')}.`,
+          'error',
+        )
+        return
+      }
+    }
+
+    // A manual send is an explicit "continue" — lift any queue pause left
+    // by Stop / budget stop / task rehydrate before this message queues.
+    setQueuePaused(false)
+
     const attachments = [...useChatStore.getState().draftAttachments]
 
     // Build the queued value. Plain text → string. With attachments →
@@ -1262,30 +1284,13 @@ export function usePromptBar() {
     logger.info('queue', `Message enqueued${queueAsTask ? ' as task' : ''}: "${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}"`)
   }, [currentProject, devCommand, runAgentForPrompt, queueAsTask])
 
+  // Shared implementation with the status-bar Stop (stopAgentRun): drops
+  // steering, PARKS queued tasks (paused, not destroyed — this handler used
+  // to clear the whole queue while the status bar cleared nothing), kills
+  // all live work.
   const handleStop = useCallback(() => {
-    // Clear the message queue BEFORE cancelling — prevents useQueueProcessor
-    // from firing when queryGuard transitions to idle.
-    clearMessageQueue()
-
-    // Check if there are pending permissions that will be cancelled
-    const pendingCount = usePermissionStore.getState().getQueuedCount()
-    if (pendingCount > 0) {
-      const confirmed = window.confirm(
-        `There are ${pendingCount} pending permission${pendingCount > 1 ? 's' : ''} in the queue. ` +
-        `Stopping will cancel all of them. Continue?`
-      )
-      if (!confirmed) return
-    }
-
-    // Clear any pending permission first — resolves the dangling Promise
-    usePermissionStore.getState().clearPending()
-    // Resolve any pending diff approval waits (rejects them)
-    resolveAllPendingDiffApprovals(false)
-    AgentService.getInstance().cancelLoop()
-    useAgentStore.getState().setError(null)
-    useAgentStore.getState().setStatus('cancelled')
-    useChatStore.getState().finalizeAssistantMessage()
-  }, [clearMessageQueue])
+    stopAgentRun()
+  }, [])
 
   // === Queue processor — runs queued commands when agent becomes idle ===
   //

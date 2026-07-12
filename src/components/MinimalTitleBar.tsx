@@ -6,7 +6,6 @@ import { tokens } from '@/theme/tokens'
 import { useProjectStore } from '../stores/projectStore'
 import { useAuthStore } from '../stores/authStore'
 import { useLayoutStore } from '../stores/layoutStore'
-import { useChatStore } from '../stores/chatStore'
 import { useToastStore } from '../stores/toastStore'
 import FirebaseAuthService from '../services/auth/firebaseAuth'
 import { prepareProjectWebExport, sendProjectToTmCodeWeb, type PreparedWebExport } from '../services/webExportService'
@@ -188,11 +187,15 @@ function MinimalTitleBar() {
   async function handleSignOut() {
     setShowUserMenu(false)
 
-    // Clean up project and chat state before signing out
+    // Close the project first — closeProject saves the chat session itself
+    // (cleanupOnExit) and can DECLINE when the agent is mid-task and the
+    // user picks "keep working". Without checking the result, sign-out
+    // proceeded anyway: signed-out UI over an open workspace, with the
+    // live run dying on the next token refresh.
     const project = useProjectStore.getState().currentProject
     if (project) {
-      await useChatStore.getState().cleanupOnExit(project.path).catch(() => {})
-      await useProjectStore.getState().closeProject().catch(() => {})
+      const closed = await useProjectStore.getState().closeProject().catch(() => false)
+      if (!closed) return
     }
 
     // Clear auth state and sign out

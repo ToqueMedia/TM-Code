@@ -15,17 +15,22 @@ import {
   enqueue,
   dequeue,
   dequeueAllMatching,
+  drainSteerableMessages,
   peek,
   remove,
+  removeSteerableMessages,
   clearCommandQueue,
   resetCommandQueue,
   hasCommandsInQueue,
   getCommandQueueSnapshot,
+  hydrateCommandQueue,
+  isQueuePaused,
   isSlashCommand,
   isSteerable,
   joinPromptValues,
   canBatchWith,
   moveInQueue,
+  setQueuePaused,
 } from '../messageQueue'
 import type { ContentBlock, QueuedCommand } from '../../../types/messageQueueTypes'
 
@@ -344,5 +349,60 @@ describe('messageQueue — moveInQueue (queue strip reorder)', () => {
     enqueue(mk('b', { uuid: 'B' }))
     moveInQueue('B', -1)
     expect(dequeue()?.uuid).toBe('B')
+  })
+})
+
+describe('messageQueue — steering drains respect the task boundary', () => {
+  it('drainSteerableMessages only takes steer items BEFORE the first task', () => {
+    enqueue(mk('s1', { uuid: 'S1' }))
+    enqueue(mk('t1', { uuid: 'T1', asTask: true }))
+    enqueue(mk('s2', { uuid: 'S2' }))
+
+    // s2 was placed BELOW the task — it belongs to the task's run, not to
+    // the live one; draining it here would make the strip's order a lie.
+    const drained = drainSteerableMessages()
+    expect(drained.map(c => c.uuid)).toEqual(['S1'])
+    expect(getCommandQueueSnapshot().map(c => c.uuid)).toEqual(['T1', 'S2'])
+  })
+
+  it('drainSteerableMessages never takes tasks or slash commands', () => {
+    enqueue(mk('/plan', { uuid: 'SL' }))
+    enqueue(mk('t1', { uuid: 'T1', asTask: true }))
+    expect(drainSteerableMessages()).toEqual([])
+    expect(getCommandQueueSnapshot()).toHaveLength(2)
+  })
+
+  it('removeSteerableMessages drops steer everywhere, keeps tasks and slash', () => {
+    enqueue(mk('s1', { uuid: 'S1' }))
+    enqueue(mk('t1', { uuid: 'T1', asTask: true }))
+    enqueue(mk('s2', { uuid: 'S2' }))
+    enqueue(mk('/plan', { uuid: 'SL' }))
+
+    removeSteerableMessages()
+    expect(getCommandQueueSnapshot().map(c => c.uuid)).toEqual(['T1', 'SL'])
+  })
+})
+
+describe('messageQueue — pause semantics', () => {
+  it('pause flips and reports', () => {
+    expect(isQueuePaused()).toBe(false)
+    setQueuePaused(true)
+    expect(isQueuePaused()).toBe(true)
+  })
+
+  it('auto-unpauses when the queue empties', () => {
+    enqueue(mk('a', { uuid: 'A' }))
+    setQueuePaused(true)
+    remove([getCommandQueueSnapshot()[0] as any])
+    // Nothing left to resume — a lingering pause would freeze the NEXT enqueue.
+    expect(isQueuePaused()).toBe(false)
+  })
+
+  it('rehydrating a snapshot with tasks starts PAUSED; steer-only does not', () => {
+    hydrateCommandQueue([mk('t1', { uuid: 'T1', asTask: true })])
+    expect(isQueuePaused()).toBe(true)
+
+    hydrateCommandQueue([mk('s1', { uuid: 'S1' })])
+    expect(isQueuePaused()).toBe(false)
   })
 })

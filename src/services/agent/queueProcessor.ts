@@ -100,7 +100,17 @@ export function processQueueIfReady({
     cmd => batchWindow.has(cmd) && !isSlashCommand(cmd) && cmd.mode === targetMode,
   )
   if (commands.length === 0) {
-    return { processed: false }
+    // Priority reordering can make peek() pick an item the array-order
+    // batch window excludes (e.g. a 'now'-priority steer parked AFTER a
+    // task). Dispatch it alone instead of returning processed:false with a
+    // non-empty queue — that would freeze the drain forever (no snapshot
+    // change → useQueueProcessor's effect never re-fires). Unreachable
+    // with today's enqueue sites (everything is 'next'), but one 'now'
+    // enqueue away from a deadlock without this fallback.
+    const cmd = dequeue()
+    if (!cmd) return { processed: false }
+    void executeInput([cmd])
+    return { processed: true }
   }
 
   void executeInput(commands)

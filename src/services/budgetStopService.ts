@@ -17,13 +17,20 @@
  *   3. /v1/me no focus da janela (é assim que uma janela paralela descobre
  *      que outra janela esgotou o orçamento — não há push do servidor).
  *
- * Não limpa a fila de mensagens: o pré-voo do agentRunner já bloqueia novos
- * runs enquanto noCredits, e as mensagens do utilizador não devem ser
- * descartadas — voltam a correr depois da compra/reset.
+ * Fila: as orientações (steer) são descartadas — pertenciam ao run que está
+ * a morrer. As TAREFAS sobrevivem PARQUEADAS: a fila fica em pausa
+ * (setQueuePaused) e o useQueueProcessor também tem um gate de billing, por
+ * isso nada é despachado (nem queima 402s) enquanto não houver consumo; após
+ * a compra, o utilizador retoma pela strip ou enviando uma mensagem.
  */
 
 import { useBillingStore } from '@/stores/billingStore'
 import { useChatStore } from '@/stores/chatStore'
+import {
+  hasCommandsInQueue,
+  removeSteerableMessages,
+  setQueuePaused,
+} from '@/services/agent/messageQueue'
 import { logger } from '@/utils/logger'
 import { t } from '@/i18n'
 
@@ -42,6 +49,14 @@ async function stopAllAgentWork(): Promise<void> {
       ])
     const agentService = agentServiceModule.getInstance()
     const subAgents = useSubAgentStore.getState()
+
+    // Fila primeiro e SEMPRE (mesmo sem run vivo — o 402 pode ter chegado
+    // quando o run principal já ia a terminar): orientações fora, tarefas
+    // parqueadas. O gate de billing do processor já as segura; a pausa
+    // torna o estado visível (banner + Retomar na strip).
+    removeSteerableMessages()
+    if (hasCommandsInQueue()) setQueuePaused(true)
+
     const busy = agentService.isAgentRunning() || subAgents.getPendingCount() > 0
     if (!busy) return
 
@@ -51,7 +66,7 @@ async function stopAllAgentWork(): Promise<void> {
     // com o motivo.
     statusService.markNextStopAsBudgetStop(t('billing.budgetStopBadge'))
 
-    // Mesmo par do botão Stop (AgentStatusBar): sub-agentes + loop principal.
+    // Mesmo par do botão Stop (stopAgentRun): sub-agentes + loop principal.
     subAgents.abortAll()
     agentService.cancelLoop()
 

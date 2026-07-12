@@ -82,18 +82,35 @@ export function markNextStopAsBudgetStop(label: string): void {
   budgetStopLabel = label
 }
 
+/**
+ * Escritas SERIALIZADAS: heartbeat (setInterval) e escritas de transição são
+ * invokes async concorrentes — sem a cadeia, um "running" atrasado podia
+ * vencer o rename ao "done" e deixar um badge vivo-mentiroso até ao corte de
+ * staleness (90s) nas outras janelas. A cadeia garante que a ordem de
+ * chegada ao Rust é a ordem em que decidimos escrever.
+ *
+ * `onlyIfOwn`: escreve apenas se o ficheiro actual pertence a ESTE processo
+ * (pid) — usado nos clears para nunca apagar o badge verdadeiro de OUTRA
+ * janela com o mesmo projecto aberto.
+ */
+let writeChain: Promise<void> = Promise.resolve()
+
 function writeStatus(
   projectPath: string,
   state: ProjectAgentRunState,
   label?: string | null,
+  opts?: { onlyIfOwn?: boolean },
 ): void {
-  invoke('set_project_agent_status', {
-    projectPath,
-    state,
-    label: label ?? null,
-  }).catch(err => {
-    logger.warn('agent', 'set_project_agent_status failed:', err)
-  })
+  writeChain = writeChain.then(() =>
+    invoke('set_project_agent_status', {
+      projectPath,
+      state,
+      label: label ?? null,
+      onlyIfOwn: opts?.onlyIfOwn === true,
+    }).catch(err => {
+      logger.warn('agent', 'set_project_agent_status failed:', err)
+    }) as Promise<void>,
+  )
 }
 
 function startHeartbeat(): void {
@@ -136,7 +153,7 @@ export function acknowledgeTerminalStatus(): void {
   const currentPath = useProjectStore.getState().currentProject?.path
   if (!currentPath || currentPath !== terminalWrite.path) return
   if (BUSY_STATUSES.has(useAgentStore.getState().status)) return
-  writeStatus(terminalWrite.path, 'idle')
+  writeStatus(terminalWrite.path, 'idle', null, { onlyIfOwn: true })
   terminalWrite = null
 }
 
@@ -199,7 +216,7 @@ function onAgentStatusChange(status: AgentStatus, prevStatus: AgentStatus): void
     } else if (status === 'cancelled') {
       // Explicit user stop — attended by definition, no badge to keep.
       terminalWrite = null
-      writeStatus(path, 'idle')
+      writeStatus(path, 'idle', null, { onlyIfOwn: true })
     } else {
       terminalWrite = { path, state: 'done' }
       writeStatus(path, 'done', runningLabel)
@@ -241,11 +258,13 @@ function onProjectChange(
   if (prevPath) {
     // Leaving a project (switch/close). The run was already cancelled by
     // projectStore's guard — make sure no badge from THIS window survives.
+    // onlyIfOwn: another window may have the SAME project open and running;
+    // its truthful badge must not be stamped over by our exit.
     stopHeartbeat()
     cancelAttendedClear()
     if (runningPath === prevPath) runningPath = null
     if (terminalWrite?.path === prevPath) terminalWrite = null
-    writeStatus(prevPath, 'idle')
+    writeStatus(prevPath, 'idle', null, { onlyIfOwn: true })
   }
   if (newPath) {
     void clearStaleStatusOnOpen(newPath)

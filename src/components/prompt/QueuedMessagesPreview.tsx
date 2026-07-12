@@ -14,14 +14,17 @@
 
 import { memo, useSyncExternalStore } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
-import { FiChevronDown, FiChevronUp, FiCornerDownRight, FiLayers, FiX } from 'react-icons/fi'
+import { FiChevronDown, FiChevronUp, FiCornerDownRight, FiLayers, FiPause, FiX } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import {
   getCommandQueueSnapshot,
+  isQueuePaused,
   moveInQueue,
   remove as removeFromQueue,
+  setQueuePaused,
   subscribeToCommandQueue,
+  subscribeToQueuePause,
 } from '@/services/agent/messageQueue'
 import type { PromptValue, QueuedCommand } from '@/types/messageQueueTypes'
 
@@ -105,6 +108,7 @@ function QueuedMessagesPreview() {
     subscribeToCommandQueue,
     getCommandQueueSnapshot,
   )
+  const paused = useSyncExternalStore(subscribeToQueuePause, isQueuePaused)
 
   // TM Code currently only enqueues 'prompt' mode commands so every
   // queued item is user-visible. When task notifications are added,
@@ -116,6 +120,44 @@ function QueuedMessagesPreview() {
 
   return (
     <Box mb={2}>
+      {paused && (
+        // Parked queue (Stop / budget stop / rehydrated tasks): nothing
+        // runs until the user resumes here or sends a new message.
+        <Flex
+          align="center"
+          gap={2}
+          px={3}
+          py="6px"
+          mb={1}
+          borderRadius="8px"
+          bg="rgba(255, 149, 0, 0.07)"
+          border="1px solid rgba(255, 149, 0, 0.22)"
+        >
+          <Box color={tokens.colors.status.warning} display="flex" flexShrink={0}>
+            <FiPause size={12} />
+          </Box>
+          <Text fontSize="11px" color={tokens.colors.status.warning} fontWeight="600" flex={1} lineClamp={1}>
+            {t('queue.paused')}
+          </Text>
+          <Box
+            as="button"
+            px={2}
+            h="20px"
+            borderRadius="6px"
+            fontSize="10.5px"
+            fontWeight="700"
+            color={tokens.colors.status.warning}
+            border="1px solid rgba(255, 149, 0, 0.35)"
+            cursor="pointer"
+            flexShrink={0}
+            _hover={{ bg: 'rgba(255, 149, 0, 0.12)' }}
+            transition={tokens.transition.fast}
+            onClick={() => setQueuePaused(false)}
+          >
+            {t('queue.resume')}
+          </Box>
+        </Flex>
+      )}
       {visibleCommands.map((cmd, index) => {
         const kind = kindOf(cmd)
         const KindIcon = kind.icon

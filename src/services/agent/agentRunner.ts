@@ -17,7 +17,7 @@ import { browserSession } from '../browserSessionManager'
 import { getProjectSessionsDir } from '../projectStatePaths'
 import { resolveAttachments, resolveImageToDataUri } from '../attachmentService'
 import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText, extractDisplayFromValue } from './promptValueHelpers'
-import { dequeueAllMatching, isSteerable, joinPromptValues } from './messageQueue'
+import { drainSteerableMessages, joinPromptValues } from './messageQueue'
 import { describeImagesViaSidecar } from './visionSidecar'
 import { MODEL_PROFILES, getProfileForPlan } from './modelProfiles'
 import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from './atMentions'
@@ -765,11 +765,12 @@ async function runAgentInternal(
             const { drainSubAgentDeliveries } = await import('./subAgents/autoWake')
             const deliveries = drainSubAgentDeliveries()
 
-            // Only steerable messages ride the live run (isSteerable):
-            // slash/bash need executeInput's per-command handling, and
-            // queued TASKS (`asTask`) wait for the idle drain on purpose —
-            // they are a separate unit of work, not a course correction.
-            const drained = dequeueAllMatching(isSteerable)
+            // Only steerable messages BEFORE the first queued task ride the
+            // live run (drainSteerableMessages): slash/bash need
+            // executeInput's per-command handling, tasks wait for the idle
+            // drain, and a steer message the user reordered BELOW a task
+            // belongs to that task's run — not to this one.
+            const drained = drainSteerableMessages()
             if (drained.length === 0) return deliveries
 
             // Coalesce a burst into ONE steered turn (same as the queue's

@@ -1723,7 +1723,6 @@ export async function* query(
         try {
           const { useBillingStore } = await import("../../stores/billingStore");
           const store = useBillingStore.getState();
-          if (!isTeamByokExhausted) store.setNoCredits();
           teamMemberBlocked = !!store.team && store.team.role !== "owner";
         } catch {
           /* non-critical */
@@ -1746,6 +1745,21 @@ export async function* query(
           type: "error",
           message,
         };
+        // setNoCredits DEPOIS do yield, nunca antes: o flip dispara o
+        // budget-stop watcher (cancelLoop global) e, se corresse antes de o
+        // consumer processar este evento, o ramo isAborted() dos handlers
+        // engolia a mensagem tipada — um membro de equipa via "compra
+        // consumo" (do watcher) em vez de "fala com o admin". O for-await
+        // do consumer só faz resume do generator depois de processar o
+        // evento, por isso aqui a mensagem já está no chat.
+        if (!isTeamByokExhausted) {
+          try {
+            const { useBillingStore } = await import("../../stores/billingStore");
+            useBillingStore.getState().setNoCredits();
+          } catch {
+            /* non-critical */
+          }
+        }
         return {
           reason: "error",
           turnCount: state.turnCount,

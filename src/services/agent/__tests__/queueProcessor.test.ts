@@ -278,4 +278,23 @@ describe('processQueueIfReady — queued tasks (asTask)', () => {
     expect(exec.mock.calls[0]![0]).toHaveLength(1)
     expect(exec.mock.calls[0]![0][0].value).toBe('/review')
   })
+
+  it("a 'now'-priority item parked after a task still dispatches (no queue freeze)", () => {
+    // peek() picks by PRIORITY, the batch window by ARRAY order — a 'now'
+    // item behind a task is chosen as head but excluded from the window.
+    // Without the single-dispatch fallback this returned processed:false
+    // with a non-empty queue and the drain never re-fired.
+    enqueue(mk('task1', { asTask: true }))
+    enqueue(mk('urgent', { priority: 'now' }))
+
+    const exec = jest.fn().mockResolvedValue(undefined)
+    const r1 = processQueueIfReady({ executeInput: exec })
+    expect(r1.processed).toBe(true)
+    expect(exec.mock.calls[0]![0].map((c: QueuedCommand) => c.value)).toEqual(['urgent'])
+
+    const r2 = processQueueIfReady({ executeInput: exec })
+    expect(r2.processed).toBe(true)
+    expect(exec.mock.calls[1]![0].map((c: QueuedCommand) => c.value)).toEqual(['task1'])
+    expect(getCommandQueueSnapshot()).toHaveLength(0)
+  })
 })

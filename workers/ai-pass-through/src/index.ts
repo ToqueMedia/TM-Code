@@ -283,11 +283,16 @@ async function handleChatCompletions(
       // Perto do limite (≥95% / em overage) ou já rejeitado: encurta o TTL
       // da cache de estado (60s → ≤10s). Ver shortenBudgetStateCacheTtl —
       // trava o overshoot de runs paralelos e desbloqueia compras de extra
-      // sem esperar o minuto inteiro.
+      // sem esperar o minuto inteiro. O guard `tokenBudget > 0` exclui os
+      // planos SEM orçamento (byok-only / plano desconhecido): esses são
+      // `rejected` permanentemente por construção e em shadow continuam a
+      // conversar — sem o guard ficavam com TTL de 10s para sempre (6x
+      // leituras Firestore sem estarem perto de limite nenhum).
       if (
-        !budgetCheck.allowed ||
-        budgetCheck.status === 'allowed_critical' ||
-        budgetCheck.status === 'allowed_overage'
+        budgetCheck.tokenBudget > 0 &&
+        (!budgetCheck.allowed ||
+          budgetCheck.status === 'allowed_critical' ||
+          budgetCheck.status === 'allowed_overage')
       ) {
         shortenBudgetStateCacheTtl(user.userId)
       }
@@ -327,6 +332,10 @@ async function handleChatCompletions(
     if (enforcement !== 'off') {
       const gate = checkTeamByokBudget(config.pool, budgetState.team)
       if (!gate.allowed) {
+        // Mesma razão do gate principal: o consumo BYOK da equipa vive na
+        // MESMA entrada de cache de 60s — sem encurtar, um top-up do admin
+        // ficava "colado" em 402 até um minuto.
+        shortenBudgetStateCacheTtl(user.userId)
         return jsonError(
           402,
           'tm_team_byok_exhausted',
