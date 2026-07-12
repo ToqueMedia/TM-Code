@@ -22,8 +22,10 @@ import {
   hasCommandsInQueue,
   getCommandQueueSnapshot,
   isSlashCommand,
+  isSteerable,
   joinPromptValues,
   canBatchWith,
+  moveInQueue,
 } from '../messageQueue'
 import type { ContentBlock, QueuedCommand } from '../../../types/messageQueueTypes'
 
@@ -287,5 +289,60 @@ describe('messageQueue — slash + batching helpers', () => {
 
   it('canBatchWith returns false for bash-mode head', () => {
     expect(canBatchWith(mk('a', { mode: 'bash' }), mk('b'))).toBe(false)
+  })
+})
+
+describe('messageQueue — isSteerable (steer vs task contract)', () => {
+  it('plain prompt messages steer', () => {
+    expect(isSteerable(mk('hello'))).toBe(true)
+  })
+
+  it('task commands never steer — they wait for the idle drain', () => {
+    expect(isSteerable(mk('build feature B', { asTask: true }))).toBe(false)
+  })
+
+  it('slash and bash commands never steer', () => {
+    expect(isSteerable(mk('/compact'))).toBe(false)
+    expect(isSteerable(mk('ls', { mode: 'bash' }))).toBe(false)
+  })
+
+  it('skipSlashCommands text starting with / still steers (it is plain text)', () => {
+    expect(isSteerable(mk('/not-a-command', { skipSlashCommands: true }))).toBe(true)
+  })
+})
+
+describe('messageQueue — moveInQueue (queue strip reorder)', () => {
+  it('moves an item down and up', () => {
+    enqueue(mk('a', { uuid: 'A' }))
+    enqueue(mk('b', { uuid: 'B' }))
+    enqueue(mk('c', { uuid: 'C' }))
+
+    moveInQueue('A', 1)
+    expect(getCommandQueueSnapshot().map(c => c.uuid)).toEqual(['B', 'A', 'C'])
+
+    moveInQueue('C', -1)
+    expect(getCommandQueueSnapshot().map(c => c.uuid)).toEqual(['B', 'C', 'A'])
+  })
+
+  it('is a no-op at the edges', () => {
+    enqueue(mk('a', { uuid: 'A' }))
+    enqueue(mk('b', { uuid: 'B' }))
+
+    moveInQueue('A', -1)
+    moveInQueue('B', 1)
+    expect(getCommandQueueSnapshot().map(c => c.uuid)).toEqual(['A', 'B'])
+  })
+
+  it('is a no-op for unknown uuids', () => {
+    enqueue(mk('a', { uuid: 'A' }))
+    moveInQueue('ghost', 1)
+    expect(getCommandQueueSnapshot().map(c => c.uuid)).toEqual(['A'])
+  })
+
+  it('reordered position is what FIFO dequeue respects', () => {
+    enqueue(mk('a', { uuid: 'A' }))
+    enqueue(mk('b', { uuid: 'B' }))
+    moveInQueue('B', -1)
+    expect(dequeue()?.uuid).toBe('B')
   })
 })

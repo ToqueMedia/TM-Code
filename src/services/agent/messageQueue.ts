@@ -278,6 +278,23 @@ export function remove(commandsToRemove: QueuedCommand[]): void {
 }
 
 /**
+ * Move a queued command one position up (-1) or down (+1). Queue order is
+ * what the queue strip displays AND what the idle drain respects, so this
+ * is the user's "run this one first" control. No-op at the edges or for
+ * unknown uuids.
+ */
+export function moveInQueue(uuid: string, direction: -1 | 1): void {
+  const idx = commandQueue.findIndex(c => c.uuid === uuid)
+  if (idx === -1) return
+  const target = idx + direction
+  if (target < 0 || target >= commandQueue.length) return
+  const [item] = commandQueue.splice(idx, 1)
+  commandQueue.splice(target, 0, item!)
+  notifySubscribers()
+  logOperation('reorder')
+}
+
+/**
  * Clear all commands from the queue.
  * Used by Stop and by session-switch paths.
  */
@@ -314,6 +331,20 @@ export function isSlashCommand(cmd: QueuedCommand): boolean {
   const first = cmd.value[0]
   if (!first || first.type !== 'text') return false
   return first.text.trim().startsWith('/')
+}
+
+/**
+ * True when a queued command may be DRAINED AS STEERING into the live run
+ * (ridden onto its next turn). Slash/bash commands need executeInput's
+ * per-command handling, and TASK commands (`asTask`) are the opposite of
+ * steering by contract: they wait for the current run to END and then start
+ * as their own run. This predicate is the single source of truth shared by
+ * BOTH steering collectors (agentRunner.ts and usePromptBar.ts — they must
+ * stay in lockstep, see the 06-16 "queued messages only after the run" bug)
+ * and mirrored by the idle-drain batching in queueProcessor.ts.
+ */
+export function isSteerable(cmd: QueuedCommand): boolean {
+  return !isSlashCommand(cmd) && cmd.mode === 'prompt' && cmd.asTask !== true
 }
 
 /**

@@ -22,6 +22,8 @@ function PromptBar() {
     textareaRef,
     isStreaming,
     isAgentBusy,
+    queueAsTask,
+    setQueueAsTask,
     isScaffolding,
     isSendBlocked,
     isDisabled,
@@ -153,6 +155,9 @@ function PromptBar() {
           <PromptActions
             viewMode={viewMode}
             isStreaming={isStreaming}
+            isAgentBusy={isAgentBusy}
+            queueAsTask={queueAsTask}
+            onQueueModeChange={setQueueAsTask}
             hasInput={(hasInputContent || draftAttachments.length > 0) && !isSendBlocked}
             onToggleEditor={toggleEditor}
             onImprovePrompt={handleImprovePrompt}
@@ -179,7 +184,9 @@ function PromptBar() {
           ) : isAgentBusy ? (
             <>
               <KeyBindingDisplay binding={{ key: 'Enter' }} size="sm" />
-              <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.queueHint')}</Text>
+              <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>
+                {queueAsTask ? t('prompt.queueTaskHint') : t('prompt.queueHint')}
+              </Text>
               <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>·</Text>
               <KeyBindingDisplay binding={{ key: 'Enter', shift: true }} size="sm" />
               <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.newLine')}</Text>

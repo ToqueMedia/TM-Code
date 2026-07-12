@@ -5,6 +5,11 @@
  * isolation needs a fresh module registry, not just cleared mocks.
  */
 
+// Sem imports top-level (tudo via require nos setups), o ficheiro seria um
+// SCRIPT de escopo global para o tsc e o `setup()` daqui colidia com o de
+// outros testes no yarn build. `export {}` torna-o módulo.
+export {}
+
 jest.mock('@/utils/invokeMetrics', () => ({
   invoke: jest.fn().mockResolvedValue({}),
 }))
@@ -38,6 +43,11 @@ jest.mock('@/utils/logger', () => ({
 type AgentStoreModule = typeof import('@/stores/agentStore')
 type ProjectStoreModule = typeof import('@/stores/projectStore')
 type ServiceModule = typeof import('../projectAgentStatusService')
+type ProjectInfo = import('@/types/project').ProjectInfo
+
+/** The service only reads `.path` — a minimal stub is all these tests need. */
+const mkProject = (path: string, name: string): ProjectInfo =>
+  ({ path, name } as unknown as ProjectInfo)
 
 function setup() {
   jest.resetModules()
@@ -63,7 +73,7 @@ afterEach(() => {
 describe('projectAgentStatusService (writer)', () => {
   it('writes running (with task label) when a run starts, once per run', () => {
     const { invoke, useAgentStore, useProjectStore } = setup()
-    useProjectStore.setState({ currentProject: { path: '/p/a', name: 'a' } })
+    useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
 
     useAgentStore.getState().setStatus('awaiting_response')
     // busy → busy transitions must NOT rewrite (heartbeat owns refreshes)
@@ -81,7 +91,7 @@ describe('projectAgentStatusService (writer)', () => {
 
   it('writes done when the run completes', () => {
     const { invoke, useAgentStore, useProjectStore } = setup()
-    useProjectStore.setState({ currentProject: { path: '/p/a', name: 'a' } })
+    useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
 
     useAgentStore.getState().setStatus('generating')
     useAgentStore.getState().setStatus('idle')
@@ -95,7 +105,7 @@ describe('projectAgentStatusService (writer)', () => {
 
   it('writes idle (no badge) when the user cancels', () => {
     const { invoke, useAgentStore, useProjectStore } = setup()
-    useProjectStore.setState({ currentProject: { path: '/p/a', name: 'a' } })
+    useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
 
     useAgentStore.getState().setStatus('generating')
     useAgentStore.getState().setStatus('cancelled')
@@ -109,7 +119,7 @@ describe('projectAgentStatusService (writer)', () => {
 
   it('writes error when the run fails', () => {
     const { invoke, useAgentStore, useProjectStore } = setup()
-    useProjectStore.setState({ currentProject: { path: '/p/a', name: 'a' } })
+    useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
 
     useAgentStore.getState().setStatus('reasoning')
     useAgentStore.getState().setStatus('error')
@@ -124,7 +134,7 @@ describe('projectAgentStatusService (writer)', () => {
   it('heartbeats running so readers can detect a crashed writer', () => {
     jest.useFakeTimers()
     const { invoke, useAgentStore, useProjectStore, service } = setup()
-    useProjectStore.setState({ currentProject: { path: '/p/a', name: 'a' } })
+    useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
 
     useAgentStore.getState().setStatus('generating')
     jest.advanceTimersByTime(service.PROJECT_AGENT_STATUS_HEARTBEAT_MS * 2 + 50)
@@ -142,12 +152,12 @@ describe('projectAgentStatusService (writer)', () => {
 
   it('marks the previous project idle on switch', () => {
     const { invoke, useAgentStore, useProjectStore } = setup()
-    useProjectStore.setState({ currentProject: { path: '/p/a', name: 'a' } })
+    useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
     useAgentStore.getState().setStatus('generating')
 
     // projectStore's guard cancels the run, then the switch lands:
     useAgentStore.getState().setStatus('cancelled')
-    useProjectStore.setState({ currentProject: { path: '/p/b', name: 'b' } })
+    useProjectStore.setState({ currentProject: mkProject('/p/b', 'b') })
 
     const writes = statusWrites(invoke)
     const forA = writes.filter(w => w.projectPath === '/p/a')
@@ -167,7 +177,7 @@ describe('projectAgentStatusService (writer)', () => {
 
   it('badges a budget stop as error with the budget label (any terminal status)', () => {
     const { invoke, useAgentStore, useProjectStore, service } = setup()
-    useProjectStore.setState({ currentProject: { path: '/p/a', name: 'a' } })
+    useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
 
     useAgentStore.getState().setStatus('generating')
     service.markNextStopAsBudgetStop('Consumo esgotado — tarefas interrompidas')
@@ -185,7 +195,7 @@ describe('projectAgentStatusService (writer)', () => {
 
   it('a new run clears a stale budget-stop mark', () => {
     const { invoke, useAgentStore, useProjectStore, service } = setup()
-    useProjectStore.setState({ currentProject: { path: '/p/a', name: 'a' } })
+    useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
 
     service.markNextStopAsBudgetStop('stale')
     useAgentStore.getState().setStatus('generating') // run start consome/limpa a marca

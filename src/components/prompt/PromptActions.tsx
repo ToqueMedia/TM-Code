@@ -1,6 +1,6 @@
 import { memo, useMemo, type MouseEvent, type ReactNode } from 'react'
 import { Box, Flex, IconButton, Text } from '@chakra-ui/react'
-import { FiSend, FiSquare, FiCode, FiImage, FiClock, FiTerminal, FiServer } from 'react-icons/fi'
+import { FiSend, FiSquare, FiCode, FiImage, FiClock, FiTerminal, FiServer, FiCornerDownRight, FiLayers } from 'react-icons/fi'
 import { VscDiscard, VscLoading, VscWand } from 'react-icons/vsc'
 import { useBillingStore } from '../../stores/billingStore'
 import { useChatStore } from '../../stores/chatStore'
@@ -15,6 +15,12 @@ import { t } from '@/i18n'
 interface PromptActionsProps {
   viewMode: string
   isStreaming: boolean
+  /** QueryGuard-level busy (covers dispatching + tool turns, not just token
+   *  streaming) — drives the Steer/Task toggle visibility. */
+  isAgentBusy: boolean
+  /** Steer/Task toggle state — what Enter does while the agent is busy. */
+  queueAsTask: boolean
+  onQueueModeChange: (asTask: boolean) => void
   hasInput: boolean
   onToggleEditor: () => void
   onImprovePrompt: () => void
@@ -34,6 +40,9 @@ interface PromptActionsProps {
 function PromptActions({
   viewMode,
   isStreaming,
+  isAgentBusy,
+  queueAsTask,
+  onQueueModeChange,
   hasInput,
   onToggleEditor,
   onImprovePrompt,
@@ -279,6 +288,40 @@ function PromptActions({
           same line as the plan/source-code/checkpoint controls, next to send. */}
       <Flex align="center" gap={2} flexShrink={0}>
         <ContextWindowIndicator popoverPlacement="top" />
+        {isAgentBusy && (
+          // Steer/Task segmented toggle — what Enter does while a run is
+          // live: steer the CURRENT task (parity default) or queue a NEW
+          // task that starts when this one finishes. Labels collapse under
+          // the same container query as the left-side tool buttons.
+          <Flex
+            h="28px"
+            borderRadius="8px"
+            border={`1px solid ${tokens.colors.border.default}`}
+            overflow="hidden"
+            flexShrink={0}
+            role="group"
+            aria-label={t('prompt.queueModeToggle')}
+          >
+            <QueueModeButton
+              icon={<FiCornerDownRight size={12} />}
+              label={t('prompt.steerMode')}
+              title={t('prompt.steerModeHint')}
+              active={!queueAsTask}
+              activeColor={tokens.colors.accent.primary}
+              activeBg={tokens.colors.accent.primarySubtle}
+              onClick={() => onQueueModeChange(false)}
+            />
+            <QueueModeButton
+              icon={<FiLayers size={12} />}
+              label={t('prompt.taskMode')}
+              title={t('prompt.taskModeHint')}
+              active={queueAsTask}
+              activeColor={tokens.colors.accent.purple}
+              activeBg={tokens.colors.accent.purpleSubtle}
+              onClick={() => onQueueModeChange(true)}
+            />
+          </Flex>
+        )}
         {isStreaming && hasInput ? (
           // Agent working + user typed → send to queue
           <IconButton
@@ -323,6 +366,55 @@ function PromptActions({
         )}
       </Flex>
     </Flex>
+  )
+}
+
+function QueueModeButton({
+  icon,
+  label,
+  title,
+  active,
+  activeColor,
+  activeBg,
+  onClick,
+}: {
+  icon: ReactNode
+  label: string
+  title: string
+  active: boolean
+  activeColor: string
+  activeBg: string
+  onClick: () => void
+}) {
+  return (
+    <Box
+      as="button"
+      data-prompt-tool-button
+      display="flex"
+      alignItems="center"
+      gap="4px"
+      h="100%"
+      px="8px"
+      cursor="pointer"
+      color={active ? activeColor : tokens.colors.text.disabled}
+      bg={active ? activeBg : 'transparent'}
+      transition={`background ${tokens.transition.fast}, color ${tokens.transition.fast}`}
+      _hover={{ color: active ? activeColor : tokens.colors.text.secondary }}
+      onClick={event => {
+        event.stopPropagation()
+        onClick()
+      }}
+      aria-pressed={active}
+      aria-label={label}
+      title={title}
+    >
+      <Box display="flex" alignItems="center" flexShrink={0}>
+        {icon}
+      </Box>
+      <Text data-prompt-action-label fontSize="10.5px" fontWeight="700" whiteSpace="nowrap">
+        {label}
+      </Text>
+    </Box>
   )
 }
 

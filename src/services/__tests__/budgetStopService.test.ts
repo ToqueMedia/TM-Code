@@ -4,6 +4,11 @@
  * (started/handledExhaustion) e o billingStore real também é module-level.
  */
 
+// Sem imports top-level (tudo via require nos setups), o ficheiro seria um
+// SCRIPT de escopo global para o tsc e o `setup()` daqui colidia com o de
+// outros testes no yarn build. `export {}` torna-o módulo.
+export {}
+
 const mockIsAgentRunning = jest.fn<boolean, []>(() => false)
 const mockCancelLoop = jest.fn()
 jest.mock('@/services/agent/agentService', () => ({

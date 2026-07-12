@@ -35,7 +35,7 @@ import {
   enqueue as enqueueMessage,
   clearCommandQueue as clearMessageQueue,
   dequeueAllMatching,
-  isSlashCommand,
+  isSteerable,
   joinPromptValues,
 } from '../../services/agent/messageQueue'
 import type { OpenAIContentPart } from '../../services/agent/agentService'
@@ -113,6 +113,15 @@ export function usePromptBar() {
   const [devCommand, setDevCommand] = useState<string | null>(null)
   const [isImprovingPrompt, setIsImprovingPrompt] = useState(false)
   const [promptImprovementBackup, setPromptImprovementBackup] = useState<string | null>(null)
+  /**
+   * Composer Steer/Task toggle (visible only while the agent is busy).
+   * false → Enter steers the running task (claude-vaz parity, the default);
+   * true → Enter queues the message as a SEPARATE task that runs when the
+   * current one finishes (QueuedCommand.asTask). Sticky while the run
+   * lasts so the user can queue several tasks in a row; reset when the
+   * agent goes idle so the next run starts back at the parity default.
+   */
+  const [queueAsTask, setQueueAsTask] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const historyIndexRef = useRef(-1)
@@ -126,6 +135,13 @@ export function usePromptBar() {
   // Claude Code uses. Re-renders when reserve/tryStart/end/forceEnd fires.
   const queryGuard = getQueryGuard()
   const isAgentBusy = useSyncExternalStore(queryGuard.subscribe, queryGuard.getSnapshot)
+
+  // Reset the Steer/Task toggle whenever the agent goes idle — the toggle
+  // only has meaning against a live run, and the parity default (steer)
+  // must be restored for the next one.
+  useEffect(() => {
+    if (!isAgentBusy) setQueueAsTask(false)
+  }, [isAgentBusy])
   const currentProject = useProjectStore(s => s.currentProject)
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewServerRunning = useLayoutStore(selectIsPreviewServerRunning)
@@ -959,12 +975,11 @@ export function usePromptBar() {
                 ? `${deliveries}\n\n${v}`
                 : [{ type: 'text', text: deliveries }, ...v]
 
-          // Only plain prompt-mode messages steer. Slash/bash/task-notif
-          // commands need executeInput's per-command handling, so they stay
-          // queued for the idle drain when this run ends.
-          const drained = dequeueAllMatching(
-            c => !isSlashCommand(c) && c.mode === 'prompt',
-          )
+          // Only steerable messages ride the live run (isSteerable):
+          // slash/bash need executeInput's per-command handling, and queued
+          // TASKS (`asTask`) wait for the idle drain on purpose — they are
+          // a separate unit of work, not a course correction.
+          const drained = dequeueAllMatching(isSteerable)
           if (drained.length === 0) return deliveries
 
           // Coalesce a burst into ONE steered turn (joinPromptValues preserves
@@ -1235,14 +1250,17 @@ export function usePromptBar() {
       mode: 'prompt',
       priority: 'next',
       uuid: generateId('queued'),
+      // Steer/Task toggle: tasks skip the per-turn steering drain and are
+      // dispatched as their own run by the idle drain (queueProcessor).
+      ...(queueAsTask ? { asTask: true } : {}),
     })
 
     // Clear input immediately — message is in the queue
     useChatStore.getState().setDraftInput('')
     clearDraftAttachments()
 
-    logger.info('queue', `Message enqueued: "${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}"`)
-  }, [currentProject, devCommand, runAgentForPrompt])
+    logger.info('queue', `Message enqueued${queueAsTask ? ' as task' : ''}: "${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}"`)
+  }, [currentProject, devCommand, runAgentForPrompt, queueAsTask])
 
   const handleStop = useCallback(() => {
     // Clear the message queue BEFORE cancelling — prevents useQueueProcessor
@@ -1612,6 +1630,9 @@ export function usePromptBar() {
     textareaRef,
     isStreaming,
     isAgentBusy,
+    // Steer/Task toggle (composer, visible while the agent is busy)
+    queueAsTask,
+    setQueueAsTask,
     isScaffolding,
     isSendBlocked,
     isDisabled,

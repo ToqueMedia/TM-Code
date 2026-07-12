@@ -220,3 +220,62 @@ describe('processQueueIfReady — block-valued commands', () => {
     expect((merged[3] as any).text).toBe('another plain')
   })
 })
+
+describe('processQueueIfReady — queued tasks (asTask)', () => {
+  it('dispatches a task individually, never coalesced with steer messages', () => {
+    enqueue(mk('task1', { asTask: true }))
+    enqueue(mk('s1'))
+
+    const exec = jest.fn().mockResolvedValue(undefined)
+    processQueueIfReady({ executeInput: exec })
+
+    expect(exec.mock.calls[0]![0]).toHaveLength(1)
+    expect(exec.mock.calls[0]![0][0].value).toBe('task1')
+    expect(getCommandQueueSnapshot().map(c => c.value)).toEqual(['s1'])
+  })
+
+  it('steer batch stops at the first task — queue order is execution order', () => {
+    enqueue(mk('s1'))
+    enqueue(mk('s2'))
+    enqueue(mk('task1', { asTask: true }))
+    enqueue(mk('s3'))
+
+    const exec = jest.fn().mockResolvedValue(undefined)
+
+    // Without the batch boundary, s3 would ride the first batch and run
+    // BEFORE task1, silently violating the order the queue strip shows.
+    processQueueIfReady({ executeInput: exec })
+    expect(exec.mock.calls[0]![0].map((c: QueuedCommand) => c.value)).toEqual(['s1', 's2'])
+
+    processQueueIfReady({ executeInput: exec })
+    expect(exec.mock.calls[1]![0].map((c: QueuedCommand) => c.value)).toEqual(['task1'])
+
+    processQueueIfReady({ executeInput: exec })
+    expect(exec.mock.calls[2]![0].map((c: QueuedCommand) => c.value)).toEqual(['s3'])
+
+    expect(getCommandQueueSnapshot()).toHaveLength(0)
+  })
+
+  it('two queued tasks are two separate dispatches, in order', () => {
+    enqueue(mk('task1', { asTask: true }))
+    enqueue(mk('task2', { asTask: true }))
+
+    const exec = jest.fn().mockResolvedValue(undefined)
+    processQueueIfReady({ executeInput: exec })
+    processQueueIfReady({ executeInput: exec })
+
+    expect(exec).toHaveBeenCalledTimes(2)
+    expect(exec.mock.calls[0]![0][0].value).toBe('task1')
+    expect(exec.mock.calls[1]![0][0].value).toBe('task2')
+  })
+
+  it('a task that is also a slash command still dispatches alone', () => {
+    enqueue(mk('/review', { asTask: true }))
+
+    const exec = jest.fn().mockResolvedValue(undefined)
+    processQueueIfReady({ executeInput: exec })
+
+    expect(exec.mock.calls[0]![0]).toHaveLength(1)
+    expect(exec.mock.calls[0]![0][0].value).toBe('/review')
+  })
+})

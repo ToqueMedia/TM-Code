@@ -17,7 +17,7 @@ import { browserSession } from '../browserSessionManager'
 import { getProjectSessionsDir } from '../projectStatePaths'
 import { resolveAttachments, resolveImageToDataUri } from '../attachmentService'
 import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText, extractDisplayFromValue } from './promptValueHelpers'
-import { dequeueAllMatching, isSlashCommand, joinPromptValues } from './messageQueue'
+import { dequeueAllMatching, isSteerable, joinPromptValues } from './messageQueue'
 import { describeImagesViaSidecar } from './visionSidecar'
 import { MODEL_PROFILES, getProfileForPlan } from './modelProfiles'
 import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from './atMentions'
@@ -765,12 +765,11 @@ async function runAgentInternal(
             const { drainSubAgentDeliveries } = await import('./subAgents/autoWake')
             const deliveries = drainSubAgentDeliveries()
 
-            // Only plain prompt-mode messages steer. Slash/bash/task-notif
-            // commands need executeInput's per-command handling, so they stay
-            // queued for the idle drain when this run ends.
-            const drained = dequeueAllMatching(
-              c => !isSlashCommand(c) && c.mode === 'prompt',
-            )
+            // Only steerable messages ride the live run (isSteerable):
+            // slash/bash need executeInput's per-command handling, and
+            // queued TASKS (`asTask`) wait for the idle drain on purpose —
+            // they are a separate unit of work, not a course correction.
+            const drained = dequeueAllMatching(isSteerable)
             if (drained.length === 0) return deliveries
 
             // Coalesce a burst into ONE steered turn (same as the queue's

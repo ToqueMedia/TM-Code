@@ -119,6 +119,17 @@ export type QueuedCommand = {
    * local slash commands.
    */
   skipSlashCommands?: boolean
+
+  /**
+   * When true, this command is a QUEUED TASK: it must NOT be drained as
+   * steering into the live run (messageQueue.isSteerable excludes it) and
+   * the idle drain dispatches it as its OWN agent run, never coalesced
+   * with other queued messages. This is the "queue a second feature while
+   * the first is being built" flow — a steering message changes the
+   * CURRENT task; a task waits its turn and starts fresh. Set by the
+   * composer's Steer/Task toggle (usePromptBar) while the agent is busy.
+   */
+  asTask?: boolean
 }
 
 // === Operation log (persistence) ===
@@ -127,7 +138,7 @@ export type QueuedCommand = {
  * Discrete queue operations. Recorded to disk so the queue's history can
  * be reconstructed for debugging.
  */
-export type QueueOperation = 'enqueue' | 'dequeue' | 'remove'
+export type QueueOperation = 'enqueue' | 'dequeue' | 'remove' | 'reorder'
 
 export type QueueOperationMessage = {
   type: 'queue-operation'
