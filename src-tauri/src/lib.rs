@@ -1316,6 +1316,9 @@ pub fn run() {
                                 commands::project_state::clear_project_agent_status(
                                     &active.project_path,
                                 );
+                                commands::project_state::release_project_window_lock_owned(
+                                    &active.project_path,
+                                );
                             }
                         }
                     }
@@ -1534,7 +1537,10 @@ pub fn run() {
             is_directory,
             open_new_instance,
             set_project_agent_status,
-            get_project_agent_statuses
+            get_project_agent_statuses,
+            acquire_project_window_lock,
+            check_project_window_lock,
+            release_project_window_lock
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

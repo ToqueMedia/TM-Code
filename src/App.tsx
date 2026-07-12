@@ -384,7 +384,35 @@ function App() {
 		void import('./services/budgetStopService')
 			.then(m => m.initBudgetStopWatcher())
 			.catch(() => { /* Tauri not present (jsdom tests) */ })
+		// Double-open guard: heartbeat this window's presence on its open
+		// project so other windows can warn before opening it too.
+		void import('./services/projectWindowLockService')
+			.then(m => m.initProjectWindowLock())
+			.catch(() => { /* Tauri not present (jsdom tests) */ })
 	}, []);
+
+	// Backstop drain for `--open-project`: initializeApp only drains it on
+	// the AUTHENTICATED boot path — a window that boots signed-out returned
+	// early there and the queued target survived login with nobody left to
+	// read it (the init effect is one-shot). Fires once when both auth and
+	// init have settled; on the normal boot the slot is already empty.
+	const pendingProjectDrainedRef = useRef(false);
+	useEffect(() => {
+		if (!isAuthenticated || initializing) return;
+		if (pendingProjectDrainedRef.current) return;
+		pendingProjectDrainedRef.current = true;
+		void (async () => {
+			try {
+				const { invoke } = await import('@tauri-apps/api/core');
+				const pendingProject = await invoke<string | null>('take_pending_open_project');
+				if (pendingProject && !useProjectStore.getState().currentProject) {
+					await openProject(pendingProject);
+				}
+			} catch {
+				/* Tauri not present (jsdom tests) */
+			}
+		})();
+	}, [isAuthenticated, initializing, openProject]);
 
 	// Native file drop — drag a folder from Finder/Explorer onto the window
 	// to open it as a project. Uses Tauri's window-level drag-drop event

@@ -1009,6 +1009,9 @@ const en = {
   'project.closeWhileRunning': 'The agent is still working on "{name}". Closing the project cancels the task in progress.',
   'project.agentBusyConfirm': 'Cancel task and continue',
   'project.agentBusyStay': 'Keep working',
+  'project.alreadyOpenElsewhereTitle': 'Project already open',
+  'project.alreadyOpenElsewhere': '"{name}" appears to be open in another TM Code window. Opening it here too can cause session conflicts — two agents over the same files.\n\nTip: switch to that window instead.',
+  'project.alreadyOpenElsewhereOk': 'Open anyway',
 
   // ── Clone Dialog ────────────────────────────────────
   'clone.title': 'Clone Repository',
@@ -2680,6 +2683,9 @@ const pt: Record<keyof typeof en, string> = {
   'project.closeWhileRunning': 'O agente ainda está a trabalhar em "{name}". Fechar o projeto cancela a tarefa em curso.',
   'project.agentBusyConfirm': 'Cancelar tarefa e continuar',
   'project.agentBusyStay': 'Continuar a trabalhar',
+  'project.alreadyOpenElsewhereTitle': 'Projeto já aberto',
+  'project.alreadyOpenElsewhere': '"{name}" parece estar aberto noutra janela do TM Code. Abrir também aqui pode causar conflitos de sessão — dois agentes sobre os mesmos ficheiros.\n\nDica: use antes essa janela.',
+  'project.alreadyOpenElsewhereOk': 'Abrir na mesma',
 
   // ── Clone Dialog ────────────────────────────────────
   'clone.title': 'Clonar Repositório',

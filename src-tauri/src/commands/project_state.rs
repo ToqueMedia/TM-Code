@@ -239,10 +239,10 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Monotonic suffix for the temp file: two concurrent invokes from the SAME
-/// process (heartbeat tick + run-end transition) must never share a temp
-/// path, or one write could truncate the other's inode mid-publish.
-static AGENT_STATUS_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Monotonic suffix for state temp files: two concurrent invokes from the
+/// SAME process (heartbeat tick + run-end transition) must never share a
+/// temp path, or one write could truncate the other's inode mid-publish.
+static STATE_FILE_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[tauri::command]
 pub async fn set_project_agent_status(
@@ -283,7 +283,7 @@ pub async fn set_project_agent_status(
         .map_err(|e| format!("Failed to serialize agent status: {}", e))?;
     // temp + rename: readers in OTHER processes poll this file — they must
     // never observe a torn write (a parse failure reads as "no status").
-    let seq = AGENT_STATUS_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let seq = STATE_FILE_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = root.join(format!(
         ".agent-status.tmp-{}-{}",
         std::process::id(),
@@ -314,6 +314,88 @@ pub async fn get_project_agent_statuses(
         }
     }
     Ok(out)
+}
+
+// ─── Project window lock (double-open guard, cross-process) ─────────────────
+//
+// One project open in TWO windows means two processes over the same state
+// dir (sessions last-write-wins) and two agents over the same working tree.
+// The owning window heartbeats `window-lock.json`; openProject consults
+// `check_project_window_lock` and WARNS before opening a project whose lock
+// is fresh and foreign. Deliberately a warning, not a hard lock: a rigid
+// lock surviving a crash would strand the user out of their own project —
+// the frontend's staleness window (same 90s as the agent badge) arbitrates
+// dead owners, and `WindowEvent::Destroyed` releases on graceful close.
+
+const WINDOW_LOCK_FILE: &str = "window-lock.json";
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectWindowLock {
+    pub pid: u32,
+    /// Epoch ms of the last heartbeat — liveness signal for readers.
+    pub updated_at: u64,
+}
+
+#[tauri::command]
+pub async fn acquire_project_window_lock(project_path: String) -> Result<(), String> {
+    let root = project_state_root(&project_path)?;
+    std::fs::create_dir_all(&root)
+        .map_err(|e| format!("Failed to create project state directory: {}", e))?;
+    let lock = ProjectWindowLock {
+        pid: std::process::id(),
+        updated_at: now_ms(),
+    };
+    let json = serde_json::to_string(&lock)
+        .map_err(|e| format!("Failed to serialize window lock: {}", e))?;
+    let seq = STATE_FILE_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = root.join(format!(".window-lock.tmp-{}-{}", std::process::id(), seq));
+    std::fs::write(&tmp, &json).map_err(|e| format!("Failed to write window lock: {}", e))?;
+    std::fs::rename(&tmp, root.join(WINDOW_LOCK_FILE))
+        .map_err(|e| format!("Failed to publish window lock: {}", e))?;
+    Ok(())
+}
+
+/// Returns the lock ONLY when it belongs to ANOTHER process — the caller
+/// asks "is somebody ELSE here?", so an own/absent/unreadable lock is None.
+/// Freshness is the frontend's call (staleness window shared with the badge).
+#[tauri::command]
+pub async fn check_project_window_lock(
+    project_path: String,
+) -> Result<Option<ProjectWindowLock>, String> {
+    let Some(root) = project_state_root_readonly(&project_path) else {
+        return Ok(None);
+    };
+    let Ok(content) = std::fs::read_to_string(root.join(WINDOW_LOCK_FILE)) else {
+        return Ok(None);
+    };
+    match serde_json::from_str::<ProjectWindowLock>(&content) {
+        Ok(lock) if lock.pid != std::process::id() => Ok(Some(lock)),
+        _ => Ok(None),
+    }
+}
+
+#[tauri::command]
+pub async fn release_project_window_lock(project_path: String) -> Result<(), String> {
+    release_project_window_lock_owned(&project_path);
+    Ok(())
+}
+
+/// Ownership-aware removal — shared with the WindowEvent::Destroyed handler.
+/// A foreign lock (another window still on this project) is left alone; an
+/// unparseable one is removed (torn garbage helps nobody).
+pub(crate) fn release_project_window_lock_owned(project_path: &str) {
+    if let Some(root) = project_state_root_readonly(project_path) {
+        let file = root.join(WINDOW_LOCK_FILE);
+        if let Ok(existing) = std::fs::read_to_string(&file) {
+            if let Ok(lock) = serde_json::from_str::<ProjectWindowLock>(&existing) {
+                if lock.pid != std::process::id() {
+                    return;
+                }
+            }
+            let _ = std::fs::remove_file(file);
+        }
+    }
 }
 
 /// Best-effort removal of the status file — called from the

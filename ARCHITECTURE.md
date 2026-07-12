@@ -101,6 +101,52 @@ in the IDE's billing memories.)
 
 ---
 
+## Parallel work (multi-window)
+
+**One window = one OS process = one project.** "Open in New Window" spawns a fresh instance
+(`open_new_instance` → `--open-project <dir>`, lib.rs); instances share **nothing at runtime**
+(each has its own Rust state, Zustand stores, MCP processes — only Firebase auth is shared via
+the user-data dir). The only cross-window channel is **disk**, under the project's app-managed
+state dir (`~/.toquemedia-studio/projects/<id>/`):
+
+- **`agent-status.json`** — the window running the agent mirrors its run state
+  (`running`/`done`/`error` + task label), heartbeating every 30s
+  (`src/services/projectAgentStatusService.ts`, writer; `useProjectAgentStatuses`, polling
+  reader → badges in the Welcome-sidebar recents and the titlebar project menu). A `running`
+  older than 90s = crashed writer, ignored. Writes are **serialized** (promise chain + unique
+  temp files) and clears are **pid-owned** (`only_if_own`), so two windows never clobber each
+  other's truthful badge; `WindowEvent::Destroyed` removes own files on graceful close.
+- **`window-lock.json`** — presence heartbeat for the **double-open guard**: opening a project
+  whose lock is fresh and foreign warns the user (same state dir → session last-write-wins;
+  same working tree → two agents writing). A warning, not a hard lock — staleness arbitrates
+  crashed owners (`src/services/projectWindowLockService.ts`).
+
+**Switching projects in-window cancels the run** (confirm first — `projectStore.openProject`/
+`closeProject`); background work across projects is the multi-window model above, NOT in-window
+concurrency. The Rust `ActiveProject` clamp, the streaming cursor, and the agent singletons are
+all single-slot per process — see the parallel-projects memory for the Fase 4 (in-window)
+blocker inventory before attempting to change that.
+
+**Budget exhaustion stops everything, visibly.** Enforcement stays server-side (Data-Plane 402
+`tm_budget_exhausted`/`tm_team_slice_exhausted`). Client-side, the `noCredits` flip (own 402,
+`X-Budget-Status: rejected` header, or `/v1/me` on window focus — how a *parallel window* finds
+out; there is no server push) triggers `budgetStopService`: aborts this window's main run +
+sub-agents, adds a system message, badges the project `error` cross-window, and **parks** the
+queue. `useQueueProcessor` also gates on billing, so parked work never burns 402s and survives
+until credits return. (The Chat dispatch path has **no billing pre-flight of its own** — the
+queue gate is what stands between an exhausted budget and a real request.)
+
+**Task queue (same project, sequential).** While a run is live, Enter **steers** it (claude-vaz
+parity). The composer's Steer/**New task** toggle enqueues the message as `asTask` instead: its
+own run, dispatched one-at-a-time by the idle drain, never coalesced. **Queue order is execution
+order** — both the steering collectors (`drainSteerableMessages`) and the idle-drain batch stop
+at the first task. Stop (single implementation: `stopAgentRun`, used by BOTH stop buttons)
+drops steering and **parks** tasks (paused, "Resume" in the queue strip; any manual send also
+resumes); a rehydrated queue containing tasks boots paused. Tasks share the session/context —
+per-task sessions and true intra-project parallelism (worktrees) are Fase 5, not built.
+
+---
+
 ## Cross-cutting rules
 
 - **`curl` against the Data-Plane proves nothing about the browser path** (CORS + SSE differ).

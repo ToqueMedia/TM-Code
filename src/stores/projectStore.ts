@@ -291,6 +291,35 @@ export const useProjectStore = create<ProjectStore>()(
         if (prevProject && prevProject.path !== path) {
           const proceed = await confirmCancelActiveRun('switch');
           if (!proceed) return;
+        }
+
+        // Double-open guard (cross-window): the same project in two windows
+        // shares the state dir (sessions last-write-wins) AND the working
+        // tree (two agents writing). Warn, don't hard-lock — a rigid lock
+        // orphaned by a crash would strand the user out of their own
+        // project; the lock heartbeat's staleness window arbitrates.
+        if (prevProject?.path !== path) {
+          try {
+            const { isProjectOpenElsewhere } = await import('../services/projectWindowLockService');
+            if (await isProjectOpenElsewhere(path)) {
+              const name = path.replace(/\\/g, '/').split('/').pop() || path;
+              const ok = await tauriConfirm(
+                t('project.alreadyOpenElsewhere').replace('{name}', name),
+                {
+                  title: t('project.alreadyOpenElsewhereTitle'),
+                  kind: 'warning',
+                  okLabel: t('project.alreadyOpenElsewhereOk'),
+                },
+              );
+              if (!ok) return;
+            }
+          } catch { /* best-effort */ }
+        }
+
+        // Cancel only after ALL confirms passed — cancelling before the
+        // double-open prompt would kill the run of a switch the user then
+        // declines.
+        if (prevProject && prevProject.path !== path) {
           await cancelActiveRunForProjectExit();
         }
 
