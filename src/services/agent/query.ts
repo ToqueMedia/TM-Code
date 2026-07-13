@@ -29,6 +29,7 @@ import {
   type CompactFn,
 } from "./compact";
 import { applyGlobalToolResultBudget } from "./toolResultGlobalBudget";
+import { updateToolResultVisibility } from "./toolExecutor/toolResultVisibility";
 import {
   applyCollapsesIfNeeded,
   recoverFromOverflow,
@@ -62,6 +63,15 @@ import { EDIT_FILE } from "./toolNames";
 
 const MAX_OUTPUT_TOKENS = 32_768;
 const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3;
+// Cortes transitórios de stream (rede/5xx/stall) recuperados por run antes
+// de superficializar o erro — padrão "withheld errors" do claude-vaz: o erro
+// só chega ao user quando as vias de recuperação se esgotam.
+const STREAM_CUT_RECOVERY_LIMIT = 2;
+// Teto do escalation quando o output é truncado (finish_reason length) e o
+// modelo não expõe maxOutputTokens via getContextLimits. Porte do padrão
+// claude-vaz (8k→64k): truncou → duplica o cap nos pedidos seguintes, até
+// este teto ou ao máximo do modelo.
+const ESCALATED_MAX_OUTPUT_TOKENS = 65_536;
 const PLATFORM_AUTH_REFRESH_ATTEMPTS = 1;
 const CREDENTIAL_CONFIG_MAX_RETRIES = 3;
 const CREDENTIAL_CONFIG_RETRY_DELAY_MS = 30_000;
@@ -307,6 +317,12 @@ export interface QueryParams {
   tools: OpenAI.ChatCompletionTool[];
   /** Tool execution function. */
   executeTool: ToolExecutorFn;
+  /**
+   * Predicado de execução em streaming: true sse o tool pode COMEÇAR a
+   * executar durante o SSE (read-only/concurrencySafe no executor). Ausente
+   * = sem execução mid-stream (comportamento clássico: tudo pós-stream).
+   */
+  isStreamSafeTool?: (toolName: string) => boolean;
   /** Abort signal for cancellation. */
   signal: AbortSignal;
   /** Maximum turns before stopping (default: Infinity). */
@@ -582,6 +598,26 @@ function isCredentialOrConfigError(error: unknown): boolean {
   return (
     /api key not configured|auth not configured|endpoint not configured|provider not configured/.test(text) ||
     /invalid api key|incorrect api key|api key.*invalid|invalid token|unauthori[sz]ed|permission denied|forbidden|credential/.test(text)
+  );
+}
+
+/**
+ * Corte TRANSITÓRIO de stream — recuperável por retry (pré-output) ou por
+ * retoma em turno novo (pós-output). Classes deliberadas:
+ *   - 5xx do provider/gateway (o worker já re-tenta gateway HTML pré-stream;
+ *     isto cobre o corte DEPOIS do stream abrir);
+ *   - erros de transporte sem status (fetch/socket/rede terminada a meio);
+ *   - abort interno do watchdog semântico (requestAbort dispara sem o signal
+ *     do user — stream stalled). O abort do USER é guardado pelo caller
+ *     (!signal.aborted) antes de chamar isto.
+ * 4xx tipados NÃO entram — têm caminhos próprios acima (401 refresh, 402
+ * budget, 429 escada, credential/config) e re-tentar um 400 é inútil.
+ */
+function isTransientStreamCutError(error: unknown, errMsg: string): boolean {
+  const status = errorStatus(error);
+  if (status !== undefined) return status >= 500;
+  return /network|fetch failed|failed to fetch|econn|etimedout|socket|terminated|premature|connection|abort|stream.*(closed|ended|error)/i.test(
+    errMsg,
   );
 }
 
@@ -975,6 +1011,7 @@ export async function* query(
     getContextLimits,
     toolsetSelector,
     auxiliarySelection,
+    isStreamSafeTool,
   } = params;
   let client = params.client;
   const refreshClient = params.refreshClient;
@@ -1033,6 +1070,16 @@ export async function* query(
   let guardTriggeredLastTurn = false;
   let noEditGuardReason: string | undefined;
   let noEditRecoveryAction: string | undefined;
+  /**
+   * Cap de output escalado após truncagem (finish_reason "length" — OpenAI-
+   * compat — ou "max_tokens", Anthropic). null = usa o cap normal. Sobe uma
+   * vez por truncagem (2×, com teto no maxOutputTokens do modelo ou
+   * ESCALATED_MAX_OUTPUT_TOKENS) e mantém-se até ao fim da run — se um output
+   * já não coube uma vez, os seguintes têm a mesma cara.
+   */
+  let escalatedMaxTokens: number | null = null;
+  /** Cortes transitórios de stream recuperados nesta run (limite: STREAM_CUT_RECOVERY_LIMIT). */
+  let streamCutRecoveryCount = 0;
 
   // eslint-disable-next-line no-constant-condition
   queryLoop: while (true) {
@@ -1089,13 +1136,15 @@ export async function* query(
     let messagesForQuery = [...messages];
 
     // 0. Global tool-result budget — cap TOTAL tool-result tokens across all
-    //    messages at ~40K, compacting older results with a structured summary
-    //    (tool name, path/range, hash, preview, re-read hint) instead of the
-    //    flat "[cleared]" string microcompact used. Replaces microcompact in
-    //    the pipeline: keepRecent=4 ensures the results the model is actively
-    //    working with stay complete; older ones are compacted, not deleted —
-    //    the model can re-read via read_file / read_large_result / search.
-    //    Token-reduction phase, 2026-06-26.
+    //    messages at ~40K. UNDER budget nothing is touched (the model keeps a
+    //    full working set — hardcoding it to the last 4 results starved
+    //    multi-file tasks and caused the re-read→stub→force:true dance, raiz
+    //    corrigida 2026-07-13); OVER budget the oldest results are compacted
+    //    to a structured summary (tool name, path/range, hash, preview,
+    //    re-read hint) until back under, keepRecent=4 protected. Compacted ≠
+    //    deleted — the model re-reads via read_file / read_large_result, and
+    //    updateToolResultVisibility (below) garante que o dedup não bloqueia
+    //    essa releitura. Token-reduction phase 2026-06-26, budget real 07-13.
     const budgetResult = applyGlobalToolResultBudget(messagesForQuery);
     if (budgetResult.compactedCount > 0) {
       messagesForQuery = budgetResult.messages;
@@ -1258,6 +1307,16 @@ export async function* query(
     resetMentionContextTurnStats();
     const providerMessagesForQuery = compactHistoricalMentionContextForPayload(messagesForQuery);
 
+    // Regista que tool_results seguem INTACTOS neste payload vs compactados/
+    // removidos por QUALQUER camada acima (budget global, per-message,
+    // collapse, autoCompact, snip de emergência, mention-compaction). As
+    // camadas de dedup de leitura consultam este registo: um stub "já leste
+    // isto, está no contexto" só é permitido quando é VERDADE — senão o read
+    // serve o conteúdo diretamente e poupa o round-trip do force:true.
+    // `messages` (histórico canónico) delimita os ids deste loop, para não
+    // reclassificar resultados de loops concorrentes (sub-agentes).
+    updateToolResultVisibility(messages, providerMessagesForQuery);
+
     // Ensure message alternation: Anthropic requires user/assistant/user/...
     // NOTE: This synthetic assistant message was removed — it caused the model
     // to see 'Understood. What would you like me to do next?' as its own prior
@@ -1269,7 +1328,7 @@ export async function* query(
 
     // ── Build API request (convert internal format → OpenAI) ──
 
-    const maxTokens = maxOutputTokensOverride ?? MAX_OUTPUT_TOKENS;
+    const maxTokens = escalatedMaxTokens ?? maxOutputTokensOverride ?? MAX_OUTPUT_TOKENS;
     const apiMessages = toOpenAIMessages(providerMessagesForQuery, systemPrompt, model);
 
     // ── Dynamic toolset selection ──
@@ -1291,7 +1350,18 @@ export async function* query(
     // ── Payload inspection (token-cost diagnostics) ──
     // Best-effort: sizes + hashes + top-10 blocks logged to console.debug
     // before every provider request. Never throws, never blocks the send.
-    const payloadReport = inspectAndLogPayload(apiMessages, systemPrompt, activeTools, model, state.turnCount, toolSelection.totalCount, lastContinuationReason, auxiliarySelection);
+    const payloadReport = inspectAndLogPayload(
+      apiMessages, systemPrompt, activeTools, model, state.turnCount,
+      toolSelection.totalCount, lastContinuationReason, auxiliarySelection,
+      // Sinais de saúde da seleção dinâmica de tools: frequência de
+      // request_tools (perfil mal calibrado → round-trips extra) e base para
+      // o churn do toolset (invalidação de prompt cache) — ver toolsetChurn
+      // no PayloadReport. typeof-guard: testes injetam mocks parciais do
+      // seletor sem este método.
+      typeof toolsetSelector?.getInstrumentationStats === 'function'
+        ? toolsetSelector.getInstrumentationStats()
+        : undefined,
+    );
 
     // ── Stream from model ──
 
@@ -1316,6 +1386,71 @@ export async function* query(
     > = new Map();
     let stopReason = "";
     let turnUsage: OpenAI.CompletionUsage | undefined;
+
+    // ── Streaming tool execution (porte scoped do claude-vaz) ──
+    // Um delta para um index NOVO de tool_call significa (semântica OpenAI-
+    // compat: args por index são contíguos) que todos os indexes anteriores
+    // têm args completos — tools READ-ONLY (isStreamSafeTool, i.e.
+    // concurrencySafe no executor) começam a executar JÁ, sobrepondo a
+    // execução ao resto da geração. Ganho concentra-se nos turnos
+    // multi-read ("Leu 3 ficheiros"). Invariantes deliberados:
+    //   - Regra de prefixo: o primeiro tool não-safe (edit/write/shell) ou
+    //     com args não-parseáveis QUEBRA a cadeia — nada depois dele
+    //     pre-despacha, para que um read nunca observe estado anterior a um
+    //     edit que o precede na ordem do turno.
+    //   - Os yields de tool_result ficam onde estavam (pós-stream, em
+    //     ordem): só a EXECUÇÃO antecipa; o contrato de eventos com a UI e
+    //     o transcript não muda.
+    //   - Args que cheguem tarde para um index já despachado (interleaving
+    //     de provider) invalidam o pre-dispatch: o loop serial compara
+    //     argsJson e re-executa com os args completos — reads são
+    //     idempotentes, o custo é só o overlap perdido.
+    //   - Promises levam .catch imediato (mesma forma de erro do loop
+    //     serial) para nunca gerarem unhandled rejection num stream
+    //     abortado a meio.
+    // Keyed por tool-call id. `streamDispatchBroken` implementa o prefixo.
+    const preDispatched = new Map<
+      string,
+      { argsJson: string; promise: Promise<{ content: string; isError: boolean }> }
+    >();
+    let streamDispatchBroken = false;
+    const tryStreamDispatch = (pending: {
+      id: string;
+      name: string;
+      argsParts: string[];
+    }): void => {
+      if (streamDispatchBroken || !isStreamSafeTool) return;
+      if (!pending.id || !pending.name) {
+        streamDispatchBroken = true;
+        return;
+      }
+      if (preDispatched.has(pending.id)) return;
+      if (signal.aborted) return;
+      const argsJson = pending.argsParts.join("");
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = argsJson ? JSON.parse(argsJson) : {};
+      } catch {
+        // Args incompletos apesar do index novo — não arrisca; quebra o
+        // prefixo e deixa o loop serial (com reparo de _parseError) tratar.
+        streamDispatchBroken = true;
+        return;
+      }
+      if (!isStreamSafeTool(pending.name)) {
+        streamDispatchBroken = true;
+        return;
+      }
+      const promise = executeTool(pending.name, parsed, pending.id, signal).catch(
+        (err) => ({
+          content: `Tool execution error: ${formatError(err)}`,
+          isError: true,
+        }),
+      );
+      preDispatched.set(pending.id, { argsJson, promise });
+      console.debug(
+        `[query] stream-dispatch: ${pending.name} (${pending.id}) started during stream`,
+      );
+    };
 
     // MiniMax: buffer for content that may contain <think> tags
     // Gemini: buffer for content that may contain <thought> tags
@@ -1597,6 +1732,14 @@ export async function* query(
           for (const tc of delta.tool_calls) {
             let pending = pendingToolCalls.get(tc.index);
             if (!pending) {
+              // Index novo ⇒ os anteriores têm args completos (contiguidade
+              // OpenAI-compat) — candidatos a execução durante o stream.
+              // Ordenado por index: a regra de prefixo do tryStreamDispatch
+              // depende de visitar os tools na ordem do turno.
+              const completed = [...pendingToolCalls]
+                .filter(([idx]) => idx < tc.index)
+                .sort((a, b) => a[0] - b[0]);
+              for (const [, prior] of completed) tryStreamDispatch(prior);
               pending = {
                 id: tc.id || "",
                 name: tc.function?.name || "",
@@ -1945,6 +2088,121 @@ export async function* query(
         }
       }
 
+      // ── Withheld transient stream-cut recovery (porte claude-vaz) ──
+      // O erro NÃO chega ao user enquanto houver via de recuperação. Guardas:
+      //   - !signal.aborted: cancelamento do user nunca é "recuperado";
+      //   - só classes transitórias (5xx pós-abertura, transporte, stall do
+      //     watchdog) — 4xx tipados já foram tratados acima;
+      //   - limite por run (anti-death-spiral).
+      // Pré-output: repetir o MESMO pedido é seguro (nada foi emitido).
+      // Pós-output: NUNCA repetimos (duplicaria texto na UI) — preservamos o
+      // parcial como turno real, fechamos tool calls órfãs com tool_results
+      // sintéticos (os cards da UI resolvem em vez de ficarem "running" para
+      // sempre) e retomamos num turno novo, mesma mecânica da recovery de
+      // max_tokens.
+      if (
+        !signal.aborted &&
+        isTransientStreamCutError(error, errMsg) &&
+        streamCutRecoveryCount < STREAM_CUT_RECOVERY_LIMIT
+      ) {
+        streamCutRecoveryCount++;
+
+        if (!outputStarted) {
+          // hasStartedModelOutput não vê o contentBuffer (fragmento de tag
+          // <think> parcial ainda não classificado) — limpa-o para o retry
+          // não prefixar o stream novo com lixo do anterior.
+          contentBuffer.length = 0;
+          thinkMode = false;
+          yield {
+            type: "agent_status",
+            phase: "retrying",
+            message: `Connection to the model was interrupted. Retrying ${streamCutRecoveryCount}/${STREAM_CUT_RECOVERY_LIMIT}...`,
+            attempt: streamCutRecoveryCount,
+            maxAttempts: STREAM_CUT_RECOVERY_LIMIT,
+            httpStatus: errorStatus(error),
+          };
+          continue;
+        }
+
+        // Fecha os tool calls do stream parcial: pendentes ainda não
+        // coletados entram também (o tool_use_start deles já foi emitido —
+        // sem resultado sintético o card ficava pendurado).
+        const seenIds = new Set(collectedToolCalls.map((tc) => tc.id));
+        const orphanedCalls = [...collectedToolCalls];
+        for (const [, pending] of pendingToolCalls) {
+          if (pending.id && !seenIds.has(pending.id)) {
+            orphanedCalls.push({
+              id: pending.id,
+              name: pending.name,
+              argsJson: pending.argsParts.join(""),
+              thoughtSignature: pending.thoughtSignature,
+            });
+            seenIds.add(pending.id);
+          }
+        }
+
+        const partialBlocks: ContentBlockAPI[] = [];
+        const partialThinking = assistantThinkingParts.join("");
+        const partialText = assistantTextParts.join("");
+        if (partialThinking) partialBlocks.push({ type: "thinking", thinking: partialThinking });
+        if (partialText) partialBlocks.push({ type: "text", text: partialText });
+        for (const tc of orphanedCalls) {
+          partialBlocks.push({
+            type: "tool_call",
+            id: tc.id,
+            name: tc.name,
+            arguments: tc.argsJson,
+          });
+        }
+
+        const syntheticResult =
+          "Stream was interrupted by a transient connection error before this tool could execute. " +
+          "Re-issue the call if you still need it.";
+        const recoveryBlocks: ContentBlockAPI[] = orphanedCalls.map((tc) => ({
+          type: "tool_result",
+          toolCallId: tc.id,
+          content: syntheticResult,
+          isError: true,
+        }));
+        for (const tc of orphanedCalls) {
+          yield {
+            type: "tool_result",
+            toolUseId: tc.id,
+            content: syntheticResult,
+            isError: true,
+          };
+        }
+        recoveryBlocks.push({
+          type: "text",
+          text:
+            "Your previous message was cut off by a transient connection error mid-stream. " +
+            "Resume EXACTLY where it stopped — no apology, no recap, do not repeat text already produced. " +
+            "Re-issue any tool call that was interrupted before executing.",
+        });
+
+        yield {
+          type: "agent_status",
+          phase: "retrying",
+          message: `Connection interrupted mid-response. Resuming ${streamCutRecoveryCount}/${STREAM_CUT_RECOVERY_LIMIT}...`,
+          attempt: streamCutRecoveryCount,
+          maxAttempts: STREAM_CUT_RECOVERY_LIMIT,
+          httpStatus: errorStatus(error),
+        };
+
+        state = {
+          ...state,
+          messages: [
+            ...messagesForQuery,
+            ...(partialBlocks.length > 0
+              ? [{ role: "assistant" as const, content: partialBlocks }]
+              : []),
+            { role: "user" as const, content: recoveryBlocks },
+          ],
+          continuationCount: 0,
+        };
+        continue queryLoop;
+      }
+
       yield { type: "error", message: errMsg };
 
       // If we have tool calls from a partial stream, yield error results
@@ -2228,6 +2486,24 @@ export async function* query(
 
     yield { type: "message_stop", stopReason, usage: turnUsage, providerState: turnProviderState };
 
+    // ── Output-cap escalation (porte claude-vaz) ──
+    // O output foi truncado pelo cap ("length" = OpenAI-compat; "max_tokens"
+    // = Anthropic). Duplica o cap dos pedidos SEGUINTES até ao máximo do
+    // modelo (getContextLimits) ou ESCALATED_MAX_OUTPUT_TOKENS. Aplica-se
+    // também quando há tool calls: argsJson truncado a meio é exatamente o
+    // caso que o reparo de _parseError tenta remendar — mais vale o próximo
+    // pedido ter espaço do que remendar JSON outra vez.
+    if (stopReason === "length" || stopReason === "max_tokens") {
+      const ceiling = getContextLimits?.()?.maxOutputTokens ?? ESCALATED_MAX_OUTPUT_TOKENS;
+      const next = Math.min(ceiling, maxTokens * 2);
+      if (next > maxTokens) {
+        escalatedMaxTokens = next;
+        console.debug(
+          `[query] output truncated (finish_reason=${stopReason}) — escalating max_tokens ${maxTokens} → ${next} for subsequent requests`,
+        );
+      }
+    }
+
     // ── Build assistant message and add to history ──
 
     const assistantBlocks: ContentBlockAPI[] = [];
@@ -2315,9 +2591,15 @@ export async function* query(
         };
       }
 
-      // No tool calls — check for max_tokens continuation
+      // No tool calls — check for output-cap truncation continuation.
+      // BUG HISTÓRICO (corrigido 2026-07-13): comparava só com "max_tokens"
+      // (vocabulário Anthropic), mas os providers OpenAI-compat do data-plane
+      // emitem finish_reason "length" — a recovery NUNCA disparava e respostas
+      // truncadas terminavam a run como se estivessem completas. O cap dos
+      // pedidos seguintes já foi escalado no pós-stream (escalatedMaxTokens),
+      // por isso a continuação tem espaço real, não só o pedido de brevidade.
       if (
-        stopReason === "max_tokens" &&
+        (stopReason === "length" || stopReason === "max_tokens") &&
         maxOutputTokensRecoveryCount < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
       ) {
         state = {
@@ -2327,7 +2609,8 @@ export async function* query(
             {
               role: "user",
               content:
-                "Output token limit hit. Resume directly — no apology, no recap. Break remaining work into smaller pieces.",
+                "Your previous message hit the output token limit and was cut off mid-answer. " +
+                "Resume EXACTLY where it stopped — no apology, no recap, do not repeat text already produced.",
             },
           ],
           maxOutputTokensRecoveryCount: maxOutputTokensRecoveryCount + 1,
@@ -2511,7 +2794,17 @@ export async function* query(
       }
 
       try {
-        const result = await executeTool(tc.name, toolInput, tc.id, signal);
+        // Execução em streaming: se este tool call foi pre-despachado durante
+        // o stream, consome o resultado (já pronto ou quase). O guard de
+        // argsJson invalida o pre-dispatch quando args chegaram DEPOIS do
+        // despacho (interleaving raro de provider): re-executa com os args
+        // completos — o pre-dispatch é sempre read-only, o custo é só o
+        // overlap perdido, nunca um side effect duplicado.
+        const pre = preDispatched.get(tc.id);
+        const result =
+          pre && pre.argsJson === tc.argsJson
+            ? await pre.promise
+            : await executeTool(tc.name, toolInput, tc.id, signal);
         const modelContent = sanitizeToolResultForModel(result.content)
         yield {
           type: "tool_result",

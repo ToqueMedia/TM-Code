@@ -45,7 +45,7 @@ import type { ToolsetGroupName } from "./toolsetSelector";
 import type { PromptProfile } from "./contextBuilder/auxiliaryRegistry";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 import { classifyExecuteCommandPurpose, convertShellReadCommand } from "./commandPurpose";
-import { EDIT_FILE } from "./toolNames";
+import { EDIT_FILE, canonicalToolName } from "./toolNames";
 import { formatShellReadRedirect } from "./shellReadRedirect";
 import {
   decorateTmsRequestUsage,
@@ -595,6 +595,14 @@ class AgentService {
       systemPrompt: this.systemPrompt,
       tools: openaiTools,
       executeTool,
+      // Execução em streaming (query.ts): só tools concurrencySafe (read-only
+      // por definição do flag) podem começar durante o SSE. Canonicaliza
+      // porque o modelo chama aliases (Read/Grep/...) e o registry pode ter
+      // o flag na entrada canónica. Meta-tools (request_tools/context) não
+      // estão no registry → false → nunca pre-despacham.
+      isStreamSafeTool: (name) =>
+        this.toolExecutor.isConcurrencySafe(name) ||
+        this.toolExecutor.isConcurrencySafe(canonicalToolName(name)),
       thinkingConfig,
       maxTurns: this.lightweightOptions?.maxTurns,
       extraHeaders,

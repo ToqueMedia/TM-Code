@@ -42,6 +42,8 @@ export interface QueryEngineOptions {
   tools: OpenAI.ChatCompletionTool[]
   /** Tool execution function. */
   executeTool: ToolExecutorFn
+  /** Streaming-execution predicate — see QueryParams.isStreamSafeTool. */
+  isStreamSafeTool?: (toolName: string) => boolean
   /** Max output tokens override. */
   maxOutputTokensOverride?: number
   /** Thinking config. */
@@ -175,6 +177,7 @@ export class QueryEngine {
       model: this.options.model ?? DEFAULT_MODEL,
       tools: this.options.tools,
       executeTool: this.options.executeTool,
+      isStreamSafeTool: this.options.isStreamSafeTool,
       signal: this.abortController.signal,
       maxTurns: this.options.maxTurns,
       maxOutputTokensOverride: this.options.maxOutputTokensOverride,

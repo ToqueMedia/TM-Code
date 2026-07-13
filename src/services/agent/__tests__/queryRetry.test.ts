@@ -394,7 +394,11 @@ describe('query retry handling', () => {
     expect(create).toHaveBeenCalledTimes(4)
   })
 
-  it('aborts a live stream that never produces useful model progress', async () => {
+  it('retries a stalled stream (withheld) and only surfaces the error after the limit', async () => {
+    // Contrato novo (withheld errors, 2026-07-13): um stream que nunca produz
+    // progresso útil é um corte TRANSITÓRIO — o watchdog aborta o pedido e o
+    // loop repete (nada foi emitido, retry é seguro), com status visível.
+    // O erro só chega ao user depois de STREAM_CUT_RECOVERY_LIMIT retries.
     const streamReturn = jest.fn()
     const create = jest.fn((_body, _opts) => ({
       withResponse: async () => ({
@@ -410,10 +414,22 @@ describe('query retry handling', () => {
 
     expect(await nextEvent(generator)).toEqual({ type: 'message_start' })
     expect(await nextEvent(generator)).toMatchObject({
+      type: 'agent_status',
+      phase: 'retrying',
+      attempt: 1,
+    })
+    expect(await nextEvent(generator)).toMatchObject({
+      type: 'agent_status',
+      phase: 'retrying',
+      attempt: 2,
+    })
+    expect(await nextEvent(generator)).toMatchObject({
       type: 'error',
       message: expect.stringContaining('did not produce model output'),
     })
 
+    // Cada tentativa abortou o SEU pedido via watchdog (1 inicial + 2 retries).
+    expect(create).toHaveBeenCalledTimes(3)
     const requestSignal = create.mock.calls[0]?.[1]?.signal as AbortSignal
     expect(requestSignal.aborted).toBe(true)
     expect(streamReturn).toHaveBeenCalled()
