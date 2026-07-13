@@ -130,7 +130,6 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
                 onOpenFolder={handleOpenFolder}
                 onCloneRepository={() => cloneDialog.setOpen(true)}
                 onOpenProject={handleOpenRecentProject}
-                onSettings={() => setWelcomeScreen('settings')}
                 onClearRecent={clearAllRecent}
                 activeProjectPath={currentProject?.path ?? null}
               />

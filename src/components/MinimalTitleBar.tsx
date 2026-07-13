@@ -1,40 +1,19 @@
 import { memo, useState, useRef, useEffect, useCallback, lazy, Suspense } from 'react'
 import { Box, Flex, Text, HStack, Portal } from '@chakra-ui/react'
-import { FiLogOut, FiSettings, FiAlertCircle, FiUploadCloud } from 'react-icons/fi'
+import { FiFolder, FiUploadCloud } from 'react-icons/fi'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { tokens } from '@/theme/tokens'
 import { useProjectStore } from '../stores/projectStore'
-import { useAuthStore } from '../stores/authStore'
-import { useLayoutStore } from '../stores/layoutStore'
 import { useToastStore } from '../stores/toastStore'
-import FirebaseAuthService from '../services/auth/firebaseAuth'
 import { prepareProjectWebExport, sendProjectToTmCodeWeb, type PreparedWebExport } from '../services/webExportService'
 import WindowControls from './ui/WindowControls'
 import MenuBar from './ui/titlebar/MenuBar'
+import BranchMenu from './ui/BranchMenu'
 import { BrowserMissingDialog } from './dialogs/BrowserMissingDialog'
 import { useTranslation, t as translate } from '@/i18n'
-import { IS_MAC, IS_LINUX } from '@/utils/platform'
+import { IS_MAC } from '@/utils/platform'
 
 const IssueReporterDialog = lazy(() => import('./dialogs/IssueReporterDialog'))
-
-function getInitials(email: string | null, displayName: string | null): string {
-  if (displayName) {
-    const parts = displayName.trim().split(/\s+/)
-    if (parts.length >= 2) {
-      return (parts[0][0] + parts[1][0]).toUpperCase()
-    }
-    return parts[0].substring(0, 2).toUpperCase()
-  }
-  if (email) {
-    const local = email.split('@')[0]
-    const parts = local.split(/[._-]/)
-    if (parts.length >= 2) {
-      return (parts[0][0] + parts[1][0]).toUpperCase()
-    }
-    return local.substring(0, 2).toUpperCase()
-  }
-  return '?'
-}
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
@@ -75,8 +54,6 @@ function buildSendToWebConfirmMessage(template: string, prepared: PreparedWebExp
 
 function MinimalTitleBar() {
   const currentProject = useProjectStore(s => s.currentProject)
-  const user = useAuthStore(s => s.user)
-  const [showUserMenu, setShowUserMenu] = useState(false)
   const [showIssueReporter, setShowIssueReporter] = useState(false)
   const [sendingToWeb, setSendingToWeb] = useState(false)
   // Painel de atividade do "Enviar para Web" — lista de passos com o atual
@@ -84,49 +61,15 @@ function MinimalTitleBar() {
   const [exportSteps, setExportSteps] = useState<Array<{ label: string; done: boolean }>>([])
   const exportStepsClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const handleCloseIssueReporter = useCallback(() => setShowIssueReporter(false), [])
-  const avatarRef = useRef<HTMLDivElement>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
-  const [menuPos, setMenuPos] = useState({ top: 0, right: 0 })
 
-  // Position the dropdown relative to the avatar (recalculate on resize)
-  const recalcMenuPos = useCallback(() => {
-    if (!avatarRef.current) return
-    const rect = avatarRef.current.getBoundingClientRect()
-    setMenuPos({
-      top: rect.bottom + 4,
-      right: window.innerWidth - rect.right,
-    })
-  }, [])
-
-  useEffect(() => {
-    if (!showUserMenu) return
-    recalcMenuPos()
-    window.addEventListener('resize', recalcMenuPos)
-    return () => window.removeEventListener('resize', recalcMenuPos)
-  }, [showUserMenu, recalcMenuPos])
-
-  // Listen for issue reporter open event (from native menu or elsewhere)
+  // Listen for issue reporter open event (from native menu, or from the
+  // sidebar-footer user menu — the avatar moved there in the 2026-07-13
+  // redesign; this dialog stays mounted here as the single global instance).
   useEffect(() => {
     function handleOpen() { setShowIssueReporter(true) }
     window.addEventListener('app:report-issue', handleOpen)
     return () => window.removeEventListener('app:report-issue', handleOpen)
   }, [])
-
-  // Close menu on outside click
-  useEffect(() => {
-    if (!showUserMenu) return
-    function handleClick(e: MouseEvent) {
-      const target = e.target as Node
-      if (
-        avatarRef.current && !avatarRef.current.contains(target) &&
-        menuRef.current && !menuRef.current.contains(target)
-      ) {
-        setShowUserMenu(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [showUserMenu])
 
   const t = useTranslation()
 
@@ -159,7 +102,6 @@ function MinimalTitleBar() {
     if (['button', 'input', 'svg', 'path'].includes(tag)) return
     if (t.getAttribute?.('role') === 'button') return
     if (t.closest?.('[data-no-drag]')) return
-    if (avatarRef.current?.contains(t)) return
     try {
       const win = getCurrentWindow()
       const isMax = await win.isMaximized()
@@ -179,45 +121,8 @@ function MinimalTitleBar() {
     // should NOT start a window drag — otherwise the click gets eaten by
     // startDragging() on Windows and onClick never fires.
     if (t.closest?.('[data-no-drag]')) return
-    // Don't start dragging if clicking inside user menu area
-    if (avatarRef.current?.contains(t)) return
     getCurrentWindow().startDragging().catch(() => {})
   }, [])
-
-  async function handleSignOut() {
-    setShowUserMenu(false)
-
-    // Close the project first — closeProject saves the chat session itself
-    // (cleanupOnExit) and can DECLINE when the agent is mid-task and the
-    // user picks "keep working". Without checking the result, sign-out
-    // proceeded anyway: signed-out UI over an open workspace, with the
-    // live run dying on the next token refresh.
-    const project = useProjectStore.getState().currentProject
-    if (project) {
-      const closed = await useProjectStore.getState().closeProject().catch(() => false)
-      if (!closed) return
-    }
-
-    // Clear auth state and sign out
-    useAuthStore.getState().clear()
-    await FirebaseAuthService.getInstance().signOut()
-  }
-
-  function handleOpenSettings() {
-    setShowUserMenu(false)
-    const project = useProjectStore.getState()
-    if (!project.currentProject) {
-      project.setWelcomeScreen(project.welcomeScreen === 'settings' ? 'hero' : 'settings')
-      return
-    }
-
-    const layout = useLayoutStore.getState()
-    if (layout.viewMode === 'settings') {
-      layout.goBack()
-    } else {
-      layout.setViewMode('settings')
-    }
-  }
 
   // Activity feed do envio — cada passo aparece no painel flutuante enquanto
   // decorre (spinner) e fica com ✓ quando o seguinte começa. Substitui os
@@ -297,22 +202,14 @@ function MinimalTitleBar() {
     }
   }
 
-  const initials = user ? getInitials(user.email, user.displayName) : ''
-  const displayName = user?.displayName?.trim() || user?.email?.split('@')[0] || ''
-  const titlebarName = displayName
-    ? (displayName.length > 24 ? displayName.substring(0, 22) + '...' : displayName)
-    : ''
-
   return (
     <Box
-      height="35px"
-      // Translucent over the native NSVisualEffectView (macOS) / Mica/Acrylic
-      // (Windows) installed by lib.rs::run().setup. Linux has no platform
-      // vibrancy via window-vibrancy, so we keep the previous CSS backdrop
-      // blur there — it's not equivalent to native, but better than a flat bar.
-      bg={IS_MAC ? 'rgba(15, 15, 15, 0.55)' : tokens.colors.dialog.bg}
-      backdropFilter={IS_LINUX ? 'blur(10px)' : undefined}
-      borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}
+      height="40px"
+      // Header LISO (redesign 2026-07-13): mesma cor do fundo da app, sem
+      // borda nem translucidez — deixa de ler como "uma barra" e funde-se
+      // com o conteúdo, como na referência. A área continua a ser a drag
+      // region da janela frameless.
+      bg="#0a0a0a"
       display="flex"
       alignItems="center"
       px={2}
@@ -334,15 +231,31 @@ function MinimalTitleBar() {
         <Text fontSize="13px" fontWeight="600" color={tokens.colors.text.primary} whiteSpace="nowrap">
           TM Code
         </Text>
-        {currentProject && (
-          <>
-            <Text fontSize="13px" color={tokens.colors.text.disabled}>—</Text>
-            <Text fontSize="13px" color={tokens.colors.text.secondary} whiteSpace="nowrap" maxW="120px" overflow="hidden" textOverflow="ellipsis">
-              {currentProject.name}
-            </Text>
-          </>
-        )}
         <MenuBar />
+        {currentProject && (
+          <HStack gap={1.5} ml={1} data-no-drag>
+            {/* Chip do projecto — par do chip de branch, como na referência */}
+            <Flex
+              align="center"
+              gap="6px"
+              h="26px"
+              px="9px"
+              borderRadius="8px"
+              bg="rgba(255, 255, 255, 0.05)"
+              border={`1px solid ${tokens.colors.border.default}`}
+              color={tokens.colors.text.secondary}
+              maxW="200px"
+              title={currentProject.path}
+            >
+              <FiFolder size={12} />
+              <Text fontSize="12px" fontWeight="600" lineClamp={1}>
+                {currentProject.name}
+              </Text>
+            </Flex>
+            {/* Trocar/criar branch a partir do chat */}
+            <BranchMenu projectPath={currentProject.path} />
+          </HStack>
+        )}
       </HStack>
 
       {/* Center spacer */}
@@ -406,61 +319,8 @@ function MinimalTitleBar() {
           </Flex>
         )}
 
-        {user && (
-          <Flex
-            align="center"
-            justify="center"
-            w="28px"
-            h="28px"
-            borderRadius="6px"
-            cursor="pointer"
-            color={tokens.colors.text.secondary}
-            transition={`all ${tokens.transition.fast}`}
-            _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
-            role="button"
-            title={t('menu.settings')}
-            aria-label={t('menu.settings')}
-            onClick={handleOpenSettings}
-          >
-            <FiSettings size={14} />
-          </Flex>
-        )}
-
-        {/* User identity */}
-        {user && (
-          <Box ref={avatarRef}>
-            <Flex
-              align="center"
-              gap={1.5}
-              cursor="pointer"
-              px={1.5}
-              py={0.5}
-              borderRadius="6px"
-              transition={`background ${tokens.transition.fast}`}
-              _hover={{ bg: tokens.colors.bg.whiteSubtle }}
-              role="button"
-              onClick={() => setShowUserMenu(!showUserMenu)}
-            >
-              {/* Avatar with initials */}
-              <Flex
-                w="20px"
-                h="20px"
-                borderRadius="full"
-                bg={tokens.colors.accent.primary}
-                align="center"
-                justify="center"
-                flexShrink={0}
-              >
-                <Text fontSize="9px" fontWeight="700" color="#fff" lineHeight="1">
-                  {initials}
-                </Text>
-              </Flex>
-              <Text fontSize="11px" color={tokens.colors.text.secondary} maxW="130px" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">
-                {titlebarName}
-              </Text>
-            </Flex>
-          </Box>
-        )}
+        {/* Avatar/menu de utilizador: migrou para o rodapé da sidebar
+            (redesign 2026-07-13, paridade com a referência). */}
       </HStack>
 
       {/* Right: window controls (Windows/Linux) */}
@@ -474,92 +334,6 @@ function MinimalTitleBar() {
         </HStack>
       )}
 
-      {/* Dropdown rendered in portal to escape overflow:hidden */}
-      {showUserMenu && user && (
-        <Portal>
-          <Box
-            ref={menuRef}
-            position="fixed"
-            top={`${menuPos.top}px`}
-            right={`${menuPos.right}px`}
-            bg={tokens.colors.dialog.bg}
-            border={`1px solid ${tokens.colors.border.panel}`}
-            borderRadius="8px"
-            boxShadow="0 4px 12px rgba(0,0,0,0.3)"
-            py={1}
-            minW="200px"
-            zIndex={tokens.zIndex.overlay}
-            backdropFilter="blur(16px)"
-          >
-            <Box px={3} py={2} borderBottom={`1px solid ${tokens.colors.border.panel}`}>
-              <Text fontSize="12px" color={tokens.colors.text.primary} fontWeight="500">
-                {displayName || t('activity.accounts')}
-              </Text>
-            </Box>
-            <Box
-              px={3}
-              py={1.5}
-              cursor="pointer"
-              display="flex"
-              alignItems="center"
-              gap={2}
-              role="button"
-              transition={`background ${tokens.transition.fast}`}
-              _hover={{ bg: tokens.colors.bg.whiteSubtle }}
-              css={{ '& *': { pointerEvents: 'none' } }}
-              onClick={handleOpenSettings}
-            >
-              <FiSettings size={13} color={tokens.colors.text.secondary} />
-              <Text fontSize="12px" color={tokens.colors.text.secondary}>
-                {t('menu.settings')}
-              </Text>
-            </Box>
-            <Box
-              px={3}
-              py={1.5}
-              cursor="pointer"
-              display="flex"
-              alignItems="center"
-              gap={2}
-              role="button"
-              transition={`background ${tokens.transition.fast}`}
-              _hover={{ bg: tokens.colors.bg.whiteSubtle }}
-              // Children pointer-events:none so the WHOLE padded row is the click
-              // target (matches ContextMenuOverlay). Without this, on Windows
-              // WebView2 only a click directly on the icon/text registered.
-              css={{ '& *': { pointerEvents: 'none' } }}
-              onClick={() => {
-                setShowUserMenu(false)
-                setShowIssueReporter(true)
-              }}
-            >
-              <FiAlertCircle size={13} color={tokens.colors.text.secondary} />
-              <Text fontSize="12px" color={tokens.colors.text.secondary}>
-                {t('issueReporter.menuItem')}
-              </Text>
-            </Box>
-            <Box h="1px" bg={tokens.colors.border.panel} mx={2} my={0.5} />
-            <Box
-              px={3}
-              py={1.5}
-              cursor="pointer"
-              display="flex"
-              alignItems="center"
-              gap={2}
-              role="button"
-              transition={`background ${tokens.transition.fast}`}
-              _hover={{ bg: tokens.colors.bg.whiteSubtle }}
-              css={{ '& *': { pointerEvents: 'none' } }}
-              onClick={handleSignOut}
-            >
-              <FiLogOut size={13} color={tokens.colors.text.secondary} />
-              <Text fontSize="12px" color={tokens.colors.text.secondary}>
-                {t('common.signOut')}
-              </Text>
-            </Box>
-          </Box>
-        </Portal>
-      )}
       {/* Issue Reporter Dialog */}
       <Suspense fallback={null}>
         <IssueReporterDialog

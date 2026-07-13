@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import {
   Box,
   Flex,
@@ -9,39 +9,31 @@ import {
   Icon,
 } from '@chakra-ui/react'
 import {
-  LuFolder,
   LuFolderOpen,
   LuGitBranch,
   LuClock,
-  LuChevronRight,
   LuSettings,
   LuEraser,
   LuPlus,
+  LuCheck,
+  LuLayers,
 } from 'react-icons/lu'
+import { FiAlertCircle, FiLogOut } from 'react-icons/fi'
 import { getVersion } from '@tauri-apps/api/app'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { showProjectContextMenu } from '@/components/projectContextMenu'
 import { useProjectAgentStatuses, type ProjectAgentStatus } from '@/hooks/useProjectAgentStatuses'
+import {
+  getCommandQueueSnapshot,
+  subscribeToCommandQueue,
+} from '@/services/agent/messageQueue'
+import { useAuthStore } from '@/stores/authStore'
+import { useProjectStore } from '@/stores/projectStore'
+import { useLayoutStore } from '@/stores/layoutStore'
+import { signOutWithGuard } from '@/services/auth/signOutFlow'
+import type { PromptValue } from '@/types/messageQueueTypes'
 import type { RecentProject } from '@/types/project'
-
-// ─── Agent-run badge (multi-window parallel work) ──────────────────────
-// Which colour/label a project row shows for the agent-status file state.
-// `running` comes from ANOTHER window's live agent (or this one's, when the
-// user is back on Welcome mid-run); `done`/`error` persist until the user
-// visits that project. See services/projectAgentStatusService.ts.
-function agentBadgeFor(state: ProjectAgentStatus['state']): { color: string; label: string } | null {
-  switch (state) {
-    case 'running':
-      return { color: tokens.colors.accent.primary, label: t('welcome.agentWorking') }
-    case 'done':
-      return { color: tokens.colors.status.running, label: t('welcome.agentDone') }
-    case 'error':
-      return { color: tokens.colors.status.error, label: t('welcome.agentError') }
-    default:
-      return null
-  }
-}
 
 // Cache the version promise — it never changes during the session.
 let versionPromise: Promise<string> | null = null
@@ -54,7 +46,7 @@ function getAppVersion(): Promise<string> {
   return versionPromise
 }
 
-// ─── Relative time helper ──────────────────────────────────────────────
+// ─── Time helpers ───────────────────────────────────────────────────────
 function relativeTime(dateStr?: string): string | null {
   if (!dateStr) return null
   const now = new Date()
@@ -80,13 +72,52 @@ function relativeTime(dateStr?: string): string | null {
   return then.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+/** Compact "2m / 3h / 5d" for task rows (image-style timestamps). */
+function shortAgo(epochMs: number): string | null {
+  const diff = Date.now() - epochMs
+  if (!Number.isFinite(diff) || diff < 0) return null
+  const mins = Math.floor(diff / 60_000)
+  if (mins < 1) return t('welcome.justNow')
+  if (mins < 60) return `${mins}m`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h`
+  return `${Math.floor(hours / 24)}d`
+}
+
+/** Single-line preview of a queued command's value (text + attachment count). */
+function queuedPreview(value: PromptValue): string {
+  if (typeof value === 'string') return value
+  const texts: string[] = []
+  let attachments = 0
+  for (const block of value) {
+    if (block.type === 'text') texts.push(block.text)
+    else attachments++
+  }
+  const joined = texts.join(' ')
+  return attachments > 0 ? `${joined} [${attachments}]`.trim() : joined
+}
+
+function getInitials(email: string | null, displayName: string | null): string {
+  if (displayName) {
+    const parts = displayName.trim().split(/\s+/)
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
+    return parts[0].substring(0, 2).toUpperCase()
+  }
+  if (email) {
+    const local = email.split('@')[0]
+    const parts = local.split(/[._-]/)
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
+    return local.substring(0, 2).toUpperCase()
+  }
+  return '?'
+}
+
 interface WelcomeSidebarProps {
   recentProjects: RecentProject[]
   onNewProject: () => void
   onOpenFolder: () => void
   onCloneRepository: () => void
   onOpenProject: (path?: string) => void
-  onSettings?: () => void
   activeProjectPath?: string | null
   /** Clear the recent projects list. The caller handles the confirmation
    *  dialog; this component just surfaces the button. */
@@ -99,7 +130,6 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   onOpenFolder,
   onCloneRepository,
   onOpenProject,
-  onSettings,
   activeProjectPath,
   onClearRecent,
 }) => {
@@ -109,6 +139,13 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   // on purpose: each window is a separate OS process, disk is the only
   // shared channel (see useProjectAgentStatuses).
   const agentStatuses = useProjectAgentStatuses(recentProjects.map(p => p.path))
+
+  // Queued TASKS of the project open in THIS window — they render as
+  // children of its folder, alongside the running row (the "features em
+  // paralelo" tree from the reference design). Steering entries stay in the
+  // composer strip: they are course corrections, not units of work.
+  const queuedCommands = useSyncExternalStore(subscribeToCommandQueue, getCommandQueueSnapshot)
+  const queuedTasks = queuedCommands.filter(c => c.asTask === true)
 
   useEffect(() => {
     getAppVersion().then(setAppVersion)
@@ -120,14 +157,6 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
     showProjectContextMenu(project).catch(() => {})
   }, [])
 
-  const truncatePath = (path: string, maxLen = 38) => {
-    if (path.length <= maxLen) return path
-    const parts = path.split(/[/\\]/)
-    if (parts.length <= 3) return '...' + path.slice(-maxLen)
-    const sep = path.includes('\\') ? '\\' : '/'
-    return parts[0] + sep + '...' + sep + parts.slice(-2).join(sep)
-  }
-
   return (
     <Box
       width="clamp(200px, 30vw, 300px)"
@@ -138,92 +167,50 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
       bg="rgba(15, 15, 15, 0.95)"
       backdropFilter="blur(24px)"
       borderRight="1px solid"
-      borderColor="rgba(254, 16, 99, 0.15)"
+      borderColor="rgba(255, 255, 255, 0.05)"
       display="flex"
       flexDirection="column"
-      py={{ base: 4, md: 8 }}
-      px={{ base: 3, md: 5 }}
-      pt={{ base: 8, md: 12 }}
+      py={{ base: 4, md: 6 }}
+      px={{ base: 3, md: 4 }}
+      pt={{ base: 6, md: 8 }}
       data-no-drag
       position="relative"
       overflow="hidden"
       css={{
         '@media (max-width: 520px)': {
           '& [data-sidebar-logo]': {
-            marginBottom: '18px',
+            marginBottom: '14px',
           },
           '& [data-sidebar-logo-mark]': {
-            width: '30px',
-            height: '30px',
-            marginRight: '10px',
+            width: '26px',
+            height: '26px',
+            marginRight: '8px',
           },
           '& [data-sidebar-logo-title]': {
-            fontSize: '16px',
+            fontSize: '15px',
           },
           '& [data-sidebar-actions]': {
-            marginBottom: '22px',
+            marginBottom: '18px',
           },
-          '& [data-sidebar-action]': {
-            gap: '9px',
-            paddingLeft: '9px',
-            paddingRight: '9px',
-            paddingTop: '8px',
-            paddingBottom: '8px',
-          },
-          '& [data-sidebar-action-icon]': {
-            width: '25px',
-            height: '25px',
-          },
-          '& [data-sidebar-action-label]': {
-            fontSize: '12px',
-          },
-          '& [data-sidebar-action-chevron]': {
+          '& [data-sidebar-clear-label], & [data-sidebar-task-time], & [data-sidebar-footer-version]': {
             display: 'none',
-          },
-          '& [data-sidebar-clear-label], & [data-sidebar-project-time], & [data-sidebar-project-arrow], & [data-sidebar-footer-powered]': {
-            display: 'none',
-          },
-          '& [data-sidebar-section-row]': {
-            paddingLeft: '4px',
-            paddingRight: '4px',
           },
           '& [data-sidebar-section-label]': {
             fontSize: '10px',
             letterSpacing: '0.08em',
           },
-          '& [data-sidebar-project-row]': {
-            gap: '9px',
-            paddingLeft: '8px',
-            paddingRight: '8px',
-          },
-          '& [data-sidebar-project-icon]': {
-            width: '25px',
-            height: '25px',
-          },
         },
       }}
     >
-      {/* Subtle glow at top */}
-      <Box
-        position="absolute"
-        top="-60px"
-        left="50%"
-        transform="translateX(-50%)"
-        width="200px"
-        height="120px"
-        bg="radial-gradient(ellipse, rgba(254, 16, 99, 0.12) 0%, transparent 70%)"
-        pointerEvents="none"
-      />
-
       {/* Logo */}
-      <Flex data-sidebar-logo alignItems="center" mb={6} position="relative">
+      <Flex data-sidebar-logo alignItems="center" mb={5} position="relative">
         <Box
           data-sidebar-logo-mark
-          width="36px"
-          height="36px"
-          mr={3}
+          width="30px"
+          height="30px"
+          mr={2.5}
           flexShrink={0}
-          filter="drop-shadow(0 4px 12px rgba(254, 16, 99, 0.4))"
+          filter="drop-shadow(0 4px 12px rgba(254, 16, 99, 0.35))"
         >
           <img
             src="/isologo.svg"
@@ -233,7 +220,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
         </Box>
         <Heading
           data-sidebar-logo-title
-          fontSize="18px"
+          fontSize="16px"
           fontWeight="800"
           color="white"
           letterSpacing="-0.3px"
@@ -242,60 +229,40 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
         </Heading>
       </Flex>
 
-      {/* Primary project actions */}
-      <VStack data-sidebar-actions align="stretch" gap={2} mb={8} position="relative">
+      {/* Primary actions — flat rows (reference design), no cards */}
+      <VStack data-sidebar-actions align="stretch" gap="2px" mb={6} position="relative">
         {[
-          { icon: LuPlus, label: t('welcome.newProject'), onClick: onNewProject, color: tokens.colors.accent.primary },
-          { icon: LuFolderOpen, label: t('welcome.openProject'), onClick: onOpenFolder, color: tokens.colors.accent.greenBright },
-          { icon: LuGitBranch, label: t('welcome.cloneRepo'), onClick: onCloneRepository, color: tokens.colors.accent.purple },
-        ].map((action) => (
+          { icon: LuPlus, label: t('welcome.newProject'), onClick: onNewProject },
+          { icon: LuFolderOpen, label: t('welcome.openProject'), onClick: onOpenFolder },
+          { icon: LuGitBranch, label: t('welcome.cloneRepo'), onClick: onCloneRepository },
+        ].map(action => (
           <Flex
-            data-sidebar-action
             key={action.label}
             as="button"
             alignItems="center"
-            gap={3}
+            gap={2.5}
             w="100%"
-            px={3}
-            py={2.5}
+            px={2}
+            py="7px"
             borderRadius="8px"
-            bg="rgba(255, 255, 255, 0.04)"
-            border="1px solid"
-            borderColor="rgba(255, 255, 255, 0.07)"
-            color={tokens.colors.text.primary}
+            color={tokens.colors.text.secondary}
             cursor="pointer"
-            transition="all 0.18s ease"
+            transition={`background ${tokens.transition.fast}, color ${tokens.transition.fast}`}
             textAlign="left"
-            _hover={{
-              bg: 'rgba(255, 255, 255, 0.07)',
-              borderColor: `${action.color}55`,
-              transform: 'translateY(-1px)',
-            }}
+            _hover={{ bg: 'rgba(255, 255, 255, 0.05)', color: tokens.colors.text.primary }}
             onClick={action.onClick}
           >
-            <Flex
-              data-sidebar-action-icon
-              width="28px"
-              height="28px"
-              borderRadius="7px"
-              alignItems="center"
-              justifyContent="center"
-              bg={`${action.color}15`}
-              flexShrink={0}
-            >
-              <Icon as={action.icon} fontSize="14px" color={action.color} />
-            </Flex>
-            <Text data-sidebar-action-label fontSize="13px" fontWeight="600" flex={1} lineClamp={1}>
+            <Icon as={action.icon} fontSize="15px" flexShrink={0} />
+            <Text fontSize="13px" fontWeight="500" flex={1} lineClamp={1}>
               {action.label}
             </Text>
-            <Icon data-sidebar-action-chevron as={LuChevronRight} fontSize="12px" color={tokens.colors.text.disabled} />
           </Flex>
         ))}
       </VStack>
 
-      {/* Recent projects */}
+      {/* Recent projects — folder groups with the parallel work nested inside */}
       <VStack align="stretch" flex={1} overflow="hidden" minH={0}>
-        <HStack data-sidebar-section-row px={2} mb={3} justify="space-between">
+        <HStack data-sidebar-section-row px={2} mb={2} justify="space-between">
           <HStack gap={2}>
             <Icon color={tokens.colors.text.muted} fontSize="12px">
               <LuClock />
@@ -353,7 +320,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
 
         <VStack
           align="stretch"
-          gap={0}
+          gap="2px"
           flex={1}
           overflowY="auto"
           minH={0}
@@ -372,209 +339,355 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
             </Text>
           )}
 
-          {recentProjects.length > 0 && (
-            recentProjects.map((project, index) => (
-              <ProjectRow
-                key={project.id || `project-${index}`}
-                project={project}
-                truncatePath={truncatePath}
-                isActive={activeProjectPath === project.path}
-                agentStatus={agentStatuses[project.path] ?? null}
-                onClick={() => project.path && onOpenProject(project.path)}
-                onContextMenu={(e) => handleProjectContextMenu(e, project)}
-              />
-            ))
-          )}
+          {recentProjects.map((project, index) => (
+            <ProjectGroup
+              key={project.id || `project-${index}`}
+              project={project}
+              isActive={activeProjectPath === project.path}
+              agentStatus={agentStatuses[project.path] ?? null}
+              queuedTasks={activeProjectPath === project.path ? queuedTasks : []}
+              onOpen={() => project.path && onOpenProject(project.path)}
+              onContextMenu={(e) => handleProjectContextMenu(e, project)}
+            />
+          ))}
         </VStack>
       </VStack>
 
-      {/* Footer — powered by + settings + version */}
-      <Flex
-        direction="column"
-        pt={{ base: 3, md: 4 }}
-        mt={{ base: 3, md: 4 }}
-        borderTop="1px solid rgba(255,255,255,0.05)"
-        gap={{ base: 2, md: 3 }}
-        flexShrink={0}
-      >
-        <Flex alignItems="center" justifyContent="space-between" px={2}>
-          <Flex
-            width="28px"
-            height="28px"
-            alignItems="center"
-            justifyContent="center"
-            borderRadius="6px"
-            cursor="pointer"
-            transition="all 0.2s ease"
-            _hover={{ bg: 'rgba(255, 255, 255, 0.06)' }}
-            onClick={onSettings}
-          >
-            <Icon color={tokens.colors.text.muted} fontSize="15px">
-              <LuSettings />
-            </Icon>
-          </Flex>
-          <Text fontSize="10px" color={tokens.colors.text.disabled} opacity={0.6}>
-            {appVersion}
-          </Text>
-        </Flex>
-        <Text
-          data-sidebar-footer-powered
-          fontSize="9px"
-          color={tokens.colors.text.disabled}
-          opacity={0.4}
-          textAlign="center"
-          letterSpacing="0.3px"
-        >
-          Powered by Toque Media, Lda
-        </Text>
-      </Flex>
+      {/* Footer — avatar + name + settings (reference layout) */}
+      <UserFooter appVersion={appVersion} />
     </Box>
   )
 }
 
-// ─── Project row ────────────────────────────────────────────────────────
+// ─── Project group (folder + nested parallel work) ──────────────────────
 
-interface ProjectRowProps {
+interface ProjectGroupProps {
   project: RecentProject
-  truncatePath: (path: string, maxLen?: number) => string
-  isActive?: boolean
-  agentStatus?: ProjectAgentStatus | null
-  onClick: () => void
+  isActive: boolean
+  agentStatus: ProjectAgentStatus | null
+  queuedTasks: ReturnType<typeof getCommandQueueSnapshot>[number][]
+  onOpen: () => void
   onContextMenu: (e: React.MouseEvent) => void
 }
 
-const ProjectRow: React.FC<ProjectRowProps> = ({
+function ProjectGroup({
   project,
-  truncatePath,
-  isActive = false,
-  agentStatus = null,
-  onClick,
+  isActive,
+  agentStatus,
+  queuedTasks,
+  onOpen,
   onContextMenu,
-}) => {
+}: ProjectGroupProps) {
   const timeLabel = relativeTime(project.lastOpened)
-  const badge = agentStatus ? agentBadgeFor(agentStatus.state) : null
+  const hasChildren = !!agentStatus || queuedTasks.length > 0
 
   return (
-    <Flex
-      data-sidebar-project-row
-      alignItems="center"
-      gap={3}
-      px={3}
-      py={2}
-      borderRadius="8px"
-      cursor="pointer"
-      transition="all 0.2s ease"
-      bg={isActive ? 'rgba(254, 16, 99, 0.12)' : 'transparent'}
-      border="1px solid"
-      borderColor={isActive ? 'rgba(254, 16, 99, 0.35)' : 'transparent'}
-      _hover={{
-        bg: isActive ? 'rgba(254, 16, 99, 0.16)' : 'rgba(255, 255, 255, 0.05)',
-        transform: 'translateX(2px)',
-      }}
-      onClick={onClick}
-      onContextMenu={onContextMenu}
-    >
-      {/* Icon */}
+    <Box>
+      {/* Folder row */}
       <Flex
-        data-sidebar-project-icon
-        width="28px"
-        height="28px"
-        borderRadius="6px"
         alignItems="center"
-        justifyContent="center"
-        bg={isActive ? 'rgba(254, 16, 99, 0.16)' : 'rgba(255, 255, 255, 0.05)'}
-        flexShrink={0}
+        gap={2}
+        px={2}
+        py="6px"
+        borderRadius="8px"
+        cursor="pointer"
+        transition={`background ${tokens.transition.fast}`}
+        _hover={{ bg: 'rgba(255, 255, 255, 0.05)' }}
+        onClick={onOpen}
+        onContextMenu={onContextMenu}
+        title={project.path}
       >
         <Icon
-          as={LuFolder}
-          fontSize="14px"
+          as={LuFolderOpen}
+          fontSize="15px"
+          flexShrink={0}
           color={isActive ? tokens.colors.accent.primary : tokens.colors.text.secondary}
         />
-      </Flex>
-
-      {/* Name + path */}
-      <Box flex="1" minW={0}>
         <Text
           fontSize="13px"
           fontWeight={isActive ? '650' : '500'}
-          color={isActive ? tokens.colors.accent.primary : tokens.colors.text.primary}
+          color={isActive ? tokens.colors.text.primary : tokens.colors.text.secondary}
           lineClamp={1}
-          overflow="hidden"
-          textOverflow="ellipsis"
-          whiteSpace="nowrap"
+          flex={1}
+          minW={0}
         >
           {project.name}
         </Text>
-        <Flex align="center" gap={2}>
-          <Text
-            fontSize="10px"
-            color={tokens.colors.text.muted}
-            lineClamp={1}
-            overflow="hidden"
-            textOverflow="ellipsis"
-            whiteSpace="nowrap"
-            flex="1"
-            minW={0}
-          >
-            {truncatePath(project.path)}
+        {!hasChildren && timeLabel && (
+          <Text data-sidebar-task-time fontSize="10px" color={tokens.colors.text.disabled} flexShrink={0} opacity={0.7}>
+            {timeLabel}
           </Text>
-          {badge ? (
-            // Agent-run badge wins the slot over the relative time — "this
-            // project is working / finished" is the information the user is
-            // scanning the list for while running things in parallel.
-            <Flex
-              data-sidebar-project-agent
-              align="center"
-              gap="5px"
-              flexShrink={0}
-              title={agentStatus?.label || undefined}
-            >
-              <Box
-                width="6px"
-                height="6px"
-                borderRadius="full"
-                bg={badge.color}
-                css={{
-                  '@keyframes tmAgentPulse': {
-                    '0%, 100%': { opacity: 1, transform: 'scale(1)' },
-                    '50%': { opacity: 0.3, transform: 'scale(0.75)' },
-                  },
-                  animation:
-                    agentStatus?.state === 'running'
-                      ? 'tmAgentPulse 1.2s ease-in-out infinite'
-                      : undefined,
-                }}
-              />
-              <Text
-                fontSize="9px"
-                fontWeight="700"
-                color={badge.color}
-                textTransform="uppercase"
-                letterSpacing="0.06em"
-                whiteSpace="nowrap"
-              >
-                {badge.label}
-              </Text>
-            </Flex>
-          ) : timeLabel && (
-            <Text
-              data-sidebar-project-time
-              fontSize="9px"
-              color={tokens.colors.text.disabled}
-              flexShrink={0}
-              opacity={0.6}
-            >
-              {timeLabel}
-            </Text>
-          )}
-        </Flex>
-      </Box>
-
-      {/* Hover arrow */}
-      <Flex data-sidebar-project-arrow gap={1} alignItems="center" opacity={0.5} flexShrink={0}>
-        <Icon as={LuChevronRight} fontSize="12px" color={tokens.colors.text.disabled} />
+        )}
       </Flex>
+
+      {/* Children: the parallel work under this project */}
+      {agentStatus?.state === 'running' && (
+        <TaskRow
+          highlight={isActive}
+          dot={{ color: tokens.colors.accent.primary, pulse: true }}
+          label={agentStatus.label || t('welcome.agentWorking')}
+          onClick={onOpen}
+        />
+      )}
+      {agentStatus?.state === 'done' && (
+        <TaskRow
+          icon={<Icon as={LuCheck} fontSize="12px" color={tokens.colors.status.running} />}
+          label={agentStatus.label || t('welcome.agentDone')}
+          time={shortAgo(agentStatus.updatedAt)}
+          onClick={onOpen}
+        />
+      )}
+      {agentStatus?.state === 'error' && (
+        <TaskRow
+          dot={{ color: tokens.colors.status.error, pulse: false }}
+          label={agentStatus.label || t('welcome.agentError')}
+          time={shortAgo(agentStatus.updatedAt)}
+          onClick={onOpen}
+        />
+      )}
+      {queuedTasks.map((task, index) => (
+        <TaskRow
+          key={task.uuid ?? `queued-${index}`}
+          icon={<Icon as={LuLayers} fontSize="12px" color={tokens.colors.accent.purple} />}
+          label={queuedPreview(task.value)}
+          time={t('welcome.taskQueued')}
+          onClick={onOpen}
+        />
+      ))}
+    </Box>
+  )
+}
+
+function TaskRow({
+  label,
+  time,
+  dot,
+  icon,
+  highlight = false,
+  onClick,
+}: {
+  label: string
+  time?: string | null
+  dot?: { color: string; pulse: boolean }
+  icon?: React.ReactNode
+  highlight?: boolean
+  onClick: () => void
+}) {
+  return (
+    <Flex
+      alignItems="center"
+      gap={2}
+      pl="26px"
+      pr={2}
+      py="5px"
+      borderRadius="8px"
+      cursor="pointer"
+      bg={highlight ? 'rgba(255, 255, 255, 0.06)' : 'transparent'}
+      transition={`background ${tokens.transition.fast}`}
+      _hover={{ bg: highlight ? 'rgba(255, 255, 255, 0.08)' : 'rgba(255, 255, 255, 0.04)' }}
+      onClick={onClick}
+      title={label}
+    >
+      {dot && (
+        <Box
+          w="7px"
+          h="7px"
+          borderRadius="full"
+          bg={dot.color}
+          flexShrink={0}
+          css={dot.pulse ? {
+            '@keyframes tmSidebarTaskPulse': {
+              '0%, 100%': { opacity: 1 },
+              '50%': { opacity: 0.35 },
+            },
+            animation: 'tmSidebarTaskPulse 1.2s ease-in-out infinite',
+          } : undefined}
+        />
+      )}
+      {icon}
+      <Text fontSize="12px" color={tokens.colors.text.secondary} lineClamp={1} flex={1} minW={0}>
+        {label}
+      </Text>
+      {time && (
+        <Text data-sidebar-task-time fontSize="10px" color={tokens.colors.text.disabled} flexShrink={0}>
+          {time}
+        </Text>
+      )}
     </Flex>
+  )
+}
+
+// ─── User footer (avatar + menu, reference layout) ──────────────────────
+
+function UserFooter({ appVersion }: { appVersion: string }) {
+  const user = useAuthStore(s => s.user)
+  const [menuOpen, setMenuOpen] = useState(false)
+
+  const initials = user ? getInitials(user.email, user.displayName) : '?'
+  const displayName = user?.displayName?.trim() || user?.email?.split('@')[0] || ''
+
+  // Mesma lógica dual do antigo menu do titlebar: sem projecto → ecrã de
+  // settings do Welcome; com projecto → viewMode settings do workspace.
+  const openSettings = useCallback(() => {
+    setMenuOpen(false)
+    const project = useProjectStore.getState()
+    if (!project.currentProject) {
+      project.setWelcomeScreen(project.welcomeScreen === 'settings' ? 'hero' : 'settings')
+      return
+    }
+    const layout = useLayoutStore.getState()
+    if (layout.viewMode === 'settings') {
+      layout.goBack()
+    } else {
+      layout.setViewMode('settings')
+    }
+  }, [])
+
+  return (
+    <Box
+      pt={3}
+      mt={3}
+      borderTop="1px solid rgba(255,255,255,0.05)"
+      flexShrink={0}
+      position="relative"
+    >
+      {/* Dropdown-up menu */}
+      {menuOpen && (
+        <>
+          {/* Overlay para fechar com clique fora */}
+          <Box position="fixed" inset={0} zIndex={999} onClick={() => setMenuOpen(false)} />
+          <Box
+            position="absolute"
+            bottom="calc(100% + 6px)"
+            left={0}
+            right={0}
+            zIndex={1000}
+            bg={tokens.colors.dialog.bg}
+            border={`1px solid ${tokens.colors.border.panel}`}
+            borderRadius="10px"
+            boxShadow="0 -8px 28px rgba(0,0,0,0.4)"
+            py={1}
+          >
+            {[
+              {
+                icon: <LuSettings size={13} />,
+                label: t('menu.settings'),
+                onClick: openSettings,
+              },
+              {
+                icon: <FiAlertCircle size={13} />,
+                label: t('issueReporter.menuItem'),
+                onClick: () => {
+                  setMenuOpen(false)
+                  // O dialog global vive no MinimalTitleBar; este evento
+                  // já era o canal usado pelo menu nativo.
+                  window.dispatchEvent(new CustomEvent('app:report-issue'))
+                },
+              },
+              {
+                icon: <FiLogOut size={13} />,
+                label: t('common.signOut'),
+                onClick: () => {
+                  setMenuOpen(false)
+                  void signOutWithGuard()
+                },
+              },
+            ].map(item => (
+              <Flex
+                key={item.label}
+                align="center"
+                gap={2}
+                px={3}
+                py="7px"
+                cursor="pointer"
+                role="button"
+                color={tokens.colors.text.secondary}
+                transition={`background ${tokens.transition.fast}`}
+                _hover={{ bg: tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
+                css={{ '& *': { pointerEvents: 'none' } }}
+                onClick={item.onClick}
+              >
+                {item.icon}
+                <Text fontSize="12px">{item.label}</Text>
+              </Flex>
+            ))}
+          </Box>
+        </>
+      )}
+
+      <Flex alignItems="center" gap={2.5} px={1}>
+        {/* Avatar + nome → abre o menu */}
+        <Flex
+          as="button"
+          alignItems="center"
+          gap={2.5}
+          flex={1}
+          minW={0}
+          cursor="pointer"
+          borderRadius="8px"
+          px={1}
+          py="4px"
+          transition={`background ${tokens.transition.fast}`}
+          _hover={{ bg: 'rgba(255, 255, 255, 0.05)' }}
+          onClick={() => setMenuOpen(open => !open)}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+        >
+          <Flex
+            w="26px"
+            h="26px"
+            borderRadius="full"
+            bg={tokens.colors.accent.primary}
+            align="center"
+            justify="center"
+            flexShrink={0}
+            overflow="hidden"
+          >
+            {user?.photoURL ? (
+              <img src={user.photoURL} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+            ) : (
+              <Text fontSize="10px" fontWeight="700" color="#fff" lineHeight="1">
+                {initials}
+              </Text>
+            )}
+          </Flex>
+          <Text
+            fontSize="12.5px"
+            fontWeight="600"
+            color={tokens.colors.text.primary}
+            lineClamp={1}
+            flex={1}
+            minW={0}
+            textAlign="left"
+          >
+            {displayName}
+          </Text>
+        </Flex>
+
+        <Text data-sidebar-footer-version fontSize="10px" color={tokens.colors.text.disabled} opacity={0.6} flexShrink={0}>
+          {appVersion}
+        </Text>
+
+        <Flex
+          as="button"
+          width="26px"
+          height="26px"
+          alignItems="center"
+          justifyContent="center"
+          borderRadius="6px"
+          cursor="pointer"
+          flexShrink={0}
+          color={tokens.colors.text.muted}
+          transition={`all ${tokens.transition.fast}`}
+          _hover={{ bg: 'rgba(255, 255, 255, 0.06)', color: tokens.colors.text.primary }}
+          onClick={openSettings}
+          title={t('menu.settings')}
+          aria-label={t('menu.settings')}
+        >
+          <LuSettings size={14} />
+        </Flex>
+      </Flex>
+    </Box>
   )
 }
 

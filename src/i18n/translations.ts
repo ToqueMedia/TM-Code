@@ -1002,6 +1002,18 @@ const en = {
   'welcome.agentWorking': 'Working…',
   'welcome.agentDone': 'Done',
   'welcome.agentError': 'Failed',
+  'welcome.justNow': 'now',
+  'welcome.taskQueued': 'queued',
+
+  // ── Branch switcher (header chip) ────────────────────
+  'branch.chipTitle': 'Branch — switch or create',
+  'branch.sectionTitle': 'Branches',
+  'branch.create': 'Create branch…',
+  'branch.createPlaceholder': 'new-branch-name',
+  'branch.createConfirm': 'Create',
+  'branch.switched': 'Switched to "{name}"',
+  'branch.created': 'Branch "{name}" created',
+  'branch.switchWhileRunning': 'The agent is working — switching branches changes the files under it. Switch anyway?',
 
   // ── Parallel projects (agent busy on switch/close) ──
   'project.agentBusyTitle': 'Agent is working',
@@ -2676,6 +2688,18 @@ const pt: Record<keyof typeof en, string> = {
   'welcome.agentWorking': 'A trabalhar…',
   'welcome.agentDone': 'Terminou',
   'welcome.agentError': 'Falhou',
+  'welcome.justNow': 'agora',
+  'welcome.taskQueued': 'em fila',
+
+  // ── Selector de branch (chip do header) ──────────────
+  'branch.chipTitle': 'Branch — trocar ou criar',
+  'branch.sectionTitle': 'Branches',
+  'branch.create': 'Criar branch…',
+  'branch.createPlaceholder': 'nome-da-branch',
+  'branch.createConfirm': 'Criar',
+  'branch.switched': 'Mudou para "{name}"',
+  'branch.created': 'Branch "{name}" criada',
+  'branch.switchWhileRunning': 'O agente está a trabalhar — trocar de branch muda os ficheiros debaixo dele. Trocar na mesma?',
 
   // ── Projetos em paralelo (agente ocupado ao trocar/fechar) ──
   'project.agentBusyTitle': 'Agente a trabalhar',

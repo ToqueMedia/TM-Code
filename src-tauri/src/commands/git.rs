@@ -666,6 +666,69 @@ pub async fn git_show_file(project_path: String, file_path: String) -> Result<St
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranchInfo {
+    pub name: String,
+    pub current: bool,
+}
+
+/// Local branches for the header branch switcher. `%(HEAD)` marks the
+/// checked-out branch with `*` — parsing the porcelain `--format` output is
+/// stable across git versions (unlike scraping `git branch`'s column layout).
+#[tauri::command]
+pub async fn git_list_branches(project_path: String) -> Result<Vec<GitBranchInfo>, String> {
+    let output = git_cmd(&project_path)
+        .args(["branch", "--list", "--format=%(refname:short)\t%(HEAD)"])
+        .output()
+        .map_err(|e| format!("Failed to list branches: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let branches = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(2, '\t');
+            let name = parts.next()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let current = parts.next().map(|m| m.trim() == "*").unwrap_or(false);
+            Some(GitBranchInfo {
+                name: name.to_string(),
+                current,
+            })
+        })
+        .collect();
+    Ok(branches)
+}
+
+#[tauri::command]
+pub async fn git_checkout_branch(project_path: String, branch: String) -> Result<(), String> {
+    let output = git_cmd(&project_path)
+        .args(["checkout", &branch])
+        .output()
+        .map_err(|e| format!("Failed to run git checkout: {}", e))?;
+    if !output.status.success() {
+        // stderr carries the useful message (uncommitted changes, unknown
+        // branch, …) — surface it verbatim so the toast explains itself.
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn git_create_branch(project_path: String, branch: String) -> Result<(), String> {
+    let output = git_cmd(&project_path)
+        .args(["checkout", "-b", &branch])
+        .output()
+        .map_err(|e| format!("Failed to run git checkout -b: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
 /// Get the current git branch name (handles detached HEAD)
 #[tauri::command]
 pub async fn git_current_branch(project_path: String) -> Result<String, String> {
