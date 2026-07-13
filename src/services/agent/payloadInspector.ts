@@ -183,6 +183,41 @@ export interface PayloadReport {
   duplicates: Array<{ hash: string; count: number; tokens: number; preview: string }>
   /** One entry per tool_result block in the payload, in order. */
   toolResults: Array<{ messageIndex: number; toolCallId: string; tokens: number; chars: number; hash: string; preview: string }>
+  /**
+   * Churn do toolset vs o request anterior — proxy de invalidação de prompt
+   * cache. O array `tools` faz parte do prefixo cacheável do provider:
+   * qualquer mudança (membro, ordem, description dos meta-tools) invalida
+   * esse segmento e o que vem depois. Ativações transientes do
+   * request_tools (entram um step, saem no seguinte) são a fonte típica de
+   * churn — se `changesThisSession` crescer quase tão rápido quanto
+   * `requestsThisSession`, o cache está a ser rebentado todos os turnos e
+   * parte dos ~10K poupados em schemas está a ser devolvida em cache misses.
+   */
+  toolsetChurn: {
+    /** The tools array differs from the previous request (names OR schema bytes). */
+    changed: boolean
+    /** Tool names present now but not in the previous request. */
+    added: string[]
+    /** Tool names present in the previous request but not now. */
+    removed: string[]
+    /** Requests (after the first) whose toolset differed from the previous. */
+    changesThisSession: number
+    /** Total requests inspected this session (churn-rate denominator). */
+    requestsThisSession: number
+  }
+  /**
+   * Uso do meta-tool request_tools na run corrente (vem do ToolsetSelector).
+   * calls>0 = o perfil adivinhou mal o starter set e a run pagou round-trips
+   * para pedir tools; defensiveActivations = misses recuperados sem
+   * round-trip (modelo chamou o tool inativo diretamente). Undefined quando
+   * não há seletor ativo (modo legacy: todos os tools sempre enviados).
+   */
+  requestToolsStats?: {
+    requestToolsCalls: number
+    defensiveActivations: number
+    expandedNames: string[]
+    deniedNames: string[]
+  }
 }
 
 export interface PromptSectionInfo {
@@ -204,6 +239,55 @@ const RING_MAX = 50
 
 export function getRecentReports(): readonly PayloadReport[] {
   return REPORT_RING
+}
+
+// ── Toolset churn tracking (session-scoped, like the ring buffer) ──
+// Snapshot do request anterior para detetar mudanças no array `tools`.
+// O hash cobre os BYTES serializados (não só nomes): as descriptions dos
+// meta-tools request_tools/request_context embutem listas de nomes inativos/
+// omitidos, por isso o schema pode mudar mesmo com o mesmo conjunto ativo.
+let prevToolNames: string[] | null = null
+let prevToolsetHash: string | null = null
+let toolsetChangesSession = 0
+let toolsetRequestsSession = 0
+
+/** Reset do churn tracking — para testes e para o início de sessão. */
+export function resetToolsetChurnTracking(): void {
+  prevToolNames = null
+  prevToolsetHash = null
+  toolsetChangesSession = 0
+  toolsetRequestsSession = 0
+}
+
+function trackToolsetChurn(
+  tools: { type?: string; function?: unknown }[] | undefined,
+): PayloadReport['toolsetChurn'] {
+  const names = (tools ?? []).map((t) => {
+    const fn = t.function as { name?: string } | undefined
+    return fn?.name ?? '(unnamed)'
+  })
+  const serialized = JSON.stringify(tools ?? [])
+  const hash = fnv1aHex(serialized)
+
+  toolsetRequestsSession++
+  const isFirst = prevToolsetHash === null
+  const changed = !isFirst && hash !== prevToolsetHash
+  const prevSet = new Set(prevToolNames ?? [])
+  const currSet = new Set(names)
+  const added = isFirst ? [] : names.filter((n) => !prevSet.has(n))
+  const removed = isFirst ? [] : (prevToolNames ?? []).filter((n) => !currSet.has(n))
+  if (changed) toolsetChangesSession++
+
+  prevToolNames = names
+  prevToolsetHash = hash
+
+  return {
+    changed,
+    added,
+    removed,
+    changesThisSession: toolsetChangesSession,
+    requestsThisSession: toolsetRequestsSession,
+  }
 }
 
 // ── Core analysis ──
@@ -397,6 +481,7 @@ export function inspectPayload(
   totalToolCount?: number,
   continuationReason?: string,
   auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection,
+  requestToolsStats?: PayloadReport['requestToolsStats'],
 ): PayloadReport {
   const messages = apiMessages as AnyMessage[]
   const blocks: BlockInfo[] = []
@@ -673,6 +758,8 @@ export function inspectPayload(
     topBlocks,
     duplicates,
     toolResults,
+    toolsetChurn: trackToolsetChurn(tools),
+    requestToolsStats,
   }
 
   // Ring buffer
@@ -702,6 +789,28 @@ export function formatReportForConsole(report: PayloadReport): string {
   // efficiency target so a 7-turn bugfix leaves a forensic trail of WHY.
   if (report.continuationReason) {
     lines.push(`  turn-efficiency: ${report.continuationReason}`)
+  }
+
+  // Toolset churn + request_tools — os dois sinais de saúde da seleção
+  // dinâmica: churn alto = prompt cache invalidado pelo array `tools`;
+  // request_tools calls > 0 = perfil starter mal calibrado para a tarefa.
+  const churn = report.toolsetChurn
+  if (churn) {
+    const delta = churn.changed
+      ? ` Δ(+${churn.added.length > 0 ? churn.added.join(',') : '∅'} −${churn.removed.length > 0 ? churn.removed.join(',') : '∅'})`
+      : ''
+    lines.push(
+      `  toolset_churn: ${churn.changed ? 'CHANGED' : 'stable'}${delta} | ` +
+      `${churn.changesThisSession}/${churn.requestsThisSession} requests changed this session`,
+    )
+  }
+  if (report.requestToolsStats && (report.requestToolsStats.requestToolsCalls > 0 || report.requestToolsStats.defensiveActivations > 0)) {
+    const s = report.requestToolsStats
+    lines.push(
+      `  request_tools: ${s.requestToolsCalls} call(s), ${s.defensiveActivations} defensive activation(s)` +
+      (s.expandedNames.length > 0 ? ` expanded=[${s.expandedNames.join(',')}]` : '') +
+      (s.deniedNames.length > 0 ? ` denied=[${s.deniedNames.join(',')}]` : ''),
+    )
   }
 
   // Category breakdown
@@ -787,9 +896,10 @@ export function inspectAndLogPayload(
   totalToolCount?: number,
   continuationReason?: string,
   auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection,
+  requestToolsStats?: PayloadReport['requestToolsStats'],
 ): PayloadReport | null {
   try {
-    const report = inspectPayload(apiMessages, systemPrompt, tools, model, turn, totalToolCount, continuationReason, auxiliarySelection)
+    const report = inspectPayload(apiMessages, systemPrompt, tools, model, turn, totalToolCount, continuationReason, auxiliarySelection, requestToolsStats)
     // eslint-disable-next-line no-console
     console.debug(formatReportForConsole(report))
     // Return the report so the caller (query.ts) can persist the per-request

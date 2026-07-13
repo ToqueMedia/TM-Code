@@ -3,8 +3,9 @@
  *
  * Profiles choose the starter toolset only. request_tools can activate any
  * registered tool on demand unless a hard explicit read-only/no-edit policy
- * blocks it. On-demand activations are transient: offered for one model step,
- * then removed unless requested again.
+ * blocks it. On-demand activations are PERSISTENT for the rest of the run
+ * (2026-07-13): transience churned the cacheable `tools` prefix on every
+ * step after an activation and forced re-request round-trips.
  */
 
 import {
@@ -159,19 +160,21 @@ describe('ToolsetSelector (on-demand)', () => {
       expect(result.denied).toEqual([])
     })
 
-    it('drops requested tools after they have been offered once', () => {
+    it('keeps requested tools active for the rest of the run (stable cache prefix)', () => {
       const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')
       selector.requestTools([WRITE_FILE])
 
       expect(toolNamesFor(selector)).toContain(WRITE_FILE)
       expect(selector.isActive(WRITE_FILE)).toBe(true)
 
-      expect(toolNamesFor(selector)).not.toContain(WRITE_FILE)
-      expect(selector.isActive(WRITE_FILE)).toBe(false)
+      // Steps seguintes: o tool continua ativo — o array `tools` não churna.
+      expect(toolNamesFor(selector)).toContain(WRITE_FILE)
+      expect(toolNamesFor(selector)).toContain(WRITE_FILE)
+      expect(selector.isActive(WRITE_FILE)).toBe(true)
       expect(selector.getExpandedNames()).toContain(WRITE_FILE)
     })
 
-    it('omits request_tools only when every requestable tool is active for this model step', () => {
+    it('omits request_tools permanently once every requestable tool is active', () => {
       const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')
       selector.requestTools(ALL_NAMES.filter((name) => !BUGFIX_BASE.includes(name as (typeof BUGFIX_BASE)[number])))
 
@@ -180,8 +183,8 @@ describe('ToolsetSelector (on-demand)', () => {
       expect(first.tools.map((t) => t.function.name)).not.toContain(REQUEST_TOOLS_NAME)
 
       const second = selector.selectForTurn(ALL_TOOLS)
-      expect(second.allActive).toBe(false)
-      expect(second.tools.map((t) => t.function.name)).toContain(REQUEST_TOOLS_NAME)
+      expect(second.allActive).toBe(true)
+      expect(second.tools.map((t) => t.function.name)).not.toContain(REQUEST_TOOLS_NAME)
     })
   })
 

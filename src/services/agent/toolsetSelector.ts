@@ -14,8 +14,16 @@
  * ────────────
  * The selector starts with the model-selected profile base and optional
  * model-planned tool groups. Additional tools are delivered on demand when
- * the model asks for them. On-demand activations are transient: they are sent
- * on the next model step, then dropped unless requested again.
+ * the model asks for them. On-demand activations are PERSISTENT for the rest
+ * of the run (2026-07-13; they used to be transient — sent for one model step
+ * and then dropped unless re-requested). Transience looked thrifty but cost
+ * more than it saved: the `tools` array is part of the provider's cacheable
+ * prefix, so add-then-remove churned the prefix on EVERY step after an
+ * activation (cache miss ≫ the ~300 tokens of one schema), and the model had
+ * to burn request_tools round-trips re-asking for a tool it had already been
+ * granted. A run's toolset now only GROWS, which keeps the prefix stable
+ * between activations. claude-vaz behaves the same way: its tool pool is
+ * fixed within a run.
  *
  * Expansion sources:
  *   1. Context/tool plan from the utility model activates groups up front.
@@ -268,7 +276,7 @@ export function requestToolsDefinition(allInactiveNames: string[]): OpenAI.ChatC
         'Request additional tools that are NOT in the current active toolset. ' +
         'Use this when you need a capability that is not currently available ' +
         '(e.g. write_file, create_file, delegate, save_memory). ' +
-        'The requested tools will be available on the next model step, then may be dropped if not requested again. ' +
+        'The requested tools stay available for the remainder of this run — never re-request a tool already granted. ' +
         'Call this ONCE with all the tools you need — do not call it repeatedly ' +
         'for individual tools. After calling this, wait for its tool result, then continue in the same run ' +
         'using the activated tools on the next model step. Do not stop or defer the task just because you requested tools.',
@@ -317,18 +325,15 @@ export interface RequestToolsResult {
 
 /**
  * Stateful toolset selector. One per agent run. Profile/base tools persist
- * through the run; tools requested on demand are sent for one model step and
- * then removed unless the model asks for them again.
+ * through the run; tools requested on demand ALSO persist to the end of the
+ * run (the active set only grows) — see the module header for why transience
+ * was removed (prompt-cache churn + re-request round-trips).
  */
 export class ToolsetSelector {
   /** Names of tools currently active for the next request. */
   private activeToolNames: Set<string>
   /** Names that belong to the current profile/planned starter set. */
   private persistentToolNames: Set<string>
-  /** On-demand names added via request_tools or direct defensive expansion. */
-  private transientToolNames = new Set<string>()
-  /** Transient names already sent in the previous provider request. */
-  private transientToolNamesOffered = new Set<string>()
   /** All available tool names (from the toolExecutor registry). */
   private allToolNames: Set<string>
   /** The profile driving the starter toolset. */
@@ -344,6 +349,16 @@ export class ToolsetSelector {
   private expandedNames = new Set<string>()
   /** Names the model requested but were denied by a hard policy. */
   private deniedNames = new Set<string>()
+  /**
+   * Instrumentação (payloadInspector): nº de chamadas request_tools e de
+   * ativações defensivas nesta run. request_tools frequente = perfil mal
+   * calibrado (o starter set não tinha o que a tarefa pedia) e cada chamada
+   * custa um round-trip; ativações defensivas = o modelo chamou um tool
+   * inativo diretamente (recuperado sem round-trip extra, mas é o mesmo
+   * sinal de miss do perfil).
+   */
+  private requestToolsCallCount = 0
+  private defensiveExpansionCount = 0
   /**
    * Number of auxiliary context blocks omitted from the system prompt (set by
    * agentService after building the prompt). When > 0, selectForTurn injects
@@ -385,8 +400,9 @@ export class ToolsetSelector {
   }
 
   private resetPersistentTools(profile: PromptProfile, plannedGroups: ToolsetGroupName[]): void {
-    this.transientToolNames.clear()
-    this.transientToolNamesOffered.clear()
+    // Deliberate: a profile switch (only used post-bootstrap) DROPS on-demand
+    // activations from the previous phase — the new profile's base defines a
+    // fresh starting set for the actual task.
     this.persistentToolNames = new Set()
     const base = PROFILE_TOOLSETS[profile]?.base ?? CORE_TOOLS
     for (const name of base) {
@@ -429,17 +445,6 @@ export class ToolsetSelector {
     }
   }
 
-  private pruneOfferedTransientTools(): void {
-    if (this.transientToolNamesOffered.size === 0) return
-    for (const name of this.transientToolNamesOffered) {
-      this.transientToolNames.delete(name)
-      if (!this.persistentToolNames.has(name)) {
-        this.activeToolNames.delete(name)
-      }
-    }
-    this.transientToolNamesOffered.clear()
-  }
-
   private getRequestableToolNames(): Set<string> {
     return new Set(
       Array.from(this.allToolNames).filter((name) => !this.isBlockedByHardPolicy(name)),
@@ -458,8 +463,6 @@ export class ToolsetSelector {
     allTools: OpenAI.ChatCompletionTool[],
     _userText = '',
   ): ToolsetSelection {
-    this.pruneOfferedTransientTools()
-
     // Build the filtered list, preserving the original order.
     const activeTools = allTools.filter((t) =>
       this.activeToolNames.has(t.function.name),
@@ -475,7 +478,6 @@ export class ToolsetSelector {
     if (this.omittedAuxiliaryCount > 0) {
       tools.push(this.buildRequestContextMetaTool())
     }
-    this.transientToolNamesOffered = new Set(this.transientToolNames)
 
     return {
       tools,
@@ -491,6 +493,7 @@ export class ToolsetSelector {
    * hard policy. Registered tools are otherwise delivered on demand.
    */
   requestTools(toolNames: string[]): RequestToolsResult {
+    this.requestToolsCallCount++
     const added: string[] = []
     const alreadyActive: string[] = []
     const unknown: string[] = []
@@ -505,7 +508,9 @@ export class ToolsetSelector {
         alreadyActive.push(name)
       } else {
         this.activeToolNames.add(name)
-        this.transientToolNames.add(name)
+        // Persistente até ao fim da run — ver cabeçalho do módulo (churn de
+        // prompt cache + round-trips de re-request mataram a transiência).
+        this.persistentToolNames.add(name)
         this.expandedNames.add(name)
         added.push(name)
       }
@@ -556,11 +561,31 @@ export class ToolsetSelector {
     }
     if (!this.activeToolNames.has(toolName)) {
       this.activeToolNames.add(toolName)
-      this.transientToolNames.add(toolName)
+      this.persistentToolNames.add(toolName)
       this.expandedNames.add(toolName)
+      this.defensiveExpansionCount++
       return true
     }
     return false
+  }
+
+  /**
+   * Estatísticas de instrumentação para o payloadInspector — indicador
+   * direto de perfis mal calibrados: calls>0 significa que o starter set
+   * não chegou e a run pagou round-trips de request_tools.
+   */
+  getInstrumentationStats(): {
+    requestToolsCalls: number
+    defensiveActivations: number
+    expandedNames: string[]
+    deniedNames: string[]
+  } {
+    return {
+      requestToolsCalls: this.requestToolsCallCount,
+      defensiveActivations: this.defensiveExpansionCount,
+      expandedNames: Array.from(this.expandedNames),
+      deniedNames: Array.from(this.deniedNames),
+    }
   }
 
   /** Whether a tool name is currently in the active set. */
