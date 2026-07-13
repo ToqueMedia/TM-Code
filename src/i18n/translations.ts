@@ -1004,6 +1004,10 @@ const en = {
   'welcome.agentError': 'Failed',
   'welcome.justNow': 'now',
   'welcome.taskQueued': 'queued',
+  'welcome.newTask': 'New task',
+  'welcome.newTaskTitle': 'Focus composer in new-task mode',
+  'welcome.removeQueuedTask': 'Remove from queue',
+  'welcome.openInNewWindowTitle': 'Open in new window',
 
   // ── Branch switcher (header chip) ────────────────────
   'branch.chipTitle': 'Branch — switch or create',
@@ -2690,6 +2694,10 @@ const pt: Record<keyof typeof en, string> = {
   'welcome.agentError': 'Falhou',
   'welcome.justNow': 'agora',
   'welcome.taskQueued': 'em fila',
+  'welcome.newTask': 'Nova tarefa',
+  'welcome.newTaskTitle': 'Focar o composer em modo nova tarefa',
+  'welcome.removeQueuedTask': 'Remover da fila',
+  'welcome.openInNewWindowTitle': 'Abrir noutra janela',
 
   // ── Selector de branch (chip do header) ──────────────
   'branch.chipTitle': 'Branch — trocar ou criar',

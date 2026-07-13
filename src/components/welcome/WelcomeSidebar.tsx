@@ -17,6 +17,8 @@ import {
   LuPlus,
   LuCheck,
   LuLayers,
+  LuExternalLink,
+  LuX,
 } from 'react-icons/lu'
 import { FiAlertCircle, FiLogOut } from 'react-icons/fi'
 import { getVersion } from '@tauri-apps/api/app'
@@ -26,13 +28,16 @@ import { showProjectContextMenu } from '@/components/projectContextMenu'
 import { useProjectAgentStatuses, type ProjectAgentStatus } from '@/hooks/useProjectAgentStatuses'
 import {
   getCommandQueueSnapshot,
+  remove as removeFromQueue,
   subscribeToCommandQueue,
 } from '@/services/agent/messageQueue'
+import { invoke } from '@/utils/invokeMetrics'
 import { useAuthStore } from '@/stores/authStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useLayoutStore } from '@/stores/layoutStore'
+import { getQueryGuard } from '@/services/agent/queryGuard'
 import { signOutWithGuard } from '@/services/auth/signOutFlow'
-import type { PromptValue } from '@/types/messageQueueTypes'
+import type { PromptValue, QueuedCommand } from '@/types/messageQueueTypes'
 import type { RecentProject } from '@/types/project'
 
 // Cache the version promise — it never changes during the session.
@@ -146,6 +151,11 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   // composer strip: they are course corrections, not units of work.
   const queuedCommands = useSyncExternalStore(subscribeToCommandQueue, getCommandQueueSnapshot)
   const queuedTasks = queuedCommands.filter(c => c.asTask === true)
+
+  // Live agent busy flag for THIS window — drives "+ Nova tarefa" under the
+  // active project (QueryGuard is the same source the composer uses).
+  const queryGuard = getQueryGuard()
+  const isAgentBusy = useSyncExternalStore(queryGuard.subscribe, queryGuard.getSnapshot)
 
   useEffect(() => {
     getAppVersion().then(setAppVersion)
@@ -344,6 +354,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
               key={project.id || `project-${index}`}
               project={project}
               isActive={activeProjectPath === project.path}
+              isAgentBusyHere={activeProjectPath === project.path && isAgentBusy}
               agentStatus={agentStatuses[project.path] ?? null}
               queuedTasks={activeProjectPath === project.path ? queuedTasks : []}
               onOpen={() => project.path && onOpenProject(project.path)}
@@ -364,8 +375,10 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
 interface ProjectGroupProps {
   project: RecentProject
   isActive: boolean
+  /** Agent is busy in THIS window on this project (drives "+ Nova tarefa"). */
+  isAgentBusyHere: boolean
   agentStatus: ProjectAgentStatus | null
-  queuedTasks: ReturnType<typeof getCommandQueueSnapshot>[number][]
+  queuedTasks: QueuedCommand[]
   onOpen: () => void
   onContextMenu: (e: React.MouseEvent) => void
 }
@@ -373,16 +386,38 @@ interface ProjectGroupProps {
 function ProjectGroup({
   project,
   isActive,
+  isAgentBusyHere,
   agentStatus,
   queuedTasks,
   onOpen,
   onContextMenu,
 }: ProjectGroupProps) {
   const timeLabel = relativeTime(project.lastOpened)
-  const hasChildren = !!agentStatus || queuedTasks.length > 0
+  const hasChildren =
+    !!agentStatus || queuedTasks.length > 0 || isAgentBusyHere
+
+  const openInNewWindow = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!project.path) return
+    void invoke('open_new_instance', { projectPath: project.path }).catch(() => {})
+  }, [project.path])
+
+  const requestNewTask = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation()
+    window.dispatchEvent(new CustomEvent('app:new-task'))
+  }, [])
 
   return (
-    <Box>
+    <Box
+      role="group"
+      css={{
+        // Hover actions on the folder row stay invisible until the group is
+        // hovered — keeps the tree calm at rest (reference rhythm).
+        '& [data-sidebar-hover-action]': { opacity: 0 },
+        '&:hover [data-sidebar-hover-action]': { opacity: 1 },
+        '& [data-sidebar-hover-action]:focus-visible': { opacity: 1 },
+      }}
+    >
       {/* Folder row */}
       <Flex
         alignItems="center"
@@ -413,6 +448,29 @@ function ProjectGroup({
         >
           {project.name}
         </Text>
+        {/* Open in another window — hidden for the project THIS window owns
+            (same project in two windows collides on the shared state dir). */}
+        {!isActive && project.path && (
+          <Flex
+            as="button"
+            data-sidebar-hover-action
+            alignItems="center"
+            justifyContent="center"
+            w="22px"
+            h="22px"
+            borderRadius="6px"
+            flexShrink={0}
+            color={tokens.colors.text.muted}
+            cursor="pointer"
+            transition={`background ${tokens.transition.fast}, color ${tokens.transition.fast}, opacity ${tokens.transition.fast}`}
+            _hover={{ bg: 'rgba(255, 255, 255, 0.08)', color: tokens.colors.text.primary }}
+            onClick={openInNewWindow}
+            title={t('welcome.openInNewWindowTitle')}
+            aria-label={t('welcome.openInNewWindowTitle')}
+          >
+            <LuExternalLink size={12} />
+          </Flex>
+        )}
         {!hasChildren && timeLabel && (
           <Text data-sidebar-task-time fontSize="10px" color={tokens.colors.text.disabled} flexShrink={0} opacity={0.7}>
             {timeLabel}
@@ -426,6 +484,8 @@ function ProjectGroup({
           highlight={isActive}
           dot={{ color: tokens.colors.accent.primary, pulse: true }}
           label={agentStatus.label || t('welcome.agentWorking')}
+          // startedAt → "· 12m"; falls back to nothing on pre-field files.
+          time={agentStatus.startedAt ? shortAgo(agentStatus.startedAt) : null}
           onClick={onOpen}
         />
       )}
@@ -452,8 +512,35 @@ function ProjectGroup({
           label={queuedPreview(task.value)}
           time={t('welcome.taskQueued')}
           onClick={onOpen}
+          onRemove={() => removeFromQueue([task])}
         />
       ))}
+      {/* Shortcut: focus composer already in "Nova tarefa" mode. Only for
+          the project open in THIS window while a run is live. */}
+      {isAgentBusyHere && (
+        <Flex
+          as="button"
+          alignItems="center"
+          gap={2}
+          pl="26px"
+          pr={2}
+          py="5px"
+          w="100%"
+          borderRadius="8px"
+          cursor="pointer"
+          color={tokens.colors.text.muted}
+          transition={`background ${tokens.transition.fast}, color ${tokens.transition.fast}`}
+          _hover={{ bg: 'rgba(255, 255, 255, 0.04)', color: tokens.colors.text.secondary }}
+          onClick={requestNewTask}
+          title={t('welcome.newTaskTitle')}
+          aria-label={t('welcome.newTaskTitle')}
+        >
+          <LuPlus size={12} />
+          <Text fontSize="12px" fontWeight="500">
+            {t('welcome.newTask')}
+          </Text>
+        </Flex>
+      )}
     </Box>
   )
 }
@@ -465,6 +552,7 @@ function TaskRow({
   icon,
   highlight = false,
   onClick,
+  onRemove,
 }: {
   label: string
   time?: string | null
@@ -472,6 +560,7 @@ function TaskRow({
   icon?: React.ReactNode
   highlight?: boolean
   onClick: () => void
+  onRemove?: () => void
 }) {
   return (
     <Flex
@@ -484,6 +573,12 @@ function TaskRow({
       cursor="pointer"
       bg={highlight ? 'rgba(255, 255, 255, 0.06)' : 'transparent'}
       transition={`background ${tokens.transition.fast}`}
+      role="group"
+      css={{
+        '& [data-sidebar-task-remove]': { opacity: 0 },
+        '&:hover [data-sidebar-task-remove]': { opacity: 1 },
+        '& [data-sidebar-task-remove]:focus-visible': { opacity: 1 },
+      }}
       _hover={{ bg: highlight ? 'rgba(255, 255, 255, 0.08)' : 'rgba(255, 255, 255, 0.04)' }}
       onClick={onClick}
       title={label}
@@ -508,6 +603,30 @@ function TaskRow({
       <Text fontSize="12px" color={tokens.colors.text.secondary} lineClamp={1} flex={1} minW={0}>
         {label}
       </Text>
+      {onRemove && (
+        <Flex
+          as="button"
+          data-sidebar-task-remove
+          alignItems="center"
+          justifyContent="center"
+          w="18px"
+          h="18px"
+          borderRadius="4px"
+          flexShrink={0}
+          color={tokens.colors.text.muted}
+          cursor="pointer"
+          transition={`background ${tokens.transition.fast}, color ${tokens.transition.fast}, opacity ${tokens.transition.fast}`}
+          _hover={{ bg: 'rgba(254, 16, 99, 0.12)', color: tokens.colors.accent.primary }}
+          onClick={(e: React.MouseEvent) => {
+            e.stopPropagation()
+            onRemove()
+          }}
+          title={t('welcome.removeQueuedTask')}
+          aria-label={t('welcome.removeQueuedTask')}
+        >
+          <LuX size={11} />
+        </Flex>
+      )}
       {time && (
         <Text data-sidebar-task-time fontSize="10px" color={tokens.colors.text.disabled} flexShrink={0}>
           {time}

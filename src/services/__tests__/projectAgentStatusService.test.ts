@@ -91,12 +91,15 @@ describe('projectAgentStatusService (writer)', () => {
 
     const writes = await statusWrites(invoke)
     expect(writes).toHaveLength(1)
-    expect(writes[0]).toEqual({
+    expect(writes[0]).toMatchObject({
       projectPath: '/p/a',
       state: 'running',
       label: 'Corrige o bug do login',
       onlyIfOwn: false,
     })
+    // startedAt is set once at run start and preserved by heartbeats.
+    expect(typeof writes[0].startedAt).toBe('number')
+    expect(writes[0].startedAt as number).toBeGreaterThan(0)
   })
 
   it('writes done when the run completes', async () => {
@@ -153,6 +156,9 @@ describe('projectAgentStatusService (writer)', () => {
 
     const running = (await statusWrites(invoke)).filter(w => w.state === 'running')
     expect(running.length).toBeGreaterThanOrEqual(3) // initial + 2 heartbeats
+    // Every heartbeat reuses the same startedAt from the first write.
+    const startedAts = running.map(w => w.startedAt)
+    expect(startedAts.every(ts => ts === startedAts[0])).toBe(true)
 
     // Run ends → heartbeat must stop refreshing `running`.
     useAgentStore.getState().setStatus('idle')
@@ -198,11 +204,13 @@ describe('projectAgentStatusService (writer)', () => {
     useAgentStore.getState().setStatus('cancelled')
 
     const writes = await statusWrites(invoke)
-    expect(writes[writes.length - 1]).toEqual({
+    expect(writes[writes.length - 1]).toMatchObject({
       projectPath: '/p/a',
       state: 'error',
       label: 'Consumo esgotado — tarefas interrompidas',
       onlyIfOwn: false,
+      // Terminal writes drop startedAt (elapsed only matters while running).
+      startedAt: null,
     })
   })
 

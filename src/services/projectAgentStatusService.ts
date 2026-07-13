@@ -36,6 +36,12 @@ export interface ProjectAgentStatus {
   state: ProjectAgentRunState
   label?: string | null
   updatedAt: number
+  /**
+   * Epoch ms when the run started. Set on the first `running` write and
+   * preserved by heartbeats so other windows can show "a trabalhar · 12m".
+   * Optional for files written before this field existed.
+   */
+  startedAt?: number | null
   pid: number
 }
 
@@ -68,6 +74,8 @@ let attendedClearTimer: ReturnType<typeof setTimeout> | null = null
  */
 let runningPath: string | null = null
 let runningLabel: string | null = null
+/** Epoch ms of the current run's first `running` write — preserved on heartbeats. */
+let runningStartedAt: number | null = null
 /** Last terminal (`done`/`error`) write — cleared on user acknowledgement. */
 let terminalWrite: { path: string; state: 'done' | 'error' } | null = null
 /**
@@ -99,7 +107,7 @@ function writeStatus(
   projectPath: string,
   state: ProjectAgentRunState,
   label?: string | null,
-  opts?: { onlyIfOwn?: boolean },
+  opts?: { onlyIfOwn?: boolean; startedAt?: number | null },
 ): void {
   writeChain = writeChain.then(() =>
     invoke('set_project_agent_status', {
@@ -107,6 +115,8 @@ function writeStatus(
       state,
       label: label ?? null,
       onlyIfOwn: opts?.onlyIfOwn === true,
+      // Only attach startedAt on `running` — terminal/idle clears drop it.
+      startedAt: state === 'running' ? (opts?.startedAt ?? null) : null,
     }).catch(err => {
       logger.warn('agent', 'set_project_agent_status failed:', err)
     }) as Promise<void>,
@@ -116,7 +126,11 @@ function writeStatus(
 function startHeartbeat(): void {
   stopHeartbeat()
   heartbeatTimer = setInterval(() => {
-    if (runningPath) writeStatus(runningPath, 'running', runningLabel)
+    if (runningPath) {
+      writeStatus(runningPath, 'running', runningLabel, {
+        startedAt: runningStartedAt,
+      })
+    }
   }, PROJECT_AGENT_STATUS_HEARTBEAT_MS)
 }
 
@@ -185,10 +199,11 @@ function onAgentStatusChange(status: AgentStatus, prevStatus: AgentStatus): void
     if (!path) return
     runningPath = path
     runningLabel = extractTaskLabel()
+    runningStartedAt = Date.now()
     terminalWrite = null
     budgetStopLabel = null
     cancelAttendedClear()
-    writeStatus(path, 'running', runningLabel)
+    writeStatus(path, 'running', runningLabel, { startedAt: runningStartedAt })
     startHeartbeat()
     return
   }
@@ -197,6 +212,7 @@ function onAgentStatusChange(status: AgentStatus, prevStatus: AgentStatus): void
     stopHeartbeat()
     const path = runningPath
     runningPath = null
+    runningStartedAt = null
     if (!path) {
       budgetStopLabel = null
       return
@@ -262,7 +278,10 @@ function onProjectChange(
     // its truthful badge must not be stamped over by our exit.
     stopHeartbeat()
     cancelAttendedClear()
-    if (runningPath === prevPath) runningPath = null
+    if (runningPath === prevPath) {
+      runningPath = null
+      runningStartedAt = null
+    }
     if (terminalWrite?.path === prevPath) terminalWrite = null
     writeStatus(prevPath, 'idle', null, { onlyIfOwn: true })
   }

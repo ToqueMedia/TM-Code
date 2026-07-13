@@ -228,6 +228,11 @@ pub struct ProjectAgentStatus {
     pub label: Option<String>,
     /// Epoch ms of the last write — heartbeat for `running`.
     pub updated_at: u64,
+    /// Epoch ms when the run STARTED (set on `running` writes, preserved by
+    /// heartbeats) — lets other windows show "a trabalhar · 12m". Optional
+    /// for backwards compat with files written before 2026-07-13.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
     /// PID of the writing process (diagnostics; readers key off updated_at).
     pub pid: u32,
 }
@@ -250,6 +255,7 @@ pub async fn set_project_agent_status(
     state: String,
     label: Option<String>,
     only_if_own: Option<bool>,
+    started_at: Option<u64>,
 ) -> Result<(), String> {
     if !matches!(state.as_str(), "running" | "done" | "error" | "idle") {
         return Err(format!("Invalid agent status state: {}", state));
@@ -277,6 +283,7 @@ pub async fn set_project_agent_status(
         state,
         label,
         updated_at: now_ms(),
+        started_at,
         pid: std::process::id(),
     };
     let json = serde_json::to_string(&status)

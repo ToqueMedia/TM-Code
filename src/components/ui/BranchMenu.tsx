@@ -10,7 +10,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
-import { Box, Flex, Menu, Text } from '@chakra-ui/react'
+import { Box, Flex, Menu, Spinner, Text } from '@chakra-ui/react'
 import { FiCheck, FiGitBranch, FiPlus } from 'react-icons/fi'
 import { VscChevronDown } from 'react-icons/vsc'
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog'
@@ -146,11 +146,15 @@ function BranchMenu({ projectPath }: { projectPath: string }) {
           title={t('branch.chipTitle')}
           aria-label={t('branch.chipTitle')}
         >
-          <FiGitBranch size={12} />
+          {busy ? (
+            <Spinner size="xs" color={tokens.colors.accent.primary} borderWidth="1.5px" />
+          ) : (
+            <FiGitBranch size={12} />
+          )}
           <Text fontSize="12px" fontWeight="600" lineClamp={1} maxW="160px">
             {current}
           </Text>
-          <VscChevronDown size={11} />
+          {busy ? null : <VscChevronDown size={11} />}
         </Flex>
       </Menu.Trigger>
       <Menu.Positioner className="no-drag" style={{ zIndex: 30000 }}>
@@ -169,12 +173,17 @@ function BranchMenu({ projectPath }: { projectPath: string }) {
             <Menu.Item
               value={branch.name}
               key={branch.name}
+              disabled={busy}
               onClick={() => void switchTo(branch.name)}
               _hover={{ bg: tokens.colors.bg.hover }}
+              opacity={busy ? 0.55 : 1}
             >
               <Flex align="center" gap={2} px={2} py="6px" width="100%">
                 <Box w="14px" flexShrink={0} color={tokens.colors.accent.greenBright}>
-                  {branch.current && <FiCheck size={13} />}
+                  {branch.current && !busy && <FiCheck size={13} />}
+                  {busy && branch.name === current && (
+                    <Spinner size="xs" color={tokens.colors.accent.primary} borderWidth="1.5px" />
+                  )}
                 </Box>
                 <Text
                   fontSize="13px"
@@ -233,7 +242,11 @@ function BranchMenu({ projectPath }: { projectPath: string }) {
                   void createBranch()
                 }}
               >
-                {t('branch.createConfirm')}
+                {busy ? (
+                  <Spinner size="xs" color={tokens.colors.text.inverse} borderWidth="1.5px" />
+                ) : (
+                  t('branch.createConfirm')
+                )}
               </Box>
             </Flex>
           ) : (

@@ -142,6 +142,20 @@ export function usePromptBar() {
   useEffect(() => {
     if (!isAgentBusy) setQueueAsTask(false)
   }, [isAgentBusy])
+
+  // Sidebar "+ Nova tarefa" (and any other surface) can request task mode +
+  // focus without reaching into this hook's local state.
+  useEffect(() => {
+    const onNewTask = () => {
+      if (!getQueryGuard().getSnapshot()) return
+      setQueueAsTask(true)
+      // Defer focus so the composer re-render (toggle visible) lands first.
+      requestAnimationFrame(() => textareaRef.current?.focus())
+    }
+    window.addEventListener('app:new-task', onNewTask)
+    return () => window.removeEventListener('app:new-task', onNewTask)
+  }, [])
+
   const currentProject = useProjectStore(s => s.currentProject)
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewServerRunning = useLayoutStore(selectIsPreviewServerRunning)
