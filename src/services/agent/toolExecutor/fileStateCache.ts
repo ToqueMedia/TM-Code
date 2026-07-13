@@ -130,6 +130,17 @@ export interface FileState {
    * require an explicit Read first. Mirrors claude-vaz's isPartialView.
    */
   isPartialView?: boolean
+  /**
+   * toolCallId of the read_file call that produced this entry. Dedup consults
+   * the toolResultVisibility registry with it: a re-read is only stubbed when
+   * the tool_result carrying this content went INTACT in the last provider
+   * request. If context management compacted/evicted it, the stub would lie
+   * ("content still in conversation") and cost the model a force:true
+   * round-trip — instead, dedup steps aside and the read serves the content.
+   * Undefined for mention-injected and legacy entries (treated as visible —
+   * old behaviour preserved).
+   */
+  toolCallId?: string
 }
 
 export interface FileContentSignature {

@@ -46,6 +46,14 @@ export interface ReadRange {
   fsVersion: number
   /** File mtime captured at read time when available. */
   modifiedMs?: number | null
+  /**
+   * toolCallId of the read that put this range in the model's context.
+   * Overlap dedup only counts ranges whose tool_result went INTACT in the
+   * last provider request (toolResultVisibility) — a range whose content was
+   * compacted away must not contribute to "already covered" stubs, or the
+   * stub lies and forces a force:true round-trip.
+   */
+  toolCallId?: string
 }
 
 export type OverlapKind = 'not_covered' | 'fully_covered' | 'partially_covered'
@@ -122,6 +130,8 @@ function firstUncovered(
 
 // ── Tracker (module-level singleton) ───────────────────────────────────
 
+import { isToolResultContextVisible } from './toolResultVisibility'
+
 const byPath = new Map<string, ReadRange[]>()
 let stats: OverlapStats = { skippedOverlappingReads: 0, adjustedReadRanges: 0 }
 
@@ -152,8 +162,13 @@ export function checkReadRangeOverlap(
 
   // Only consider ranges captured at the same fsVersion. If the global
   // counter advanced (a write happened somewhere), prior ranges may be stale.
+  // A range whose tool_result was compacted out of the last provider request
+  // (toolResultVisibility) is also excluded: the model no longer SEES that
+  // content, so counting it toward "already covered" would produce a lying
+  // stub and a force:true round-trip.
   const valid = ranges.filter((r) => {
     if (r.fsVersion !== currentFsVersion) return false
+    if (!isToolResultContextVisible(r.toolCallId)) return false
     if (
       currentModifiedMs !== undefined &&
       currentModifiedMs !== null &&
@@ -230,17 +245,22 @@ export function recordReadRange(
   limit: number | undefined,
   fsVersion: number,
   modifiedMs?: number | null,
+  toolCallId?: string,
 ): void {
   const key = normalizePath(filePath)
   const ranges = byPath.get(key) ?? []
   // Avoid storing exact-duplicate ranges (the exact dedup path already
-  // handled those; no need to bloat the list).
+  // handled those; no need to bloat the list). A duplicate range from a NEW
+  // read (e.g. re-read after eviction) re-points the entry at the freshest
+  // toolCallId — that's the tool_result that is now intact in context.
   const start = Math.max(1, offset ?? 1)
-  const exists = ranges.some(
+  const existing = ranges.find(
     (r) => r.offset === start && r.limit === limit && r.fsVersion === fsVersion && r.modifiedMs === modifiedMs,
   )
-  if (!exists) {
-    ranges.push({ offset: start, limit, fsVersion, modifiedMs })
+  if (existing) {
+    if (toolCallId) existing.toolCallId = toolCallId
+  } else {
+    ranges.push({ offset: start, limit, fsVersion, modifiedMs, toolCallId })
     byPath.set(key, ranges)
   }
 }

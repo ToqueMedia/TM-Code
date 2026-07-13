@@ -48,6 +48,7 @@ import { ENTER_WORKTREE_DESCRIPTION, EXIT_WORKTREE_DESCRIPTION } from './toolExe
 import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileState, type FileStateCache } from './toolExecutor/fileStateCache'
 import { FILE_UNCHANGED_STUB } from './toolExecutor/readDedup'
 import { checkReadRangeOverlap, recordReadRange, clearReadRangeTracker } from './toolExecutor/readRangeTracker'
+import { isToolResultContextVisible, clearToolResultVisibility } from './toolExecutor/toolResultVisibility'
 import { clearMentionContextTracker } from './mentionContextTracker'
 import { addLineNumbers } from './toolExecutor/lineNumbers'
 import { hasBinaryExtension } from './toolExecutor/binaryExtensions'
@@ -468,6 +469,7 @@ class ToolExecutor {
     this.readFileTimestamps.clear()
     this.readFileState.clear()
     clearReadRangeTracker()
+    clearToolResultVisibility()
     this.largeResults.clear()
     this.largeResultsTotalBytes = 0
     this.largeResultRangesShown.clear()
@@ -2619,6 +2621,11 @@ ${preview}
         let limit = limitProvided ? Math.max(1, input.limit as number) : 0
         let sliceRequested = offsetProvided || limitProvided
         const forceRead = input.force === true
+        // Injected by execute(); undefined em caminhos sem tool_call
+        // (executeForMention). Guarda-se no FileState/readRangeTracker para
+        // o dedup poder perguntar ao toolResultVisibility se o resultado que
+        // levou este conteúdo ao modelo ainda segue INTACTO nos pedidos.
+        const readToolCallId = typeof input._toolCallId === 'string' ? input._toolCallId : undefined
         await this.requirePathAccess(filePath)
 
         const currentFsVersion = getFsVersion()
@@ -2677,10 +2684,16 @@ ${preview}
           // file's mtime is unchanged on disk. fsVersion is no longer the
           // gate (it missed external edits). The cached mtime lives in the
           // FileContentSignature captured at the prior read.
+          // isToolResultContextVisible: TM-specific extra gate — the stub
+          // claims "the content is still in the conversation", so it can only
+          // fire when the tool_result that carried this content went INTACT in
+          // the last provider request. If context management compacted it, we
+          // fall through and serve the content (no stub, no force:true dance).
           if (
             !forceRead &&
             existingState?.source === 'read' &&
             !existingState.isPartialView &&
+            isToolResultContextVisible(existingState.toolCallId) &&
             existingState.offset === requestedOffset &&
             existingState.limit === requestedLimit &&
             existingState.signature?.modifiedMs !== undefined &&
@@ -2809,6 +2822,7 @@ ${preview}
               hash: contentHash,
               fsVersion: currentFsVersion,
               isPartialView: visibility.partialView || undefined,
+              toolCallId: readToolCallId,
             })
 
             if (visibility.range) {
@@ -2820,6 +2834,7 @@ ${preview}
                 visibility.range.limit,
                 currentFsVersion,
                 signatureForRead.modifiedMs,
+                readToolCallId,
               )
             }
           }
@@ -2960,12 +2975,22 @@ ${preview}
         const offset = Math.max(1, line - before)
         const endLine = line + after
         const limit = endLine - offset + 1
-        return this.execute('read_file', {
-          file_path: requestedPath,
-          offset,
-          limit,
-          ...(input.force === true ? { force: true } : {}),
-        })
+        // Propaga o contexto por-chamada injetado pelo execute() de origem:
+        // o _toolCallId é o que liga o FileState/readRangeTracker ao registo
+        // de visibilidade (sem ele, releituras pós-evicção voltavam a levar
+        // stub), e o _abortSignal mantém o cancelamento a meio do voo.
+        return this.execute(
+          'read_file',
+          {
+            file_path: requestedPath,
+            offset,
+            limit,
+            ...(input.force === true ? { force: true } : {}),
+          },
+          typeof input._toolCallId === 'string' ? input._toolCallId : undefined,
+          input._abortSignal as AbortSignal | undefined,
+          typeof input._memoryScope === 'string' ? input._memoryScope : undefined,
+        )
       },
     })
 

@@ -18,18 +18,31 @@
  * This module sits in the pipeline right before `toOpenAIMessages`. It:
  *   1. Collects every tool_result block across all messages, paired with the
  *      tool_call that produced it (for name + args → path/command extraction).
- *   2. Keeps the N most recent results COMPLETE (default 4) — these are the
- *      ones the model is actively working with.
- *   3. Replaces the CONTENT of older results with a compact structured block:
+ *   2. Under the global budget (40K tokens) it compacts NOTHING — the model
+ *      keeps its full working set. The budget is a real gate, not a pretext:
+ *      the original version compacted everything older than the last 4
+ *      results UNCONDITIONALLY, which starved multi-file tasks (the model's
+ *      working set was hardcoded to 4 tool results) and forced a re-read →
+ *      dedup-stub → force:true dance costing 1–2 full round-trips per file
+ *      (root-cause analysis, 2026-07-13).
+ *   3. Over budget, replaces the CONTENT of the OLDEST results first — never
+ *      the `keepRecent` most recent ones — with a compact structured block,
+ *      only until the total is back under budget:
  *        [tool-result-summary]
  *        tool: read_file | path: /foo/bar.ts offset: 1 limit: 50
  *        original: 15234 chars (~5078 tokens) | hash: a1b2c3d4
  *        preview (first 800 chars):
  *        <…first 800 chars…>
  *        [re-read via read_file(path) or read_large_result(refId) if needed]
- *   4. If the total STILL exceeds the global budget (40K tokens), compacts
- *      progressively older "recent" results — but NEVER the single most recent
- *      one (the model needs it to continue the current step).
+ *   4. If the total STILL exceeds the budget after all old results are
+ *      compacted, compacts progressively older "recent" results — but NEVER
+ *      the single most recent one (the model needs it to continue the
+ *      current step).
+ *
+ *   The re-read hint in the summary is honoured downstream: query.ts records
+ *   which tool_results were sent compacted (toolResultVisibility registry),
+ *   and the read-dedup layers serve content directly — no stub, no force —
+ *   for anything this module evicted.
  *
  * CRITICAL — what this does NOT do
  * ───────────────────────────────
@@ -302,6 +315,14 @@ export function applyGlobalToolResultBudget(
 
   const tokensBefore = allResults.reduce((s, r) => s + r.tokens, 0)
 
+  // Under budget → compact NOTHING. The budget is the gate, not a pretext:
+  // eviction below this line exists to protect the context window and the
+  // per-request bill, not to minimise at all costs. Keeping the working set
+  // intact is what lets the agent decide its next step without re-reading.
+  if (tokensBefore <= budget) {
+    return { messages, compactedCount: 0, tokensBefore, tokensAfter: tokensBefore }
+  }
+
   // The most recent result (last in array) is ALWAYS kept complete — the model
   // just received it and needs it to continue the current step.
   const recentCount = Math.min(keepRecent, allResults.length)
@@ -318,20 +339,16 @@ export function applyGlobalToolResultBudget(
   // Set of results to compact (messageIndex:blockIndex keys).
   const toCompact = new Set<string>()
 
-  // Phase 1: compact all old (non-recent, non-pinned) results.
+  // Phase 1: over budget — evict OLDEST-first, and only as many as it takes
+  // to get back under. Results the model is still working with survive as
+  // long as the budget allows, instead of being unconditionally destroyed.
+  let tokensAfterPhase1 = tokensBefore
   for (const r of compactCandidates) {
+    if (tokensAfterPhase1 <= budget) break
     toCompact.add(`${r.messageIndex}:${r.blockIndex}`)
-  }
-
-  // Compute total after Phase 1.
-  let tokensAfterPhase1 = 0
-  for (const r of allResults) {
-    if (toCompact.has(`${r.messageIndex}:${r.blockIndex}`)) {
-      // Approximate the compact summary size: ~1000 chars (header + 800 preview + footer).
-      tokensAfterPhase1 += roughTokenEstimate(buildCompactSummary(r.content, r.toolName, r.toolArgs))
-    } else {
-      tokensAfterPhase1 += r.tokens
-    }
+    // Approximate the compact summary size: ~1000 chars (header + 800 preview + footer).
+    tokensAfterPhase1 = tokensAfterPhase1 - r.tokens
+      + roughTokenEstimate(buildCompactSummary(r.content, r.toolName, r.toolArgs))
   }
 
   // Phase 2: if still over budget, compact progressively older "recent" results

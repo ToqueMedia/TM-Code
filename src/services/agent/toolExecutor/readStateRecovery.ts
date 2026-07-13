@@ -154,6 +154,10 @@ export function extractReadFilesFromMessages(
           // because the real content is still in the conversation history —
           // re-reading just wastes a few cache_creation tokens.
           fsVersion: -1,
+          // Historical toolCallId — the first request's visibility snapshot
+          // classifies it (intact vs compacted), so mtime-gated dedup after
+          // resume only stubs content the model can still actually see.
+          toolCallId,
         })
         readFileTimestamps.set(readInfo.filePath, { timestamp, hash })
         continue // toolCallId matched — skip remaining checks
