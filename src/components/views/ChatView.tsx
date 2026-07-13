@@ -361,26 +361,15 @@ function ChatView() {
           {isSidebarMode && <CollabShareControls compact />}
         </Flex>
 
-        {/* Credits + Isolation + MCP indicators — hidden in sidebar mode
-            because 380px can't fit them all. */}
+        {/* Isolation + MCP + team indicators — hidden in sidebar mode because
+            380px can't fit them all. Credits are NOT here: the CreditIndicator
+            renders after this block, outside both this gate and the wide-only
+            cluster, so it survives every responsive compaction. */}
         {!isSidebarMode && (
           <>
             <HStack data-chat-toolbar-wide-only gap={1.5} flexShrink={0} overflow="visible">
               <TmSpeedIndicator />
               <ModelIndicator />
-              {!showModelIndicator && (
-                <CreditIndicator
-                  plan={billingPlan}
-                  noCredits={noCredits}
-                  isStreaming={isStreaming}
-                  consumedPct={consumedPct}
-                  tokensConsumed={tokensConsumed}
-                  tokenBudget={tokenBudget}
-                  cycleEnd={cycleEnd}
-                  status={billingStatus}
-                  tmsRemaining={tmsRemaining}
-                />
-              )}
               {sandboxEnabled && (
                 <IsolationPill
                   icon={FiShield}
@@ -421,6 +410,29 @@ function ChatView() {
             </HStack>
             <HeaderOverflowMenu />
           </>
+        )}
+
+        {/* Créditos SEMPRE visíveis — deliberadamente FORA do cluster
+            data-chat-toolbar-wide-only (que a container query esconde a
+            ≤1180px, empurrando tudo para o menu ⋯) e fora do gate de
+            isSidebarMode: o consumo do ciclo é a informação de billing que
+            o user nunca pode perder de vista, em nenhuma largura. O gate
+            showModelIndicator mantém-se — em BYOK o billing é a chave do
+            próprio user (decisão de produto, não responsividade). */}
+        {!showModelIndicator && (
+          <Box flexShrink={0}>
+            <CreditIndicator
+              plan={billingPlan}
+              noCredits={noCredits}
+              isStreaming={isStreaming}
+              consumedPct={consumedPct}
+              tokensConsumed={tokensConsumed}
+              tokenBudget={tokenBudget}
+              cycleEnd={cycleEnd}
+              status={billingStatus}
+              tmsRemaining={tmsRemaining}
+            />
+          </Box>
         )}
         </Flex>
       )}
@@ -744,18 +756,8 @@ function HeaderOverflowMenu() {
   const projectPath = currentProject?.path || ''
   const isSharingLivePreview = useCollabStore(s => s.sharingPreview)
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
-  const billingPlan = useBillingStore(s => s.plan)
-  const noCredits = useBillingStore(s => s.noCredits)
-  const consumedPct = useBillingStore(s => s.consumedPct)
-  const tokensConsumed = useBillingStore(s => s.tokensConsumed)
-  const tokenBudget = useBillingStore(s => s.tokenBudget)
-  const cycleEnd = useBillingStore(s => s.cycleEnd)
-  const billingStatus = useBillingStore(s => s.status)
-  const tmsRemaining = useBillingStore(s => s.tmsRemaining)
-  const isStreaming = useChatStore(s => s.isStreaming)
   const mcpServers = useMcpStore(s => s.servers)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
-  const { byokInPlay: showModelIndicator } = useByokState()
   const shouldShowMcp = mcpIsInitializing || mcpServers.some(server => server.status === 'running' || server.status === 'error')
   const shouldShowCollab = canShareCode()
 
@@ -851,22 +853,12 @@ function HeaderOverflowMenu() {
             <Text fontSize="10px" color={tokens.colors.text.muted} fontWeight="700" textTransform="uppercase">
               Status
             </Text>
+            {/* CreditIndicator já não vive aqui — está sempre visível na
+                toolbar (fora do cluster wide-only), portanto duplicá-lo no
+                menu seria redundante. */}
             <HStack gap={1.5} justify="flex-end" minW={0} overflow="visible">
               <TmSpeedIndicator />
               <ModelIndicator />
-              {!showModelIndicator && (
-                <CreditIndicator
-                  plan={billingPlan}
-                  noCredits={noCredits}
-                  isStreaming={isStreaming}
-                  consumedPct={consumedPct}
-                  tokensConsumed={tokensConsumed}
-                  tokenBudget={tokenBudget}
-                  cycleEnd={cycleEnd}
-                  status={billingStatus}
-                  tmsRemaining={tmsRemaining}
-                />
-              )}
             </HStack>
           </Flex>
 
