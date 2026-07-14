@@ -41,9 +41,13 @@ export const CRITICAL_SECTIONS_MAX_BYTES = 12_000
  * names whose CRITICAL sections should be inlined into the prompt this turn.
  * Empty when no recognised tags are present.
  *
- * The point: turn-1 reinforcement before scaffoldingDetector has filesystem
- * markers to find. The user has already declared intent via `#auth-google`,
- * so the rules should already be in context — not waiting for the next turn.
+ * The point: turn-1 reinforcement. The user has already declared intent via
+ * `#design`, so the rules should already be in context — not waiting for
+ * the next turn.
+ *
+ * NOTE (2026-07): the managed-auth tags (`#auth-google`,
+ * `#auth-email-password` → auth-proxy/google-signin skills) were removed
+ * with the MANAGED-PLATFORM layer — see hashtagRegistry.ts.
  *
  * Exported for unit tests.
  */
@@ -53,12 +57,6 @@ export function skillsFromHashtags(message: string | undefined): string[] {
   // whitespace/punctuation. (\B is wrong here because between two `#`
   // chars it counts as non-word-boundary and would match `a###tag`.)
   const skills = new Set<string>()
-  if (/(?<!\S)#auth-(google|email-password)\b/i.test(message)) {
-    skills.add('auth-proxy')
-  }
-  if (/(?<!\S)#auth-google\b/i.test(message)) {
-    skills.add('google-signin')
-  }
   if (/(?<!\S)#design\b/i.test(message)) {
     skills.add('frontend-design')
   }
@@ -199,6 +197,21 @@ export function extractCriticalSectionsWithStats(content: string): CriticalExtra
 // Short TTL: long enough to survive rapid successive turns (user follow-ups,
 // retries), short enough that edits to TMS.md/PLAN.md/TODO.md surface quickly.
 export const PROMPT_CACHE_TTL_MS = 30_000
+
+/**
+ * Small deterministic string hash for cache signatures. This is not a
+ * security primitive; it only keeps volatile prompt inputs out of cache keys
+ * while still invalidating on content changes.
+ */
+export function stablePromptHash(input: string | null | undefined): string {
+  const text = input ?? ''
+  let hash = 2166136261
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
 
 /**
  * Static/dynamic boundary marker. Inserted as a literal sentinel between the

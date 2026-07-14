@@ -8,8 +8,8 @@ import { useAskUserQuestionStore } from '../stores/askUserQuestionStore'
 /**
  * Elapsed-time ticker for any UI that surfaces "the agent is busy for N seconds".
  *
- * Three timers in the app surface this number (AgentStatusBar, AgentActivityIndicator,
- * TerminalStatusLine). Without a shared hook the pause-on-permission logic drifted
+ * Multiple timers in the app surface this number (AgentStatusBar,
+ * AgentActivityIndicator). Without a shared hook the pause-on-permission logic drifted
  * — fixing one left two counting through user wait time, which is a lie since the
  * agent isn't doing work then.
  *

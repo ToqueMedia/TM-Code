@@ -28,11 +28,18 @@ describe('checkPlanModeAccess', () => {
     })
 
     test('allows read tools without a filePath check', () => {
-      const allowed = ['read_file', 'list_directory', 'glob', 'search_files', 'read_skill', 'read_large_result']
+      const allowed = ['read_file', 'read_around', 'list_directory', 'glob', 'search_files', 'read_skill', 'read_large_result']
       for (const tool of allowed) {
         // Read tools should pass even with arbitrary paths — they only consume.
         expect(checkPlanModeAccess(tool, 'src/components/App.tsx', ROOT)).toBeNull()
         expect(checkPlanModeAccess(tool, '', ROOT)).toBeNull()
+      }
+    })
+
+    test('allows Claude-like read aliases via canonical tool mapping', () => {
+      const allowed = ['Read', 'LS', 'Glob', 'Grep']
+      for (const tool of allowed) {
+        expect(checkPlanModeAccess(tool, 'src/components/App.tsx', ROOT)).toBeNull()
       }
     })
 
@@ -58,6 +65,7 @@ describe('checkPlanModeAccess', () => {
         'edit_file',
         'glob',
         'list_directory',
+        'read_around',
         'read_file',
         'read_large_result',
         'read_skill',

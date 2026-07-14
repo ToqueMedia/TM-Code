@@ -41,7 +41,17 @@ jest.mock('../../utils/logger', () => ({
   },
 }))
 
-import { useChatStore } from '../chatStore'
+// clearAllSessions dynamic-imports this to drop the invoked-skills cache —
+// keep it inert so the test doesn't pull the real skill machinery.
+jest.mock('../../services/agent/skillService', () => ({
+  clearInvokedSkills: jest.fn(),
+}))
+
+import {
+  useChatStore,
+  createDiffApprovalPromise,
+  hasPendingDiffApprovals,
+} from '../chatStore'
 
 // Helper: reset the store to initial state before each test
 function resetStore() {
@@ -155,6 +165,22 @@ describe('chatStore', () => {
 
       const finalMsg = useChatStore.getState().getActiveSession()!.messages.find(m => m.id === assistantId)!
       expect(finalMsg.isStreaming).toBe(false)
+    })
+
+    it('marks UI-only streaming text separately from model text', () => {
+      useChatStore.getState().createSession('/test/project')
+      const assistantId = useChatStore.getState().startAssistantMessage()
+
+      useChatStore.getState().appendUiTextDelta('Preparing context...\n\n')
+      useChatStore.getState().appendTextDelta('Final answer')
+
+      const session = useChatStore.getState().getActiveSession()!
+      const msg = session.messages.find(m => m.id === assistantId)!
+      expect(msg.content).toBe('Preparing context...\n\nFinal answer')
+      expect(msg.contentBlocks).toEqual([
+        { type: 'text', text: 'Preparing context...\n\n', uiOnly: true },
+        { type: 'text', text: 'Final answer' },
+      ])
     })
   })
 
@@ -344,6 +370,23 @@ describe('chatStore', () => {
       useChatStore.getState().addPendingDiff({ ...mockDiff, id: 'diff-2' })
       useChatStore.getState().clearPendingDiffs()
       expect(useChatStore.getState().pendingDiffs).toHaveLength(0)
+    })
+  })
+
+  describe('clearAllSessions', () => {
+    it('rejects pending diff approvals so an orphaned run unblocks', async () => {
+      // Project-switch path: a run can be blocked awaiting a diff decision
+      // while clearAllSessions fires WITHOUT cancelLoop having run first.
+      // The module-level approval map survives the set() wipe, so an
+      // unresolved entry would keep the orphaned run's executor awaiting
+      // forever (and the global tool-pause gate engaged for the next project).
+      const approval = createDiffApprovalPromise('tool-call-orphan')
+      expect(hasPendingDiffApprovals()).toBe(true)
+
+      useChatStore.getState().clearAllSessions()
+
+      await expect(approval).resolves.toBe(false)
+      expect(hasPendingDiffApprovals()).toBe(false)
     })
   })
 })

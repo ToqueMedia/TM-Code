@@ -1,6 +1,6 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { logger } from '@/utils/logger'
-import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, markReasoningBoundary, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
+import { useChatStore, appendTextDeltaBuffered, appendUiTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, markReasoningBoundary, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useProblemsStore } from '../../stores/problemsStore'
@@ -10,17 +10,26 @@ import { t } from '../../i18n/useTranslation'
 import AgentService from './agentService'
 import type { OpenAIContentPart } from './types'
 import ContextBuilder from './contextBuilder'
+import { classifyIntent, type IntentClassification } from './intentRouter'
 import ToolExecutor from './toolExecutor'
 import MCPService from '../mcp/mcpService'
 import { browserSession } from '../browserSessionManager'
 import { getProjectSessionsDir } from '../projectStatePaths'
 import { resolveAttachments, resolveImageToDataUri } from '../attachmentService'
 import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText, extractDisplayFromValue } from './promptValueHelpers'
-import { dequeueAllMatching, isSlashCommand, joinPromptValues } from './messageQueue'
+import { drainSteerableMessages, joinPromptValues } from './messageQueue'
 import { describeImagesViaSidecar } from './visionSidecar'
 import { MODEL_PROFILES, getProfileForPlan } from './modelProfiles'
 import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from './atMentions'
-import type { Attachment, PromptBlock } from '../../types/chat'
+import {
+  buildTmsBootstrapOnlyPrompt,
+  getTmsBootstrapCompleteMessageKey,
+  getTmsBootstrapStartMessageKey,
+  runTmsPreflight,
+  type TmsPreflightResult,
+} from './tmsBootstrap'
+import { getTmsTurnTelemetry, markOriginalTaskFailed } from './tmsContext'
+import type { Attachment, ConversationMessage, PromptBlock } from '../../types/chat'
 
 interface RunAgentOptions {
   /** Whether to add a user message to the chat. Default: true */
@@ -36,9 +45,14 @@ interface RunAgentOptions {
   /** Use existing conversation history instead of empty. Default: false */
   useConversationHistory?: boolean
   /**
-   * Run in CLI/CMD-only mode: no project required, file writes go directly to
-   * disk without diff approval, CWD is the user's home directory.
-   * Must be set explicitly by the caller — never derived implicitly from project state.
+   * Run with cwd-scoped tools: no project-store entry required, file writes go
+   * directly to disk without diff approval, and CWD defaults to the project
+   * path or the user's home directory. Must be set explicitly by the caller.
+   * Today the only caller is /plan (planCommand.ts) — the architect turn needs
+   * the tool executor to resolve paths via its own cwd (enableCmdMode) instead
+   * of useProjectStore.currentProject, and must skip the TMS preflight. Always
+   * paired with `systemPromptOverride`; the old cwd-scoped system prompt
+   * (buildCmdModeSystemPrompt) was removed with the Terminal chat surface.
    */
   cmdOnlyMode?: boolean
   /**
@@ -59,7 +73,7 @@ interface RunAgentOptions {
   systemPromptOverride?: string
   /**
    * Raw USER-TYPED text to resolve @-mentions from (atMentions.ts). Set by
-   * callers that forward real user input (CMD mode executePrompt). When
+   * callers that forward real user input from a prompt surface. When
    * unset, mentions resolve from the text blocks of `modelMessageBlocks` /
    * `userMessageBlocks` if present — system-generated prompts (autoWake,
    * compaction, slash internals) carry neither and get NO mention
@@ -72,6 +86,11 @@ interface RunAgentOptions {
    * runs "score" a goal. Default: false.
    */
   isBackgroundRun?: boolean
+  /** Explicit history to send to the model. Used when resuming the original
+   *  request after TMS bootstrap without duplicating the visible user bubble. */
+  conversationHistoryOverride?: ConversationMessage[]
+  /** Force a known task profile for internal slash-command flows. */
+  intentOverride?: IntentClassification
 }
 
 const APPROX_CHARS_PER_TOKEN = 4
@@ -95,7 +114,7 @@ function estimateTokensFromValue(value: unknown): number {
  * Serialization chain — each invocation awaits the previous one to fully
  * settle before starting. We *cannot* simply drop concurrent calls: the
  * message queue dispatches a queued prompt as soon as `queryGuard` reports
- * idle, but the previous invocation's `finally` (cleanup, CMD-mode disable)
+ * idle, but the previous invocation's `finally` (cleanup, cwd-scope disable)
  * may still be running. With a boolean "running" guard the queued prompt
  * would be dropped silently and never appear in the message list. Chaining
  * ensures every call actually runs while still preventing overlap.
@@ -110,13 +129,10 @@ let lastRun: Promise<void> = Promise.resolve()
  * slash command — from both clearing `tryStart()` in the reserve→tryStart
  * window and one losing as "concurrent runAgentLoop detected".
  *
- * Chat-mode queued messages were starved precisely because they dispatched
- * `runAgentLoop` DIRECTLY (off this chain) while auto-wake ran on it: the queued
- * prompt kept colliding and being rejected until all background activity ceased
- * ("only at session end"). Terminal mode already routes every dispatch through
- * here (via runAgentWithCallbacks), which is why it behaved as expected.
- * Routing the Chat queue through `enqueueSerializedRun` too restores per-turn
- * draining.
+ * Queued messages were starved when one dispatch path called `runAgentLoop`
+ * directly while auto-wake ran on this chain: the queued prompt kept colliding
+ * and being rejected until all background activity ceased. Routing every agent
+ * dispatch through `enqueueSerializedRun` restores per-turn draining.
  */
 export function enqueueSerializedRun<T>(task: () => Promise<T>): Promise<T> {
   const prev = lastRun
@@ -157,24 +173,23 @@ async function runAgentInternal(
     systemPromptOverride,
     mentionText,
     isBackgroundRun = false,
+    conversationHistoryOverride,
+    intentOverride,
   } = options
 
   const chatStore = useChatStore.getState()
   const agentStore = useAgentStore.getState()
   const projectStore = useProjectStore.getState()
   const currentProject = projectStore.currentProject
-  const cmdModePath = projectStore.cmdModeProjectPath
-  const projectPath = currentProject?.path || cmdModePath || ''
+  const projectPath = currentProject?.path || ''
 
-  // Resolve CWD and home directory for CLI-only mode.
+  // Resolve CWD for cwd-scoped tool execution.
   // Prefer the open project path so the agent operates in context;
-  // fall back to home directory when CMD mode is launched without a project.
+  // fall back to home directory when launched without a project.
   let cmdCwd = ''
-  let cmdHomeDir: string | null = null
   if (cmdOnlyMode) {
     try {
       const home = await invoke<string>('get_home_directory')
-      cmdHomeDir = home
       cmdCwd = projectPath || home
     } catch {
       cmdCwd = projectPath || ''
@@ -186,6 +201,8 @@ async function runAgentInternal(
   if (!sessionId) {
     sessionId = chatStore.createSession(cmdCwd || projectPath)
   }
+  const historyBeforeCurrentUser = conversationHistoryOverride
+    ?? useChatStore.getState().conversationHistory
 
   // Pull the agent service early so we can ask it about the upcoming turn
   // (specifically, whether reasoning is requested) before creating the
@@ -232,6 +249,33 @@ async function runAgentInternal(
     return
   }
 
+  let tmsPreflight: TmsPreflightResult | null = null
+  if (
+    projectPath &&
+    addUserMessage &&
+    !cmdOnlyMode &&
+    !isBackgroundRun &&
+    !useProjectStore.getState().tmsBootstrapping
+  ) {
+    tmsPreflight = await runTmsPreflight({
+      projectPath,
+      originalUserMessageDisplayed: true,
+      originalUserMessage: userMessageText ?? prompt,
+    })
+  }
+  const bootstrapOnly = tmsPreflight?.shouldBootstrap === true
+  const rawHistory = bootstrapOnly
+    ? historyBeforeCurrentUser
+    : conversationHistoryOverride
+      ? conversationHistoryOverride
+      : useConversationHistory
+        ? useChatStore.getState().conversationHistory
+        : []
+  const hasImageForIntent =
+    (userMessageAttachments?.some(a => a.type === 'image') ?? false) ||
+    (userMessageBlocks?.some(block => block.type === 'attachment' && block.attachment.type === 'image') ?? false) ||
+    (modelMessageBlocks?.some(block => block.type === 'attachment' && block.attachment.type === 'image') ?? false)
+
   // Reset the per-request token counter at the START of each new request so
   // the chat indicator shows tokens for the CURRENT request only (not the
   // session-cumulative total). A "request" = one runAgentInternal invocation,
@@ -250,6 +294,10 @@ async function runAgentInternal(
     // didn't ask for them (BYOK reasoning models sometimes keep emitting
     // chain-of-thought even when the disable param is set correctly).
     chatStore.startAssistantMessage(agentService.isThinkingRequestedForNextTurn())
+  }
+  if (bootstrapOnly) {
+    appendUiTextDeltaBuffered(`${t(getTmsBootstrapStartMessageKey(tmsPreflight!))}\n\n`)
+    flushBufferedDeltas()
   }
   // 'awaiting_response': prompt is about to be sent; nothing has streamed yet.
   // Flips to 'reasoning' or 'generating' once the first delta lands.
@@ -285,11 +333,12 @@ async function runAgentInternal(
     }
   }
 
-  // Enable CLI mode on the executor — direct disk writes, CWD-scoped path validation.
+  // Enable cwd-scoped execution on the executor — direct disk writes,
+  // cwd-scoped path validation.
   // Always paired with disableCmdMode() in the finally block below.
   if (cmdOnlyMode && cmdCwd) {
     toolExecutor.enableCmdMode(cmdCwd)
-    logger.info('agent', `→ CMD mode enabled: ${cmdCwd}`)
+    logger.info('agent', `→ cwd-scoped execution enabled: ${cmdCwd}`)
   }
 
   // Build system prompt with MCP tool info
@@ -306,26 +355,53 @@ async function runAgentInternal(
   const promptBuildStart = Date.now()
   if (systemPromptOverride) {
     systemPrompt = systemPromptOverride
-  } else if (cmdOnlyMode && cmdCwd) {
-    // userMessageText is forwarded so CMD mode can detect skill-trigger
-    // hashtags (#auth-google etc.) and inline the corresponding CRITICAL
-    // rules at turn 1 — same mechanism as chat mode. Without this, the
-    // hashtag regex never fires in CMD and the model improvises auth from
-    // training prior, producing scaffolds with placeholder credentials.
-    systemPrompt = await contextBuilder.buildCmdModeSystemPrompt(cmdCwd, cmdHomeDir, mcpToolSummaries, userMessageText)
   } else {
     const projectType = currentProject?.projectType || 'unknown'
     // userMessageText carries the raw user input so contextBuilder can detect
     // skill-trigger hashtags (#auth-google etc.) and inline the corresponding
     // CRITICAL rules at turn 1.
-    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText, AgentService.getInstance().getAccessedFilePaths())
+    //
+    // Intent Router: a lightweight model call (qwen3.7-plus, no tools,
+    // non-streaming) classifies the user's intent into a PromptProfile,
+    // readOnly flag, and requiresMutation flag BEFORE the system prompt is
+    // assembled. The result feeds
+    // the context builder (prompt profile + on-demand auxiliaries) and — via
+    // lastAuxiliarySelection — the ToolsetSelector (starter toolset). User-text
+    // inference stays in the model router/planner except for the local
+    // no-edit/read-only safety override in classifyIntent.
+    // Never throws; on failure it falls back to { bugfix_local, readOnly:false }
+    // and buildSystemPrompt uses a conservative no-auxiliary fallback.
+    const bootstrapUserMessageText = bootstrapOnly && tmsPreflight
+      ? buildTmsBootstrapOnlyPrompt(tmsPreflight, userMessageText ?? prompt)
+      : null
+    const promptForSystem = bootstrapUserMessageText ?? userMessageText
+    const intentStart = Date.now()
+    const intent = bootstrapOnly
+      ? {
+          profile: 'project_bootstrap' as const,
+          readOnly: false,
+          requiresMutation: true,
+          source: 'keyword' as const,
+          confidence: 'high' as const,
+          reason: 'TMS.md bootstrap preflight selected project_bootstrap before the original task',
+        }
+      : intentOverride
+        ? intentOverride
+      : await classifyIntent(userMessageText ?? '', {
+          hasImage: hasImageForIntent,
+          conversationHistory: rawHistory,
+        })
+    const effectiveIntent = intent
+    AgentService.getInstance().clearPostTmsBootstrapToolProfile()
+    logger.info(
+      'agent',
+      `→ Intent router: profile=${effectiveIntent.profile} readOnly=${effectiveIntent.readOnly} requiresMutation=${effectiveIntent.requiresMutation} (${effectiveIntent.source}, ${Date.now() - intentStart}ms) — ${effectiveIntent.reason}`,
+    )
+    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, promptForSystem, AgentService.getInstance().getAccessedFilePaths(), { profile: effectiveIntent.profile, readOnly: effectiveIntent.readOnly, requiresMutation: effectiveIntent.requiresMutation, reason: effectiveIntent.reason, source: effectiveIntent.source, confidence: effectiveIntent.confidence, error: effectiveIntent.error, diagnostics: effectiveIntent.diagnostics })
   }
   logger.info('agent', `✓ System prompt built (${systemPrompt.length} chars, ${Date.now() - promptBuildStart}ms)`)
 
   // Get conversation history
-  const rawHistory = useConversationHistory
-    ? useChatStore.getState().conversationHistory
-    : []
   logger.info('agent', `→ Conversation history: ${rawHistory.length} messages`)
 
   agentService.setSystemPrompt(systemPrompt)
@@ -344,10 +420,12 @@ async function runAgentInternal(
   const hasAnyAttachments = (userMessageAttachments?.length ?? 0) > 0
   const hasImageAttachments = userMessageAttachments?.some(a => a.type === 'image') ?? false
 
-  let userContent: string | OpenAIContentPart[] = prompt
+  let userContent: string | OpenAIContentPart[] = bootstrapOnly && tmsPreflight
+    ? buildTmsBootstrapOnlyPrompt(tmsPreflight, userMessageText ?? prompt)
+    : prompt
 
   const blocksForModel = modelMessageBlocks ?? userMessageBlocks
-  if (hasAnyAttachments && blocksForModel) {
+  if (!bootstrapOnly && hasAnyAttachments && blocksForModel) {
     const imageCount = userMessageAttachments?.filter(a => a.type === 'image').length ?? 0
     const fileCount = (userMessageAttachments?.length ?? 0) - imageCount
     logger.info('agent', `→ Processing attachments (${imageCount} images, ${fileCount} files)...`)
@@ -422,7 +500,7 @@ async function runAgentInternal(
     ?? (blocksForModel
       ? blocksForModel.filter(b => b.type === 'text').map(b => b.text).join('\n')
       : null)
-  try {
+  if (!bootstrapOnly) try {
     const mentionResolution = mentionSource
       ? await resolveMentionContext(mentionSource)
       : { contextText: '', imageParts: [], resolvedPaths: [] }
@@ -454,6 +532,7 @@ async function runAgentInternal(
   const loopStartTime = Date.now()
   let firstTextReceived = false
   let firstReasoningReceived = false
+  let streamedAssistantText = ''
   // Estimativas LOCAIS são apenas para o ctx-pill (chatStore) — a
   // contabilidade de billing é exclusiva do worker ai-pass-through (único
   // ponto de verdade): ele observa o `usage` real de cada resposta, aplica o
@@ -493,6 +572,7 @@ async function runAgentInternal(
         }
         agentStore.setStatus('generating')
         applyLiveTokenEstimate(0, estimateTokensFromText(delta))
+        streamedAssistantText += delta
         appendTextDeltaBuffered(delta)
       },
       onReasoningDelta: (delta) => {
@@ -544,8 +624,28 @@ async function runAgentInternal(
           useChatStore.getState().setProviderState(providerState)
         }
       },
-      onDone: () => {
+      onDone: (finalText) => {
         flushBufferedDeltas()
+        if (finalText && finalText !== streamedAssistantText) {
+          const suffix = finalText.startsWith(streamedAssistantText)
+            ? finalText.slice(streamedAssistantText.length)
+            : finalText
+          if (suffix) {
+            appendTextDeltaBuffered(suffix)
+            flushBufferedDeltas()
+          }
+        }
+        const keepAssistantOpenForOriginalTask =
+          !isBackgroundRun &&
+          bootstrapOnly &&
+          (() => {
+            const tms = getTmsTurnTelemetry()
+            return tms.tmsCreated || tms.tmsAlreadyExists
+          })()
+        if (keepAssistantOpenForOriginalTask) {
+          agentStore.setStatus('awaiting_response')
+          return
+        }
         if (!finalized) {
           finalized = true
           useChatStore.getState().finalizeAssistantMessage()
@@ -590,6 +690,16 @@ async function runAgentInternal(
         flushBufferedDeltas()
         resolveAllPendingDiffApprovals(false)
         agentStore.setCompactPhase('idle')
+        if (agentService.isAborted()) {
+          agentStore.setError(null)
+          agentStore.setStatus('cancelled')
+          logger.info('agent', `Agent run cancelled by user: ${error.message}`)
+          if (!finalized) {
+            finalized = true
+            useChatStore.getState().finalizeAssistantMessage()
+          }
+          return
+        }
         agentStore.setStatus('error')
         agentStore.setError(error.message)
         logger.info('agent', `✗ Agent error: ${error.message}`)
@@ -617,6 +727,13 @@ async function runAgentInternal(
         // worker — nada de matemática de consumo no cliente.
         useBillingStore.getState().addLastRequestTokens(inTok + outTok)
       },
+      onRequestUsage: (entry) => {
+        // Persist the per-request usage log on the active session — real
+        // tokens + payloadInspector estimate + breakdown. Best-effort: never
+        // blocks the agent loop. Provider is enriched in the store from the
+        // session's byokSnapshot (BYOK providerId, or 'tms' for data-plane).
+        try { useChatStore.getState().addRequestUsage(entry) } catch { /* observability never blocks */ }
+      },
       onContextCompression: (event) => {
         if (event.type === 'hooks_start') {
           agentStore.setCompactPhase(event.hookType === 'pre_compact' ? 'hooks_pre' : 'hooks_post')
@@ -642,13 +759,19 @@ async function runAgentInternal(
       collectSteeringMessages: isBackgroundRun
         ? undefined
         : async (): Promise<string | null> => {
-            // Only plain prompt-mode messages steer. Slash/bash/task-notif
-            // commands need executeInput's per-command handling, so they stay
-            // queued for the idle drain when this run ends.
-            const drained = dequeueAllMatching(
-              c => !isSlashCommand(c) && c.mode === 'prompt',
-            )
-            if (drained.length === 0) return null
+            // Sub-agent results are PUSHED here (never polled): finished team
+            // members queue their formatted reports and the live run picks
+            // them up at this turn boundary.
+            const { drainSubAgentDeliveries } = await import('./subAgents/autoWake')
+            const deliveries = drainSubAgentDeliveries()
+
+            // Only steerable messages BEFORE the first queued task ride the
+            // live run (drainSteerableMessages): slash/bash need
+            // executeInput's per-command handling, tasks wait for the idle
+            // drain, and a steer message the user reordered BELOW a task
+            // belongs to that task's run — not to this one.
+            const drained = drainSteerableMessages()
+            if (drained.length === 0) return deliveries
 
             // Coalesce a burst into ONE steered turn (same as the queue's
             // batched dispatch — joinPromptValues preserves block ordering).
@@ -658,18 +781,12 @@ async function runAgentInternal(
                 : drained[0]!.value
             const display = extractDisplayFromValue(merged)
 
-            // Transcript bookkeeping — keep the run continuous (no idle
-            // flicker) while showing the steered message in the right place:
-            //   [assistant so far] → [user: steered] → [fresh assistant bubble]
-            // flushBufferedDeltas first so buffered tokens land in the bubble
-            // we're about to finalize, not the new one. We intentionally do NOT
-            // touch the run-level `finalized` flag: onDone/onError still finalize
-            // the FRESH bubble opened below at the real end of the run.
-            flushBufferedDeltas()
             const cs = useChatStore.getState()
-            cs.finalizeAssistantMessage()
-            cs.addUserMessage(display.text, display.attachments)
-            cs.startAssistantMessage(agentService.isThinkingRequestedForNextTurn())
+            cs.splitForQueuedMessage(
+              display.text,
+              display.attachments,
+              typeof merged === 'string' ? undefined : merged,
+            )
 
             // Model-facing text. buildAugmentedPrompt resolves file/folder
             // attachments to XML; images degrade to <attached_image> markers
@@ -680,9 +797,33 @@ async function runAgentInternal(
               resolveAttachmentXml: resolveAttachments,
               resolveImageDataUri: resolveImageToDataUri,
             })
-            return text && text.trim().length > 0 ? text : display.text
+            const userText = text && text.trim().length > 0 ? text : display.text
+            return deliveries ? `${deliveries}\n\n${userText}` : userText
           },
     })
+
+    if (!isBackgroundRun && bootstrapOnly) {
+      const tms = getTmsTurnTelemetry()
+      if (tms.tmsCreated || tms.tmsAlreadyExists) {
+        appendUiTextDeltaBuffered(`\n\n${t(getTmsBootstrapCompleteMessageKey(tms.tmsCreated))}\n\n`)
+        flushBufferedDeltas()
+        await runAgentInternal(prompt, {
+          ...options,
+          addUserMessage: false,
+          skipStartAssistantMessage: true,
+          conversationHistoryOverride: historyBeforeCurrentUser,
+        })
+      }
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (!bootstrapOnly) {
+      markOriginalTaskFailed(message)
+      if (!isBackgroundRun) {
+        useChatStore.getState().addSystemMessage(`A tarefa não pôde continuar: ${message}`, 'error')
+      }
+    }
+    throw err
   } finally {
     // Always restore IDE mode regardless of how the loop exited
     if (cmdOnlyMode && cmdCwd) {

@@ -102,9 +102,13 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
       const { useAgentStore } = await import('../../../stores/agentStore')
       const { useProjectStore } = await import('../../../stores/projectStore')
 
-      // Plan-mode gate: update_tasks must follow write_file (PLAN.md).
+      // Plan-mode gate: update_tasks must follow a completed PLAN.md, not
+      // just the initial scaffold write.
       if (ctx.getPlanMode() && !ctx.getPlanFileWritten()) {
         return 'Blocked in /plan mode: update_tasks must follow write_file — create PLAN.md first, then seed the task tracker.'
+      }
+      if (ctx.getPlanMode() && !(await ctx.getPlanReadyForTaskSeed())) {
+        return 'Blocked in /plan mode: update_tasks must follow the final Status: PENDING APPROVAL edit — finish PLAN.md before seeding the task tracker.'
       }
 
       const prev = useAgentStore.getState().tasks as StoredTask[]
@@ -206,7 +210,7 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
       void import('../../fsVersion').then(m => m.bumpFsVersion('update_tasks')).catch(() => { /* non-critical */ })
 
       // Mark planTasksSeeded after first update_tasks in plan mode
-      if (ctx.getPlanMode() && ctx.getPlanFileWritten()) {
+      if (ctx.getPlanMode() && await ctx.getPlanReadyForTaskSeed()) {
         ctx.setPlanTasksSeeded(true)
       }
 

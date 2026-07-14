@@ -8,8 +8,7 @@ import {
 	Input,
 	ScrollArea,
 } from '@chakra-ui/react'
-import { VscNewFile, VscNewFolder, VscRefresh, VscCollapseAll } from 'react-icons/vsc'
-import { FiFolder } from 'react-icons/fi'
+import { VscNewFile, VscNewFolder, VscRefresh, VscCollapseAll, VscFolder } from 'react-icons/vsc'
 import { useCurrentProject } from '../../hooks/useProjectState'
 import { useFileTreeRepository } from '../../stores/fileTreeStore'
 import FileTreeSkeleton from './FileTreeSkeleton'
@@ -24,7 +23,6 @@ interface ExplorerPanelProps {
 
 function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 	const currentProject = useCurrentProject()
-	useFileTreeRepository()
 
 	const refresh = useFileTreeRepository(s => s.refresh)
 	const collapseAll = useFileTreeRepository(s => s.collapseAll)
@@ -95,7 +93,7 @@ function ExplorerPanel({ onFileSelect }: ExplorerPanelProps) {
 					borderRadius="12px"
 					bg={tokens.colors.accent.primarySubtle}
 				>
-					<FiFolder
+					<VscFolder
 						size={32}
 						color={tokens.colors.accent.primary}
 						style={{ filter: `drop-shadow(0 0 8px ${tokens.colors.accent.primaryGlow})` }}

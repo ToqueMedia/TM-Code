@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { Box, Button, Flex, HStack, Input, Switch, Text, VStack } from '@chakra-ui/react'
 import { FiCheck, FiAlertCircle, FiTrash2, FiEye, FiTool, FiCpu, FiChevronDown, FiPlus, FiKey, FiPower, FiZap, FiRefreshCw, FiWifi, FiWifiOff, FiLock } from 'react-icons/fi'
-import { useByokStore, type ByokProvider, type ByokProviderConfig, type ByokModel, type ByokModelCapabilities } from '../../../stores/byokStore'
+import { useByokStore, type ByokProvider, type ByokProviderConfig, type ByokModel, type ByokModelCapabilities, type ByokReasoningEffort } from '../../../stores/byokStore'
 import { useBillingStore } from '../../../stores/billingStore'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
@@ -19,6 +19,14 @@ const CONTEXT_WINDOW_OPTIONS: Array<{ label: string; value: number | undefined }
   { label: '256K', value: 262_144 },
   { label: '1M', value: 1_048_576 },
   { label: '2M', value: 2_097_152 },
+]
+
+const REASONING_EFFORT_OPTIONS: Array<{ label: string; value: ByokReasoningEffort }> = [
+  { label: 'Low', value: 'low' },
+  { label: 'Medium', value: 'medium' },
+  { label: 'High', value: 'high' },
+  { label: 'XHigh', value: 'xhigh' },
+  { label: 'Max', value: 'max' },
 ]
 
 // Per-OS keychain label for the trust line under API key inputs. Tauri uses
@@ -808,6 +816,7 @@ function ProviderCard(props: {
   const deleteKey = useByokStore(s => s.deleteKey)
   const setBaseURL = useByokStore(s => s.setBaseURL)
   const setContextWindow = useByokStore(s => s.setContextWindow)
+  const setReasoningEffort = useByokStore(s => s.setReasoningEffort)
   const setActive = useByokStore(s => s.setActive)
   const testKey = useByokStore(s => s.testKey)
   const setUserDefinedModel = useByokStore(s => s.setUserDefinedModel)
@@ -821,6 +830,7 @@ function ProviderCard(props: {
   const isConfigured = config?.configured === true
   const baseURL = config?.baseURL ?? ''
   const contextWindow = config?.contextWindow
+  const reasoningEffort = config?.reasoningEffort ?? 'medium'
   const userDefined = config?.userDefinedModel
   const dynamicModels = config?.dynamicCatalog?.models ?? []
 
@@ -1177,6 +1187,22 @@ function ProviderCard(props: {
           </Text>
         </VStack>
 
+        {/* Reasoning effort — persisted per provider. Providers with adaptive
+            or OpenAI-compatible effort consume the level directly; boolean-only
+            thinking providers ignore the depth but keep the preference. */}
+        <VStack align="stretch" gap={1.5}>
+          <Text fontSize="11px" color={tokens.colors.text.muted} fontWeight="500">
+            {t('settings.byokReasoningEffort')}
+          </Text>
+          <ReasoningEffortPicker
+            value={reasoningEffort}
+            onChange={(v) => setReasoningEffort(provider.id, v)}
+          />
+          <Text fontSize="10px" color={tokens.colors.text.disabled} lineHeight="1.5">
+            {t('settings.byokReasoningEffortHint')}
+          </Text>
+        </VStack>
+
         {/* Local server panel: reachability + refresh models. Replaces the
             cloud Test button for local providers — pinging the discovery
             endpoint is both validation and catalog refresh. */}
@@ -1459,6 +1485,127 @@ function CapCheckbox(props: {
         {props.label}
       </Text>
     </HStack>
+  )
+}
+
+// ── ReasoningEffortPicker ──
+
+function ReasoningEffortPicker(props: {
+  value: ByokReasoningEffort
+  onChange: (v: ByokReasoningEffort) => void
+}) {
+  const [isOpen, setIsOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const selected =
+    REASONING_EFFORT_OPTIONS.find(o => o.value === props.value) ?? REASONING_EFFORT_OPTIONS[1]
+
+  useEffect(() => {
+    if (!isOpen) return
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setIsOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [isOpen])
+
+  return (
+    <Box ref={ref} position="relative">
+      <Flex
+        as="button"
+        align="center"
+        justify="space-between"
+        w="100%"
+        px={3}
+        py="8px"
+        borderRadius={tokens.radius.md}
+        bg={tokens.colors.bg.sidebar}
+        border="1px solid"
+        textAlign="left"
+        borderColor={isOpen ? 'rgba(254, 16, 99, 0.5)' : tokens.colors.border.default}
+        cursor="pointer"
+        transition={tokens.transition.fast}
+        _hover={{ borderColor: tokens.colors.border.subtle }}
+        _focusVisible={{ borderColor: 'rgba(254, 16, 99, 0.7)', outline: 'none' }}
+        onClick={() => setIsOpen(v => !v)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') setIsOpen(false)
+          else if ((e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') && !isOpen) {
+            e.preventDefault()
+            setIsOpen(true)
+          }
+        }}
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
+      >
+        <Text fontSize="12px" color={tokens.colors.text.primary} fontWeight="500" fontFamily={tokens.fontFamily.mono}>
+          {selected.label}
+        </Text>
+        <Box
+          color={tokens.colors.text.disabled}
+          transition="transform 0.15s"
+          transform={isOpen ? 'rotate(180deg)' : 'rotate(0deg)'}
+        >
+          <FiChevronDown size={14} />
+        </Box>
+      </Flex>
+
+      {isOpen && (
+        <Box
+          role="listbox"
+          position="absolute"
+          top="calc(100% + 4px)"
+          left={0}
+          right={0}
+          bg={tokens.colors.bg.overlay}
+          border="1px solid"
+          borderColor={tokens.colors.border.panel}
+          borderRadius={tokens.radius.md}
+          boxShadow="0 8px 24px rgba(0,0,0,0.4)"
+          zIndex={tokens.zIndex.dropdown}
+          py={1}
+        >
+          {REASONING_EFFORT_OPTIONS.map(opt => {
+            const isSelected = opt.value === props.value
+            return (
+              <Flex
+                key={opt.value}
+                as="button"
+                role="option"
+                aria-selected={isSelected}
+                align="center"
+                justify="space-between"
+                w="100%"
+                px={3}
+                py="8px"
+                textAlign="left"
+                bg={isSelected ? 'rgba(254, 16, 99, 0.08)' : 'transparent'}
+                cursor="pointer"
+                transition={tokens.transition.fast}
+                _hover={{ bg: isSelected ? 'rgba(254, 16, 99, 0.12)' : tokens.colors.bg.hoverSubtle }}
+                onClick={() => {
+                  props.onChange(opt.value)
+                  setIsOpen(false)
+                }}
+              >
+                <Text
+                  fontSize="12px"
+                  fontFamily={tokens.fontFamily.mono}
+                  color={isSelected ? tokens.colors.accent.primary : tokens.colors.text.primary}
+                  fontWeight={isSelected ? '600' : '500'}
+                >
+                  {opt.label}
+                </Text>
+                {isSelected && (
+                  <Box color={tokens.colors.accent.primary} flexShrink={0}>
+                    <FiCheck size={12} />
+                  </Box>
+                )}
+              </Flex>
+            )
+          })}
+        </Box>
+      )}
+    </Box>
   )
 }
 

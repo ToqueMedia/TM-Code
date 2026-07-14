@@ -13,26 +13,19 @@
  *
  * Freshness check
  * ---------------
- * Claude Code uses mtime (stat) for the freshness check. TM Code runs via
- * Tauri IPC and doesn't have a cheap `stat_file` command. Instead of reading
- * the file to compare hashes (which would defeat the purpose — reading the
- * file to decide whether to read the file), we use `fsVersion`: a global
- * counter that increments on every observed write (toolExecutor bumps it on
- * write_file / edit_file / create_file / delete_file / rename_file). If the
- * current fsVersion matches the one stored at read time, no writes have
- * occurred, so the cached content is still valid.
+ * The first gate is cheap: `fsVersion`, a global counter that increments on
+ * every observed write. If it matches, no local tool write happened and the
+ * cached content is still valid without touching disk.
  *
- * This is slightly less precise than per-file mtime (a write to a DIFFERENT
- * file bumps the same global counter, causing a false negative — the dedup
- * won't fire even though our file is unchanged). But it's:
- *   - O(1) instead of O(file_size) — no IPC call at all
- *   - Conservative — never returns stale data (only skips dedup unnecessarily)
- *   - Identical to how the contextBuilder cache invalidation already works
+ * If `fsVersion` differs, the caller may pass a freshly-computed Rust SHA-256
+ * signature or the freshly-read disk content. A signature match lets dedup
+ * fire before fetching the full file body again; an exact string match is the
+ * fallback when no signature is available.
  *
  * Adapted from claude-vaz's FileReadTool dedup logic (FileReadTool.ts:523-573).
  */
 
-import type { FileStateCache } from './fileStateCache'
+import type { FileContentSignature, FileStateCache } from './fileStateCache'
 
 // ── Stub message ────────────────────────────────────────────────────────
 
@@ -49,7 +42,7 @@ import type { FileStateCache } from './fileStateCache'
  * on its own — no silent data loss.
  */
 export const FILE_UNCHANGED_STUB =
-  'File unchanged since last read. The content you previously read is still current — use your existing knowledge of this file rather than requesting it again.'
+  'File unchanged since last Read. The content you previously read is still current in the conversation/cache; use that existing knowledge rather than requesting it again. Do not work around this with execute_command/cat/head/tail/sed. If you need different lines, call Read only for the missing range. If compaction removed the exact text from context and you truly need the same range again, call Read once with force: true.'
 
 // ── Dedup check ─────────────────────────────────────────────────────────
 
@@ -65,9 +58,15 @@ export interface DedupResult {
  *
  * Conditions for dedup (mirrors claude-vaz):
  *   1. An existing cache entry exists for this file path.
- *   2. The entry came from a prior Read (offset is set, not from Edit/Write).
- *   3. The read range matches exactly (same offset + limit, or both full-file).
- *   4. The global fsVersion hasn't changed since the read (no writes occurred).
+ *   2. The entry came from a prior Read (not from Edit/Write).
+ *   3. The read range matches exactly (same offset + limit, including both
+ *      undefined for a full-file read).
+ *   4. Either:
+ *      - the global fsVersion hasn't changed since the read; or
+ *      - the caller provides currentSignature and it matches the cached
+ *        model-visible signature; or
+ *      - the caller provides currentContent and it exactly equals the cached
+ *        model-visible content.
  *
  * Ranged reads that DON'T match the cached range are allowed through — the
  * model may need a different slice. Only exact same-range reads are deduped.
@@ -77,6 +76,11 @@ export interface DedupResult {
  * @param limit     Line limit (undefined = read to EOF)
  * @param readFileState  The content cache to check against
  * @param currentFsVersion  The current global fsVersion counter value
+ * @param currentContent    Optional freshly-read disk content for an exact
+ *                          second-stage equality check after fsVersion changed.
+ * @param currentSignature  Optional freshly-computed disk signature. When it
+ *                          matches the cached signature, dedup can fire before
+ *                          reading the full file body.
  */
 export function checkReadDedup(
   filePath: string,
@@ -84,16 +88,17 @@ export function checkReadDedup(
   limit: number | undefined,
   readFileState: FileStateCache,
   currentFsVersion: number,
+  currentContent?: string,
+  currentSignature?: FileContentSignature,
 ): DedupResult {
   const existingState = readFileState.get(filePath)
 
-  // Only dedup entries that came from a prior Read (offset is always set
-  // by Read). Edit/Write store offset=undefined — their readFileState
-  // entry reflects post-edit content, so deduping against it would wrongly
-  // point the model at the pre-edit Read content.
+  // Only dedup entries that came from a prior Read. Full-file reads and writes
+  // both store offset/limit as undefined, so source is the discriminator.
   if (
     !existingState ||
-    existingState.offset === undefined
+    existingState.source !== 'read' ||
+    existingState.isPartialView
   ) {
     return { isDuplicate: false, stub: null }
   }
@@ -105,13 +110,21 @@ export function checkReadDedup(
     return { isDuplicate: false, stub: null }
   }
 
-  // Freshness check via fsVersion: if the global counter hasn't changed
-  // since the read, no writes have occurred and the content is still valid.
-  // If it HAS changed, a write might have touched this file — play it safe
-  // and don't dedup. This is conservative: a write to a DIFFERENT file
-  // also bumps the counter, causing a false negative. But it's O(1) and
-  // never returns stale data.
+  // Freshness check via fsVersion first. If the global counter changed, only
+  // dedupe when the caller gives us a freshly-computed signature or content
+  // that matches the cached model-visible state.
   if (currentFsVersion !== existingState.fsVersion) {
+    if (
+      currentSignature &&
+      existingState.signature &&
+      currentSignature.size === existingState.signature.size &&
+      currentSignature.sha256 === existingState.signature.sha256
+    ) {
+      return { isDuplicate: true, stub: FILE_UNCHANGED_STUB }
+    }
+    if (currentContent !== undefined && currentContent === existingState.content) {
+      return { isDuplicate: true, stub: FILE_UNCHANGED_STUB }
+    }
     return { isDuplicate: false, stub: null }
   }
 

@@ -11,9 +11,10 @@ import { detectAiAgentIntent, buildAiAgentPlatformLine } from '../aiAgentIntent'
 import type { Attachment, PlanResumePending, PromptBlock } from '../../../types/chat'
 import {
   READ_FILE, LIST_DIRECTORY, GLOB, SEARCH_FILES,
+  READ_ALIAS,
   READ_SKILL, WRITE_FILE, EDIT_FILE, CREATE_FILE,
   EXECUTE_COMMAND, START_DEV_SERVER,
-  PROVISION_AUTH, REQUEST_CREDENTIALS, UPDATE_TASKS,
+  DELETE_FILE, REQUEST_CREDENTIALS, UPDATE_TASKS,
   ASK_USER_QUESTION, DELEGATE, COLLECT_RESULTS,
 } from '../toolNames'
 import { t } from '@/i18n'
@@ -109,7 +110,6 @@ async function readPlanReadiness(path: string): Promise<PlanReadiness> {
 export async function executePlan(
   args: string,
   projectPath: string,
-  mode: 'chat' | 'terminal' = 'chat',
 ): Promise<void> {
   const chatStore = useChatStore.getState()
 
@@ -134,7 +134,6 @@ export async function executePlan(
     originalArgs: args,
     planPath: planArtifact.path,
     planFileName: planArtifact.fileName,
-    mode,
     updatedAt: Date.now(),
   })
 
@@ -142,7 +141,7 @@ export async function executePlan(
   const agentService = AgentService.getInstance()
   agentService.setRequestType('plan')
   // Mechanical enforcement of architect mode at the tool layer. Even if the
-  // model ignores its system prompt and tries to call provision_auth /
+  // model ignores its system prompt and tries to call delete_file /
   // execute_command / etc., the executor returns a block message instead.
   // Pairs with the buildArchitectSystemPrompt — prompt is the soft contract,
   // this is the hard one.
@@ -156,28 +155,23 @@ export async function executePlan(
     // app), skipping PLAN.md entirely. By making "you are the architect,
     // produce PLAN.md and stop" the only system prompt for this turn,
     // there is no other role to fall back to.
-    // Detect routing hashtags (`#auth-google`, `#auth-email-password`,
-    // `#design`) inside the args. Slash precedence means /plan dispatches
-    // ahead of the hashtag flow — without this we'd lose the signal entirely
-    // and the architect would propose generic auth (passport-google-oauth20)
-    // instead of the TM Code-managed `provision_auth` + `auth-proxy`
-    // pattern. Pass the detected requirements to the architect prompt so
-    // the plan reflects the platform's canonical integrations.
+    // Detect routing hashtags (`#design`) inside the args. Slash precedence
+    // means /plan dispatches ahead of the hashtag flow — without this we'd
+    // lose the signal entirely and the architect would skip the design
+    // requirement. Pass the detected requirements to the architect prompt
+    // so the plan reflects them.
     const hashtagSignals = preprocessHashtags(args)
     const aiAgentSignal = detectAiAgentIntent(args)
     await runAgentWithCallbacks(buildArchitectUserMessage(args, projectPath, hashtagSignals, aiAgentSignal, planArtifact), {
       addUserMessage: true,
       userMessageText: `/plan ${args}`,
-      // Mode-aware: chat injects platform-publish constraints into the
-      // architect prompt (firebase-admin baseline, Dockerfile, no SQL deps),
-      // terminal swaps in a free-stack note (any host / DB / framework).
-      // Same PLAN.md template + completion rules in both branches — only
-      // the stack-choice constraints change.
-      systemPromptOverride: buildArchitectSystemPrompt(mode, planArtifact.fileName),
-      // CMD mode requires the tool executor to be aware of the cwd; without
-      // cmdOnlyMode it falls back to useProjectStore.currentProject (empty
-      // in CMD) and every file tool fails with "No project is open."
-      cmdOnlyMode: mode === 'terminal',
+      // Free-form stack choice, explicit trade-offs, and no Publish-pipeline
+      // coercion unless the developer asks for TM Code-managed deploy.
+      systemPromptOverride: buildArchitectSystemPrompt(planArtifact.fileName),
+      // Cwd-scoped execution requires the tool executor to know the cwd;
+      // without cmdOnlyMode it falls back to useProjectStore.currentProject,
+      // which may be empty, and file tools fail with "No project is open."
+      cmdOnlyMode: true,
     })
   } finally {
     agentService.setRequestType(null)
@@ -218,7 +212,6 @@ export async function executePlanResume(
   promptBlocks?: PromptBlock[],
 ): Promise<void> {
   const chatStore = useChatStore.getState()
-  const mode = pending.mode || 'chat'
   const planArtifact: PlanArtifact = {
     fileName: pending.planFileName,
     path: pending.planPath,
@@ -260,8 +253,8 @@ export async function executePlanResume(
         userMessageAttachments: attachments,
         userMessageBlocks: promptBlocks,
         modelMessageBlocks: modelBlocks,
-        systemPromptOverride: buildArchitectSystemPrompt(mode, planArtifact.fileName),
-        cmdOnlyMode: mode === 'terminal',
+        systemPromptOverride: buildArchitectSystemPrompt(planArtifact.fileName),
+        cmdOnlyMode: true,
       },
     )
   } finally {
@@ -356,7 +349,6 @@ export function handlePlanRequestChanges(projectPath: string, planPath?: string)
 export async function executePlanRevision(
   feedback: string,
   projectPath: string,
-  mode: 'chat' | 'terminal' = 'chat',
   planPath?: string,
 ): Promise<void> {
   const chatStore = useChatStore.getState()
@@ -372,7 +364,7 @@ export async function executePlanRevision(
     chatStore.addSystemMessage(
       t('plan.missing'),
     )
-    await executePlan(feedback, projectPath, mode)
+    await executePlan(feedback, projectPath)
     return
   }
 
@@ -392,8 +384,8 @@ export async function executePlanRevision(
     await runAgentWithCallbacks(revisionPrompt, {
       addUserMessage: true,
       userMessageText: feedback,
-      systemPromptOverride: buildArchitectSystemPrompt(mode, planArtifact.fileName),
-      cmdOnlyMode: mode === 'terminal',
+      systemPromptOverride: buildArchitectSystemPrompt(planArtifact.fileName),
+      cmdOnlyMode: true,
     })
   } finally {
     agentService.setRequestType(null)
@@ -442,7 +434,7 @@ The current ${planArtifact.fileName} (your previous version) is below. Your job 
 4. Flip frontmatter \`Status:\` back to \`PENDING APPROVAL\` (or leave as-is if it's already there) — the IDE waits for this marker before re-rendering the approval card.
 5. Post a 3-sentence chat summary of what you changed, then STOP. The developer will re-approve / re-request changes / reject from the new card.
 
-**DO NOT implement the plan.** This is a revision turn, not an execution turn. Edits to ${planArtifact.fileName} only — no source files, no \`provision_auth\`, no \`start_dev_server\`, no \`execute_command\`. The tool executor enforces this mechanically; ignoring this rule produces tool blocks.
+**DO NOT implement the plan.** This is a revision turn, not an execution turn. Edits to ${planArtifact.fileName} only — no source files, no \`delete_file\`, no \`start_dev_server\`, no \`execute_command\`. The tool executor enforces this mechanically; ignoring this rule produces tool blocks.
 
 **DO NOT re-write ${planArtifact.fileName} from scratch unless the feedback explicitly asks for restructuring.** Targeted Edits preserve the parts the developer was happy with and keep the diff reviewable.
 
@@ -486,7 +478,7 @@ Interpret the developer's latest message using the conversation history and the 
 - If they are asking a question about the interrupted plan, answer the question briefly and stop without mutating project source files.
 - If they are asking to pause or not advance, acknowledge the current plan status and stop without mutating project source files.
 
-DO NOT implement the plan. Do not create source files, run commands, provision auth, or start dev servers. This is still /plan architect mode; implementation starts only after the approval card.
+DO NOT implement the plan. Do not create source files, run commands, or start dev servers. This is still /plan architect mode; implementation starts only after the approval card.
 
 ${planBlock}`
 }
@@ -599,33 +591,14 @@ Update TMS.md's Memory section as you complete milestone phases. Start with the 
 function buildArchitectUserMessage(
   userIdea: string,
   projectPath: string,
-  signals?: { authProviders: ('google' | 'email-password')[]; hasDesign: boolean },
+  signals?: { hasDesign: boolean },
   aiAgent?: { namedModels: string[]; isConversational: boolean },
   planArtifact: PlanArtifact = planArtifactFromPath(projectPath),
 ): string {
-  // Architect-side platform context: when the developer's idea included
-  // `#auth-google` / `#auth-email-password` / `#design`, surface them as
-  // explicit requirements so the architect uses TM Code's canonical
-  // integrations instead of inventing generic equivalents (e.g. passport
-  // libraries, custom OAuth flows). The execution agent will then call
-  // `provision_auth` to set up the GIP tenant when the plan runs.
+  // Architect-side context: when the developer's idea included `#design`,
+  // surface it as an explicit requirement so the architect reflects it in
+  // the plan instead of dropping the signal.
   const platformLines: string[] = []
-  if (signals?.authProviders.length) {
-    const providers = signals.authProviders.map((p) =>
-      p === 'google' ? 'Google sign-in' : 'email/password sign-in',
-    ).join(' + ')
-    platformLines.push(
-      `Auth: the developer requested ${providers}. ` +
-      `Use TM Code's canonical pattern — call \`provision_auth({ provider: "gip" })\` ` +
-      `to create the per-project GIP tenant (writes VITE_FIREBASE_* + GIP_* keys to ` +
-      `.env automatically), then implement the auth-proxy skill (Identity ` +
-      `Toolkit REST endpoints + JWT verification via Google JWKS, no Firebase Admin ` +
-      `SDK needed). Do NOT propose passport-google-oauth20, NextAuth, Auth0, or any ` +
-      `other auth library — those would not integrate with the platform-managed ` +
-      `tenant. Mention provision_auth + auth-proxy skill explicitly in the ` +
-      `Implementation Phases.`
-    )
-  }
   if (signals?.hasDesign) {
     platformLines.push(
       `Design: the developer requested polished UI. Read the \`design\` skill ` +
@@ -717,7 +690,7 @@ If you produce architecture content as chat text instead of going through \`${WR
 }
 
 function getRoleDeclaration(): string {
-  return `You are the Software Architect inside TM Code. You are NOT a coding agent for this turn — you do not scaffold, install dependencies, provision auth, start dev servers, or write source files. Your single produced artefact is PLAN.md (with its task list mirror). After both are on disk / in the tracker, you stop.
+  return `You are the Software Architect inside TM Code. You are NOT a coding agent for this turn — you do not scaffold, install dependencies, start dev servers, or write source files. Your single produced artefact is PLAN.md (with its task list mirror). After both are on disk / in the tracker, you stop.
 
 You analyze the existing codebase, identify constraints, evaluate trade-offs between concrete alternatives, and produce an architecture document that an engineer — or another AI coding agent — can implement without ambiguity. You do not write wish lists; every decision states what was chosen, what was rejected, and what was sacrificed.`
 }
@@ -741,7 +714,7 @@ function getAllowedToolsSection(): string {
 
 For understanding the existing code: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${READ_SKILL}\`. For research: \`${DELEGATE}\` — delegate a research or exploration sub-task (e.g., \`delegate({ subagent_type: "Research", description: "Find WebSocket libraries for Deno", prompt: "..." })\`). Call \`${COLLECT_RESULTS}\` to collect results. For structured clarifying questions: \`${ASK_USER_QUESTION}\` — see "Clarifying questions" below. For the deliverable: \`${WRITE_FILE}\` (lays down the scaffold) and \`${EDIT_FILE}\` (fills each section, then flips Status to PENDING APPROVAL) — both restricted to PLAN.md at the project root by the executor. \`${UPDATE_TASKS}\` to seed the task tracker.
 
-You MUST NOT call: \`${PROVISION_AUTH}\`, \`${REQUEST_CREDENTIALS}\`, \`${START_DEV_SERVER}\`, \`${EXECUTE_COMMAND}\`, \`${CREATE_FILE}\` for anything other than PLAN.md, or any tool that mutates the project beyond writing PLAN.md. If the architecture requires those steps, describe them in PLAN.md's Implementation Phases — the coding agent will run them after the developer approves the plan.`
+You MUST NOT call: \`${DELETE_FILE}\`, \`${REQUEST_CREDENTIALS}\`, \`${START_DEV_SERVER}\`, \`${EXECUTE_COMMAND}\`, \`${CREATE_FILE}\` for anything other than PLAN.md, or any tool that mutates the project beyond writing PLAN.md. If the architecture requires those steps, describe them in PLAN.md's Implementation Phases — the coding agent will run them after the developer approves the plan.`
 }
 
 function getApprovalFlowSection(): string {
@@ -800,7 +773,7 @@ Rules for the task list:
 - One task per coherent unit of work in a phase. A phase with 4 sub-tasks in PLAN.md becomes 4 tasks here.
 - Granularity: 6–20 tasks total for most projects. Fewer than 4 means the phases were under-decomposed in PLAN.md; more than 25 means tasks are too fine.
 
-Calling \`${UPDATE_TASKS}\` before the Status flip is a contract violation — the task list must derive from a fully-written plan, not from an in-progress draft. The executor rejects \`${UPDATE_TASKS}\` if PLAN.md has not been written yet.`
+Calling \`${UPDATE_TASKS}\` before the Status flip is a contract violation — the task list must derive from a fully-written plan, not from an in-progress draft. The executor rejects \`${UPDATE_TASKS}\` until PLAN.md exists and contains \`Status: PENDING APPROVAL\`.`
 }
 
 function getApproachSection(): string {
@@ -1246,92 +1219,19 @@ function getLangDirective(): string {
     : `LANGUAGE: Always respond in ${langName}. All chat narration and the prose written into PLAN.md must be in ${langName}. Code identifiers, file paths, tool names and tool arguments stay in their native form.`
 }
 
-// ── Stack-context blocks (mode-specific) ──
+// ── Stack-context block ──
 
 /**
- * Chat-mode stack constraints — the project will publish through the TM Code
- * pipeline, so the architect's stack recommendation MUST sit inside the
- * platform's accepted shape. Without this block the architect defaults to
- * AI-training-data clichés (Express + Prisma + SQLite) and produces a PLAN.md
- * that the harness rejects at the first dependency write.
- *
- * Subset of the publishing section in contextBuilder.ts — deliberately
- * narrowed: we only want the constraints relevant to STACK CHOICE in the
- * architecture document, not the runtime instructions for the coder.
+ * Architect stack policy. The architect may choose any stack when the developer
+ * is explicit, but must keep TM Code-managed defaults available when the
+ * developer has not made a stack/deploy choice.
  */
-function getChatModePlatformConstraints(): string {
-  return `# Platform constraints (chat-mode plans are publish-ready by default)
-
-This plan will be implemented inside the TM Code IDE and shipped through the
-platform's Publish pipeline. The architecture you propose MUST fit the
-pipeline's accepted shape, otherwise the coding agent's first dependency write
-fails. Hard constraints (treat these as inviolable inputs, not options to
-evaluate):
-
-## CRITICAL — Data layer
-- **Backend persistence uses \`drizzle-orm\` + \`@libsql/client\` against the
-  platform's managed SQLite (libSQL) database.** The harness BLOCKS
-  \`@prisma/client\` / \`prisma\` / \`mysql2\` / \`pg\` / \`better-sqlite3\`
-  / \`firebase-admin\` from package.json writes. Proposing them in the plan
-  guarantees a downstream failure — do not.
-- Tenant isolation key is \`APP_ID\`, resolved as:
-  \`\`\`ts
-  const APP_ID = process.env.APP_ID
-    || \`local-dev-\${(process.env.npm_package_name || 'app').replace(/[^a-z0-9]/gi, '-').toLowerCase()}\`
-  \`\`\`
-  This pattern makes \`npm run dev\` boot on day 1 without any deploy step.
-  Section 4 (Domain Schema) of PLAN.md describes the Drizzle schema model;
-  Section 7 (Technical Decisions) records "Data layer: Drizzle ORM + libSQL"
-  with no alternatives evaluated — there is no choice to evaluate.
-
-## CRITICAL — Container shape
-- Every fullstack project (frontend + backend) ships a \`Dockerfile\` at the
-  PROJECT ROOT, generated in the SAME phase that creates the backend code.
-  Without a Dockerfile, Publish classifies the project as static-spa and the
-  backend never goes online. List \`Dockerfile\` in the Phase 1 file table of
-  the plan.
-
-## CRITICAL — What NOT to put in the plan
-- Manual deploy instructions, custom \`cloudbuild.yaml\`, Cloudflare R2/Workers/D1
-  artefacts authored by the user, alternative-host comparison tables.
-  Publishing is handled by the platform's button — the plan describes the
-  application code only.
-- "Database migrations" sections referencing SQL DDL — the managed DB is
-  schemaless; the schema lives in TypeScript types and the code that reads/writes
-  documents.
-
-## Stack baseline (the parts the architect still chooses)
-
-- **Frontend framework**: pick one (React+Vite, Next, Vue+Vite, Svelte, Astro)
-  with explicit reasoning in §7. The IDE's templates favour React+Vite for
-  the auth-pre-wired flow but Next/etc are valid when the use case justifies.
-- **Backend framework**: Express, Hono, Fastify, or NestJS — all are platform-
-  compatible. Pick on ecosystem + maturity vs the project's specific needs,
-  record the trade-off in §7. The backend MUST be in a \`server/\` or
-  \`backend/\` directory at the project root (the Publish detector keys on this).
-- **Auth**: when the prompt mentions login/users/auth or the
-  \`#auth-email-password\` / \`#auth-google\` hashtags are present, the plan
-  routes to the \`auth-proxy\` skill's protocol. Section 7 records the auth
-  decision as "auth-proxy via TM Code Identity Platform" with no alternative
-  to evaluate — \`provision_auth\` is the canonical integration.`
-}
-
-/**
- * Terminal-mode stack note — the developer is working outside the Publish
- * pipeline (free-form mode). The architect keeps every other section of the
- * PLAN.md template intact (structure, trade-offs, phases, risks) but is FREE
- * to recommend any stack appropriate to the problem and deploy target.
- *
- * This block exists so the architect explicitly KNOWS it's free, rather than
- * defaulting to "platform conventions" by accident. Without it, the model
- * may still lean on TM Code's documented stack patterns from training data.
- */
-function getTerminalModeStackNote(): string {
+function getFreeFormStackNote(): string {
   return `# Stack choice — free, with explicit trade-offs
 
-This plan is being authored in Terminal Mode, OUTSIDE the TM Code Publish
-pipeline. There are NO mandatory dependencies or deploy artefacts — the
-developer chooses their own host and infrastructure.
+This plan may choose any stack and deployment target. There are NO mandatory
+dependencies or deploy artefacts unless the developer wants TM Code-managed
+deploy. The developer chooses their own host and infrastructure.
 
 You retain full architectural rigor: every section of the PLAN.md template
 applies, complete with explicit trade-offs, alternatives evaluated, failure
@@ -1341,10 +1241,10 @@ Cloudflare Workers, Express+Postgres, Rust+Axum, anything else) — choose
 what fits the problem AND the deploy target the developer described.
 
 When the developer hasn't specified a deploy target, ASK in §14 Open Questions
-("Where will this run? Self-hosted Linux VM? Vercel? Render? Fly.io?") rather
-than assuming. The stack choice in §7 Technical Decisions follows from the
-deploy answer — record the assumption explicitly so the developer can correct
-it before approving the plan.`
+("TM Code-managed deploy, self-hosted VM, Vercel, Render, Fly.io, mobile store,
+desktop installer?") rather than assuming. The stack choice in §7 Technical
+Decisions follows from the deploy answer — record the assumption explicitly so
+the developer can correct it before approving the plan.`
 }
 
 // ── Composer ──
@@ -1369,10 +1269,10 @@ You are the Architect, not the coder. This turn writes ONE artefact (PLAN.md, pl
 - The model then retries with slightly different arguments, also blocked, also wasted.
 - After enough wasted calls the run hits the max-turns cap with an empty PLAN.md.
 
-Allowed mutations this turn: \`${WRITE_FILE}\` and \`${EDIT_FILE}\` on PLAN.md at the project root, plus \`${UPDATE_TASKS}\`. Allowed reads: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${READ_SKILL}\`. Everything else (scaffolding, installing, provisioning, starting dev servers, executing commands, writing source files) belongs to the implementation phase that runs AFTER the developer approves the plan card. Describe those steps inside PLAN.md's Implementation Phases section — do not attempt them.`
+Allowed mutations this turn: \`${WRITE_FILE}\` and \`${EDIT_FILE}\` on PLAN.md at the project root, plus \`${UPDATE_TASKS}\`. Allowed reads: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${READ_SKILL}\`. Everything else (scaffolding, installing, starting dev servers, executing commands, writing source files) belongs to the implementation phase that runs AFTER the developer approves the plan card. Describe those steps inside PLAN.md's Implementation Phases section — do not attempt them.`
 }
 
-function buildArchitectSystemPrompt(mode: 'chat' | 'terminal' = 'chat', planFileName: string = 'PLAN.md'): string {
+function buildArchitectSystemPrompt(planFileName: string = 'PLAN.md'): string {
   const prompt = [
     // --- Static (cacheable across sessions for the same model) ---
     // Primacy bookend — read-only contract with the cost of violation named.
@@ -1391,9 +1291,9 @@ function buildArchitectSystemPrompt(mode: 'chat' | 'terminal' = 'chat', planFile
     getCoverageCheck(),
     getWorkedExample(),
     getConstraints(),
-    // Mode-specific stack block. Identical PLAN.md template either way — only
-    // the constraints the architect must obey when choosing the stack change.
-    mode === 'chat' ? getChatModePlatformConstraints() : getTerminalModeStackNote(),
+    // Free-form stack policy: record deploy/preview trade-offs instead of
+    // coercing the user into the Publish pipeline defaults.
+    getFreeFormStackNote(),
     getQualityCheck(),
     getReminder(),
     getModelCounterweights(),
@@ -1411,7 +1311,7 @@ function buildArchitectSystemPrompt(mode: 'chat' | 'terminal' = 'chat', planFile
 function buildTodoPrompt(projectPath: string, planPath: string = joinProjectFile(projectPath, 'PLAN.md'), planFileName: string = 'PLAN.md'): string {
   return `Read the approved ${planFileName} at ${planPath} and generate a development task list.
 
-Begin directly with the read_file call. Do NOT acknowledge "I'll generate the task list" or recap ${planFileName}'s intent — the deliverable is TODO.md (via write_file) plus a 3-sentence summary, in that order. The first action after this prompt should be the read_file('${planPath}') tool call.
+Begin directly with the ${READ_ALIAS} call. Do NOT acknowledge "I'll generate the task list" or recap ${planFileName}'s intent — the deliverable is TODO.md (via write_file) plus a 3-sentence summary, in that order. The first action after this prompt should be ${READ_ALIAS} on '${planPath}'.
 
 Note: the architect already populated the task tracker via update_tasks during /plan. The tracker is the source-of-truth for the developer's UI. TODO.md is the markdown checklist version with finer detail (file paths, acceptance criteria, dependencies). Use the SAME task IDs the architect used (e.g., "1.1", "1.2", "2.1") — TODO.md and the tracker must correlate so the implementation agent can flip tracker rows by ID as it progresses.
 

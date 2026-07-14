@@ -4,9 +4,7 @@ use commands::byok::*;
 use commands::checkpoint::*;
 use commands::collab::*;
 use commands::container::*;
-use commands::data_viewer::*;
 use commands::debugger::*;
-use commands::deploy::*;
 use commands::device::*;
 use commands::e2e::*;
 use commands::file_tree::*;
@@ -33,6 +31,24 @@ use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder};
 use tauri::webview::NewWindowResponse;
 use tauri::{Emitter, Manager};
 use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+// WebView2 (Windows) browser args para TODAS as janelas — no-op nas outras
+// plataformas. Definir isto SUBSTITUI os defaults do wry, por isso os dois
+// primeiros blocos re-incluem exatamente o comportamento por omissão
+// (mini-menu/SmartScreen off + autoplay livre — o áudio remoto das chamadas
+// de voz toca em <audio> sem gesto do utilizador e depende disto).
+// A adição é `WebRtcHideLocalIpsWithMdns`: o Chromium esconde os IPs locais
+// dos host candidates atrás de hostnames mDNS (.local); no WebView2 a
+// resolução mDNS exige a regra "mDNS-In" da firewall, cujo prompt reaparece
+// a CADA update do runtime (MicrosoftEdge/WebView2Feedback#2252) e é
+// frequentemente recusado/bloqueado — sem resolução, pares na MESMA rede não
+// se ligam direto e caem para TURN. Desativar a ofuscação põe IPs reais nos
+// host candidates (expostos apenas aos colegas da chamada, aceitável num
+// produto de equipa) e devolve a ligação direta em LAN. NAT simétrico
+// continua a precisar de TURN — isso é topologia, não Windows.
+// IMPORTANTE: a mesma string em TODAS as janelas — args diferentes exigiriam
+// data directories diferentes (aviso do wry).
+const WEBVIEW2_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,WebRtcHideLocalIpsWithMdns --autoplay-policy=no-user-gesture-required";
 
 // ── Preview webview (separate window approach — reliable on all platforms) ────
 
@@ -174,6 +190,34 @@ fn open_preview_webview(
                     }
                     return String(arg);
                 };
+
+                var _lastLocation = '';
+                var _sendLocation = function() {
+                    try {
+                        var href = window.location && window.location.href ? String(window.location.href) : '';
+                        if (!href || href === _lastLocation) return;
+                        _lastLocation = href;
+                        window.ipc.postMessage(JSON.stringify({ type: 'location', url: href }));
+                    } catch(_) {}
+                };
+                _sendLocation();
+                window.addEventListener('load', _sendLocation);
+                window.addEventListener('hashchange', _sendLocation);
+                window.addEventListener('popstate', _sendLocation);
+                try {
+                    var _origPushState = history.pushState;
+                    var _origReplaceState = history.replaceState;
+                    history.pushState = function() {
+                        var out = _origPushState.apply(this, arguments);
+                        setTimeout(_sendLocation, 0);
+                        return out;
+                    };
+                    history.replaceState = function() {
+                        var out = _origReplaceState.apply(this, arguments);
+                        setTimeout(_sendLocation, 0);
+                        return out;
+                    };
+                } catch(_) {}
 
                 window.addEventListener('error', function(e) {
                     _onerrorFired = true;
@@ -381,6 +425,21 @@ fn open_preview_webview(
                         );
                     }
                 }
+                "location" => {
+                    let url = parsed.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                    if url.is_empty() { return; }
+                    let safe_url = url
+                        .replace('\\', "\\\\")
+                        .replace('\'', "\\'")
+                        .replace('\n', "")
+                        .replace('\r', "");
+                    if let Some(win) = app_for_ipc.get_webview_window("main") {
+                        let _ = win.eval(format!(
+                            "window.dispatchEvent(new CustomEvent('preview-location',{{detail:{{url:'{}'}}}}));",
+                            safe_url
+                        ));
+                    }
+                }
                 _ => {}
             }
         })
@@ -500,6 +559,26 @@ fn take_pending_open_files() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Project queued by a `--open-project <dir>` launch argument. Used by
+/// "Open in New Window": the spawning instance passes the target project so
+/// the new process opens it directly instead of landing on Welcome (or worse,
+/// auto-reopening the SAME project the spawning window still has open).
+/// Drained once by the frontend after auth/hydration — see App.tsx
+/// initializeApp, where it takes priority over the persisted last-project.
+static PENDING_OPEN_PROJECT: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+fn pending_open_project() -> &'static std::sync::Mutex<Option<String>> {
+    PENDING_OPEN_PROJECT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[tauri::command]
+fn take_pending_open_project() -> Option<String> {
+    pending_open_project()
+        .lock()
+        .map(|mut v| v.take())
+        .unwrap_or(None)
+}
+
 /// Cheap path-is-directory probe. Used by the file-drop handler to tell a
 /// folder drop (open as project) from a file drop (likely an image targeted
 /// at the prompt — handled by the HTML5 path). Doesn't validate suitability,
@@ -524,11 +603,22 @@ fn is_directory(path: String) -> bool {
 /// We intentionally do NOT add `tauri-plugin-single-instance`; that plugin
 /// would defeat this command. If it ever gets added, this command becomes a
 /// no-op surface.
+///
+/// `project_path` (optional) is forwarded as `--open-project <dir>` so the
+/// new window opens straight into that project — the parallel-work flow:
+/// keep the agent running here, work on another project in the new window.
 #[tauri::command]
-fn open_new_instance() -> std::result::Result<(), String> {
+fn open_new_instance(project_path: Option<String>) -> std::result::Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe failed: {}", e))?;
-    std::process::Command::new(&exe)
-        .spawn()
+    let mut cmd = std::process::Command::new(&exe);
+    if let Some(p) = project_path {
+        // Only forward real directories — a bogus path would strand the new
+        // window on Welcome with an error it can't explain.
+        if std::path::Path::new(&p).is_dir() {
+            cmd.arg("--open-project").arg(p);
+        }
+    }
+    cmd.spawn()
         .map(|_| ())
         .map_err(|e| format!("spawn failed: {}", e))
 }
@@ -656,6 +746,24 @@ pub fn run() {
             // para o próximo porto livre. Ver commands/port_guard.rs.
             commands::port_guard::start_port_guard();
 
+            // ── New-window launch args ─────────────────────────────────
+            // `open_new_instance` spawns the binary directly (bypassing
+            // Launch Services on macOS), so argv IS delivered on every
+            // platform — unlike the file-association path below, which
+            // macOS routes through RunEvent::Opened. Parsed unconditionally.
+            {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                if let Some(i) = args.iter().position(|a| a == "--open-project") {
+                    if let Some(p) = args.get(i + 1) {
+                        if std::path::Path::new(p).is_dir() {
+                            if let Ok(mut slot) = pending_open_project().lock() {
+                                *slot = Some(p.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
             // ── File-association launch args ───────────────────────────
             // On Windows/Linux, "Open with TM Code" launches the binary
             // with file paths in argv[1..]. macOS routes these through
@@ -723,6 +831,7 @@ pub fn run() {
 
             #[allow(unused_mut)]
             let mut splash_builder = WebviewWindowBuilder::new(app, "splash", splash_url)
+                .additional_browser_args(WEBVIEW2_BROWSER_ARGS)
                 .title("TM Code")
                 .inner_size(360.0, 200.0)
                 .resizable(false)
@@ -874,7 +983,7 @@ pub fn run() {
                     // the frontend. The current instance keeps its state; the
                     // new process starts with a clean splash + window.
                     if safe_id == "new-window" {
-                        if let Err(err) = open_new_instance() {
+                        if let Err(err) = open_new_instance(None) {
                             eprintln!("[menu] new-window spawn failed: {}", err);
                         }
                         return;
@@ -972,6 +1081,7 @@ pub fn run() {
             //   inconsistent across distros).
             #[allow(unused_mut)]
             let mut builder = WebviewWindowBuilder::new(app, "main", main_url)
+                .additional_browser_args(WEBVIEW2_BROWSER_ARGS)
                 .title("TM Code")
                 .icon(icon.clone())
                 .expect("Failed to set window icon")
@@ -1086,6 +1196,7 @@ pub fn run() {
                                     "oauth-popup",
                                     WebviewUrl::External(parsed_url),
                                 )
+                                .additional_browser_args(WEBVIEW2_BROWSER_ARGS)
                                 .title("Sign in with Google")
                                 .inner_size(500.0, 700.0)
                                 .center()
@@ -1193,6 +1304,24 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 if window.label() == "main" {
+                    // Remove the on-disk agent-run badge for this window's
+                    // project. Other windows poll that file for the recents
+                    // badge; once this process dies nothing can heartbeat it,
+                    // so an explicit remove beats making every reader wait
+                    // out the staleness timeout.
+                    if let Some(ap) = window.try_state::<commands::container::ActiveProjectState>()
+                    {
+                        if let Ok(guard) = ap.lock() {
+                            if let Some(active) = guard.as_ref() {
+                                commands::project_state::clear_project_agent_status(
+                                    &active.project_path,
+                                );
+                                commands::project_state::release_project_window_lock_owned(
+                                    &active.project_path,
+                                );
+                            }
+                        }
+                    }
                     if let Some(pm) = window.try_state::<commands::terminal::ProcessMap>() {
                         if let Ok(mut map) = pm.lock() {
                             for (pid, child) in map.iter_mut() {
@@ -1263,6 +1392,10 @@ pub fn run() {
             delete_file_or_directory,
             rename_file_or_directory,
             read_file,
+            file_signature,
+            file_stat,
+            read_file_with_signature,
+            read_file_range_with_signature,
             path_exists,
             has_database_file,
             write_file,
@@ -1327,16 +1460,6 @@ pub fn run() {
             write_memory_file,
             delete_memory_file,
             list_memory_files,
-            data_viewer_dev_query,
-            collect_deploy_bundle,
-            collect_backend_tarball,
-            collect_next_db_meta,
-            collect_next_static_bundle,
-            collect_next_prebuilt_tarball,
-            stage_next_prebuilt_tarball,
-            upload_file_put,
-            probe_url_ready,
-            validate_backend_for_cloud_run,
             list_skills_bundled,
             read_skill_content,
             mcp_start_server,
@@ -1371,6 +1494,9 @@ pub fn run() {
             git_upstream_divergence,
             git_clone_repository,
             git_push,
+            git_list_branches,
+            git_checkout_branch,
+            git_create_branch,
             git_pull,
             github_device_start,
             github_device_poll,
@@ -1410,8 +1536,14 @@ pub fn run() {
             detect_test_browsers,
             app_ready,
             take_pending_open_files,
+            take_pending_open_project,
             is_directory,
-            open_new_instance
+            open_new_instance,
+            set_project_agent_status,
+            get_project_agent_statuses,
+            acquire_project_window_lock,
+            check_project_window_lock,
+            release_project_window_lock
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

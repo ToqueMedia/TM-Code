@@ -1,5 +1,5 @@
 /**
- * Memory tools — save_memory, forget_memory, read_memory, distill_memory.
+ * Memory tools — persistent memory plus session memory.
  *
  * Extracted from toolExecutor.ts as part of the SOLID decomposition.
  * These tools manage the persistent memory system (memdir) across
@@ -8,7 +8,17 @@
 
 import { invoke } from '@/utils/invokeMetrics'
 import { useProjectStore } from '../../../stores/projectStore'
+import { READ_SESSION_MEMORY, UPDATE_SESSION_MEMORY } from '../toolNames'
 import type { ToolRegistrationContext } from './context'
+
+// ── Guarda anti-spam do update_session_memory ────────────────────────────
+// Timestamp da última ESCRITA efetiva (module-level, como os trackers de
+// leitura): duas escritas dentro desta janela indicam o padrão "task ticker"
+// (chamadas por passo com mini-checklists) e o resultado passa a corrigir o
+// modelo em vez de o elogiar. Só afeta a MENSAGEM devolvida — a escrita em
+// si nunca é bloqueada.
+const SESSION_MEMORY_SPAM_WINDOW_MS = 90_000
+let lastSessionMemoryWrite: number | null = null
 
 export function registerMemoryTools(ctx: ToolRegistrationContext): void {
 
@@ -31,7 +41,7 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
     definition: {
       name: 'save_memory',
       description:
-        'Persist a long-lived memory the model should see in future turns and future sessions. Use when you learn a fact about the developer (their role, preferences), get explicit feedback ("don\'t do X" / "yes exactly, do X"), discover a project-specific decision worth keeping (initiative, deadline, ownership), or want to remember where to look up external info (Linear project, Grafana board). DO NOT save: code patterns/conventions derivable from the repo, git-blame style "who changed what", debugging recipes (the fix is in the code), or anything already in CLAUDE.md. The entry is written to disk and travels with the project (project/reference types) or the IDE installation (user/feedback types).',
+        'Persist a long-lived memory the model should see in future turns and future sessions. Use when you learn a fact about the developer (their role, preferences), get explicit feedback ("don\'t do X" / "yes exactly, do X"), discover a project-specific decision worth keeping (initiative, deadline, ownership), or want to remember where to look up external info (Linear project, Grafana board). DO NOT save: code patterns/conventions derivable from the repo, git-blame style "who changed what", debugging recipes (the fix is in the code), or anything already in TMS.md. The entry is written to disk and travels with the project (project/reference types) or the IDE installation (user/feedback types).',
       input_schema: {
         type: 'object',
         properties: {
@@ -384,10 +394,10 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
   })
 
   // === update_session_memory ===
-  ctx.tools.set('update_session_memory', {
+  ctx.tools.set(UPDATE_SESSION_MEMORY, {
     definition: {
-      name: 'update_session_memory',
-      description: 'Update session-scoped memory notes that survive context compaction but do not persist across sessions. Use for: in-progress work state, decisions made this session, partial results, things to remember after compact. The notes are injected into the system prompt after compaction so you can resume without loss. Write in bullet-point markdown. Each call REPLACES the previous notes (not appends).',
+      name: UPDATE_SESSION_MEMORY,
+      description: 'Update session-scoped memory notes that survive context compaction but do not persist across sessions. Use for: in-progress work state, decisions made this session, partial results, things to remember after compact. The notes are injected into the system prompt after compaction so you can resume without loss. Write in bullet-point markdown. Each call REPLACES the previous notes (not appends). This is NOT a task tracker: do not call it per step to tick items — use update_tasks for checklist progress and update session memory only when the recorded state materially changes (typically once per task phase).',
       input_schema: {
         type: 'object',
         properties: {
@@ -405,7 +415,35 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
 
       try {
         const { useChatStore } = await import('../../../stores/chatStore')
-        useChatStore.getState().setSessionMemory(notes)
+        const store = useChatStore.getState()
+        const previous = store.getActiveSession()?.sessionMemory ?? ''
+
+        // Guardas anti-spam (observado 2026-07-13: 5 chamadas seguidas com
+        // mini-checklists de 29–80 chars — o modelo usava isto como task
+        // ticker por passo, queimando tool calls sem valor: notas desse
+        // tamanho nem servem para recuperação pós-compactação). O guardrail
+        // do fim de run (query.ts, reconciliação) não cobre o meio do run,
+        // e a mensagem de sucesso antiga até REFORÇAVA o padrão. A escrita
+        // nunca é bloqueada (last-write-wins é o contrato) — o resultado é
+        // que passa a treinar o modelo para o uso certo.
+        if (notes === previous) {
+          return 'Session memory unchanged (identical notes already stored). '
+            + 'Do not re-call this tool to "confirm" state — it replaces, not appends. '
+            + 'For step-by-step checklist progress use update_tasks instead.'
+        }
+
+        store.setSessionMemory(notes)
+
+        const nowMs = Date.now()
+        const rapidRecall = lastSessionMemoryWrite !== null
+          && nowMs - lastSessionMemoryWrite < SESSION_MEMORY_SPAM_WINDOW_MS
+        lastSessionMemoryWrite = nowMs
+
+        if (rapidRecall) {
+          return `Session memory updated (${notes.length} chars) — but you already updated it seconds ago. `
+            + 'This tool REPLACES the notes and exists for post-compaction recovery, not per-step progress ticking. '
+            + 'Track checklist state with update_tasks; update session memory only when the recorded state materially changes.'
+        }
         return `Session memory updated (${notes.length} chars). These notes will survive context compaction.`
       } catch {
         return 'update_session_memory failed: could not access chat store.'
@@ -414,9 +452,9 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
   })
 
   // === read_session_memory ===
-  ctx.tools.set('read_session_memory', {
+  ctx.tools.set(READ_SESSION_MEMORY, {
     definition: {
-      name: 'read_session_memory',
+      name: READ_SESSION_MEMORY,
       description: 'Read the current session memory notes. Use to check what was recorded earlier in this session — especially useful after compaction when earlier conversation context was summarized.',
       input_schema: {
         type: 'object',

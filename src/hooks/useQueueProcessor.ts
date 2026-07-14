@@ -19,10 +19,13 @@
 import { useEffect, useSyncExternalStore } from 'react'
 import {
   getCommandQueueSnapshot,
+  isQueuePaused,
   subscribeToCommandQueue,
+  subscribeToQueuePause,
 } from '../services/agent/messageQueue'
 import { getQueryGuard } from '../services/agent/queryGuard'
 import { processQueueIfReady } from '../services/agent/queueProcessor'
+import { useBillingStore } from '../stores/billingStore'
 import { usePermissionStore } from '../stores/permissionStore'
 import type { QueuedCommand } from '../types/messageQueueTypes'
 
@@ -70,9 +73,24 @@ export function useQueueProcessor({
   // collide with the open dialog or auto-fire another one.
   const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
 
+  // Explicit pause (Stop with parked tasks / budget stop / task rehydrate).
+  // Resumed by the strip's Resume button or any manual send.
+  const queuePaused = useSyncExternalStore(subscribeToQueuePause, isQueuePaused)
+
+  // Billing gate: while credits are exhausted, HOLD the queue instead of
+  // draining it. The Chat dispatch path (runAgentForPrompt) has no billing
+  // pre-flight, so without this gate every queued item was dequeued,
+  // dispatched as a REAL request, 402'd, and destroyed — burning one
+  // round-trip per item and leaving nothing to resume after a purchase.
+  // When noCredits clears (post-purchase /v1/me or headers), this selector
+  // flips and the effect re-fires with the queue intact.
+  const billingBlocked = useBillingStore(s => s.noCredits || s.status === 'rejected')
+
   useEffect(() => {
     if (isQueryActive) return
     if (hasPendingPermission) return
+    if (queuePaused) return
+    if (billingBlocked) return
     if (queueSnapshot.length === 0) return
 
     // Reservation is owned by executeQueuedInput → runAgentLoop →
@@ -81,5 +99,5 @@ export function useQueueProcessor({
     // dequeue-triggered snapshot change), isQueryActive is already true
     // (dispatching) and the guard above returns early.
     processQueueIfReady({ executeInput: executeQueuedInput })
-  }, [queueSnapshot, isQueryActive, hasPendingPermission, executeQueuedInput])
+  }, [queueSnapshot, isQueryActive, hasPendingPermission, queuePaused, billingBlocked, executeQueuedInput])
 }

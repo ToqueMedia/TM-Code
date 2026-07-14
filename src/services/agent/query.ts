@@ -11,14 +11,14 @@
  */
 
 import type OpenAI from "openai";
-import type { ContentBlockAPI, ProviderState } from "../../types/chat";
+import type { ContentBlockAPI, ProviderState, RequestUsageEntry } from "../../types/chat";
 // formatError: Tauri/IPC rejections are often plain objects or serde-tagged
 // enums (e.g. {"PathNotFound":"…"}), and `String(err)` collapses those to the
 // literal "[object Object]" the model then sees as the tool result. formatError
 // resolves a useful message from every shape.
 import { formatError } from "../../utils/errors";
+import { t } from "../../i18n";
 import {
-  microcompact,
   applyToolResultBudget,
   snipCompactIfNeeded,
   autoCompact,
@@ -28,7 +28,8 @@ import {
   type AutoCompactTrackingState,
   type CompactFn,
 } from "./compact";
-import { computeMicrocompactKeepRecent } from "./contextManager";
+import { applyGlobalToolResultBudget } from "./toolResultGlobalBudget";
+import { updateToolResultVisibility } from "./toolExecutor/toolResultVisibility";
 import {
   applyCollapsesIfNeeded,
   recoverFromOverflow,
@@ -42,11 +43,35 @@ import {
 } from "./loopDetector";
 import { isAtBlockingLimit } from "../../utils/contextWindow";
 import { contentAsText } from "./promptValueHelpers";
+import { inspectAndLogPayload } from "./payloadInspector";
+import { getReadRanges, getAndResetOverlapStats } from "./toolExecutor/readRangeTracker";
+import {
+  getAndResetMentionContextStats,
+  recordMentionContextFull,
+  recordMentionContextStub,
+  resetMentionContextTurnStats,
+} from "./mentionContextTracker";
+import {
+  inferContinuationReason,
+  isLegitimateContinuationReason,
+  EFFICIENCY_TARGET_TURNS,
+} from "./turnEfficiency";
+import { DESTRUCTIVE_TOOLS } from "./toolsetSelector";
+import { EDIT_FILE } from "./toolNames";
 
 // ── Constants ──
 
 const MAX_OUTPUT_TOKENS = 32_768;
 const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3;
+// Cortes transitórios de stream (rede/5xx/stall) recuperados por run antes
+// de superficializar o erro — padrão "withheld errors" do claude-vaz: o erro
+// só chega ao user quando as vias de recuperação se esgotam.
+const STREAM_CUT_RECOVERY_LIMIT = 2;
+// Teto do escalation quando o output é truncado (finish_reason length) e o
+// modelo não expõe maxOutputTokens via getContextLimits. Porte do padrão
+// claude-vaz (8k→64k): truncou → duplica o cap nos pedidos seguintes, até
+// este teto ou ao máximo do modelo.
+const ESCALATED_MAX_OUTPUT_TOKENS = 65_536;
 const PLATFORM_AUTH_REFRESH_ATTEMPTS = 1;
 const CREDENTIAL_CONFIG_MAX_RETRIES = 3;
 const CREDENTIAL_CONFIG_RETRY_DELAY_MS = 30_000;
@@ -65,6 +90,13 @@ const CREDENTIAL_CONFIG_RETRY_DELAY_MS = 30_000;
 const RATE_LIMIT_MAX_RETRIES = 6;
 const RATE_LIMIT_RETRY_DELAYS_MS = [10_000, 20_000, 30_000, 45_000, 55_000, 60_000];
 
+// Client-side semantic watchdog for streaming model turns. The Worker has
+// byte-level watchdogs, but providers can keep a stream alive with empty/role
+// chunks that produce no user-visible text, reasoning, tool call, or finish
+// event. Without this guard the UI can stay in "awaiting_response" until the
+// SDK transport timeout or forever on custom BYOK transports.
+const STREAM_SEMANTIC_IDLE_TIMEOUT_MS = 180_000;
+
 /** Lê o Retry-After (segundos) dos headers de um APIError do SDK, se existir. */
 function retryAfterMs(error: unknown): number | null {
   const headers = (error as { headers?: Record<string, string> | Headers } | null)?.headers;
@@ -75,6 +107,19 @@ function retryAfterMs(error: unknown): number | null {
   const seconds = raw ? Number(raw) : NaN;
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
   return Math.min(seconds, 60) * 1000;
+}
+
+function sanitizeToolResultForModel(content: string): string {
+  try {
+    const parsed = JSON.parse(content) as Record<string, unknown>
+    if (parsed?.type === 'diff') {
+      const path = typeof parsed.path === 'string' ? parsed.path : '(unknown path)'
+      return `File ${parsed.isNewFile ? 'created' : 'updated'}: ${path}`
+    }
+  } catch {
+    // Non-JSON tool result.
+  }
+  return content
 }
 
 // ── Types ──
@@ -89,6 +134,132 @@ export interface QueryMessage {
    * instead of reconstructing from content blocks.
    */
   _native?: Record<string, unknown>;
+}
+
+export type QueuedSteeringContent = string | ContentBlockAPI[];
+
+function mentionRefId(messageIndex: number): string {
+  return `mc-${messageIndex}`;
+}
+
+function isMentionContextSystemReminder(reminder: string): boolean {
+  return (
+    /Called the (read_file|list_directory) tool with the following input:/.test(reminder) ||
+    /Result of calling the (read_file|list_directory) tool:/.test(reminder) ||
+    /@mention compact_reference/.test(reminder) ||
+    /Mentioned file summary \(@mention compacted; full content was NOT injected\)/.test(reminder)
+  );
+}
+
+function extractMentionContextPath(text: string): string | null {
+  const pathLine = text.match(/^(?:path|filePath):\s*(.+)$/m)?.[1]?.trim();
+  if (pathLine) return pathLine;
+  const jsonPath = text.match(/"file_path"\s*:\s*"([^"]+)"/)?.[1]
+    ?? text.match(/"path"\s*:\s*"([^"]+)"/)?.[1];
+  return jsonPath?.trim() || null;
+}
+
+function buildMentionContextStub(refId: string, paths: string[]): string {
+  const filePath = paths.length > 0 ? paths.join(', ') : '(unknown)';
+  return [
+    '<system-reminder>@mention compact_reference already provided earlier.',
+    `mentionContextRefId: ${refId}`,
+    `filePath: ${filePath}`,
+    'alreadyProvided: true',
+    'Use previous outline or read only missing ranges.</system-reminder>',
+  ].join('\n');
+}
+
+function compactMentionContextText(
+  text: string,
+  refId: string,
+  shouldCompact: boolean,
+): string {
+  const re = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+  const mentionBlocks: string[] = [];
+  const paths: string[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = re.exec(text)) !== null) {
+    const reminder = match[0];
+    if (!isMentionContextSystemReminder(reminder)) continue;
+    mentionBlocks.push(reminder);
+    const path = extractMentionContextPath(reminder);
+    if (path && !paths.includes(path)) paths.push(path);
+  }
+
+  if (mentionBlocks.length === 0) return text;
+
+  const fullBody = mentionBlocks.join('\n');
+  if (!shouldCompact) {
+    recordMentionContextFull(refId, fullBody);
+    return text;
+  }
+
+  const stub = buildMentionContextStub(refId, paths);
+  let inserted = false;
+  const compacted = text.replace(re, (reminder) => {
+    if (!isMentionContextSystemReminder(reminder)) return reminder;
+    if (inserted) return '';
+    inserted = true;
+    return stub;
+  });
+  recordMentionContextStub(refId, fullBody, stub);
+  return compacted.replace(/\n{3,}/g, '\n\n');
+}
+
+/**
+ * Compact historical @-mention context in the exact in-memory payload that is
+ * about to be sent to the provider. The persisted ChatMessage is left intact;
+ * only older user turns in this request get a short reference stub.
+ */
+export function compactHistoricalMentionContextForPayload(
+  messages: QueryMessage[],
+): QueryMessage[] {
+  let lastNonSystemIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user' || messages[i].role === 'assistant') {
+      lastNonSystemIndex = i;
+      break;
+    }
+  }
+
+  let changed = false;
+  const next = messages.map((msg, index): QueryMessage => {
+    if (msg.role !== 'user') return msg;
+    const shouldCompact = index < lastNonSystemIndex;
+    const refId = mentionRefId(index);
+
+    if (typeof msg.content === 'string') {
+      const content = compactMentionContextText(msg.content, refId, shouldCompact);
+      if (content === msg.content) return msg;
+      changed = true;
+      return { ...msg, content };
+    }
+
+    if (!Array.isArray(msg.content)) return msg;
+
+    let partsChanged = false;
+    const content = msg.content.map((block) => {
+      if (block.type !== 'text') return block;
+      const text = compactMentionContextText(block.text, refId, shouldCompact);
+      if (text === block.text) return block;
+      partsChanged = true;
+      return { ...block, text };
+    });
+    if (!partsChanged) return msg;
+    changed = true;
+    return { ...msg, content };
+  });
+
+  return changed ? next : messages;
+}
+
+function steeringContentToUserMessage(content: QueuedSteeringContent): QueryMessage {
+  return {
+    role: "user",
+    content: typeof content === "string" ? [{ type: "text", text: content }] : content,
+  };
 }
 
 /** Stream events yielded to the caller for UI rendering. */
@@ -146,6 +317,12 @@ export interface QueryParams {
   tools: OpenAI.ChatCompletionTool[];
   /** Tool execution function. */
   executeTool: ToolExecutorFn;
+  /**
+   * Predicado de execução em streaming: true sse o tool pode COMEÇAR a
+   * executar durante o SSE (read-only/concurrencySafe no executor). Ausente
+   * = sem execução mid-stream (comportamento clássico: tudo pós-stream).
+   */
+  isStreamSafeTool?: (toolName: string) => boolean;
   /** Abort signal for cancellation. */
   signal: AbortSignal;
   /** Maximum turns before stopping (default: Infinity). */
@@ -156,6 +333,13 @@ export interface QueryParams {
   thinkingConfig?: Record<string, unknown>;
   /** Callback for reporting token usage. */
   onUsage?: (inputTokens: number, outputTokens: number) => void;
+  /** Timeout for no useful model progress while reading a streaming turn.
+   *  Production uses STREAM_SEMANTIC_IDLE_TIMEOUT_MS; tests may override. */
+  streamSemanticIdleTimeoutMs?: number;
+  /** Callback for reporting per-request usage (real tokens + inspector
+   *  estimate + breakdown). Fires once per chat.completions.create, right
+   *  after the provider's usage chunk lands. Best-effort, never throws. */
+  onRequestUsage?: (entry: RequestUsageEntry) => void;
   /** Custom compact instructions. */
   compactInstructions?: string;
   /** Extra headers merged into every chat.completions.create request. */
@@ -185,7 +369,7 @@ export interface QueryParams {
    * a fresh bubble) as a side effect, so the run stays continuous with no
    * idle flicker. Must never throw.
    */
-  collectQueuedSteering?: () => Promise<string | null>;
+  collectQueuedSteering?: () => Promise<QueuedSteeringContent | null>;
   /**
    * Live active-model limits for the auto-compact decision. Called fresh each
    * loop iteration because the active model (and thus its context window) is
@@ -195,6 +379,31 @@ export interface QueryParams {
    * (utils/contextWindow via autoCompact), never a 1M assumption.
    */
   getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null };
+  /**
+   * Dynamic toolset selector — when present, the loop filters the tool
+   * definitions to the active subset each turn. It starts from the
+   * model-selected profile base plus model-planned groups, then expands
+   * through `request_tools`. On-demand additions are transient per model step.
+   * Null/undefined → send all tools
+   * (legacy behaviour).
+   */
+  toolsetSelector?: import('./toolsetSelector').ToolsetSelector;
+  /** Auxiliary-context selection — core/auxiliary breakdown for the inspector. */
+  auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection;
+  /** Execution phase for bootstrap/original-task telemetry and guardrails. */
+  executionPhase?: 'project_bootstrap' | 'original_task';
+  /** True when the original user request asks to implement/change/fix files. */
+  mutableTask?: boolean;
+  /** Returns telemetry from the last delegate call, or null if delegate
+   *  wasn't called this run. Populated by the ToolExecutor bridge. */
+  getDelegateTelemetry?: () => {
+    requestedMember: string | null;
+    resolvedMember: string | null;
+    blocked: boolean;
+    blockedReason: string | null;
+    inputSchemaVersion: string;
+    recoveryAttempted: boolean;
+  } | null;
 }
 
 /** Terminal return value. */
@@ -203,6 +412,18 @@ export interface QueryTerminal {
   turnCount: number;
   totalInputTokens: number;
   totalOutputTokens: number;
+  /** ── Guardrail telemetry (populated on the final return) ── */
+  runHasEdited?: boolean;
+  noEditRecoveryCount?: number;
+  noEditGuardTriggered?: boolean;
+  firstWriteTurn?: number;
+  writeActionCount?: number;
+  originalTaskWriteActionCount?: number;
+  originalTaskFirstWriteTurn?: number;
+  noEditGuardReason?: string;
+  noEditRecoveryAction?: string;
+  completionGuardDecision?: string;
+  completionGuardReason?: string;
 }
 
 // ── Internal state ──
@@ -237,6 +458,74 @@ function abortableDelay(ms: number, signal: AbortSignal): Promise<boolean> {
   });
 }
 
+function createLinkedAbortController(parent: AbortSignal): {
+  controller: AbortController;
+  cleanup: () => void;
+} {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (parent.aborted) {
+    controller.abort();
+  } else {
+    parent.addEventListener("abort", onAbort, { once: true });
+  }
+  return {
+    controller,
+    cleanup: () => parent.removeEventListener("abort", onAbort),
+  };
+}
+
+function createStreamSemanticIdleError(timeoutMs: number): Error {
+  return new Error(
+    `Active AI provider did not produce model output for ${Math.round(timeoutMs / 1000)}s. ` +
+    `The request was aborted to avoid leaving the agent stuck awaiting a response.`,
+  );
+}
+
+async function readNextStreamChunk<T>(
+  iterator: AsyncIterator<T>,
+  semanticDeadlineMs: number,
+  timeoutMs: number,
+  onTimeout: () => void,
+): Promise<IteratorResult<T>> {
+  const remainingMs = semanticDeadlineMs - Date.now();
+  if (remainingMs <= 0) {
+    onTimeout();
+    throw createStreamSemanticIdleError(timeoutMs);
+  }
+
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const nextPromise = iterator.next();
+  // If the timeout wins, the pending nextPromise may later reject because the
+  // request was aborted. Observe it so browsers do not surface an unhandled
+  // rejection after we already reported the semantic timeout.
+  nextPromise.catch(() => {});
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      onTimeout();
+      reject(createStreamSemanticIdleError(timeoutMs));
+    }, remainingMs);
+  });
+
+  try {
+    return await Promise.race([nextPromise, timeoutPromise]);
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  }
+}
+
+function cancelStreamIterator(iterator: AsyncIterator<unknown>): void {
+  try {
+    const returned = iterator.return?.();
+    if (returned && typeof (returned as PromiseLike<IteratorResult<unknown>>).then === "function") {
+      void (returned as Promise<IteratorResult<unknown>>).catch(() => {});
+    }
+  } catch {
+    // Best-effort stream cleanup after timeout.
+  }
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === "string") return error;
@@ -268,6 +557,29 @@ function errorPayload(error: unknown): string {
   }
 }
 
+function apiErrorInfo(error: unknown): { type?: string; message?: string } {
+  const apiError = (error as { error?: unknown } | null)?.error;
+  if (!apiError) return {};
+
+  let payload: unknown = apiError;
+  if (typeof apiError === "string") {
+    try {
+      payload = JSON.parse(apiError);
+    } catch {
+      return { message: apiError };
+    }
+  }
+
+  if (!payload || typeof payload !== "object") return {};
+  const record = payload as Record<string, unknown>;
+  const nested = record.error && typeof record.error === "object"
+    ? record.error as Record<string, unknown>
+    : record;
+  const type = typeof nested.type === "string" ? nested.type : undefined;
+  const message = typeof nested.message === "string" ? nested.message : undefined;
+  return { type, message };
+}
+
 function isPlatformAuthError(error: unknown): boolean {
   if (errorSource(error) === "upstream") return false;
   if (errorStatus(error) !== 401) return false;
@@ -286,6 +598,26 @@ function isCredentialOrConfigError(error: unknown): boolean {
   return (
     /api key not configured|auth not configured|endpoint not configured|provider not configured/.test(text) ||
     /invalid api key|incorrect api key|api key.*invalid|invalid token|unauthori[sz]ed|permission denied|forbidden|credential/.test(text)
+  );
+}
+
+/**
+ * Corte TRANSITÓRIO de stream — recuperável por retry (pré-output) ou por
+ * retoma em turno novo (pós-output). Classes deliberadas:
+ *   - 5xx do provider/gateway (o worker já re-tenta gateway HTML pré-stream;
+ *     isto cobre o corte DEPOIS do stream abrir);
+ *   - erros de transporte sem status (fetch/socket/rede terminada a meio);
+ *   - abort interno do watchdog semântico (requestAbort dispara sem o signal
+ *     do user — stream stalled). O abort do USER é guardado pelo caller
+ *     (!signal.aborted) antes de chamar isto.
+ * 4xx tipados NÃO entram — têm caminhos próprios acima (401 refresh, 402
+ * budget, 429 escada, credential/config) e re-tentar um 400 é inútil.
+ */
+function isTransientStreamCutError(error: unknown, errMsg: string): boolean {
+  const status = errorStatus(error);
+  if (status !== undefined) return status >= 500;
+  return /network|fetch failed|failed to fetch|econn|etimedout|socket|terminated|premature|connection|abort|stream.*(closed|ended|error)/i.test(
+    errMsg,
   );
 }
 
@@ -672,10 +1004,14 @@ export async function* query(
     maxOutputTokensOverride,
     thinkingConfig,
     onUsage,
+    onRequestUsage,
     compactInstructions,
     extraHeaders,
     onResponseHeaders,
     getContextLimits,
+    toolsetSelector,
+    auxiliarySelection,
+    isStreamSafeTool,
   } = params;
   let client = params.client;
   const refreshClient = params.refreshClient;
@@ -686,11 +1022,17 @@ export async function* query(
   // Undefined until the first response is recorded.
   let lastTurnRealOccupancy: number | undefined;
 
+  // Turn-efficiency tracking — the continuation reason inferred at the END of
+  // the previous turn (why the loop kept going past the 3-4-request target).
+  // Surfaced in the payload-inspector log of the NEXT turn so the forensic
+  // trail travels with the request diagnostics. Undefined until turn ≥ target.
+  let lastContinuationReason: string | undefined;
+
   // Wall-clock of the previous turn's assistant message — feeds the gap-aware
-  // microcompact (computeMicrocompactKeepRecent). Loop-local: null on the first
-  // turn, then the end-of-turn timestamp, so a long mid-run stall (e.g. a
-  // permission wait past the 60-min cache TTL) triggers aggressive eviction.
-  let lastAssistantMessageAt: number | null = null;
+  // (lastAssistantMessageAt was used by microcompact's gap-aware keepRecent.
+  //  Removed when microcompact was replaced by applyGlobalToolResultBudget —
+  //  the global budget uses a fixed keepRecent=4. Restore here if gap-aware
+  //  eviction is re-added to the budget.)
 
   let state: LoopState = {
     messages: [...params.messages],
@@ -703,8 +1045,41 @@ export async function* query(
 
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  const executionPhase = params.executionPhase ?? 'original_task';
+  const mutableTask = params.mutableTask === true && executionPhase === 'original_task';
   const loopDetectorState = createLoopDetectorState();
   let thinkingOnlyRecoveryCount = 0;
+
+  // Guardrail: a bugfix_local run (readOnly=false) that ends without a single
+  // file mutation likely stopped prematurely — the model diagnosed the bug but
+  // deferred the fix ("No próximo turno, aplicarei…") without requesting
+  // edit_file (which is intentionally excluded from the bugfix_local base).
+  // Track whether any mutating tool ran successfully this run, and allow one
+  // recovery attempt to nudge the model back on track.
+  let runHasEdited = false;
+  let noEditRecoveryCount = 0;
+  /** Whether any successful update_tasks ran this run — see the
+   *  task-reconciliation guardrail at the stop path. */
+  let runTouchedTaskTracker = false;
+  let taskGuardCount = 0;
+  /** Turn number of the first successful file mutation (1-indexed). */
+  let firstWriteTurn: number | undefined;
+  /** Total count of successful file-mutating tool calls this run. */
+  let writeActionCount = 0;
+  /** Set when the no-edit guardrail fires; reported on the NEXT request's usage entry. */
+  let guardTriggeredLastTurn = false;
+  let noEditGuardReason: string | undefined;
+  let noEditRecoveryAction: string | undefined;
+  /**
+   * Cap de output escalado após truncagem (finish_reason "length" — OpenAI-
+   * compat — ou "max_tokens", Anthropic). null = usa o cap normal. Sobe uma
+   * vez por truncagem (2×, com teto no maxOutputTokens do modelo ou
+   * ESCALATED_MAX_OUTPUT_TOKENS) e mantém-se até ao fim da run — se um output
+   * já não coube uma vez, os seguintes têm a mesma cara.
+   */
+  let escalatedMaxTokens: number | null = null;
+  /** Cortes transitórios de stream recuperados nesta run (limite: STREAM_CUT_RECOVERY_LIMIT). */
+  let streamCutRecoveryCount = 0;
 
   // eslint-disable-next-line no-constant-condition
   queryLoop: while (true) {
@@ -760,27 +1135,38 @@ export async function* query(
 
     let messagesForQuery = [...messages];
 
-    // 1. Tool result budget — cap oversized tool-result bodies (keeps structure).
+    // 0. Global tool-result budget — cap TOTAL tool-result tokens across all
+    //    messages at ~40K. UNDER budget nothing is touched (the model keeps a
+    //    full working set — hardcoding it to the last 4 results starved
+    //    multi-file tasks and caused the re-read→stub→force:true dance, raiz
+    //    corrigida 2026-07-13); OVER budget the oldest results are compacted
+    //    to a structured summary (tool name, path/range, hash, preview,
+    //    re-read hint) until back under, keepRecent=4 protected. Compacted ≠
+    //    deleted — the model re-reads via read_file / read_large_result, and
+    //    updateToolResultVisibility (below) garante que o dedup não bloqueia
+    //    essa releitura. Token-reduction phase 2026-06-26, budget real 07-13.
+    const budgetResult = applyGlobalToolResultBudget(messagesForQuery);
+    if (budgetResult.compactedCount > 0) {
+      messagesForQuery = budgetResult.messages;
+      console.debug(
+        `[query] global tool-result budget: compacted ${budgetResult.compactedCount} ` +
+        `results (~${budgetResult.tokensBefore}→${budgetResult.tokensAfter} tokens)`,
+      );
+    }
+
+    // 1. Per-message tool result budget — cap oversized single-message bodies.
     messagesForQuery = applyToolResultBudget(messagesForQuery);
 
     // 2. (routine snip removed — emergency-only below). No tokens pre-freed, so
     //    autoCompact reasons about the full occupancy.
     const snipTokensFreed = 0;
 
-    // 3. Microcompact — keepRecent is density- AND gap-aware now (was a fixed 8
-    //    with a dead "skip time-based for now" stub). computeMicrocompactKeepRecent
-    //    keeps more recent results in dense sessions and clears more aggressively
-    //    after a long idle gap (cold prompt cache). lastAssistantMessageAt is
-    //    loop-local so the gap branch is real code, not a no-op.
-    const microKeepRecent = computeMicrocompactKeepRecent(
-      messagesForQuery as unknown as Parameters<typeof computeMicrocompactKeepRecent>[0],
-      lastAssistantMessageAt,
-      false,
-    );
-    const microResult = microcompact(messagesForQuery, { keepRecent: microKeepRecent });
-    if (microResult.clearedCount > 0) {
-      messagesForQuery = microResult.messages;
-    }
+    // 3. (microcompact replaced by step 0 — applyGlobalToolResultBudget.
+    //    The old microcompact cleared to "[Old tool result content cleared]"
+    //    with no tool name/path/size/hash, so the model couldn't decide
+    //    whether a re-read was worth it. The global budget does the same
+    //    clearing but with a structured summary that preserves
+    //    identifiability + re-read instructions. keepRecent lowered 8→4.)
 
     // 4. Context collapse (stub for now)
     const collapseResult = applyCollapsesIfNeeded(messagesForQuery);
@@ -914,6 +1300,23 @@ export async function* query(
     // Filter incomplete tool calls (orphaned tool_use without tool_result)
     messagesForQuery = filterIncompleteToolCalls(messagesForQuery);
 
+    // Compact historical @-mention context only in the exact payload about to
+    // be sent. Keep messagesForQuery itself unmodified so turn 3+ can still
+    // compute the same full-vs-stub saving instead of seeing only turn 2's
+    // stub in loop state.
+    resetMentionContextTurnStats();
+    const providerMessagesForQuery = compactHistoricalMentionContextForPayload(messagesForQuery);
+
+    // Regista que tool_results seguem INTACTOS neste payload vs compactados/
+    // removidos por QUALQUER camada acima (budget global, per-message,
+    // collapse, autoCompact, snip de emergência, mention-compaction). As
+    // camadas de dedup de leitura consultam este registo: um stub "já leste
+    // isto, está no contexto" só é permitido quando é VERDADE — senão o read
+    // serve o conteúdo diretamente e poupa o round-trip do force:true.
+    // `messages` (histórico canónico) delimita os ids deste loop, para não
+    // reclassificar resultados de loops concorrentes (sub-agentes).
+    updateToolResultVisibility(messages, providerMessagesForQuery);
+
     // Ensure message alternation: Anthropic requires user/assistant/user/...
     // NOTE: This synthetic assistant message was removed — it caused the model
     // to see 'Understood. What would you like me to do next?' as its own prior
@@ -925,8 +1328,40 @@ export async function* query(
 
     // ── Build API request (convert internal format → OpenAI) ──
 
-    const maxTokens = maxOutputTokensOverride ?? MAX_OUTPUT_TOKENS;
-    const apiMessages = toOpenAIMessages(messagesForQuery, systemPrompt, model);
+    const maxTokens = escalatedMaxTokens ?? maxOutputTokensOverride ?? MAX_OUTPUT_TOKENS;
+    const apiMessages = toOpenAIMessages(providerMessagesForQuery, systemPrompt, model);
+
+    // ── Dynamic toolset selection ──
+    // Filter the tool definitions to the active subset for this turn. The
+    // selector starts with the model-selected profile base plus any
+    // model-planned groups, then expands through request_tools. Reduces
+    // tool-schema overhead (~10K tokens for 36 tools) to the few the current
+    // task needs. When the selector is absent, send all tools (legacy).
+    const toolSelection = toolsetSelector
+      ? toolsetSelector.selectForTurn(tools)
+      : {
+          tools,
+          activeCount: tools.length,
+          totalCount: tools.length,
+          allActive: true,
+        };
+    const activeTools = toolSelection.tools;
+
+    // ── Payload inspection (token-cost diagnostics) ──
+    // Best-effort: sizes + hashes + top-10 blocks logged to console.debug
+    // before every provider request. Never throws, never blocks the send.
+    const payloadReport = inspectAndLogPayload(
+      apiMessages, systemPrompt, activeTools, model, state.turnCount,
+      toolSelection.totalCount, lastContinuationReason, auxiliarySelection,
+      // Sinais de saúde da seleção dinâmica de tools: frequência de
+      // request_tools (perfil mal calibrado → round-trips extra) e base para
+      // o churn do toolset (invalidação de prompt cache) — ver toolsetChurn
+      // no PayloadReport. typeof-guard: testes injetam mocks parciais do
+      // seletor sem este método.
+      typeof toolsetSelector?.getInstrumentationStats === 'function'
+        ? toolsetSelector.getInstrumentationStats()
+        : undefined,
+    );
 
     // ── Stream from model ──
 
@@ -951,6 +1386,71 @@ export async function* query(
     > = new Map();
     let stopReason = "";
     let turnUsage: OpenAI.CompletionUsage | undefined;
+
+    // ── Streaming tool execution (porte scoped do claude-vaz) ──
+    // Um delta para um index NOVO de tool_call significa (semântica OpenAI-
+    // compat: args por index são contíguos) que todos os indexes anteriores
+    // têm args completos — tools READ-ONLY (isStreamSafeTool, i.e.
+    // concurrencySafe no executor) começam a executar JÁ, sobrepondo a
+    // execução ao resto da geração. Ganho concentra-se nos turnos
+    // multi-read ("Leu 3 ficheiros"). Invariantes deliberados:
+    //   - Regra de prefixo: o primeiro tool não-safe (edit/write/shell) ou
+    //     com args não-parseáveis QUEBRA a cadeia — nada depois dele
+    //     pre-despacha, para que um read nunca observe estado anterior a um
+    //     edit que o precede na ordem do turno.
+    //   - Os yields de tool_result ficam onde estavam (pós-stream, em
+    //     ordem): só a EXECUÇÃO antecipa; o contrato de eventos com a UI e
+    //     o transcript não muda.
+    //   - Args que cheguem tarde para um index já despachado (interleaving
+    //     de provider) invalidam o pre-dispatch: o loop serial compara
+    //     argsJson e re-executa com os args completos — reads são
+    //     idempotentes, o custo é só o overlap perdido.
+    //   - Promises levam .catch imediato (mesma forma de erro do loop
+    //     serial) para nunca gerarem unhandled rejection num stream
+    //     abortado a meio.
+    // Keyed por tool-call id. `streamDispatchBroken` implementa o prefixo.
+    const preDispatched = new Map<
+      string,
+      { argsJson: string; promise: Promise<{ content: string; isError: boolean }> }
+    >();
+    let streamDispatchBroken = false;
+    const tryStreamDispatch = (pending: {
+      id: string;
+      name: string;
+      argsParts: string[];
+    }): void => {
+      if (streamDispatchBroken || !isStreamSafeTool) return;
+      if (!pending.id || !pending.name) {
+        streamDispatchBroken = true;
+        return;
+      }
+      if (preDispatched.has(pending.id)) return;
+      if (signal.aborted) return;
+      const argsJson = pending.argsParts.join("");
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = argsJson ? JSON.parse(argsJson) : {};
+      } catch {
+        // Args incompletos apesar do index novo — não arrisca; quebra o
+        // prefixo e deixa o loop serial (com reparo de _parseError) tratar.
+        streamDispatchBroken = true;
+        return;
+      }
+      if (!isStreamSafeTool(pending.name)) {
+        streamDispatchBroken = true;
+        return;
+      }
+      const promise = executeTool(pending.name, parsed, pending.id, signal).catch(
+        (err) => ({
+          content: `Tool execution error: ${formatError(err)}`,
+          isError: true,
+        }),
+      );
+      preDispatched.set(pending.id, { argsJson, promise });
+      console.debug(
+        `[query] stream-dispatch: ${pending.name} (${pending.id}) started during stream`,
+      );
+    };
 
     // MiniMax: buffer for content that may contain <think> tags
     // Gemini: buffer for content that may contain <thought> tags
@@ -978,21 +1478,31 @@ export async function* query(
     let authRefreshAttempts = 0;
     let credentialConfigRetries = 0;
     let rateLimitRetries = 0;
+    const semanticIdleTimeoutMs = Math.max(
+      1,
+      params.streamSemanticIdleTimeoutMs ?? STREAM_SEMANTIC_IDLE_TIMEOUT_MS,
+    );
 
     // Retry the same model turn only before any assistant output/tool call has
     // been emitted. Retrying after visible output could duplicate text or tools.
     // eslint-disable-next-line no-constant-condition
     while (true) {
+    const requestAbort = createLinkedAbortController(signal);
+    let semanticDeadlineMs = Date.now() + semanticIdleTimeoutMs;
+    const markModelProgress = () => {
+      semanticDeadlineMs = Date.now() + semanticIdleTimeoutMs;
+    };
     try {
       const streamParams: Record<string, unknown> = {
         model,
         max_tokens: maxTokens,
         messages: apiMessages,
         stream: true,
+        stream_options: { include_usage: true },
       };
 
-      if (tools.length > 0) {
-        streamParams.tools = tools;
+      if (activeTools.length > 0) {
+        streamParams.tools = activeTools;
       }
 
       if (thinkingConfig) {
@@ -1004,7 +1514,7 @@ export async function* query(
           ...streamParams,
           stream: true,
         } as any,
-        { signal, headers: extraHeaders },
+        { signal: requestAbort.controller.signal, headers: extraHeaders },
       );
       const { data: stream, response } =
         typeof (responsePromise as any).withResponse === "function"
@@ -1015,7 +1525,19 @@ export async function* query(
       }
 
       // Process OpenAI stream chunks
-      for await (const chunk of stream as any) {
+      const streamIterator = (stream as AsyncIterable<unknown>)[Symbol.asyncIterator]();
+      while (true) {
+        const next = await readNextStreamChunk(
+          streamIterator,
+          semanticDeadlineMs,
+          semanticIdleTimeoutMs,
+          () => {
+            requestAbort.controller.abort();
+            cancelStreamIterator(streamIterator);
+          },
+        );
+        if (next.done) break;
+        const chunk = next.value as any;
         if (signal.aborted) {
           yield { type: "interrupted" };
           return {
@@ -1037,6 +1559,15 @@ export async function* query(
           !Array.isArray(chunk.choices)
         ) {
           continue;
+        }
+
+        // Usage-only chunks from OpenAI-compatible streaming providers
+        // commonly arrive as `{ choices: [], usage: ... }` when
+        // `stream_options.include_usage` is enabled. Capture usage before
+        // reading `choices[0]`, otherwise the final accounting chunk is
+        // skipped and BYOK sessions look unmetered.
+        if (chunk.usage) {
+          turnUsage = chunk.usage;
         }
 
         const choice = chunk.choices[0];
@@ -1062,6 +1593,7 @@ export async function* query(
           const reasoning = String(delta.content);
           assistantThinkingParts.push(reasoning);
           nativeAccumulator.reasoningContent += reasoning;
+          markModelProgress();
           yield { type: "thinking_delta", thinking: reasoning };
           continue;
         }
@@ -1073,6 +1605,7 @@ export async function* query(
           const reasoning = delta.reasoning_content;
           assistantThinkingParts.push(reasoning);
           nativeAccumulator.reasoningContent += reasoning;
+          markModelProgress();
           yield { type: "thinking_delta", thinking: reasoning };
         }
 
@@ -1087,6 +1620,7 @@ export async function* query(
             nativeAccumulator.reasoningDetails.push(detail);
             if (detail?.text) {
               assistantThinkingParts.push(detail.text);
+              markModelProgress();
               yield { type: "thinking_delta", thinking: detail.text };
             }
           }
@@ -1108,6 +1642,7 @@ export async function* query(
         // Text content — MiniMax may embed <think> tags in content
         // We use a state machine to handle tags spanning multiple chunks
         if (delta?.content) {
+          markModelProgress();
           const raw = delta.content;
           contentBuffer.push(raw);
 
@@ -1193,9 +1728,18 @@ export async function* query(
 
         // Tool calls (streaming)
         if (delta?.tool_calls) {
+          markModelProgress();
           for (const tc of delta.tool_calls) {
             let pending = pendingToolCalls.get(tc.index);
             if (!pending) {
+              // Index novo ⇒ os anteriores têm args completos (contiguidade
+              // OpenAI-compat) — candidatos a execução durante o stream.
+              // Ordenado por index: a regra de prefixo do tryStreamDispatch
+              // depende de visitar os tools na ordem do turno.
+              const completed = [...pendingToolCalls]
+                .filter(([idx]) => idx < tc.index)
+                .sort((a, b) => a[0] - b[0]);
+              for (const [, prior] of completed) tryStreamDispatch(prior);
               pending = {
                 id: tc.id || "",
                 name: tc.function?.name || "",
@@ -1260,6 +1804,7 @@ export async function* query(
 
         // Finish reason — may appear in multiple chunks (e.g. MiniMax)
         if (choice.finish_reason) {
+          markModelProgress();
           stopReason = choice.finish_reason;
           // Emit tool_use_stop for all completed tool calls (guard against duplicates)
           const seenToolIds = new Set(collectedToolCalls.map((tc) => tc.id));
@@ -1277,10 +1822,6 @@ export async function* query(
           }
         }
 
-        // Usage
-        if (chunk.usage) {
-          turnUsage = chunk.usage;
-        }
       }
 
       // Some OpenAI-compatible providers close the stream after tool-call
@@ -1314,28 +1855,54 @@ export async function* query(
         pendingToolCalls,
       });
 
-      // Orçamento esgotado — o gate do worker (BUDGET_ENFORCEMENT=enforce)
-      // rejeitou com 402 tm_budget_exhausted. Não é retryable: marca o
-      // billing store para o agentRunner/usePromptBar bloquearem o próximo
-      // turno localmente e o CreditIndicator mostrar o estado.
+      // Orçamento esgotado — o gate do worker rejeitou com 402 tipado.
+      // Não é retryable. Para budget TM/fatia Team normal marcamos o billing
+      // store para bloquear o próximo turno localmente; Team BYOK usa outro
+      // ledger, então preservamos só a mensagem do worker.
       if (errorStatus(error) === 402) {
-        // Membro de equipa esgotou a fatia → mensagem dedicada (não pode comprar;
-        // só o admin realoca). Owner/pessoal → mensagem de compra/upgrade.
+        const apiInfo = apiErrorInfo(error);
+        const isTeamByokExhausted = apiInfo.type === "tm_team_byok_exhausted";
         let teamMemberBlocked = false;
         try {
           const { useBillingStore } = await import("../../stores/billingStore");
           const store = useBillingStore.getState();
-          store.setNoCredits();
           teamMemberBlocked = !!store.team && store.team.role !== "owner";
         } catch {
           /* non-critical */
         }
+        // Códigos conhecidos → mensagem localizada; tm_* desconhecido usa a
+        // mensagem do worker verbatim; sem tipo, heurística por contexto.
+        const TM_402_MESSAGES: Record<string, string> = {
+          tm_budget_exhausted: t("billing.budgetExhaustedError"),
+          tm_team_slice_exhausted: t("billing.teamSliceExhaustedError"),
+          tm_team_byok_exhausted: t("billing.teamByokExhaustedError"),
+        };
+        const message =
+          (apiInfo.type && TM_402_MESSAGES[apiInfo.type]) ||
+          (apiInfo.type?.startsWith("tm_") && apiInfo.message
+            ? apiInfo.message
+            : teamMemberBlocked
+              ? t("billing.teamSliceExhaustedError")
+              : t("billing.budgetExhaustedError"));
         yield {
           type: "error",
-          message: teamMemberBlocked
-            ? "Your team slice is exhausted for this cycle. Ask your team admin to increase your allocation."
-            : "Token budget exhausted for this cycle. Buy extra usage or wait for the cycle reset.",
+          message,
         };
+        // setNoCredits DEPOIS do yield, nunca antes: o flip dispara o
+        // budget-stop watcher (cancelLoop global) e, se corresse antes de o
+        // consumer processar este evento, o ramo isAborted() dos handlers
+        // engolia a mensagem tipada — um membro de equipa via "compra
+        // consumo" (do watcher) em vez de "fala com o admin". O for-await
+        // do consumer só faz resume do generator depois de processar o
+        // evento, por isso aqui a mensagem já está no chat.
+        if (!isTeamByokExhausted) {
+          try {
+            const { useBillingStore } = await import("../../stores/billingStore");
+            useBillingStore.getState().setNoCredits();
+          } catch {
+            /* non-critical */
+          }
+        }
         return {
           reason: "error",
           turnCount: state.turnCount,
@@ -1521,6 +2088,121 @@ export async function* query(
         }
       }
 
+      // ── Withheld transient stream-cut recovery (porte claude-vaz) ──
+      // O erro NÃO chega ao user enquanto houver via de recuperação. Guardas:
+      //   - !signal.aborted: cancelamento do user nunca é "recuperado";
+      //   - só classes transitórias (5xx pós-abertura, transporte, stall do
+      //     watchdog) — 4xx tipados já foram tratados acima;
+      //   - limite por run (anti-death-spiral).
+      // Pré-output: repetir o MESMO pedido é seguro (nada foi emitido).
+      // Pós-output: NUNCA repetimos (duplicaria texto na UI) — preservamos o
+      // parcial como turno real, fechamos tool calls órfãs com tool_results
+      // sintéticos (os cards da UI resolvem em vez de ficarem "running" para
+      // sempre) e retomamos num turno novo, mesma mecânica da recovery de
+      // max_tokens.
+      if (
+        !signal.aborted &&
+        isTransientStreamCutError(error, errMsg) &&
+        streamCutRecoveryCount < STREAM_CUT_RECOVERY_LIMIT
+      ) {
+        streamCutRecoveryCount++;
+
+        if (!outputStarted) {
+          // hasStartedModelOutput não vê o contentBuffer (fragmento de tag
+          // <think> parcial ainda não classificado) — limpa-o para o retry
+          // não prefixar o stream novo com lixo do anterior.
+          contentBuffer.length = 0;
+          thinkMode = false;
+          yield {
+            type: "agent_status",
+            phase: "retrying",
+            message: `Connection to the model was interrupted. Retrying ${streamCutRecoveryCount}/${STREAM_CUT_RECOVERY_LIMIT}...`,
+            attempt: streamCutRecoveryCount,
+            maxAttempts: STREAM_CUT_RECOVERY_LIMIT,
+            httpStatus: errorStatus(error),
+          };
+          continue;
+        }
+
+        // Fecha os tool calls do stream parcial: pendentes ainda não
+        // coletados entram também (o tool_use_start deles já foi emitido —
+        // sem resultado sintético o card ficava pendurado).
+        const seenIds = new Set(collectedToolCalls.map((tc) => tc.id));
+        const orphanedCalls = [...collectedToolCalls];
+        for (const [, pending] of pendingToolCalls) {
+          if (pending.id && !seenIds.has(pending.id)) {
+            orphanedCalls.push({
+              id: pending.id,
+              name: pending.name,
+              argsJson: pending.argsParts.join(""),
+              thoughtSignature: pending.thoughtSignature,
+            });
+            seenIds.add(pending.id);
+          }
+        }
+
+        const partialBlocks: ContentBlockAPI[] = [];
+        const partialThinking = assistantThinkingParts.join("");
+        const partialText = assistantTextParts.join("");
+        if (partialThinking) partialBlocks.push({ type: "thinking", thinking: partialThinking });
+        if (partialText) partialBlocks.push({ type: "text", text: partialText });
+        for (const tc of orphanedCalls) {
+          partialBlocks.push({
+            type: "tool_call",
+            id: tc.id,
+            name: tc.name,
+            arguments: tc.argsJson,
+          });
+        }
+
+        const syntheticResult =
+          "Stream was interrupted by a transient connection error before this tool could execute. " +
+          "Re-issue the call if you still need it.";
+        const recoveryBlocks: ContentBlockAPI[] = orphanedCalls.map((tc) => ({
+          type: "tool_result",
+          toolCallId: tc.id,
+          content: syntheticResult,
+          isError: true,
+        }));
+        for (const tc of orphanedCalls) {
+          yield {
+            type: "tool_result",
+            toolUseId: tc.id,
+            content: syntheticResult,
+            isError: true,
+          };
+        }
+        recoveryBlocks.push({
+          type: "text",
+          text:
+            "Your previous message was cut off by a transient connection error mid-stream. " +
+            "Resume EXACTLY where it stopped — no apology, no recap, do not repeat text already produced. " +
+            "Re-issue any tool call that was interrupted before executing.",
+        });
+
+        yield {
+          type: "agent_status",
+          phase: "retrying",
+          message: `Connection interrupted mid-response. Resuming ${streamCutRecoveryCount}/${STREAM_CUT_RECOVERY_LIMIT}...`,
+          attempt: streamCutRecoveryCount,
+          maxAttempts: STREAM_CUT_RECOVERY_LIMIT,
+          httpStatus: errorStatus(error),
+        };
+
+        state = {
+          ...state,
+          messages: [
+            ...messagesForQuery,
+            ...(partialBlocks.length > 0
+              ? [{ role: "assistant" as const, content: partialBlocks }]
+              : []),
+            { role: "user" as const, content: recoveryBlocks },
+          ],
+          continuationCount: 0,
+        };
+        continue queryLoop;
+      }
+
       yield { type: "error", message: errMsg };
 
       // If we have tool calls from a partial stream, yield error results
@@ -1539,6 +2221,8 @@ export async function* query(
         totalInputTokens,
         totalOutputTokens,
       };
+    } finally {
+      requestAbort.cleanup();
     }
     }
 
@@ -1548,6 +2232,38 @@ export async function* query(
       totalInputTokens += turnUsage.prompt_tokens;
       totalOutputTokens += turnUsage.completion_tokens;
       onUsage?.(turnUsage.prompt_tokens, turnUsage.completion_tokens);
+      // Prompt-cache observability — surfaces provider cache hit/miss per
+      // request so a multi-turn session shows the first turn creating the
+      // cache and subsequent turns reading it. Anthropic reports
+      // cache_read_input_tokens; DashScope reports cached_tokens under usage.
+      try {
+        const tu2 = turnUsage as unknown as Record<string, unknown>
+        const promptDetails = tu2.prompt_tokens_details && typeof tu2.prompt_tokens_details === 'object'
+          ? tu2.prompt_tokens_details as Record<string, unknown>
+          : undefined
+        const cRead = typeof tu2.cache_read_input_tokens === 'number'
+          ? tu2.cache_read_input_tokens
+          : typeof promptDetails?.cached_tokens === 'number'
+            ? promptDetails.cached_tokens
+            : typeof tu2.cached_tokens === 'number'
+              ? tu2.cached_tokens
+              : undefined
+        const cCreate = typeof tu2.cache_creation_input_tokens === 'number'
+          ? tu2.cache_creation_input_tokens
+          : undefined
+        if (cRead !== undefined || cCreate !== undefined) {
+          const read = cRead ?? 0
+          const create = cCreate ?? 0
+          const input = turnUsage.prompt_tokens ?? 0
+          const uncached = Math.max(0, input - read - create)
+          // eslint-disable-next-line no-console
+          console.debug(
+            `[query] prompt cache · turn ${state.turnCount} · ` +
+            `read=${read} create=${create} uncached=${uncached} input=${input} ` +
+            `${read > 0 ? '(HIT)' : '(MISS — creating)'}`,
+          )
+        }
+      } catch { /* cache log never blocks the agent loop */ }
       // Real occupancy for the NEXT iteration's compaction decision. input
       // already includes all prior history; output rolls into the next
       // prompt — their sum is the true "how full is the window right now"
@@ -1555,9 +2271,157 @@ export async function* query(
       lastTurnRealOccupancy = turnUsage.prompt_tokens + turnUsage.completion_tokens;
     }
 
-    // Stamp the assistant turn's wall-clock for the next iteration's gap-aware
-    // microcompact (set every turn, independent of whether usage was reported).
-    lastAssistantMessageAt = Date.now();
+    // Per-request usage log — real tokens + payloadInspector estimate +
+    // breakdown. Persist an inspector-only row even if a streaming provider
+    // omits usage, otherwise exports lose the request entirely.
+    if (turnUsage || payloadReport) {
+      try {
+        const tu = (turnUsage ?? {}) as unknown as Record<string, unknown>
+        const promptDetails = tu.prompt_tokens_details && typeof tu.prompt_tokens_details === 'object'
+          ? tu.prompt_tokens_details as Record<string, unknown>
+          : undefined
+        const dashScopeCachedTokens =
+          typeof promptDetails?.cached_tokens === 'number'
+            ? promptDetails.cached_tokens
+            : typeof tu.cached_tokens === 'number'
+              ? tu.cached_tokens
+              : undefined
+        const cacheCreationInputTokens =
+          typeof tu.cache_creation_input_tokens === 'number' ? tu.cache_creation_input_tokens : undefined
+        const cacheReadInputTokens =
+          typeof tu.cache_read_input_tokens === 'number' ? tu.cache_read_input_tokens : dashScopeCachedTokens
+        const overlapStats = getAndResetOverlapStats()
+        if (overlapStats.skippedOverlappingReads > 0 || overlapStats.adjustedReadRanges > 0) {
+          console.debug(
+            `[query] read-range dedup: skipped=${overlapStats.skippedOverlappingReads}, ` +
+            `adjusted=${overlapStats.adjustedReadRanges}`,
+          )
+        }
+        onRequestUsage?.({
+          requestId: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `${state.turnCount}-${Date.now()}`,
+          turn: state.turnCount,
+          executionPhase,
+          mutableTask,
+          model,
+          inputTokens: turnUsage?.prompt_tokens ?? 0,
+          outputTokens: turnUsage?.completion_tokens ?? 0,
+          usageAvailable: !!turnUsage,
+          cacheCreationInputTokens,
+          cacheReadInputTokens,
+          estimatedInputTokens: payloadReport?.totalEstimatedTokens ?? 0,
+          estimatedInputTokensBreakdown: payloadReport?.estimatedInputTokensBreakdown,
+          totalMessages: payloadReport?.totalMessages,
+          toolCount: payloadReport?.toolCount,
+          toolCountTotal: payloadReport?.toolCountTotal,
+          toolNames: activeTools.map((tool: any) => tool?.function?.name).filter((name: unknown): name is string => typeof name === 'string'),
+          toolDefsTokens: payloadReport?.toolDefsTokens,
+          continuationReason: payloadReport?.continuationReason,
+          mentionContextTokens: payloadReport?.mentionContextTokens ?? 0,
+          breakdown: payloadReport?.byCategory ?? {},
+          systemPromptSections: payloadReport?.systemPromptSections ?? [],
+          auxiliaryPromptCandidates: payloadReport?.auxiliaryPromptCandidates ?? [],
+          // ── Lazy System Prompt + Tighter Toolset telemetry (Phase 1) ──
+          // The dynamic/on-demand toolset only "counts" if the export can prove it:
+          // which profile the Intent Router chose, the core/auxiliary token
+          // split, the savings, and which tools were requested vs denied by
+          // explicit policy.
+          selectedPromptProfile: auxiliarySelection?.profile,
+          selectedToolProfile: toolsetSelector?.getProfile() ?? auxiliarySelection?.profile,
+          coreContextTokens: payloadReport?.coreContextTokens,
+          coreSystemTokens: payloadReport?.coreSystemTokens,
+          onDemandIndexTokens: payloadReport?.onDemandIndexTokens,
+          auxiliaryContextTokens: payloadReport?.auxiliaryContextTokens,
+          auxiliaryLoaded: payloadReport?.auxiliaryLoaded?.map((a: { id: string }) => a.id),
+          loadedSystemSections: payloadReport?.loadedSystemSections,
+          auxiliaryOmitted: payloadReport?.auxiliaryOmitted?.map((a: { id: string }) => a.id),
+          omittedSystemSections: payloadReport?.omittedSystemSections,
+          autoLoadedSystemSections: payloadReport?.autoLoadedSystemSections,
+          contextPlanCandidateSections: payloadReport?.contextPlanCandidateSections,
+          modelRequestedContextSections: payloadReport?.modelRequestedContextSections,
+          requestContextToolCalls: payloadReport?.requestContextToolCalls,
+          requestContextSectionsLoaded: payloadReport?.requestContextSectionsLoaded,
+          requestContextSelectionReason: payloadReport?.requestContextSelectionReason,
+          requestContextCostTier: payloadReport?.requestContextCostTier,
+          requestContextFallbackUsed: payloadReport?.requestContextFallbackUsed,
+          requestContextFallbackFrom: payloadReport?.requestContextFallbackFrom,
+          requestContextFallbackTo: payloadReport?.requestContextFallbackTo,
+          requestedButNotLoadedSections: payloadReport?.requestedButNotLoadedSections,
+          requestedContextSections: payloadReport?.requestedContextSections,
+          auxiliarySavingsTokens: payloadReport?.auxiliarySavingsTokens,
+          systemPromptSavingsTokens: payloadReport?.systemPromptSavingsTokens,
+          systemPromptProfileReason: payloadReport?.systemPromptProfileReason,
+          readOnlyRun: auxiliarySelection?.readOnly,
+          toolsetReason: auxiliarySelection?.reason,
+          routerSource: auxiliarySelection?.routerSource,
+          routerConfidence: auxiliarySelection?.routerConfidence,
+          routerError: auxiliarySelection?.routerError,
+          routerDiagnostics: auxiliarySelection?.routerDiagnostics,
+          // ── Context Planner telemetry (audit) ──
+          contextPlannerStatus: auxiliarySelection?.contextPlannerStatus,
+          contextPlannerSource: auxiliarySelection?.contextPlannerSource,
+          contextPlannerModel: auxiliarySelection?.contextPlannerModel,
+          contextPlannerError: auxiliarySelection?.contextPlannerError,
+          contextPlannerRawOutput: auxiliarySelection?.contextPlannerRawOutput,
+          contextPlannerFallbackReason: auxiliarySelection?.contextPlannerFallbackReason,
+          contextPlannerTaskDomain: auxiliarySelection?.contextPlan?.taskDomain,
+          contextPlannerRequiredCapabilities: auxiliarySelection?.contextPlan?.requiredCapabilities,
+          contextPlannerSelectedContexts: auxiliarySelection?.contextPlan?.selectedContexts,
+          contextPlannerRejectedContexts: auxiliarySelection?.contextPlannerRejectedContexts,
+          contextPlannerSelectionReason: auxiliarySelection?.contextPlannerSelectionReason,
+          expandedToolNames: toolsetSelector?.getExpandedNames(),
+          deniedToolNames: toolsetSelector?.getDeniedNames(),
+          // ── Read Range Tracker telemetry (overlap dedup) ──
+          // readRanges/skippedOverlappingReads/adjustedReadRanges reflect
+          // tool calls executed between the previous request and this one;
+          // getAndResetOverlapStats() resets the counters each call.
+          readRanges: getReadRanges(),
+          skippedOverlappingReads: overlapStats.skippedOverlappingReads,
+          adjustedReadRanges: overlapStats.adjustedReadRanges,
+          // ── Mention context redundancy telemetry (Correção B) ──
+          // mentionContextSentFullThisTurn=false means the follow-up-turn
+          // stub fired (full outline replaced by a short reference);
+          // mentionContextRepeatedTokens is the token saving vs re-sending
+          // the full body. Both reset each turn.
+          ...getAndResetMentionContextStats(),
+          // ── "Stopped without editing" guardrail telemetry ──
+          // Cumulative values as of THIS request. The guardrail fires AFTER
+          // onRequestUsage, so noEditGuardTriggered reflects the PREVIOUS
+          // turn's firing. Final decision fields (completionGuardDecision /
+          // completionGuardReason) are stamped on the last entry by the
+          // caller after the loop returns (see QueryTerminal).
+          runHasEdited,
+          noEditRecoveryCount,
+          noEditGuardTriggered: guardTriggeredLastTurn,
+          noEditGuardReason,
+          noEditRecoveryAction,
+          firstWriteTurn,
+          writeActionCount,
+          originalTaskWriteActionCount: executionPhase === 'original_task' ? writeActionCount : 0,
+          originalTaskFirstWriteTurn: executionPhase === 'original_task' ? firstWriteTurn : undefined,
+          // ── Delegate/sub-agent telemetry ──
+          // Read from the toolExecutor's last delegate call info. Populated
+          // on the turn AFTER delegate was called (onRequestUsage fires before
+          // tool execution; the data surfaces on the next request's entry).
+          ...(() => {
+            const di = params.getDelegateTelemetry?.() ?? null
+            if (!di) return {}
+            return {
+              delegateRequestedMember: di.requestedMember,
+              delegateResolvedMember: di.resolvedMember,
+              delegateBlocked: di.blocked,
+              delegateBlockedReason: di.blockedReason,
+              delegateInputSchemaVersion: di.inputSchemaVersion,
+              delegateRecoveryAttempted: di.recoveryAttempted,
+            }
+          })(),
+        })
+      } catch { /* usage logging never blocks the agent loop */ }
+    }
+    // Reset the guard-triggered flag after the usage entry has captured it,
+    // so it's only true on the request that immediately follows the firing.
+    guardTriggeredLastTurn = false;
 
     // ── Build provider-native state for round-trip ──
     // Reconstruct the assistant message as the provider would have
@@ -1621,6 +2485,24 @@ export async function* query(
     );
 
     yield { type: "message_stop", stopReason, usage: turnUsage, providerState: turnProviderState };
+
+    // ── Output-cap escalation (porte claude-vaz) ──
+    // O output foi truncado pelo cap ("length" = OpenAI-compat; "max_tokens"
+    // = Anthropic). Duplica o cap dos pedidos SEGUINTES até ao máximo do
+    // modelo (getContextLimits) ou ESCALATED_MAX_OUTPUT_TOKENS. Aplica-se
+    // também quando há tool calls: argsJson truncado a meio é exatamente o
+    // caso que o reparo de _parseError tenta remendar — mais vale o próximo
+    // pedido ter espaço do que remendar JSON outra vez.
+    if (stopReason === "length" || stopReason === "max_tokens") {
+      const ceiling = getContextLimits?.()?.maxOutputTokens ?? ESCALATED_MAX_OUTPUT_TOKENS;
+      const next = Math.min(ceiling, maxTokens * 2);
+      if (next > maxTokens) {
+        escalatedMaxTokens = next;
+        console.debug(
+          `[query] output truncated (finish_reason=${stopReason}) — escalating max_tokens ${maxTokens} → ${next} for subsequent requests`,
+        );
+      }
+    }
 
     // ── Build assistant message and add to history ──
 
@@ -1709,9 +2591,15 @@ export async function* query(
         };
       }
 
-      // No tool calls — check for max_tokens continuation
+      // No tool calls — check for output-cap truncation continuation.
+      // BUG HISTÓRICO (corrigido 2026-07-13): comparava só com "max_tokens"
+      // (vocabulário Anthropic), mas os providers OpenAI-compat do data-plane
+      // emitem finish_reason "length" — a recovery NUNCA disparava e respostas
+      // truncadas terminavam a run como se estivessem completas. O cap dos
+      // pedidos seguintes já foi escalado no pós-stream (escalatedMaxTokens),
+      // por isso a continuação tem espaço real, não só o pedido de brevidade.
       if (
-        stopReason === "max_tokens" &&
+        (stopReason === "length" || stopReason === "max_tokens") &&
         maxOutputTokensRecoveryCount < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
       ) {
         state = {
@@ -1721,7 +2609,8 @@ export async function* query(
             {
               role: "user",
               content:
-                "Output token limit hit. Resume directly — no apology, no recap. Break remaining work into smaller pieces.",
+                "Your previous message hit the output token limit and was cut off mid-answer. " +
+                "Resume EXACTLY where it stopped — no apology, no recap, do not repeat text already produced.",
             },
           ],
           maxOutputTokensRecoveryCount: maxOutputTokensRecoveryCount + 1,
@@ -1735,7 +2624,7 @@ export async function* query(
       // making them wait for a fresh dispatch. Same steering collector as the
       // post-tool boundary; a non-empty return keeps the loop alive.
       if (params.collectQueuedSteering) {
-        let steered: string | null = null;
+        let steered: QueuedSteeringContent | null = null;
         try {
           steered = await params.collectQueuedSteering();
         } catch {
@@ -1746,11 +2635,85 @@ export async function* query(
             ...state,
             messages: [
               ...updatedMessages,
-              { role: "user", content: [{ type: "text", text: steered }] },
+              steeringContentToUserMessage(steered),
             ],
             continuationCount: 0,
           };
           continue;
+        }
+      }
+
+      // Guardrail: mutable original-task run that ends without a single file
+      // mutation. The model likely diagnosed the work but deferred the edit.
+      // Give it one chance to continue; if it stops again without editing,
+      // let it end with explicit telemetry instead of looping on reads.
+      if (
+        mutableTask &&
+        !runHasEdited &&
+        noEditRecoveryCount < 1 &&
+        toolsetSelector &&
+        !toolsetSelector.isReadOnly()
+      ) {
+        const hasEditFile = toolsetSelector.isActive(EDIT_FILE);
+        noEditGuardReason = "mutable original_task attempted to stop without file edit";
+        noEditRecoveryAction = hasEditFile ? "apply_edit" : "request_tools:edit_file";
+        state = {
+          ...state,
+          messages: [
+            ...updatedMessages,
+            {
+              role: "user",
+              content: hasEditFile
+                ? "You have edit_file available but have not applied any edit yet. Apply the requested change now — do not defer to the next turn."
+                : "You have not applied any file edit yet. The edit_file tool is not in your active toolset — call request_tools to activate it, then apply the requested change. Do not defer to the next turn — continue now.",
+            },
+          ],
+          continuationCount: 0,
+        };
+        noEditRecoveryCount++;
+        guardTriggeredLastTurn = true;
+        continue;
+      }
+
+      // Guardrail: run is stopping while the task tracker still has
+      // non-completed tasks AND the model never called update_tasks this run.
+      // This is the observed "claims everything is done, tracker says 0/N"
+      // failure: the model narrates completion (or calls update_session_memory
+      // believing that IS the tracker) and ends, stranding the panel on
+      // pending rows. One reconciliation nudge per run; a model that touched
+      // the tracker at all (even partially) is deliberately NOT nudged —
+      // partial sessions legitimately end with pending tasks.
+      if (taskGuardCount < 1 && !runTouchedTaskTracker) {
+        try {
+          const { useAgentStore } = await import("../../stores/agentStore");
+          const tasks = useAgentStore.getState().tasks;
+          const unfinished = tasks.filter((tk) => tk.status !== "completed");
+          if (tasks.length > 0 && unfinished.length > 0) {
+            taskGuardCount++;
+            const preview = unfinished
+              .slice(0, 4)
+              .map((tk) => `- ${tk.description ?? tk.id} (${tk.status})`)
+              .join("\n");
+            state = {
+              ...state,
+              messages: [
+                ...updatedMessages,
+                {
+                  role: "user",
+                  content:
+                    `The task tracker still shows ${unfinished.length} task(s) not completed:\n${preview}\n\n` +
+                    `Reconcile it before finishing (update_session_memory is NOT the task tracker — use update_tasks): ` +
+                    `if this work is actually done and verified, call update_tasks now marking each finished task completed (with evidence); ` +
+                    `if something remains, continue working on it now; if a task is obsolete or blocked, update its status/description to say so. ` +
+                    `Do not end the run with a stale tracker.`,
+                },
+              ],
+              continuationCount: 0,
+            };
+            continue;
+          }
+        } catch {
+          // Guardrail is best-effort — never let it break the stop path.
         }
       }
 
@@ -1761,6 +2724,28 @@ export async function* query(
         turnCount: state.turnCount,
         totalInputTokens,
         totalOutputTokens,
+        // Guardrail telemetry — final values at loop termination.
+        runHasEdited,
+        noEditRecoveryCount,
+        noEditGuardTriggered: noEditRecoveryCount > 0,
+        firstWriteTurn,
+        writeActionCount,
+        originalTaskWriteActionCount: executionPhase === 'original_task' ? writeActionCount : 0,
+        originalTaskFirstWriteTurn: executionPhase === 'original_task' ? firstWriteTurn : undefined,
+        noEditGuardReason,
+        noEditRecoveryAction,
+        completionGuardDecision:
+          noEditRecoveryCount > 0 && runHasEdited
+            ? "recovered_then_completed"
+            : noEditRecoveryCount > 0 && !runHasEdited
+              ? "recovery_failed_then_completed"
+              : "completed",
+        completionGuardReason:
+          noEditRecoveryCount > 0
+            ? runHasEdited
+              ? "mutable original_task attempted to stop without edit; guardrail steered the model to request/edit and apply the change"
+              : "mutable original_task attempted to stop without edit; guardrail fired but model did not recover"
+            : undefined,
       };
     }
 
@@ -1770,7 +2755,7 @@ export async function* query(
 
     // ── Execute tools ──
 
-    const toolResultBlocks: ContentBlockAPI[] = [];
+    const toolResultBlocks: Array<ContentBlockAPI & { isError?: boolean }> = [];
 
     for (const tc of collectedToolCalls) {
       if (signal.aborted) {
@@ -1790,8 +2775,37 @@ export async function* query(
         toolInput = {};
       }
 
+      if (toolsetSelector?.isReadOnly() && DESTRUCTIVE_TOOLS.has(tc.name)) {
+        toolsetSelector.noteDeniedToolName(tc.name);
+        const blocked = `Tool blocked: ${tc.name} cannot run because the latest user request is read-only/no-edit.`;
+        yield {
+          type: "tool_result",
+          toolUseId: tc.id,
+          content: blocked,
+          isError: true,
+        };
+        toolResultBlocks.push({
+          type: "tool_result",
+          toolCallId: tc.id,
+          content: blocked,
+          isError: true,
+        });
+        continue;
+      }
+
       try {
-        const result = await executeTool(tc.name, toolInput, tc.id, signal);
+        // Execução em streaming: se este tool call foi pre-despachado durante
+        // o stream, consome o resultado (já pronto ou quase). O guard de
+        // argsJson invalida o pre-dispatch quando args chegaram DEPOIS do
+        // despacho (interleaving raro de provider): re-executa com os args
+        // completos — o pre-dispatch é sempre read-only, o custo é só o
+        // overlap perdido, nunca um side effect duplicado.
+        const pre = preDispatched.get(tc.id);
+        const result =
+          pre && pre.argsJson === tc.argsJson
+            ? await pre.promise
+            : await executeTool(tc.name, toolInput, tc.id, signal);
+        const modelContent = sanitizeToolResultForModel(result.content)
         yield {
           type: "tool_result",
           toolUseId: tc.id,
@@ -1801,8 +2815,25 @@ export async function* query(
         toolResultBlocks.push({
           type: "tool_result",
           toolCallId: tc.id,
-          content: result.content,
+          content: modelContent,
+          isError: result.isError,
         });
+        // Track whether any file-mutating tool ran successfully this run.
+        // Drives the "stopped without editing" guardrail at the stop path.
+        if (!result.isError && DESTRUCTIVE_TOOLS.has(tc.name)) {
+          runHasEdited = true;
+          writeActionCount++;
+          if (firstWriteTurn === undefined) {
+            firstWriteTurn = state.turnCount;
+          }
+        }
+        // Track whether the model touched the task tracker at all this run.
+        // Drives the task-reconciliation guardrail at the stop path: a run
+        // that ends with unfinished tasks AND never called update_tasks is
+        // the "claims done, tracker says 0/N" failure mode.
+        if (!result.isError && tc.name === "update_tasks") {
+          runTouchedTaskTracker = true;
+        }
       } catch (err) {
         const errMsg = formatError(err);
         yield {
@@ -1815,7 +2846,38 @@ export async function* query(
           type: "tool_result",
           toolCallId: tc.id,
           content: `Tool execution error: ${errMsg}`,
+          isError: true,
         });
+      }
+    }
+
+    // ── Turn-efficiency measurement ──
+    // When the loop exceeds the 3-4-request target for localized fixes,
+    // infer WHY it continued from what the turn actually did (tool calls +
+    // results). Never blocks — pure observability so a 7-turn bugfix leaves
+    // a forensic trail of the technical reason (or the lack of one).
+    if (state.turnCount >= EFFICIENCY_TARGET_TURNS) {
+      try {
+        const reason = inferContinuationReason({
+          toolCalls: collectedToolCalls.map((tc) => ({ name: tc.name })),
+          toolResults: toolResultBlocks
+            .filter((b): b is ContentBlockAPI & { type: "tool_result"; content: string; isError?: boolean } =>
+              b.type === "tool_result")
+            .map((b) => ({
+              content: b.content ?? "",
+              isError: !!b.isError,
+            })),
+        });
+        lastContinuationReason = reason;
+        const legit = isLegitimateContinuationReason(reason);
+        // eslint-disable-next-line no-console
+        console.debug(
+          `[query] turn efficiency · turn ${state.turnCount} · ` +
+          (legit ? `continuing: ${reason}` : `WARNING — ${reason}`) +
+          (legit ? "" : " — consider wrapping up if the task is simple"),
+        );
+      } catch {
+        /* measurement never blocks the loop */
       }
     }
 
@@ -1856,10 +2918,7 @@ export async function* query(
       try {
         const steered = await params.collectQueuedSteering();
         if (steered) {
-          steeringMessages.push({
-            role: "user",
-            content: [{ type: "text", text: steered }],
-          });
+          steeringMessages.push(steeringContentToUserMessage(steered));
         }
       } catch {
         // Best-effort — a steering failure must never break the loop.

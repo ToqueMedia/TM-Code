@@ -18,7 +18,7 @@
  * (a single screenshot can blow the export from 10KB to 5MB).
  */
 
-import type { ChatSession, ChatMessage, ToolCallDisplay, Attachment, ByokSessionSnapshot } from '../types/chat'
+import type { ChatSession, ChatMessage, ToolCallDisplay, Attachment, ByokSessionSnapshot, RequestUsageEntry } from '../types/chat'
 import { t } from '@/i18n'
 
 /**
@@ -62,11 +62,80 @@ interface ExportOptions {
   envSnapshot?: EnvironmentSnapshot | null
 }
 
+export interface RequestEfficiencyReport {
+  totalRequests: number
+  symbolIndexRequests: number
+  symbolIndexTokensEstimate: number
+  symbolIndexFilesConsidered: number
+  symbolIndexFilesScanned: number
+  symbolIndexEntries: number
+  symbolIndexTruncated: boolean
+  finalReadRangeCount: number
+  finalReadRangeFileCount: number
+  finalReadToEndRangeCount: number
+  finalBoundedReadRangeCount: number
+  skippedOverlappingReads: number
+  adjustedReadRanges: number
+  readBeforeWriteBlockCount: number
+  readBeforeWriteBlockedTools: string[]
+  readBeforeWriteBlockedReasons: string[]
+  firstSymbolIndexRequest?: { requestNumber: number; turn: number }
+  readRangesBeforeFirstSymbolIndex?: number
+  readRangesAfterFirstSymbolIndex?: number
+}
+
 function isoTimestamp(ms: number): string {
   try {
     return new Date(ms).toISOString()
   } catch {
     return String(ms)
+  }
+}
+
+function unique(values: Array<string | undefined | null>): string[] {
+  return Array.from(new Set(values.filter((v): v is string => Boolean(v))))
+}
+
+export function buildRequestEfficiencyReport(log: RequestUsageEntry[] | undefined): RequestEfficiencyReport | null {
+  if (!log || log.length === 0) return null
+
+  const symbolEntries = log.filter(e => e.symbolIndexRequested)
+  const firstSymbolIndex = symbolEntries.length
+    ? log.findIndex(e => e.symbolIndexRequested)
+    : -1
+  const beforeSymbolReadRanges =
+    firstSymbolIndex > 0
+      ? log[firstSymbolIndex - 1]?.readRanges?.length ?? 0
+      : firstSymbolIndex === 0
+        ? 0
+        : undefined
+  const finalReadRanges = [...log].reverse().find(e => e.readRanges)?.readRanges ?? []
+  const readBeforeWriteBlockCount = Math.max(0, ...log.map(e => e.readBeforeWriteBlockCount ?? 0))
+
+  return {
+    totalRequests: log.length,
+    symbolIndexRequests: symbolEntries.length,
+    symbolIndexTokensEstimate: symbolEntries.reduce((sum, e) => sum + (e.symbolIndexTokensEstimate ?? 0), 0),
+    symbolIndexFilesConsidered: symbolEntries.reduce((sum, e) => sum + (e.symbolIndexFilesConsidered ?? 0), 0),
+    symbolIndexFilesScanned: symbolEntries.reduce((sum, e) => sum + (e.symbolIndexFilesScanned ?? 0), 0),
+    symbolIndexEntries: symbolEntries.reduce((sum, e) => sum + (e.symbolIndexEntries ?? 0), 0),
+    symbolIndexTruncated: symbolEntries.some(e => e.symbolIndexTruncated),
+    finalReadRangeCount: finalReadRanges.length,
+    finalReadRangeFileCount: new Set(finalReadRanges.map(r => r.path)).size,
+    finalReadToEndRangeCount: finalReadRanges.filter(r => r.readToEnd).length,
+    finalBoundedReadRangeCount: finalReadRanges.filter(r => !r.readToEnd).length,
+    skippedOverlappingReads: log.reduce((sum, e) => sum + (e.skippedOverlappingReads ?? 0), 0),
+    adjustedReadRanges: log.reduce((sum, e) => sum + (e.adjustedReadRanges ?? 0), 0),
+    readBeforeWriteBlockCount,
+    readBeforeWriteBlockedTools: unique(log.flatMap(e => e.readBeforeWriteBlockedTools ?? [])),
+    readBeforeWriteBlockedReasons: unique(log.flatMap(e => e.readBeforeWriteBlockedReasons ?? [])),
+    firstSymbolIndexRequest: firstSymbolIndex >= 0
+      ? { requestNumber: firstSymbolIndex + 1, turn: log[firstSymbolIndex]?.turn ?? 0 }
+      : undefined,
+    readRangesBeforeFirstSymbolIndex: beforeSymbolReadRanges,
+    readRangesAfterFirstSymbolIndex: beforeSymbolReadRanges === undefined
+      ? undefined
+      : Math.max(0, finalReadRanges.length - beforeSymbolReadRanges),
   }
 }
 
@@ -107,6 +176,7 @@ function sanitizeByokSnapshot(snap: ByokSessionSnapshot | null | undefined): Byo
 
 export function sessionToJson(session: ChatSession, opts: ExportOptions = {}): string {
   const stripImageData = opts.stripImageData !== false
+  const requestUsageLog = session.requestUsageLog ?? []
   const payload = {
     schemaVersion: 2,
     exportedAt: new Date().toISOString(),
@@ -118,6 +188,8 @@ export function sessionToJson(session: ChatSession, opts: ExportOptions = {}): s
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
       byokSnapshot: sanitizeByokSnapshot(session.byokSnapshot),
+      requestUsageLog,
+      requestEfficiencyReport: buildRequestEfficiencyReport(requestUsageLog),
       messages: session.messages.map(m => sanitizeMessage(m, stripImageData)),
     },
     environment: opts.envSnapshot ?? null,
@@ -286,6 +358,228 @@ function renderByokSnapshotMd(snap: ByokSessionSnapshot | null | undefined): str
   return lines
 }
 
+/** Per-request usage log — one row per chat.completions.create call.
+ *  Real input/output tokens + payloadInspector estimate + cache fields +
+ *  per-category breakdown. Lets you read consumption per request directly
+ *  from an exported session (eliminates inferring from compacted transcripts). */
+function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
+  if (!log || log.length === 0) return []
+  const lines: string[] = []
+  lines.push(`## Request usage log`)
+  lines.push(``)
+  lines.push(`One row per provider call. \`est.\` = payloadInspector estimate (ceil(chars/3)); \`real\` = provider usage; \`usage\` shows whether real provider counters were available.`)
+  lines.push(``)
+  const totalIn = log.reduce((s, e) => s + (e.inputTokens ?? 0), 0)
+  const totalOut = log.reduce((s, e) => s + (e.outputTokens ?? 0), 0)
+  const totalEst = log.reduce((s, e) => s + (e.estimatedInputTokens ?? 0), 0)
+  const totalMentionContext = log.reduce((s, e) => s + (e.mentionContextTokens ?? 0), 0)
+  const totalToolDefs = log.reduce((s, e) => s + (e.toolDefsTokens ?? 0), 0)
+  const totalCacheRead = log.reduce((s, e) => s + (e.cacheReadInputTokens ?? 0), 0)
+  const totalCacheCreate = log.reduce((s, e) => s + (e.cacheCreationInputTokens ?? 0), 0)
+  // uncached = input tokens that were neither read from cache nor written to it.
+  const totalUncached = Math.max(0, totalIn - totalCacheRead - totalCacheCreate)
+  const cachedPct = totalIn > 0 ? Math.round(((totalCacheRead + totalCacheCreate) / totalIn) * 100) : 0
+  lines.push(`**Totals:** ${log.length} requests · IN ${totalIn.toLocaleString()} (est. ${totalEst.toLocaleString()}) · OUT ${totalOut.toLocaleString()}`)
+  if (totalMentionContext > 0) {
+    lines.push(`**@mention context:** est. ${totalMentionContext.toLocaleString()} input tokens`)
+  }
+  if (totalToolDefs > 0) {
+    lines.push(`**Tool definitions:** est. ${totalToolDefs.toLocaleString()} input tokens`)
+  }
+  if (totalCacheRead > 0 || totalCacheCreate > 0) {
+    lines.push(`**Prompt cache:** read ${totalCacheRead.toLocaleString()} · create ${totalCacheCreate.toLocaleString()} · uncached ${totalUncached.toLocaleString()} · ${cachedPct}% of input cached`)
+  }
+  const efficiency = buildRequestEfficiencyReport(log)
+  if (efficiency) {
+    lines.push(``)
+    lines.push(`**Agent reading efficiency:**`)
+    lines.push(``)
+    lines.push(`| metric | value |`)
+    lines.push(`|---|---:|`)
+    lines.push(`| symbol index requests | ${efficiency.symbolIndexRequests.toLocaleString()} / ${efficiency.totalRequests.toLocaleString()} |`)
+    lines.push(`| symbol index tokens est. | ${efficiency.symbolIndexTokensEstimate.toLocaleString()} |`)
+    lines.push(`| symbol index files considered | ${efficiency.symbolIndexFilesConsidered.toLocaleString()} |`)
+    lines.push(`| symbol index files scanned | ${efficiency.symbolIndexFilesScanned.toLocaleString()} |`)
+    lines.push(`| symbol index entries | ${efficiency.symbolIndexEntries.toLocaleString()} |`)
+    lines.push(`| symbol index truncated | ${efficiency.symbolIndexTruncated ? 'yes' : 'no'} |`)
+    lines.push(`| final read ranges | ${efficiency.finalReadRangeCount.toLocaleString()} |`)
+    lines.push(`| files read | ${efficiency.finalReadRangeFileCount.toLocaleString()} |`)
+    lines.push(`| read-to-end ranges | ${efficiency.finalReadToEndRangeCount.toLocaleString()} |`)
+    lines.push(`| bounded ranges | ${efficiency.finalBoundedReadRangeCount.toLocaleString()} |`)
+    lines.push(`| skipped overlapping reads | ${efficiency.skippedOverlappingReads.toLocaleString()} |`)
+    lines.push(`| adjusted read ranges | ${efficiency.adjustedReadRanges.toLocaleString()} |`)
+    lines.push(`| read-before-write blocks | ${efficiency.readBeforeWriteBlockCount.toLocaleString()} |`)
+    if (efficiency.firstSymbolIndexRequest) {
+      lines.push(`| first symbol index request | #${efficiency.firstSymbolIndexRequest.requestNumber.toLocaleString()} / turn ${efficiency.firstSymbolIndexRequest.turn.toLocaleString()} |`)
+      lines.push(`| read ranges before symbol index | ${efficiency.readRangesBeforeFirstSymbolIndex?.toLocaleString() ?? '—'} |`)
+      lines.push(`| read ranges after symbol index | ${efficiency.readRangesAfterFirstSymbolIndex?.toLocaleString() ?? '—'} |`)
+    }
+    if (efficiency.readBeforeWriteBlockedTools.length) {
+      lines.push(`| blocked write tools | ${efficiency.readBeforeWriteBlockedTools.map(tool => `\`${tool}\``).join(', ')} |`)
+    }
+    if (efficiency.readBeforeWriteBlockedReasons.length) {
+      lines.push(`| block reasons | ${efficiency.readBeforeWriteBlockedReasons.map(reason => `\`${reason}\``).join(', ')} |`)
+    }
+  }
+  lines.push(``)
+  lines.push('| # | turn | provider | model | usage | msgs | tools | tool defs | IN (real) | OUT | est. IN | @mention ctx | cache read | cache create | uncached IN |')
+  lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|')
+  log.forEach((e, i) => {
+    const cRead = e.cacheReadInputTokens ?? 0
+    const cCreate = e.cacheCreationInputTokens ?? 0
+    const uncached = Math.max(0, (e.inputTokens ?? 0) - cRead - cCreate)
+    const usageState = e.usageAvailable === false ? 'missing' : 'provider'
+    const tools = e.toolCount != null
+      ? `${e.toolCount}${e.toolCountTotal != null ? `/${e.toolCountTotal}` : ''}`
+      : '—'
+    lines.push(`| ${i + 1} | ${e.turn} | ${e.provider ?? '—'} | ${e.model} | ${usageState} | ${e.totalMessages?.toLocaleString() ?? '—'} | ${tools} | ${e.toolDefsTokens?.toLocaleString() ?? '—'} | ${e.inputTokens.toLocaleString()} | ${e.outputTokens.toLocaleString()} | ${e.estimatedInputTokens.toLocaleString()} | ${e.mentionContextTokens?.toLocaleString() ?? '—'} | ${e.cacheReadInputTokens?.toLocaleString() ?? '—'} | ${e.cacheCreationInputTokens?.toLocaleString() ?? '—'} | ${uncached.toLocaleString()} |`)
+  })
+  lines.push(``)
+  // Collapsible per-request breakdown — top 5 by real input tokens.
+  const top = [...log].sort((a, b) => (b.inputTokens ?? 0) - (a.inputTokens ?? 0)).slice(0, 5)
+  for (const e of top) {
+    const idx = log.indexOf(e) + 1
+    lines.push(`<details><summary>breakdown · req #${idx} · turn ${e.turn} · IN ${e.inputTokens.toLocaleString()} (est. ${e.estimatedInputTokens.toLocaleString()})</summary>`)
+    lines.push(``)
+    lines.push('| category | blocks | tokens | chars |')
+    lines.push('|---|---|---|---|')
+    for (const [cat, v] of Object.entries(e.breakdown ?? {})) {
+      lines.push(`| ${cat} | ${v.blocks} | ${v.tokens.toLocaleString()} | ${v.chars.toLocaleString()} |`)
+    }
+    lines.push(``)
+    if (e.systemPromptSections?.length) {
+      lines.push(`**System prompt sections**`)
+      lines.push(``)
+      lines.push('| section | location | tokens | chars | on-demand candidate |')
+      lines.push('|---|---|---|---|---|')
+      for (const s of e.systemPromptSections.slice(0, 12)) {
+        lines.push(`| ${escapeTableCell(s.name)} | ${s.location} | ${s.tokens.toLocaleString()} | ${s.chars.toLocaleString()} | ${s.auxiliaryCandidate ? 'yes' : '—'} |`)
+      }
+      lines.push(``)
+    }
+    if (e.toolNames?.length) {
+      lines.push(`**Toolset**`)
+      lines.push(``)
+      lines.push(e.toolNames.map(name => `\`${name}\``).join(', '))
+      lines.push(``)
+    }
+    if (
+      e.mentionContextRepeatedTokens != null
+      || e.mentionContextFullTokens != null
+      || e.mentionContextStubTokens != null
+      || e.mentionContextRepeatedTokensCumulative != null
+    ) {
+      lines.push(`**Mention context savings**`)
+      lines.push(``)
+      lines.push(`| field | tokens |`)
+      lines.push(`|---|---:|`)
+      if (e.mentionContextFullTokens != null) lines.push(`| full mention context | ${e.mentionContextFullTokens.toLocaleString()} |`)
+      if (e.mentionContextStubTokens != null) lines.push(`| stub sent | ${e.mentionContextStubTokens.toLocaleString()} |`)
+      if (e.mentionContextRepeatedTokens != null) lines.push(`| saved this request | ${e.mentionContextRepeatedTokens.toLocaleString()} |`)
+      if (e.mentionContextRepeatedTokensCumulative != null) lines.push(`| saved cumulative | ${e.mentionContextRepeatedTokensCumulative.toLocaleString()} |`)
+      if (e.mentionContextRefId) lines.push(`| ref id | ${escapeTableCell(e.mentionContextRefId)} |`)
+      lines.push(``)
+    }
+    // ── Lazy System Prompt + Tighter Toolset (Phase 1) ──
+    // Proves the tighter toolset reached the provider: which profile the
+    // Intent Router chose, the core/auxiliary token split, the savings, and
+    // which tools were expanded via request_tools vs denied by the bound.
+    const hasLazyInfo = e.selectedPromptProfile != null
+      || e.coreContextTokens != null
+      || e.auxiliarySavingsTokens != null
+      || (e.expandedToolNames?.length ?? 0) > 0
+      || (e.deniedToolNames?.length ?? 0) > 0
+    if (hasLazyInfo) {
+      lines.push(`**Lazy system prompt + tighter toolset**`)
+      lines.push(``)
+      lines.push(`| field | value |`)
+      lines.push(`|---|---|`)
+      lines.push(`| prompt profile | ${e.selectedPromptProfile ?? '—'}${e.readOnlyRun ? ' (read-only)' : ''} |`)
+      if (e.routerSource) lines.push(`| router | ${e.routerSource}${e.routerConfidence && e.routerConfidence !== 'none' ? ` (${e.routerConfidence})` : ''}${e.routerError ? ` — ERROR: ${escapeTableCell(e.routerError)}` : ''} |`)
+      if (e.toolsetReason) lines.push(`| reason | ${escapeTableCell(e.toolsetReason)} |`)
+      if (e.systemPromptProfileReason && e.systemPromptProfileReason !== e.toolsetReason) lines.push(`| system profile reason | ${escapeTableCell(e.systemPromptProfileReason)} |`)
+      // Full router diagnostics — shown when the router ran (model or fallback)
+      // so a failed run is diagnosable from the export alone.
+      const d = e.routerDiagnostics
+      if (d) {
+        lines.push(`| router URL | ${escapeTableCell(d.url)} |`)
+        lines.push(`| router HTTP | ${d.httpStatus} |`)
+        if (d.servedModel) lines.push(`| router served model | ${escapeTableCell(d.servedModel)} |`)
+        if (d.configKey) lines.push(`| router config key | ${escapeTableCell(d.configKey)} |`)
+        if (d.contentType) lines.push(`| router content-type | ${escapeTableCell(d.contentType)} |`)
+        lines.push(`| router appcheck | ${d.appCheckPresent ? 'present' : 'absent'} |`)
+        if (d.parseError) lines.push(`| router parse error | ${escapeTableCell(d.parseError)} |`)
+        if (d.rawBodyPreview) {
+          lines.push(``)
+          lines.push(`**router raw body (first 500 chars):**`)
+          lines.push(``)
+          lines.push('```')
+          lines.push(d.rawBodyPreview)
+          lines.push('```')
+          lines.push(``)
+        }
+        if (d.contentPreview) {
+          lines.push(`**router model content (first 500 chars):**`)
+          lines.push(``)
+          lines.push('```')
+          lines.push(d.contentPreview)
+          lines.push('```')
+          lines.push(``)
+        }
+      }
+      if (e.coreContextTokens != null) lines.push(`| core context tokens | ${e.coreContextTokens.toLocaleString()} |`)
+      if (e.coreSystemTokens != null) lines.push(`| core system tokens | ${e.coreSystemTokens.toLocaleString()} |`)
+      if (e.onDemandIndexTokens != null) lines.push(`| on-demand index tokens | ${e.onDemandIndexTokens.toLocaleString()} |`)
+      if (e.auxiliaryContextTokens != null) lines.push(`| auxiliary context tokens | ${e.auxiliaryContextTokens.toLocaleString()} |`)
+      if (e.auxiliarySavingsTokens != null) lines.push(`| auxiliary savings tokens | ${e.auxiliarySavingsTokens.toLocaleString()} |`)
+      if (e.systemPromptSavingsTokens != null) lines.push(`| system prompt savings tokens | ${e.systemPromptSavingsTokens.toLocaleString()} |`)
+      if (e.auxiliaryLoaded?.length) lines.push(`| auxiliary loaded | ${e.auxiliaryLoaded.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.auxiliaryOmitted?.length) lines.push(`| auxiliary omitted | ${e.auxiliaryOmitted.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.loadedSystemSections?.length) lines.push(`| loaded system sections | ${e.loadedSystemSections.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.omittedSystemSections?.length) lines.push(`| omitted system sections | ${e.omittedSystemSections.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.autoLoadedSystemSections?.length) lines.push(`| auto-loaded system sections | ${e.autoLoadedSystemSections.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.contextPlanCandidateSections?.length) lines.push(`| context plan candidates | ${e.contextPlanCandidateSections.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.modelRequestedContextSections?.length) lines.push(`| model requested context sections | ${e.modelRequestedContextSections.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.requestContextToolCalls != null) lines.push(`| request_context tool calls | ${e.requestContextToolCalls.toLocaleString()} |`)
+      if (e.requestContextSectionsLoaded?.length) lines.push(`| request_context sections loaded | ${e.requestContextSectionsLoaded.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.requestContextSelectionReason && Object.keys(e.requestContextSelectionReason).length) lines.push(`| request_context selection reason | ${Object.entries(e.requestContextSelectionReason).map(([id, reason]) => `\`${id}\`: ${escapeTableCell(String(reason))}`).join('<br>')} |`)
+      if (e.requestContextCostTier && Object.keys(e.requestContextCostTier).length) lines.push(`| request_context cost tier | ${Object.entries(e.requestContextCostTier).map(([id, tier]) => `\`${id}\`: ${tier}`).join(', ')} |`)
+      if (e.requestContextFallbackUsed != null) lines.push(`| request_context fallback used | ${e.requestContextFallbackUsed ? 'true' : 'false'} |`)
+      if (e.requestContextFallbackFrom?.length) lines.push(`| request_context fallback from | ${e.requestContextFallbackFrom.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.requestContextFallbackTo?.length) lines.push(`| request_context fallback to | ${e.requestContextFallbackTo.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.requestedButNotLoadedSections?.length) lines.push(`| requested but not loaded sections | ${e.requestedButNotLoadedSections.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.expandedToolNames?.length) lines.push(`| expanded via request_tools | ${e.expandedToolNames.map(name => `\`${name}\``).join(', ')} |`)
+      if (e.deniedToolNames?.length) lines.push(`| DENIED by profile bound | ${e.deniedToolNames.map(name => `\`${name}\``).join(', ')} |`)
+      if (e.contextPlannerStatus) lines.push(`| context planner status | ${e.contextPlannerStatus} |`)
+      if (e.contextPlannerError) lines.push(`| context planner error | ${escapeTableCell(e.contextPlannerError)} |`)
+      if (e.contextPlannerRawOutput) lines.push(`| context planner raw output | ${escapeTableCell(e.contextPlannerRawOutput)} |`)
+      if (e.contextPlannerTaskDomain) lines.push(`| planner task domain | ${e.contextPlannerTaskDomain} |`)
+      if (e.contextPlannerRequiredCapabilities?.length) lines.push(`| required capabilities | ${e.contextPlannerRequiredCapabilities.map(c => `\`${c}\``).join(', ')} |`)
+      if (e.contextPlannerSelectedContexts?.length) lines.push(`| planner selected contexts | ${e.contextPlannerSelectedContexts.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.contextPlannerRejectedContexts?.length) lines.push(`| planner rejected contexts | ${e.contextPlannerRejectedContexts.map(id => `\`${id}\``).join(', ')} |`)
+      if (e.contextPlannerSelectionReason) lines.push(`| planner selection reason | ${escapeTableCell(e.contextPlannerSelectionReason)} |`)
+      lines.push(``)
+    }
+    if (e.auxiliaryPromptCandidates?.length) {
+      lines.push(`**Auxiliary/on-demand candidates**`)
+      lines.push(``)
+      lines.push('| section | location | tokens | reason |')
+      lines.push('|---|---|---|---|')
+      for (const s of e.auxiliaryPromptCandidates.slice(0, 8)) {
+        lines.push(`| ${escapeTableCell(s.name)} | ${s.location} | ${s.tokens.toLocaleString()} | ${escapeTableCell(s.reason ?? '')} |`)
+      }
+      lines.push(``)
+    }
+    lines.push(`</details>`)
+    lines.push(``)
+  }
+  return lines
+}
+
+function escapeTableCell(value: string): string {
+  return value.replace(/\|/g, '\\|').replace(/\n/g, ' ')
+}
+
 function renderEnvironmentMd(env: EnvironmentSnapshot): string {
   const out: string[] = []
   out.push(`# Environment snapshot`)
@@ -337,6 +631,7 @@ export function sessionToMarkdown(session: ChatSession, opts: ExportOptions = {}
     out.push(`---`)
     out.push(``)
   }
+  out.push(...renderRequestUsageMd(session.requestUsageLog))
   if (opts.envSnapshot) {
     out.push(``)
     out.push(renderEnvironmentMd(opts.envSnapshot))
@@ -395,7 +690,7 @@ export async function buildEnvironmentSnapshot(session: ChatSession): Promise<En
     else out.projectType = 'node'
   } catch { /* not a Node project, or no package.json — leave as 'unknown' */ }
 
-  // Skills available for this project + chat mode. loadSkills is cached, so
+  // Skills available for this project prompt. loadSkills is cached, so
   // calling it here doesn't double-cost when the live agent already ran.
   try {
     const { default: SkillService } = await import('../services/agent/skillService')

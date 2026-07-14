@@ -9,7 +9,6 @@
  * - Prompt cache (contextBuilder)
  * - Memory selector cache (memorySelector)
  * - Skill service cache (skillService)
- * - Scaffolding detector cache (scaffoldingDetector)
  * - Context collapse staged summaries (contextCollapse)
  *
  * What is NOT cleared (intentionally):
@@ -22,13 +21,6 @@
 import { logger } from '../../utils/logger'
 
 export async function runPostCompactCleanup(): Promise<void> {
-  // Resolve project path lazily — avoids requiring callers to pass it
-  let projectPath: string | undefined
-  try {
-    const { useProjectStore } = await import('../../stores/projectStore')
-    projectPath = useProjectStore.getState().currentProject?.path
-  } catch { /* non-critical */ }
-
   // 1. Prompt cache — invalidate all (project filter unreliable post-compact)
   try {
     const ctxMod = await import('./contextBuilder')
@@ -47,15 +39,7 @@ export async function runPostCompactCleanup(): Promise<void> {
     skillMod.default.getInstance().invalidateCache()
   } catch { /* non-critical */ }
 
-  // 4. Scaffolding detector cache (per-project)
-  if (projectPath) {
-    try {
-      const { invalidateScaffoldingCache } = await import('../scaffoldingDetector')
-      invalidateScaffoldingCache(projectPath)
-    } catch { /* non-critical */ }
-  }
-
-  // 5. Context collapse — clear staged summaries (indices invalidated by compaction)
+  // 4. Context collapse — clear staged summaries (indices invalidated by compaction)
   try {
     const { resetContextCollapse } = await import('./collapse')
     resetContextCollapse()

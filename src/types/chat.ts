@@ -13,7 +13,7 @@ export interface Attachment {
   base64?: string
   /**
    * Número do chip `[Image #N]` (paridade claude-vaz, history.ts:59) —
-   * atribuído quando uma imagem é colada/anexada no CMD mode. O mesmo texto
+   * atribuído quando uma imagem é colada/anexada no prompt local. O mesmo texto
    * é inserido no input; no submit, a imagem só é enviada se o placeholder
    * ainda estiver no texto (apagar o texto remove a imagem — claude-vaz
    * handlePromptSubmit.ts:178). Estável após atribuição: remoções de outros
@@ -29,7 +29,16 @@ export interface Attachment {
  *  the correct positions: e.g. `[reasoning, tool_call, tool_call, reasoning]`
  *  rather than collapsing every thinking pass into a single block at the top. */
 export type ContentBlock =
-  | { type: 'text'; text: string }
+  | {
+      type: 'text'
+      text: string
+      /**
+       * Visible in the transcript UI, but excluded when rebuilding model
+       * history from legacy UI state. Used for app-generated progress text
+       * that is not provider output.
+       */
+      uiOnly?: boolean
+    }
   | { type: 'tool_call'; toolCallId: string }
   | {
       type: 'reasoning'
@@ -158,14 +167,12 @@ export interface ToolCallDisplay {
   /**
    * True once the tool actually BEGAN executing (set on onToolCallStart, which
    * fires right before toolExecutor.execute() in the serial tool loop). Tool
-   * calls are added with status:'running' the moment they stream in
-   * (addPendingToolCall), but the loop runs them one at a time and blocks on
-   * each diff approval — so a turn that emits N edits shows the first one's
-   * approval card while edits 2..N sit QUEUED behind it. Without this flag
-   * they all render an active "editing" spinner, which reads as N parallel
-   * edits firing at once (a confusing "race"). `started !== true` while
-   * status==='running' means "queued, not yet started" → rendered as a calm
-   * queued row instead of the active spinner.
+   * calls are added with status:'running' when they stream in, but execution
+   * starts one at a time and can pause on user gates such as diff approval.
+   * Without this flag, waiting calls would render active "editing" spinners,
+   * which reads as parallel writes. `started !== true` while status==='running'
+   * means "queued, not yet started" → rendered as a calm queued row instead of
+   * the active spinner.
    */
   started?: boolean
   timestamp: number
@@ -395,7 +402,19 @@ export interface CodeBlock {
 
 export interface ChatSession {
   id: string
+  /**
+   * Título da tarefa/sessão. Fixado UMA vez com o primeiro texto da primeira
+   * mensagem do user (chatStore.addMessage) e nunca reescrito automaticamente
+   * — só o próprio user o muda (updateSessionMeta). É este o título que a
+   * árvore paralela da sidebar e o dropdown de sessões mostram.
+   */
   name?: string
+  /**
+   * Descrição opcional escrita pelo USER (updateSessionMeta) — nunca gerada
+   * automaticamente. Aparece como tooltip/linha secundária nas superfícies
+   * de tarefas e viaja para outras janelas via agent-status.json.
+   */
+  description?: string
   projectPath: string
   messages: ChatMessage[]
   status: 'idle' | 'running' | 'paused' | 'completed' | 'error'
@@ -425,6 +444,8 @@ export interface ChatSession {
    * from falling through to the default coding agent and implementing files.
    */
   planResumePending?: PlanResumePending | null
+  /** Per-request usage log — one entry per provider call. */
+  requestUsageLog?: RequestUsageEntry[]
 }
 
 export interface PlanResumePending {
@@ -432,7 +453,6 @@ export interface PlanResumePending {
   originalArgs: string
   planPath: string
   planFileName: string
-  mode: 'chat' | 'terminal'
   updatedAt: number
 }
 
@@ -469,7 +489,9 @@ export interface ByokSessionSnapshot {
    *  agent service falls back to looking up the live byokStore. */
   supportsThinking?: boolean
   /** Shape of the thinking parameter the upstream provider expects.
-   *  - `anthropic`: `thinking: { type: 'enabled' | 'disabled', budget_tokens? }`
+   *  - `anthropic`: `thinking: { type: 'adaptive' }` + `output_config.effort`
+   *    on Claude 4.6+/Fable 5; older models use
+   *    `thinking: { type: 'enabled', budget_tokens }`
    *  - `openai_reasoning_effort`: `reasoning_effort: 'minimal' | 'medium'`
    *  - `qwen_enable_thinking`: `enable_thinking: boolean`
    *  - `gemini_thinking_budget`: `thinking_budget: number` (0 = off)
@@ -477,6 +499,9 @@ export interface ByokSessionSnapshot {
    *  silently ignored by Anthropic/OpenAI/Gemini upstreams, which is why
    *  the toggle was a no-op for BYOK before this field existed. */
   thinkingShape?: 'anthropic' | 'openai_reasoning_effort' | 'qwen_enable_thinking' | 'gemini_thinking_budget' | 'openrouter_reasoning' | 'mimo_chat_template_kwargs'
+  /** User-selected BYOK reasoning depth, frozen with the session. Providers
+   *  that only support boolean thinking ignore this. */
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   /** Model context window frozen at snapshot time (from the hardcoded catalog).
    *  Under BYOK the request bypasses the worker, so the IDE can't learn the
    *  window from X-Model-Context-Window — it seeds the auto-compact limit from
@@ -495,12 +520,314 @@ export interface SessionContext {
 export interface SessionSummary {
   id: string
   name?: string
+  /** Descrição escrita pelo user — ver ChatSession.description. */
+  description?: string
   projectPath: string
   messageCount: number
   lastMessage: string
   status: ChatSession['status']
   createdAt: number
   updatedAt: number
+}
+
+/** Per-request usage record — one entry per `chat.completions.create` call.
+ *  Captured in query.ts right after each provider response and persisted on
+ *  the session so an exported session shows real consumption per request
+ *  (eliminates inferring from compacted transcripts or in-memory-only totals).
+ *  Best-effort: cache fields are undefined when the provider/adapter doesn't
+ *  report them; estimatedInputTokens + breakdown come from the payloadInspector. */
+export interface RequestUsageEntry {
+  /** Stable unique id for the request (crypto.randomUUID). */
+  requestId: string
+  /** Agent-loop turn number (1-based, matches state.turnCount). */
+  turn: number
+  /** Provider id (BYOK providerId, or 'tms' for data-plane-routed). */
+  provider?: string
+  /** Model id the request was sent to. */
+  model: string
+  /** Real input tokens from the provider's usage chunk. */
+  inputTokens: number
+  /** Real output tokens from the provider's usage chunk. */
+  outputTokens: number
+  /** Whether inputTokens/outputTokens came from a provider usage chunk. */
+  usageAvailable?: boolean
+  /** TMS.md bootstrap/context telemetry for this request. */
+  executionPhase?: 'project_bootstrap' | 'original_task'
+  bootstrapCompleted?: boolean
+  originalTaskStarted?: boolean
+  originalTaskCompleted?: boolean
+  originalTaskFailedReason?: string
+  tmsFound?: boolean
+  tmsFoundAtStart?: boolean
+  tmsAvailable?: boolean
+  tmsAvailableAfterBootstrap?: boolean
+  tmsBootstrapCompleted?: boolean
+  tmsBootstrapTriggered?: boolean
+  tmsCreated?: boolean
+  tmsAlreadyExists?: boolean
+  tmsBootstrapFailed?: boolean
+  tmsPath?: string
+  tmsBootstrapInputTokens?: number
+  tmsBootstrapOutputTokens?: number
+  tmsBootstrapPhase?: string
+  tmsBootstrapToolset?: string
+  tmsWriteAttempted?: boolean
+  tmsWriteToolCallId?: string
+  tmsBootstrapFailedReason?: string
+  tmsContextSentFullThisTurn?: boolean
+  tmsContextStubTokens?: number
+  tmsStubTokens?: number
+  tmsSectionsAvailable?: string[]
+  tmsSectionsLoaded?: string[]
+  tmsRequestedSections?: string[]
+  tmsSectionsRequested?: string[]
+  originalUserMessageDisplayed?: boolean
+  originalTaskResumedAfterBootstrap?: boolean
+  originalTaskResumeRequestId?: string
+  mutableTask?: boolean
+  originalTaskWriteActionCount?: number
+  originalTaskFirstWriteTurn?: number
+  noEditGuardReason?: string
+  noEditRecoveryAction?: string
+  readBeforeWriteBlocked?: boolean
+  readBeforeWriteBlockCount?: number
+  readBeforeWriteBlockedTools?: string[]
+  readBeforeWriteBlockedReasons?: string[]
+  symbolIndexRequested?: boolean
+  symbolIndexFilesConsidered?: number
+  symbolIndexFilesScanned?: number
+  symbolIndexEntries?: number
+  symbolIndexTruncated?: boolean
+  symbolIndexTokensEstimate?: number
+  shellReadBlocked?: boolean
+  shellReadConvertedToFileTool?: boolean
+  executeCommandPurpose?: 'validation' | 'file_read' | 'unknown'
+  /** Anthropic prompt-cache creation tokens, when reported. */
+  cacheCreationInputTokens?: number
+  /** Anthropic prompt-cache read tokens, when reported. */
+  cacheReadInputTokens?: number
+  /** payloadInspector's pre-request estimate (ceil(chars/3)). Compare
+   *  against the real inputTokens per request to gauge estimator accuracy. */
+  estimatedInputTokens: number
+  /** Decomposition of estimatedInputTokens by category (system, userText,
+   *  mentionContext, assistantText, toolCall, toolResult, thinking, toolDefs,
+   *  total). Proves the estimate doesn't double-count the system prompt. */
+  estimatedInputTokensBreakdown?: {
+    system: number
+    userText: number
+    mentionContext: number
+    assistantText: number
+    toolCall: number
+    toolResult: number
+    thinking: number
+    toolDefs: number
+    total: number
+  }
+  /** Number of messages sent to the provider in this request. */
+  totalMessages?: number
+  /** Number of tool definitions sent in this request. */
+  toolCount?: number
+  /** Number of tool definitions available before lazy selection. */
+  toolCountTotal?: number
+  /** Names of tool definitions sent in this request. */
+  toolNames?: string[]
+  /** Estimated tokens spent on tool definitions. */
+  toolDefsTokens?: number
+  /** Why this request continued past the simple-bugfix turn target, if known. */
+  continuationReason?: string
+  /** Estimated tokens from @mention synthetic context specifically. */
+  mentionContextTokens?: number
+  /** ── Mention context redundancy (Correção B) ──
+   *  When the mention context is sent as a short reference stub instead of
+   *  the full outline (turns > 1), this is the token SAVING vs the full body.
+   *  0 on the first turn (full outline sent) and whenever there's no mention. */
+  mentionContextRepeatedTokens?: number
+  /** Cumulative token saving from mention-context stubbing. */
+  mentionContextRepeatedTokensCumulative?: number
+  /** Full mention-context tokens used as baseline for the saving. */
+  mentionContextFullTokens?: number
+  /** Stub mention-context tokens actually sent in this request. */
+  mentionContextStubTokens?: number
+  /** True when the FULL mention outline was sent this turn; false when only a
+   *  short reference stub was sent (follow-up turns). Lets an export prove the
+   *  stub-path actually kicked in. */
+  mentionContextSentFullThisTurn?: boolean
+  /** Stable id for the mention context block, so the export can correlate the
+   *  stub reference back to the turn that carried the full outline. */
+  mentionContextRefId?: string
+  /** ── Read Range Tracker (Correção C) ──
+   *  Per-file read ranges the agent has read so far this session (offset/limit,
+   *  1-indexed). Missing limit means read-to-EOF, not a hidden default page
+   *  size; readToEnd marks that semantic explicitly in exports. */
+  readRanges?: Array<{ path: string; offset?: number; limit?: number; readToEnd?: boolean }>
+  /** Number of read_file calls skipped this turn because the requested range
+   *  was already fully covered by a previous read. */
+  skippedOverlappingReads?: number
+  /** Number of read_file calls adjusted this turn because the requested range
+   *  was partially covered — the call was narrowed to the missing sub-range. */
+  adjustedReadRanges?: number
+  /** payloadInspector's per-category breakdown (system, tool_result,
+   *  tool_call, text, etc.) — blocks/tokens/chars each. */
+  breakdown: Record<string, { blocks: number; tokens: number; chars: number }>
+  /** Largest system-prompt sections for this exact provider request. */
+  systemPromptSections?: Array<{
+    name: string
+    location: 'static' | 'dynamic'
+    tokens: number
+    chars: number
+    auxiliaryCandidate?: boolean
+    reason?: string
+  }>
+  /** Subset of systemPromptSections that look safe to investigate for
+   *  lazy/on-demand loading. Heuristic only; changing prompt behavior still
+   *  requires eval/real-session validation. */
+  auxiliaryPromptCandidates?: Array<{
+    name: string
+    location: 'static' | 'dynamic'
+    tokens: number
+    chars: number
+    reason?: string
+  }>
+  /** ── Lazy System Prompt + Tighter Toolset (Phase 1) ──
+   *  Populated from payloadReport + the Intent Router classification + the
+   *  ToolsetSelector state. Lets an exported session prove the tighter
+   *  toolset actually reached the provider (toolCount, toolNames) AND show
+   *  the auxiliary/on-demand savings (core/auxiliary split, savings). */
+  /** Prompt profile selected by the Intent Router (bugfix_local, deploy_publish, …). */
+  selectedPromptProfile?: string
+  /** Tool profile applied by the selector (= profile; kept separate so the
+   *  export can later distinguish prompt-profile from tool-profile). */
+  selectedToolProfile?: string
+  /** System-prompt tokens attributed to the always-loaded core context. */
+  coreContextTokens?: number
+  /** Alias for coreContextTokens in newer exports. */
+  coreSystemTokens?: number
+  /** Tokens spent on the on-demand index itself. */
+  onDemandIndexTokens?: number
+  /** System-prompt tokens attributed to the on-demand auxiliaries loaded inline. */
+  auxiliaryContextTokens?: number
+  /** Auxiliary ids LOADED inline in the system prompt. */
+  auxiliaryLoaded?: string[]
+  /** Alias for auxiliaryLoaded in newer exports. */
+  loadedSystemSections?: string[]
+  /** Auxiliary ids OMITTED (available via request_context). */
+  auxiliaryOmitted?: string[]
+  /** Alias for auxiliaryOmitted in newer exports. */
+  omittedSystemSections?: string[]
+  /** Sections loaded inline automatically by profile/trigger. */
+  autoLoadedSystemSections?: string[]
+  /** Context planner candidate sections for this task. */
+  contextPlanCandidateSections?: string[]
+  /** Auxiliary ids the model requested through request_context. */
+  modelRequestedContextSections?: string[]
+  /** Number of request_context tool calls intercepted in this run. */
+  requestContextToolCalls?: number
+  /** Auxiliary ids that request_context returned with content. */
+  requestContextSectionsLoaded?: string[]
+  /** request_context selection reasons keyed by auxiliary id. */
+  requestContextSelectionReason?: Record<string, string>
+  /** request_context cost tiers keyed by auxiliary id. */
+  requestContextCostTier?: Record<string, string>
+  /** Whether request_context loaded a broader fallback context. */
+  requestContextFallbackUsed?: boolean
+  /** Contexts the fallback moved away from. */
+  requestContextFallbackFrom?: string[]
+  /** Contexts loaded as fallback. */
+  requestContextFallbackTo?: string[]
+  /** Auxiliary ids requested but not loaded (unknown/already inline/no content). */
+  requestedButNotLoadedSections?: string[]
+  /** Legacy alias: auxiliary ids actually fetched during this run through request_context. */
+  requestedContextSections?: string[]
+  /** Tokens saved by omitting the auxiliaries (vs loading everything). */
+  auxiliarySavingsTokens?: number
+  /** Alias for auxiliarySavingsTokens in newer exports. */
+  systemPromptSavingsTokens?: number
+  /** Human-readable reason for the selected prompt/system profile. */
+  systemPromptProfileReason?: string
+  /** Whether the run is read-only (no file edits) per the Intent Router. */
+  readOnlyRun?: boolean
+  /** Why the Intent Router chose this profile (for audit). */
+  toolsetReason?: string
+  /** ── Intent Router diagnostics ── */
+  /** 'model' = LLM router classified; 'fallback' = router failed; 'keyword' = no router. */
+  routerSource?: 'model' | 'fallback' | 'keyword'
+  /** Router self-reported confidence; 'none' on fallback/keyword. */
+  routerConfidence?: 'high' | 'medium' | 'low' | 'none'
+  /** When the router failed, the failure reason (token/HTTP/timeout/…). */
+  routerError?: string
+  /** Full diagnostics (raw body, headers, parse error) — exported so a failed
+   *  router run is diagnosable from the session export alone. */
+  routerDiagnostics?: {
+    url: string
+    appCheckPresent: boolean
+    httpStatus: number
+    servedModel?: string
+    configKey?: string
+    contentType?: string
+    rawBodyPreview?: string
+    contentPreview?: string
+    parseError?: string
+  }
+  /** ── Context Planner telemetry ──
+   *  Mirrors the ContextPlanClassification so the session export proves
+   *  whether the utility-model planner produced a valid plan ('parsed') or
+   *  fell back ('fallback'), with the raw output / error for diagnosis. */
+  /** 'parsed' = planner returned valid JSON; 'fallback' = invalid/missing and
+   *  a deterministic per-profile plan was used instead. */
+  contextPlannerStatus?: 'parsed' | 'fallback'
+  /** 'model' when the context plan came from a model. 'fallback' exists for legacy exports only. */
+  contextPlannerSource?: 'model' | 'fallback'
+  /** Which model layer produced the plan. 'code' means utility planner retries failed and the code model returned valid JSON. */
+  contextPlannerModel?: 'utility' | 'code'
+  /** When status === 'fallback', the failure reason (schema/parse/HTTP/…). */
+  contextPlannerError?: string
+  /** The raw planner output (model JSON or HTTP body preview) for audit. */
+  contextPlannerRawOutput?: string
+  /** Why the planner escalated to the code model, when applicable. */
+  contextPlannerFallbackReason?: string
+  /** Task domain the planner assigned (e.g. 'design_system_ui'). */
+  contextPlannerTaskDomain?: string
+  /** Capabilities the planner declared as required. */
+  contextPlannerRequiredCapabilities?: string[]
+  /** Contexts the planner selected to load inline. */
+  contextPlannerSelectedContexts?: string[]
+  /** Contexts considered but NOT selected (candidates minus selected). */
+  contextPlannerRejectedContexts?: string[]
+  /** The planner's selection rationale. */
+  contextPlannerSelectionReason?: string
+  /** Tool names requested on demand during the run. This is an audit trail,
+   *  not proof those tools are still active on later model steps. */
+  expandedToolNames?: string[]
+  /** Tools the model requested but an explicit policy denied. */
+  deniedToolNames?: string[]
+  /** ── "Stopped without editing" guardrail telemetry ──
+   *  Populated from the query loop's run-level tracking. Lets an exported
+   *  session prove the guardrail fired and whether the model recovered. */
+  /** Whether any file-mutating tool (edit_file, write_file, …) ran
+   *  successfully during this run, as of this request. */
+  runHasEdited?: boolean
+  /** How many times the no-edit recovery steering was injected (0 or 1). */
+  noEditRecoveryCount?: number
+  /** True on the request AFTER the guardrail fired (the recovery turn). */
+  noEditGuardTriggered?: boolean
+  /** Turn number of the first successful file mutation (1-indexed). */
+  firstWriteTurn?: number
+  /** Total count of successful file-mutating tool calls this run. */
+  writeActionCount?: number
+  /** Final decision at the stop path: "completed" | "recovered_then_completed"
+   *  | "aborted" | "error" | "max_turns". Only set on the LAST entry. */
+  completionGuardDecision?: string
+  /** Human-readable reason for the guardrail's decision. Only set on the LAST entry. */
+  completionGuardReason?: string
+  /** ── Delegate/sub-agent telemetry ──
+   *  Populated when the delegate tool was called this run. Lets the session
+   *  export prove the member field was resolved (or why it was blocked). */
+  delegateRequestedMember?: string | null
+  delegateResolvedMember?: string | null
+  delegateBlocked?: boolean
+  delegateBlockedReason?: string | null
+  delegateInputSchemaVersion?: string
+  delegateRecoveryAttempted?: boolean
 }
 
 export interface SessionTokenUsage {
@@ -539,4 +866,7 @@ export interface PersistedSession {
   byokSnapshot?: ByokSessionSnapshot | null
   sessionMemory?: string
   planResumePending?: PlanResumePending | null
+  /** Per-request usage log — persisted so an exported session shows real
+   *  consumption per request (eliminates manual inference). */
+  requestUsageLog?: RequestUsageEntry[]
 }

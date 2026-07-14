@@ -7,7 +7,10 @@
 import {
   buildSignalingUrl,
   parseServerMessage,
+  sanitizeIceServers,
+  sanitizeMediaPolicy,
   signalingSubprotocols,
+  type MediaPolicy,
   type PeerInfo,
   type RelayChannel,
   type RelayMessage,
@@ -16,7 +19,15 @@ import {
 } from './signalingProtocol'
 
 export interface SignalingHandlers {
-  onWelcome: (selfId: string, peers: PeerInfo[]) => void
+  /** `iceServers`: ephemeral TURN credentials from the worker (null when the
+   *  worker has no TURN key configured → STUN-only session). `mediaPolicy`:
+   *  per-plan voice/screen limits (null on old workers → no limits). */
+  onWelcome: (
+    selfId: string,
+    peers: PeerInfo[],
+    iceServers: RTCIceServer[] | null,
+    mediaPolicy: MediaPolicy | null,
+  ) => void
   onPeerJoin: (peer: PeerInfo) => void
   onPeerLeave: (peerId: string) => void
   onSignal: (from: string, type: SignalType, payload: unknown) => void
@@ -47,7 +58,12 @@ export class SignalingClient {
       if (!msg) return
       switch (msg.type) {
         case 'welcome':
-          this.handlers.onWelcome(msg.selfId, msg.peers)
+          this.handlers.onWelcome(
+            msg.selfId,
+            msg.peers,
+            sanitizeIceServers(msg.iceServers),
+            sanitizeMediaPolicy(msg.mediaPolicy),
+          )
           break
         case 'peer-join':
           this.handlers.onPeerJoin(msg.peer)
@@ -62,6 +78,16 @@ export class SignalingClient {
           break
         case 'relay':
           this.handlers.onRelay(msg.from, msg.channel, msg.payload)
+          break
+        case 'ping':
+          // Room heartbeat — answering proves this socket isn't half-open.
+          // A dead peer never answers; the room times it out and broadcasts
+          // its peer-leave, so teammates stop seeing it online/sharing.
+          try {
+            ws.send(JSON.stringify({ type: 'pong' }))
+          } catch {
+            /* socket mid-close — the room will time us out */
+          }
           break
       }
     }

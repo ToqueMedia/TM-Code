@@ -18,13 +18,14 @@ import { useProblemsStore } from './problemsStore';
 import { IS_VITE_DEV } from '../utils/viteEnv';
 import { devServerManager } from '../services/devServerManager';
 import { logger } from '../utils/logger';
+import { t } from '@/i18n';
 
 
 /**
  * Dedupe a recent-projects list by `path`. Rust's `get_recent_projects`
  * returns entries sorted by lastOpened DESC; the same project can appear
- * twice when the registry stores it with two different IDs (e.g. opened
- * once via CMD-mode auto-create and once via "Open folder"). Keeping the
+ * twice when the registry stores it with two different IDs (historically,
+ * opened once via cwd-scoped auto-create and once via "Open folder"). Keeping the
  * FIRST occurrence preserves the most recent timestamp and matches what
  * the UI expects ("Recents" should be distinct projects, not entries).
  *
@@ -48,9 +49,6 @@ interface ProjectStore {
   windowState: WindowState;
   loading: boolean;
   error: string | null;
-  cmdModeProjectPath: string | null;
-  /** Paths that have been opened at least once in CMD mode — persisted. */
-  cmdModeProjectPaths: string[];
   /**
    * Where the user was on the Welcome screen the last time the app quit.
    * Persisted so a restart returns them to the same sub-screen instead of
@@ -74,11 +72,17 @@ interface ProjectStore {
   openProject: (path: string, options?: { initGit?: boolean }) => Promise<void>;
   createProject: (path: string, template: string) => Promise<void>;
   loadRecentProjects: () => Promise<void>;
-  closeProject: () => Promise<void>;
+  /**
+   * Close to Welcome. Can DECLINE (returns false) when the user answers
+   * "keep working" to the busy/dirty confirms — callers that continue with
+   * side effects (sign-out!) must check the result. `force` skips both
+   * confirms for non-interactive paths (project directory deleted).
+   */
+  closeProject: (options?: { force?: boolean }) => Promise<boolean>;
   /**
    * Forced, non-interactive teardown back to the Welcome screen — no
    * dirty-file prompt, no state save. Used when an admin blocks/deletes the
-   * account in real time: the user must be expelled from Chat/Terminal
+   * account in real time: the user must be expelled from the workspace
    * immediately, not asked whether to save.
    */
   expelToWelcome: () => void;
@@ -91,9 +95,6 @@ interface ProjectStore {
   updateWindowState: () => Promise<void>;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
-  setCmdModeProjectPath: (path: string | null) => void;
-  /** Remove a path from the CMD mode paths list (e.g. user promotes it to an IDE project). */
-  removeCmdModePath: (path: string) => void;
   /** Mirror a just-opened project into the in-memory recents list (no IPC). */
   upsertRecentProject: (info: ProjectInfo) => void;
   setWelcomeScreen: (screen: 'hero' | 'settings' | null) => void;
@@ -110,6 +111,62 @@ const getRecoveryService = () => RecoveryService.getInstance();
 const getWindowService = () => WindowService.getInstance();
 
 /**
+ * Switching/closing a project with the agent mid-task is destructive — the
+ * run gets cancelled (see openProject/tearDownProject). Ask first, and point
+ * the user at the non-destructive alternative ("Open in New Window", which
+ * keeps both projects working in parallel). Returns true to proceed. When the
+ * agent is idle there is nothing to lose, so no dialog.
+ */
+async function confirmCancelActiveRun(kind: 'switch' | 'close'): Promise<boolean> {
+  let busy = false;
+  try {
+    // Dynamic imports: same circular-dep avoidance as tearDownProject
+    // (projectStore → agentService → toolExecutor → projectStore).
+    const agentService = (await import('../services/agent/agentService')).default.getInstance();
+    busy = agentService.isAgentRunning();
+    if (!busy) {
+      const { useSubAgentStore } = await import('./subAgentStore');
+      busy = useSubAgentStore.getState().getPendingCount() > 0;
+    }
+  } catch {
+    busy = false;
+  }
+  if (!busy) return true;
+
+  const name = useProjectStore.getState().currentProject?.name || '';
+  const body = t(kind === 'switch' ? 'project.switchWhileRunning' : 'project.closeWhileRunning')
+    .replace('{name}', name);
+  return tauriConfirm(body, {
+    title: t('project.agentBusyTitle'),
+    kind: 'warning',
+    okLabel: t('project.agentBusyConfirm'),
+    cancelLabel: t('project.agentBusyStay'),
+  });
+}
+
+/**
+ * Cancels the in-flight agent work (main loop + sub-agents) for the CURRENT
+ * project. Must run BEFORE `set_active_project` re-points the Rust clamp at
+ * the next project — without this, the orphaned run kept burning tokens, its
+ * pending diff approvals hung forever, and (worst) its next shell/PTY tool
+ * calls were clamped to the NEW project's directory and executed there
+ * (cross-project contamination). cancelLoop() already resolves diffs and
+ * clears permission/credential/question prompts for every cancel path.
+ */
+async function cancelActiveRunForProjectExit(): Promise<void> {
+  try {
+    const [{ default: agentServiceModule }, { useSubAgentStore }] = await Promise.all([
+      import('../services/agent/agentService'),
+      import('./subAgentStore'),
+    ]);
+    useSubAgentStore.getState().abortAll();
+    agentServiceModule.getInstance().cancelLoop();
+  } catch (e) {
+    logger.warn('project', 'Failed to cancel agent before project exit:', e);
+  }
+}
+
+/**
  * Tears down the current project: cancels agent, stops all monitors/watchers,
  * closes editor files, stops dev server, clears preview, and resets state.
  * No confirmation dialog. No state save. Use for forced teardowns
@@ -121,6 +178,13 @@ function tearDownProject() {
   import('../services/agent/agentService').then(m => {
     m.default.getInstance().cancelLoop();
   });
+
+  // Sub-agents run outside the main loop's AbortController (own registry,
+  // own controllers) — cancelLoop() alone left them alive after teardown,
+  // still executing read tools against a project the UI already left.
+  import('./subAgentStore').then(m => {
+    m.useSubAgentStore.getState().abortAll();
+  }).catch(() => {});
 
   // Shutdown MCP servers (dynamic import to avoid circular deps)
   import('../services/mcp/mcpService').then(m => {
@@ -182,8 +246,6 @@ export const useProjectStore = create<ProjectStore>()(
       },
       loading: false,
       error: null,
-      cmdModeProjectPath: null,
-      cmdModeProjectPaths: [],
       welcomeScreen: null,
       hasHydrated: false,
       noTmsFile: false,
@@ -200,31 +262,11 @@ export const useProjectStore = create<ProjectStore>()(
       setNoTmsFile: (value) => set({ noTmsFile: value }),
       setTmsBootstrapping: (value) => set({ tmsBootstrapping: value }),
 
-      setCmdModeProjectPath: (path: string | null) => {
-        if (path) {
-          // Record that this path was opened in CMD mode (deduplicated, max 20)
-          const existing = get().cmdModeProjectPaths.filter(p => p !== path)
-          // Entering CMD mode clears the Welcome sub-screen marker — the
-          // next app start should restore CMD, not Welcome.
-          set({ cmdModeProjectPath: path, cmdModeProjectPaths: [path, ...existing].slice(0, 20), welcomeScreen: null })
-        } else {
-          // Leaving CMD back to Welcome — remember that's where the user is.
-          set({ cmdModeProjectPath: null, welcomeScreen: 'hero' })
-        }
-      },
-
-      removeCmdModePath: (path: string) => {
-        set(state => ({
-          cmdModeProjectPaths: state.cmdModeProjectPaths.filter(p => p !== path),
-        }))
-      },
-
       // Rust's open_project persists the recents FILE, but the Welcome
       // "Recents" list renders the in-memory array, which only re-reads disk
-      // on mount. Terminal Mode bypasses openProject() (it invokes
-      // open_project directly in TerminalView), so without this mirror a
-      // folder opened in CMD mode never appeared in Recents until an app
-      // restart (user report, 2026-06-12). Same no-extra-IPC pattern as the
+      // on mount. Callers that invoke open_project directly need this mirror,
+      // otherwise the folder never appeared in Recents until an app restart
+      // (user report, 2026-06-12). Same no-extra-IPC pattern as the
       // freshEntry construction inside openProject.
       upsertRecentProject: (info: ProjectInfo) => {
         const entry: RecentProject = {
@@ -239,11 +281,51 @@ export const useProjectStore = create<ProjectStore>()(
       },
 
       openProject: async (path: string, options?: { initGit?: boolean }) => {
-        // Opening a project exits any Welcome state — clear the persisted marker.
-        set({ loading: true, error: null, cmdModeProjectPath: null, welcomeScreen: null });
-
         // Clean up previous project's state before loading the new one
         const prevProject = get().currentProject;
+
+        // Switching away from a project with the agent mid-task: confirm,
+        // then cancel BEFORE anything re-points global state (Rust clamp,
+        // dev server, chat wipe) at the new project. Same-path re-opens are
+        // exempt — reloading the project you're in shouldn't kill its run.
+        if (prevProject && prevProject.path !== path) {
+          const proceed = await confirmCancelActiveRun('switch');
+          if (!proceed) return;
+        }
+
+        // Double-open guard (cross-window): the same project in two windows
+        // shares the state dir (sessions last-write-wins) AND the working
+        // tree (two agents writing). Warn, don't hard-lock — a rigid lock
+        // orphaned by a crash would strand the user out of their own
+        // project; the lock heartbeat's staleness window arbitrates.
+        if (prevProject?.path !== path) {
+          try {
+            const { isProjectOpenElsewhere } = await import('../services/projectWindowLockService');
+            if (await isProjectOpenElsewhere(path)) {
+              const name = path.replace(/\\/g, '/').split('/').pop() || path;
+              const ok = await tauriConfirm(
+                t('project.alreadyOpenElsewhere').replace('{name}', name),
+                {
+                  title: t('project.alreadyOpenElsewhereTitle'),
+                  kind: 'warning',
+                  okLabel: t('project.alreadyOpenElsewhereOk'),
+                },
+              );
+              if (!ok) return;
+            }
+          } catch { /* best-effort */ }
+        }
+
+        // Cancel only after ALL confirms passed — cancelling before the
+        // double-open prompt would kill the run of a switch the user then
+        // declines.
+        if (prevProject && prevProject.path !== path) {
+          await cancelActiveRunForProjectExit();
+        }
+
+        // Opening a project exits any Welcome state — clear the persisted marker.
+        set({ loading: true, error: null, welcomeScreen: null });
+
         if (prevProject) {
           // Stop old dev server and clear preview — await to ensure port is freed
           try {
@@ -283,14 +365,9 @@ export const useProjectStore = create<ProjectStore>()(
             path: projectInfo.path,
             lastOpened: projectInfo.lastOpened,
           };
-          // Most-recent-mode wins: opening in chat/IDE removes the path from the
-          // CMD-mode list. Without this, a folder once opened in CMD stays
-          // tagged as "Terminal" in WelcomeSidebar forever — even after it's
-          // re-opened via "Open Folder" / "New Project" for chat use.
           set(state => ({
             currentProject: projectInfo,
             recentProjects: dedupeRecentProjects([freshEntry, ...state.recentProjects]),
-            cmdModeProjectPaths: state.cmdModeProjectPaths.filter(p => p !== path),
             loading: false,
           }));
 
@@ -409,26 +486,11 @@ export const useProjectStore = create<ProjectStore>()(
             logger.warn('project', 'Failed to hydrate editor dirty buffers:', error);
           }
 
-          // Hydrate the deploy state. The orchestration source of truth is
-          // the worker; this restores the LAST IDE-visible view so a
-          // reload mid-deploy doesn't blank the panel. Once the IDE
-          // re-polls/streams from the worker, the record is updated.
-          try {
-            const [{ loadDeployStateFromDisk }, { hydrateDeployRecord }] = await Promise.all([
-              import('../services/deployPersistence'),
-              import('./deployStore'),
-            ]);
-            const record = await loadDeployStateFromDisk(path);
-            if (record) hydrateDeployRecord(record);
-          } catch (error) {
-            logger.warn('project', 'Failed to hydrate deploy state:', error);
-          }
-
           // Check for TMS.md — suggest /init only when (a) it's missing AND
           // (b) the project actually has content to analyze. Suggesting it on
           // a freshly-opened empty folder is noise: there is nothing to
-          // memorize and the agent's first natural turn will start TMS.md
-          // organically as work happens.
+          // memorize. Missing TMS.md is optional context, so the next agent
+          // turn should continue the user's task instead of forcing bootstrap.
           //
           // The "meaningful content" rule lives in projectHasContent.ts — it
           // rejects dot-files (.toquemedia/, .git/, .DS_Store, .gitignore,
@@ -443,7 +505,9 @@ export const useProjectStore = create<ProjectStore>()(
             // TMS.md exists — ensure flag is cleared (covers re-open after bootstrap)
             set({ noTmsFile: false });
           } catch {
-            // TMS.md not found — show system message suggesting /init.
+            // TMS.md not found — keep only state so the UI can suggest /init.
+            // The agent preflight treats absence as optional context and lets
+            // the user's next request proceed normally.
             const { projectHasMeaningfulContent } = await import('../utils/projectHasContent');
             let hasContent = false;
             try {
@@ -456,22 +520,6 @@ export const useProjectStore = create<ProjectStore>()(
               hasContent = false;
             }
             set({ noTmsFile: hasContent });
-            if (hasContent) {
-              const { t } = await import('../i18n');
-              // The session is created async by App.tsx (restoreLastSession →
-              // createNewSession). A fixed 600ms timeout races with session
-              // creation — poll for activeSessionId instead.
-              const deadline = Date.now() + 5000
-              const poll = () => {
-                const chatState = useChatStore.getState()
-                if (chatState.activeSessionId) {
-                  chatState.addSystemMessage(t('common.noTmsFile'))
-                } else if (Date.now() < deadline) {
-                  setTimeout(poll, 100)
-                }
-              }
-              setTimeout(poll, 100)
-            }
           }
         } catch (error: unknown) {
           set({
@@ -563,9 +611,9 @@ export const useProjectStore = create<ProjectStore>()(
           // If removing the current project, close it first
           const { currentProject } = get();
           if (currentProject?.id === projectId) {
-            await get().closeProject();
-            // User cancelled the close dialog — abort
-            if (get().currentProject?.id === projectId) return;
+            const closed = await get().closeProject();
+            // User declined the close (busy/dirty confirm) — abort
+            if (!closed) return;
           }
           await invoke('remove_from_recent_projects', { projectId });
           set(state => ({
@@ -628,34 +676,49 @@ export const useProjectStore = create<ProjectStore>()(
         }
       },
 
-      closeProject: async () => {
+      closeProject: async (options?: { force?: boolean }) => {
         const { currentProject } = get();
-        const editorState = useEditorRepository.getState();
-        const hasDirtyFiles = editorState.openFiles.some(f => f.isDirty);
 
-        if (hasDirtyFiles) {
-          const dirtyCount = editorState.openFiles.filter(f => f.isDirty).length;
-          const ok = await tauriConfirm(`There are ${dirtyCount} unsaved file(s). Close project and discard changes?`, { title: 'Unsaved changes', kind: 'warning' });
-          if (!ok) return;
+        // Closing cancels the in-flight run (tearDownProject → cancelLoop);
+        // give the user the chance to keep it working instead. `force` is
+        // for non-interactive closes (deleted project dir) where prompting
+        // would strand the app on a modal nobody can answer meaningfully.
+        if (!options?.force) {
+          const proceedBusy = await confirmCancelActiveRun('close');
+          if (!proceedBusy) return false;
+
+          const editorState = useEditorRepository.getState();
+          const hasDirtyFiles = editorState.openFiles.some(f => f.isDirty);
+          if (hasDirtyFiles) {
+            const dirtyCount = editorState.openFiles.filter(f => f.isDirty).length;
+            const ok = await tauriConfirm(`There are ${dirtyCount} unsaved file(s). Close project and discard changes?`, { title: 'Unsaved changes', kind: 'warning' });
+            if (!ok) return false;
+          }
         }
 
         // Save current project state before closing
         if (currentProject) {
           await get().saveProjectState().catch(console.error);
+          // Save the chat session BEFORE teardown wipes it. Centralised
+          // here for EVERY close path (Home button, keyboard shortcut,
+          // sign-out, status monitor) — sign-out used to do this from the
+          // outside and the other paths could lose the final seconds of
+          // conversation between the last auto-save tick and the close.
+          await useChatStore.getState().cleanupOnExit(currentProject.path).catch(() => {});
         }
         tearDownProject();
         // User is now back on Welcome — remember that so a restart doesn't
         // auto-reopen the project they just closed.
         set({ welcomeScreen: 'hero', noTmsFile: false, tmsBootstrapping: false });
+        return true;
       },
 
       expelToWelcome: () => {
         // No prompt, no save — the account was suspended; get the user out of
-        // any project (Chat/Terminal) and onto the Welcome screen at once.
+        // any open project and onto the Welcome screen at once.
         tearDownProject();
         set({
           welcomeScreen: 'hero',
-          cmdModeProjectPath: null,
           noTmsFile: false,
           tmsBootstrapping: false,
         });
@@ -763,8 +826,6 @@ export const useProjectStore = create<ProjectStore>()(
       partialize: (state) => ({
         recentProjects: state.recentProjects,
         windowState: state.windowState,
-        cmdModeProjectPath: state.cmdModeProjectPath,
-        cmdModeProjectPaths: state.cmdModeProjectPaths,
         welcomeScreen: state.welcomeScreen,
       }),
       onRehydrateStorage: () => (state) => {

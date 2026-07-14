@@ -8,11 +8,14 @@ import {
 import { ToolCallDisplay as ToolCallDisplayType } from '../../types/chat'
 import InlineDiff from './InlineDiff'
 import { useChatStore } from '../../stores/chatStore'
+import { useProjectStore } from '../../stores/projectStore'
 import { getFileIconUrl } from '@/utils/fileIcons'
+import { relativeToProjectPath } from '@/utils/platform'
 import { tokens } from '@/theme/tokens'
 import { detectLanguage, highlightLines } from '@/utils/syntaxHighlight'
 import { t } from '@/i18n'
 import { isShellTool, ShellCommandBlock } from '../shell/ShellCommandBlock'
+import { canonicalToolName, normalizeToolInputForCanonical } from '@/services/agent/toolNames'
 
 interface ToolCallDisplayProps {
   toolCall: ToolCallDisplayType
@@ -34,11 +37,12 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ size?: number | string }>
 }
 
 /** Tools where we show a file-extension icon instead of the generic tool icon. */
-const FILE_TOOLS = new Set(['read_file', 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'])
+const FILE_TOOLS = new Set(['read_file', 'read_around', 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'])
 
 /** Human-readable tool labels shown in the chat UI. */
 const TOOL_LABELS: Record<string, string> = {
   read_file: t('toolLabel.readingOutput'),
+  read_around: t('toolLabel.readingOutput'),
   write_file: t('toolLabel.writing'),
   create_file: t('toolLabel.creating'),
   edit_file: t('toolLabel.editing'),
@@ -52,6 +56,7 @@ const TOOL_LABELS: Record<string, string> = {
   execute_command_background: t('toolLabel.backgroundCommand'),
   check_background_commands: t('toolLabel.checkingBackgroundCommands'),
   start_dev_server: t('toolLabel.startingServer'),
+  stop_dev_server: t('toolLabel.stoppingServer'),
   read_dev_server_logs: t('toolLabel.readingLogs'),
   read_large_result: t('toolLabel.readingOutput'),
   web_fetch: t('toolLabel.fetching'),
@@ -88,27 +93,65 @@ function getToolLabel(toolName: string): string {
   return TOOL_LABELS[toolName] || toolName
 }
 
-function getInputSummary(toolName: string, input: Record<string, unknown>): string {
-  const fileName = (p: string) => p.split('/').pop() || p
+const PATH_INPUT_KEYS = new Set([
+  'file_path',
+  'path',
+  'directory',
+  'cwd',
+  'oldPath',
+  'old_path',
+  'newPath',
+  'new_path',
+])
+
+function inputForDisplay(value: unknown, projectPath?: string | null, key?: string): unknown {
+  if (typeof value === 'string') {
+    return key && PATH_INPUT_KEYS.has(key)
+      ? relativeToProjectPath(value, projectPath)
+      : value
+  }
+  if (Array.isArray(value)) {
+    return value.map(item => inputForDisplay(item, projectPath))
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .map(([entryKey, entryValue]) => [entryKey, inputForDisplay(entryValue, projectPath, entryKey)]),
+    )
+  }
+  return value
+}
+
+// Exported for ExplorationBatch — the group header shows the live target
+// ("⎿ src/stores/chatStore.ts") using the same summary the individual row
+// would have shown, so collapsed and expanded views always agree.
+export function getInputSummary(
+  toolName: string,
+  input: Record<string, unknown>,
+  result?: string,
+  projectPath?: string | null,
+): string {
+  const displayPath = (p: string) => relativeToProjectPath(p, projectPath)
   // Resolver: new tool calls use file_path, old sessions (pre-rename) use path.
   const fp = String(input.file_path || input.path || '')
 
   switch (toolName) {
     case 'read_file':
-      return fileName(fp)
+    case 'read_around':
+      return displayPath(fp)
     case 'write_file':
     case 'create_file':
-      return fileName(fp)
+      return displayPath(fp)
     case 'edit_file':
-      return fileName(fp)
+      return displayPath(fp)
     case 'delete_file':
-      return fileName(fp)
+      return displayPath(fp)
     case 'rename_file':
-      return `${fileName(String(input.oldPath || ''))} → ${input.newName}`
+      return `${displayPath(String(input.oldPath || input.old_path || ''))} → ${input.newName || displayPath(String(input.newPath || input.new_path || ''))}`
     case 'list_directory':
-      return fileName(fp) || 'project'
+      return displayPath(fp) || 'project'
     case 'create_directory':
-      return fileName(fp)
+      return displayPath(fp)
     case 'search_files':
       return `"${input.query}"`
     case 'execute_command': {
@@ -125,6 +168,8 @@ function getInputSummary(toolName: string, input: Record<string, unknown>): stri
       const type = input.server_type === 'backend' ? 'backend' : 'frontend'
       return `${type} server`
     }
+    case 'stop_dev_server':
+      return 'dev server'
     case 'read_dev_server_logs':
       return `last ${input.lines || 50} lines`
     case 'glob':
@@ -143,14 +188,19 @@ function getInputSummary(toolName: string, input: Record<string, unknown>): stri
       return desc.length > 50 ? desc.slice(0, 47) + '...' : desc
     }
     case 'update_tasks': {
+      // update_tasks uses patch semantics: input.tasks is only the patch the
+      // agent just sent, not the full tracker. For completed calls, prefer the
+      // executor's post-merge result so this row agrees with AgentTasksPanel.
+      const mergedProgress = result?.match(/Task list updated:\s+(\d+\/\d+ completed)\./)
+      if (mergedProgress) return mergedProgress[1]
+
       // input.tasks comes from streaming JSON — during partial parse it can be
       // a truthy non-array (e.g. an empty object or a string mid-deserialization).
       // The previous `if (tasks)` guard was permissive enough to fall through
       // and call .filter on a non-array, crashing the React tree.
       const tasks = input.tasks
       if (Array.isArray(tasks)) {
-        const done = tasks.filter((t: { status?: string }) => t?.status === 'completed').length
-        return `${done}/${tasks.length} completed`
+        return `${tasks.length} ${tasks.length === 1 ? 'update' : 'updates'}`
       }
       return ''
     }
@@ -167,7 +217,7 @@ function getInputSummary(toolName: string, input: Record<string, unknown>): stri
         const parts = toolName.split('__')
         return parts[2] || toolName
       }
-      return JSON.stringify(input).slice(0, 50)
+      return JSON.stringify(inputForDisplay(input, projectPath)).slice(0, 50)
     }
   }
 }
@@ -180,17 +230,18 @@ const SUBAGENT_SPAWNERS = new Set(['research', 'verify', 'spawn_background_agent
 
 function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps) {
   const [expanded, setExpanded] = useState(false)
-  const filePath = (toolCall.input?.file_path || toolCall.input?.path || toolCall.input?.oldPath || '') as string
-  const useFileIcon = FILE_TOOLS.has(toolCall.toolName) && !!filePath
-  const IconComponent = TOOL_ICONS[toolCall.toolName] || FiTool
-  const inputSummary = getInputSummary(toolCall.toolName, toolCall.input)
-  // A tool call streams in with status:'running' but the serial tool loop runs
-  // calls one at a time, blocking on each diff approval. So a turn that emits
-  // several edits shows the first one's approval card while the rest sit QUEUED
-  // behind it. `started` (set on onToolCallStart, i.e. the moment a call's
-  // execute() begins) separates the one actually running from those still
-  // waiting — without it every queued edit shows an active spinner and reads
-  // as parallel edits firing at once.
+  const projectPath = useProjectStore(s => s.currentProject?.path || '')
+  const displayToolName = canonicalToolName(toolCall.toolName)
+  const displayInput = normalizeToolInputForCanonical(toolCall.toolName, toolCall.input)
+  const filePath = (displayInput?.file_path || displayInput?.path || displayInput?.oldPath || '') as string
+  const useFileIcon = FILE_TOOLS.has(displayToolName) && !!filePath
+  const IconComponent = TOOL_ICONS[displayToolName] || FiTool
+  const inputSummary = getInputSummary(displayToolName, displayInput, toolCall.result, projectPath)
+  // A tool call streams in with status:'running', but the serial tool loop
+  // starts calls one at a time and can pause on each diff approval. `started`
+  // (set on onToolCallStart, i.e. the moment a call's execute() begins)
+  // separates the one actually running from those still waiting; without it
+  // every queued edit shows an active spinner and reads as parallel writes.
   const isQueued = toolCall.status === 'running' && toolCall.started !== true
   const isRunning = toolCall.status === 'running' && toolCall.started === true
   const isFailed = toolCall.status === 'failed'
@@ -207,13 +258,13 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
     )
   }
 
-  const hasDiff = toolCall.diffNewContent !== undefined && isWriteTool(toolCall.toolName)
+  const hasDiff = toolCall.diffNewContent !== undefined && isWriteTool(displayToolName)
 
   // Result text (moved before hooks to avoid conditional hook calls)
   const resultText = toolCall.result || ''
 
   // Syntax-highlight read_file output
-  const readFileLang = toolCall.toolName === 'read_file' ? detectLanguage(String(toolCall.input.file_path || toolCall.input.path || '')) : null
+  const readFileLang = displayToolName === 'read_file' ? detectLanguage(String(displayInput.file_path || displayInput.path || '')) : null
   const highlightedOutput = useMemo(() => {
     if (!readFileLang || !resultText) return null
     return highlightLines(resultText, readFileLang)
@@ -261,7 +312,7 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
             fontFamily={tokens.fontFamily.mono}
             fontSize="12px"
           >
-            {getToolLabel(toolCall.toolName)}
+            {getToolLabel(displayToolName)}
           </Text>
           <Text
             color={tokens.colors.text.disabled}
@@ -293,12 +344,12 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
   // Sub-agent spawners emit their output inline via the text stream + nested
   // child tool calls. Their `result` duplicates that content, so suppress the
   // result panel on the parent to avoid showing the same text twice.
-  const isSubAgentSpawner = SUBAGENT_SPAWNERS.has(toolCall.toolName)
+  const isSubAgentSpawner = SUBAGENT_SPAWNERS.has(displayToolName)
   // read_skill body carries platform/provider names + implementation
   // details aimed at the agent. Render the friendly description in the
   // header (via getInputSummary) and keep the body hidden — no expand
   // chevron, no markdown preview.
-  const isSkillRead = toolCall.toolName === 'read_skill'
+  const isSkillRead = displayToolName === 'read_skill'
 
   // Standard tool call rendering
   const resultLines = resultText.split('\n')
@@ -309,8 +360,8 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
   // summary truncates at 60 chars so long commands get '…' — the expand
   // chevron is the only way to see what actually ran. Available even while
   // running, so the user can audit the command in flight.
-  const fullCommand = toolCall.toolName === 'execute_command'
-    ? String(toolCall.input.command || '')
+  const fullCommand = displayToolName === 'execute_command'
+    ? String(displayInput.command || '')
     : ''
   const showFullCommand = fullCommand.length > 0
     && (fullCommand.length > 60 || isRunning || isFailed)
@@ -340,8 +391,8 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
       >
         {/* Status indicator */}
         {isQueued ? (
-          // Queued behind a pending approval — static clock, no spinner, so it
-          // reads as "waiting its turn" rather than "actively editing now".
+          // Waiting for the serial executor — static clock, no spinner, so it
+          // reads as queued rather than actively editing now.
           <Box color={tokens.colors.text.disabled} flexShrink={0}>
             <FiClock size={12} />
           </Box>
@@ -388,7 +439,7 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
           flexShrink={0}
           fontWeight="500"
         >
-          {isQueued ? `${t('toolLabel.queued')} · ${getToolLabel(toolCall.toolName)}` : getToolLabel(toolCall.toolName)}
+          {isQueued ? `${t('toolLabel.queued')} · ${getToolLabel(displayToolName)}` : getToolLabel(displayToolName)}
         </Text>
 
         {/* Summary */}

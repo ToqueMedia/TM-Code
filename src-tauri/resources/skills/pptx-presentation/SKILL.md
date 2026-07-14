@@ -5,7 +5,7 @@ description: Editable PowerPoint (.pptx) export via pandoc or python-pptx. Call 
 
 # PowerPoint Export (.pptx)
 
-Produce editable `.pptx` files when the user explicitly asks for one. CMD-mode skill — applies to "PowerPoint", ".pptx", "ficheiro Excel-de-slides", legacy stakeholder workflows.
+Produce editable `.pptx` files when the user explicitly asks for one. Applies to "PowerPoint", ".pptx", "ficheiro Excel-de-slides", and legacy stakeholder workflows.
 
 **Decide the path before writing code.** Most "preciso de uma apresentação" requests do not actually need .pptx — they need *a presentation*. Routing matters:
 

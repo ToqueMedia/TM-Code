@@ -2,7 +2,6 @@ import { useChatStore } from '../../../stores/chatStore'
 import { t } from '../../../i18n'
 import { runAgentWithCallbacks } from '../agentRunner'
 import AgentService from '../agentService'
-import type { SlashCommandMode } from '../slashCommandRegistry'
 
 /**
  * `/debug <symptom>` — debugging command.
@@ -20,7 +19,6 @@ import type { SlashCommandMode } from '../slashCommandRegistry'
 export async function executeDebug(
   args: string,
   projectPath: string,
-  mode: SlashCommandMode = 'chat',
 ): Promise<void> {
   const chatStore = useChatStore.getState()
 
@@ -37,10 +35,6 @@ export async function executeDebug(
     await runAgentWithCallbacks(buildDebugPrompt(args, projectPath), {
       addUserMessage: true,
       userMessageText: `/debug ${args}`,
-      // CMD mode requires explicit cmdOnlyMode so the tool executor uses the
-      // cwd instead of falling back to useProjectStore.currentProject (which
-      // CMD never populates).
-      cmdOnlyMode: mode === 'terminal',
     })
   } finally {
     agentService.setRequestType(null)

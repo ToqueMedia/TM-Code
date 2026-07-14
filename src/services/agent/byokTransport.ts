@@ -26,6 +26,7 @@ import {
   anthropicSSEToOpenAISSE,
   anthropicResponseToOpenAI,
 } from './anthropicAdapter'
+import { applyDashScopePromptCacheForByok } from './dashscopePromptCache'
 
 export type ByokApiShape = 'openai_compat' | 'anthropic'
 
@@ -59,6 +60,24 @@ function headersToObject(h: HeadersInit | undefined): Record<string, string> {
     Object.assign(out, h as Record<string, string>)
   }
   return out
+}
+
+function dropUnsafeTransportHeaders(headers: Record<string, string>): void {
+  for (const key of Object.keys(headers)) {
+    const lower = key.toLowerCase()
+    if (
+      lower === 'content-length' ||
+      lower === 'transfer-encoding' ||
+      lower === 'connection' ||
+      lower === 'host' ||
+      lower === 'expect' ||
+      lower === 'te' ||
+      lower === 'trailer' ||
+      lower === 'upgrade'
+    ) {
+      delete headers[key]
+    }
+  }
 }
 
 /**
@@ -112,7 +131,13 @@ export function createByokFetch(opts: { expectedHost: string; apiShape: ByokApiS
         delete headers['Authorization']
       }
       Object.assign(headers, anthropicHeaders())
+    } else if (applyDashScopePromptCacheForByok(parsedBody, opts.expectedHost)) {
+      body = JSON.stringify(parsedBody)
     }
+    // The body may have been rewritten after the SDK created headers
+    // (Anthropic shape translation). Let reqwest compute framing from the
+    // actual body instead of forwarding stale/hop-by-hop headers.
+    dropUnsafeTransportHeaders(headers)
 
     const signal = init?.signal ?? undefined
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')

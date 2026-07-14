@@ -11,11 +11,13 @@ TM Code — a chat-first desktop IDE (Tauri 2 + React 18 + TypeScript + Zustand 
 ```bash
 yarn dev                      # Vite dev server (frontend only)
 yarn tauri dev                # full app in dev mode
+yarn tauri:dev:all            # app + BOTH workers (ai :8788, collab-signaling :8789), one Ctrl-C kills all
+yarn dev:workers              # only the two workers
 yarn test                     # Jest (ts-jest, jsdom)
 yarn test src/stores/__tests__/chatStore.test.ts        # single test file
 yarn test -t "name pattern"   # single test by name
-yarn test:ai-worker           # worker tests (vitest, in workers/ai-pass-through)
-yarn build                    # tsc + vite build (type-checks; use to validate TS)
+yarn test:ai-worker           # worker tests (node:test via tsx, in workers/ai-pass-through)
+yarn build                    # tsc + vite build (type-checks; use to validate TS — if piping through tail/grep, use `set -o pipefail` or the pipe masks a failing exit code)
 yarn tauri:build:mac-arm64    # release build M1 (scripts/build.mjs → .dmg; artifacts copied to ~/Desktop/builds-desktop/v<version>/)
 yarn tauri:build:win-x64      # release build Windows
 yarn dev:ai-worker            # run the AI worker locally (wrangler, port 8788)
@@ -46,7 +48,7 @@ Consequence: `curl` tests prove nothing about the browser path, and login/billin
 
 ### Agent loop
 
-`src/services/agent/agentService.ts` orchestrates: gets ID token → `createAgentClient` (`sdkClient.ts`, normalizes baseURL to end in `/v1`) → `QueryEngine` (`queryEngine.ts`) runs the streaming tool-call loop with `refreshClient` for token expiry. Tool execution goes through `toolExecutor.ts` gated by `permissionStore` (per-project grants persisted in `permissions.json`). System prompt assembly lives in `contextBuilder/`. Slash commands for terminal mode live in `cmdModeCommands.ts`. Conversation compaction in `compact/`, agent memory in `memory*.ts`.
+`src/services/agent/agentService.ts` orchestrates: gets ID token → `createAgentClient` (`sdkClient.ts`, normalizes baseURL to end in `/v1`) → `QueryEngine` (`queryEngine.ts`) runs the streaming tool-call loop with `refreshClient` for token expiry. Tool execution goes through `toolExecutor.ts` gated by `permissionStore` (per-project grants persisted in `permissions.json`). System prompt assembly lives in `contextBuilder/`. Slash commands live in `slashCommandRegistry.ts` + `commands/`, dispatched from the chat prompt (`usePromptBar.ts`). Conversation compaction in `compact/`, agent memory in `memory*.ts`.
 
 ### State
 
@@ -54,15 +56,19 @@ Zustand stores in `src/stores/` — one store per domain (`chatStore` sessions/m
 
 ### UI modes
 
-`MainLayout.tsx` switches between Welcome, Chat mode (`components/chat/`), and Terminal/CMD mode (`components/cmd-mode/`, entry `TerminalView.tsx`). Both chat surfaces render the same `chatStore` data. The embedded PTY terminal panel (xterm.js) is separate from CMD mode. Editor is Monaco (`components/editor/`).
+`MainLayout.tsx` switches between Welcome and the workspace view modes (`layoutStore.viewMode`): Chat (`components/chat/`), Preview, Editor (Monaco, `components/editor/`), and Settings. The old Terminal/CMD chat mode was removed; what remains of `components/cmd-mode/` is only the embedded PTY terminal drawer (xterm.js — `TerminalDrawerPanel.tsx`/`TerminalPanel.tsx`), which is not a chat surface.
+
+### Multi-window parallel work
+
+One window = one OS process = one project ("Open in New Window" → `open_new_instance --open-project <dir>`). Windows coordinate **via disk only**, in the project's app-managed state dir: `agent-status.json` (cross-window agent badge — heartbeat 30s, reader-side staleness 90s, pid-owned clears; writer `src/services/projectAgentStatusService.ts`, reader `useProjectAgentStatuses`) and `window-lock.json` (double-open warning, `projectWindowLockService.ts`). Switching projects in-window CANCELS the run (confirmed first). Budget exhaustion triggers a client-side stop-all (`budgetStopService.ts`) and the message queue is HELD, not drained (billing gate in `useQueueProcessor` + explicit pause with Resume — the Chat dispatch path has no billing pre-flight of its own). In the same project, a message sent mid-run **steers** the live task by default; the composer's "New task" toggle queues it as a separate sequential run (`QueuedCommand.asTask`) — queue order is execution order, and `stopAgentRun` (the single Stop implementation) parks tasks instead of destroying or auto-firing them. Full doctrine: ARCHITECTURE.md → "Parallel work (multi-window)".
 
 ### Rust side
 
-`src-tauri/src/commands/` — one module per domain (terminal/PTY, filesystem, git, search, deploy, MCP, sandbox...), registered in `lib.rs`. Frontend invokes via `@tauri-apps/api` `invoke` (wrapped by `src/utils/invokeMetrics`). DevTools is enabled even in release builds (right-click → Inspect) — use it to debug production issues.
+`src-tauri/src/commands/` — one module per domain (terminal/PTY, filesystem, git, search, deploy, MCP, sandbox...), registered in `lib.rs`. Frontend invokes via `@tauri-apps/api` `invoke` (wrapped by `src/utils/invokeMetrics`). New `#[tauri::command]` fns must ALSO be added to `src-tauri/permissions/autogenerated.toml` (allow-list) or the invoke is blocked before Rust. DevTools is enabled even in release builds (right-click → Inspect) — use it to debug production issues.
 
 ## Conventions
 
 - i18n: user-facing strings go through `useTranslation()` / `t('key')` (`src/i18n/translations.ts`). UI copy is bilingual; much of the codebase's comments and commit messages are in Portuguese.
 - Theme: use `tokens` from `src/theme/tokens.ts` (terminal colors, mono font) rather than hard-coded values.
-- Tests live in `__tests__/` folders next to the code. Worker tests use vitest and run separately (`yarn test:ai-worker`).
+- Tests live in `__tests__/` folders next to the code. Worker tests use node's built-in test runner (`node:test` + `assert`, executed by tsx — NOT vitest, and tsx does no type-checking) and run separately (`yarn test:ai-worker`). Test files whose only imports are `require()`/`typeof import` need a top-level `export {}` or project-wide `tsc` treats them as global scripts (duplicate-declaration collisions).
 - Files routinely carry long "why" comments documenting race conditions and past bugs — preserve and follow that style; many effects/guards exist for non-obvious reasons explained inline.

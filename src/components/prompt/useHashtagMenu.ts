@@ -6,8 +6,8 @@ interface UseHashtagMenuOptions {
   /** Textarea owning the cursor — used to read selectionStart and to refocus after insert. */
   textareaRef: RefObject<HTMLTextAreaElement | null>
   /**
-   * Imperative setter for the textarea's text. Chat-mode wires to
-   * `useChatStore.setDraftInput`, cmd-mode wires to its local `setInput`.
+   * Imperative setter for the textarea's text. The main prompt wires to
+   * `useChatStore.setDraftInput`; local prompt inputs wire to `setInput`.
    * The hook never touches the underlying store — it just calls back.
    */
   setInputValue: (next: string) => void
@@ -22,9 +22,8 @@ interface UseHashtagMenuOptions {
 /**
  * Closed-vocabulary `#hashtag` autocomplete state + handlers.
  *
- * Shared between the chat prompt (`usePromptBar`) and CMD prompt
- * (`useCmdPromptLogic`). The hook owns the menu state, the cursor-aware
- * detection, and the keyboard navigation. Callers wire up:
+ * Used by the chat prompt (`usePromptBar`). The hook owns the menu state,
+ * the cursor-aware detection, and the keyboard navigation. Callers wire up:
  *
  *   - `detect(text, cursorPos)` from the input change handler — returns
  *     true when a hashtag is in progress so the caller can short-circuit

@@ -264,7 +264,7 @@ function ExperimentalTab(): React.ReactElement {
         </Field.Label>
         <Box mt={1} maxW="420px">
           <Text color={tokens.colors.text.secondary} fontSize="sm">
-            The agent's tool execution uses a concurrency-safe pool. Read-only tools (read_file, glob, search_files, web_fetch) run in parallel; mutating tools (write_file, edit_file, execute_command) are forced to run serially. This prevents race conditions when the agent edits multiple files in one turn.
+            The agent's tool execution uses a concurrency-safe pool. Read-only tools (read_file, glob, search_files, web_fetch) run in parallel; mutating tools (write_file, edit_file, execute_command) are forced to run serially. This prevents race conditions when the agent edits multiple files in one response.
           </Text>
 
           <Box

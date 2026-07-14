@@ -127,6 +127,10 @@ const EditorPane = memo<EditorPaneProps>(({
       direction="column"
       flex={1}
       minW={0}
+      bg="rgba(13, 13, 15, 0.96)"
+      border="1px solid rgba(255,255,255,0.055)"
+      borderRadius="10px 10px 0 0"
+      overflow="hidden"
       onClick={handlePaneFocus}
       position="relative"
       _after={isFocused && isSplit ? {
@@ -143,8 +147,9 @@ const EditorPane = memo<EditorPaneProps>(({
       {/* Tab bar row: Tabs + Action buttons */}
       <Flex
         flexShrink={0}
-        borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}
+        borderBottom="1px solid rgba(255,255,255,0.06)"
         align="center"
+        bg="rgba(255,255,255,0.025)"
       >
         {/* Scrollable tabs */}
         <Box flex={1} minW={0} overflow="hidden">
@@ -166,6 +171,7 @@ const EditorPane = memo<EditorPaneProps>(({
             flexShrink={0}
             bg={tokens.colors.bg.panel}
             height="30px"
+            borderLeft="1px solid rgba(255,255,255,0.045)"
           >
             <PaneAction
               icon={<VscIndent size={13} />}
@@ -206,7 +212,7 @@ const EditorPane = memo<EditorPaneProps>(({
       )}
 
       {/* Editor */}
-      <Flex flex={1} overflow="hidden">
+      <Flex flex={1} overflow="hidden" bg="rgba(10,10,10,0.7)">
         {group.activeFile ? (
           <Suspense fallback={<EditorSkeleton />}>
             <MonacoEditor
@@ -385,7 +391,7 @@ function SplitEditorLayout({ projectPath, onCursorPositionChange }: SplitEditorL
   }
 
   return (
-    <Flex ref={containerRef} flex={1} overflow="hidden">
+    <Flex ref={containerRef} flex={1} overflow="hidden" gap="6px">
       <Box flex={splitRatio} minW={0} display="flex" flexDirection="column">
         <EditorPane
           group={editorGroups[0]}

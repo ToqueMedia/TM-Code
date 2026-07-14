@@ -91,8 +91,12 @@ export async function openPreview(sharerPeerId: string, sharerName: string): Pro
   }
 
   const port = await invoke<number>('tunnel_proxy_start')
+  // 127.0.0.1 (not localhost): the Rust proxy binds 127.0.0.1 only, and the
+  // preview webview may resolve `localhost` to IPv6 ::1 first → connection
+  // refused → a BLANK preview window ("não apresentava nada"). Same fix the
+  // sharer side already carries in shareLivePreview.
   await invoke('tunnel_open_preview_window', {
-    url: `http://localhost:${port}`,
+    url: `http://127.0.0.1:${port}`,
     title: `Live preview — ${sharerName}`,
   })
 }

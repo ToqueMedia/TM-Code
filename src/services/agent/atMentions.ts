@@ -48,6 +48,10 @@ import type { OpenAIContentPart } from './types'
 
 /** Truncated-read fallback for oversized files — claude-vaz MAX_LINES_TO_READ. */
 export const MAX_LINES_TO_READ = 2000
+/** Above this, @mention emits a compact file card instead of full contents. */
+export const MAX_INLINE_MENTION_CHARS = 16_000
+const MENTION_PREVIEW_CHARS = 4_000
+const MAX_OUTLINE_ITEMS = 80
 
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'])
 // Never readable as UTF-8 text — mentions of these drop silently, matching
@@ -172,6 +176,98 @@ function getExtension(p: string): string {
   return dot === -1 ? '' : name.slice(dot + 1).toLowerCase()
 }
 
+function languageForExtension(ext: string): string {
+  const map: Record<string, string> = {
+    ts: 'TypeScript',
+    tsx: 'TypeScript React',
+    js: 'JavaScript',
+    jsx: 'JavaScript React',
+    css: 'CSS',
+    scss: 'SCSS',
+    html: 'HTML',
+    json: 'JSON',
+    md: 'Markdown',
+    py: 'Python',
+    go: 'Go',
+    rs: 'Rust',
+    java: 'Java',
+    kt: 'Kotlin',
+    swift: 'Swift',
+    php: 'PHP',
+    rb: 'Ruby',
+    cs: 'C#',
+  }
+  return map[ext] || (ext ? ext.toUpperCase() : 'text')
+}
+
+function previewHead(content: string): { text: string; lineCount: number; totalLines: number } {
+  const totalLines = content.split('\n').length
+  if (content.length <= MENTION_PREVIEW_CHARS) return { text: content, lineCount: totalLines, totalLines }
+  const slice = content.slice(0, MENTION_PREVIEW_CHARS)
+  const lastNewline = slice.lastIndexOf('\n')
+  const text = lastNewline > 500 ? slice.slice(0, lastNewline) : slice
+  return { text, lineCount: text.split('\n').length, totalLines }
+}
+
+function extractOutline(content: string, ext: string): string[] {
+  const lines = content.split('\n')
+  const out: string[] = []
+  const codeLike = /^(tsx?|jsx?|mjs|cjs|vue|svelte)$/.test(ext)
+  const patterns = codeLike
+    ? [
+        /\bexport\s+default\s+(?:async\s+)?(?:function|class)\s+([A-Za-z0-9_$]+)/,
+        /\bexport\s+(?:async\s+)?function\s+([A-Za-z0-9_$]+)/,
+        /\bfunction\s+([A-Za-z0-9_$]+)\s*\(/,
+        /\b(?:export\s+)?(?:const|let|var)\s+([A-Z][A-Za-z0-9_$]*)\s*[:=]/,
+        /\b(?:export\s+)?(?:interface|type|class|enum)\s+([A-Za-z0-9_$]+)/,
+        /\b(?:const|let|var)\s+([a-z][A-Za-z0-9_$]*(?:Handler|Hook|Store|Context|Provider))\s*[:=]/,
+      ]
+    : [
+        /^#{1,6}\s+(.+)/,
+        /\b(?:class|def)\s+([A-Za-z0-9_]+)/,
+      ]
+
+  for (let i = 0; i < lines.length && out.length < MAX_OUTLINE_ITEMS; i++) {
+    const line = lines[i]
+    for (const re of patterns) {
+      const m = line.match(re)
+      if (m?.[1]) {
+        out.push(`L${i + 1}: ${m[1]} — ${line.trim().slice(0, 140)}`)
+        break
+      }
+    }
+  }
+  return out
+}
+
+function renderLargeMentionSummary(absolutePath: string, content: string, ext: string): string {
+  const preview = previewHead(content)
+  const outline = extractOutline(content, ext)
+  const outlineText = outline.length
+    ? outline.map(item => `- ${item}`).join('\n')
+    : '- No top-level symbols detected by the lightweight outline extractor.'
+  const previewEndLine = preview.lineCount
+  const hasMore = content.length > preview.text.length
+  return [
+    `@mention compact_reference (intentional summary — full file body was NOT inlined to save context tokens):`,
+    `path: ${absolutePath}`,
+    `language: ${languageForExtension(ext)}`,
+    `size: ${content.length.toLocaleString()} chars, ${preview.totalLines.toLocaleString()} lines`,
+    `kind: compact_reference — this is an on-demand outline, NOT a truncated_tool_result (a truncated_tool_result is a Read body cut by the byte cap; this is a deliberate summary).`,
+    `edit guard: this compact_reference does NOT count as a full Read; call Read for the exact range before edit_file/write_file.`,
+    `read guidance: the outline + preview below cover lines 1-${previewEndLine}. Use Read ONLY for the specific range you still need (offset/limit). Do NOT re-read ranges already covered by this preview or by a previous Read.`,
+    ``,
+    `outline:`,
+    outlineText,
+    ``,
+    `preview (first ${preview.lineCount} lines / ${Math.min(content.length, preview.text.length).toLocaleString()} chars):`,
+    preview.text,
+    hasMore
+      ? `\n[preview covers lines 1-${previewEndLine} of ${preview.totalLines}; call Read with offset:${previewEndLine + 1} to continue from here if needed]`
+      : '',
+  ].join('\n')
+}
+
 /** Blocks for one mention, plus the path whose file CONTENT they froze (if any). */
 interface OneMention {
   blocks: ResolvedBlock[]
@@ -240,7 +336,7 @@ async function resolveOneMention(token: string, executor: ToolExecutor): Promise
 
     // Fresh full view already in context → render nothing
     // (claude-vaz `already_read_file` normalizes to []).
-    if (lineStart === undefined && executor.isFileFreshInContext(absolutePath)) return NO_MENTION
+    if (lineStart === undefined && await executor.isFileFreshInContext(absolutePath)) return NO_MENTION
 
     const input: Record<string, unknown> = { file_path: absolutePath }
     if (lineStart !== undefined) {
@@ -263,12 +359,19 @@ async function resolveOneMention(token: string, executor: ToolExecutor): Promise
       return {
         blocks: [
           ...renderToolPair('read_file', truncatedInput, truncated),
-          { kind: 'text', text: wrapInSystemReminder(`Note: The file ${absolutePath} was too large and has been truncated to the first ${MAX_LINES_TO_READ} lines. Don't tell the user about this truncation. Use read_file to read more of the file if you need.`) },
+          { kind: 'text', text: wrapInSystemReminder(`Note: The file ${absolutePath} was too large and has been truncated to the first ${MAX_LINES_TO_READ} lines. Don't tell the user about this truncation. Use Read to read more of the file if you need.`) },
         ],
         contentPath: absolutePath,
       }
     }
     if (result.startsWith('Error:')) return NO_MENTION
+
+    if (result.length > MAX_INLINE_MENTION_CHARS) {
+      const partialMarker = executor as unknown as { markMentionPathAsPartialView?: (path: string) => void }
+      partialMarker.markMentionPathAsPartialView?.(absolutePath)
+      const summary = renderLargeMentionSummary(absolutePath, result, ext)
+      return { blocks: renderToolPair('read_file', input, summary), contentPath: absolutePath }
+    }
 
     return { blocks: renderToolPair('read_file', input, result), contentPath: absolutePath }
   } catch {

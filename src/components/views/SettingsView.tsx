@@ -32,14 +32,12 @@ import { tokens } from '@/theme/tokens'
 import { useTranslation, t } from '@/i18n'
 import type { TranslationKey } from '@/i18n'
 import ApiKeysSection from './settings/ApiKeysSection'
-import DeploysSection from './settings/DeploysSection'
 
-type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'apiKeys' | 'sandbox' | 'admin' | 'deploys'
+type SectionId = 'profile' | 'editor' | 'shortcuts' | 'skills' | 'mcp' | 'apiKeys' | 'sandbox' | 'admin'
 
 const BASE_NAV_KEYS: { id: SectionId; key: TranslationKey }[] = [
   { id: 'profile', key: 'settings.profilePlan' },
   { id: 'editor', key: 'settings.editor' },
-  { id: 'deploys', key: 'settings.deploys' as TranslationKey },
   { id: 'sandbox', key: 'settings.sandbox' as TranslationKey },
   { id: 'shortcuts', key: 'settings.shortcuts' },
   { id: 'skills', key: 'settings.skills' },
@@ -64,7 +62,7 @@ interface SettingsViewProps {
 // `layoutStore.settingsInitialSection`. Keep aligned with the SectionId union
 // above — TS will flag any drift because we cast through `SectionId` below.
 const ALLOWED_INITIAL_SECTIONS: ReadonlyArray<SectionId> = [
-  'profile', 'editor', 'shortcuts', 'skills', 'mcp', 'apiKeys', 'sandbox', 'admin', 'deploys',
+  'profile', 'editor', 'shortcuts', 'skills', 'mcp', 'apiKeys', 'sandbox', 'admin',
 ]
 
 function SettingsView({ onBack }: SettingsViewProps = {}) {
@@ -199,7 +197,6 @@ function SettingsView({ onBack }: SettingsViewProps = {}) {
             {activeSection === 'skills' && <SkillsSection />}
             {activeSection === 'mcp' && <McpSection />}
             {activeSection === 'apiKeys' && <ApiKeysSection />}
-            {activeSection === 'deploys' && <DeploysSection />}
             {activeSection === 'admin' && showAdminNav && <AdminSection />}
           </Box>
         </Box>
@@ -936,6 +933,8 @@ function EditorSection() {
   const insertSpaces = useSettingsStore(function (s) { return s.editor.insertSpaces })
   const detectIndentation = useSettingsStore(function (s) { return s.editor.detectIndentation })
   const formatOnSave = useSettingsStore(function (s) { return s.formatOnSave })
+  const autoSave = useSettingsStore(function (s) { return s.autoSave })
+  const setAutoSave = useSettingsStore(function (s) { return s.setAutoSave })
   const chatTextFontSize = useSettingsStore(function (s) { return s.chatTextFontSize })
 
   const setAutocompleteEnabled = useSettingsStore(function (s) { return s.setAutocompleteEnabled })
@@ -998,6 +997,38 @@ function EditorSection() {
               <Switch.HiddenInput />
               <Switch.Control />
             </Switch.Root>
+          </HStack>
+        </Field.Root>
+      </SettingsGroup>
+
+      <SettingsGroup title={t("settings.autoSaveGroup")}>
+        <Field.Root>
+          <HStack justify="space-between" align="center" gap={4}>
+            <Box minW={0}>
+              <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px">
+                {t('settings.autoSave')}
+              </Text>
+              <Text color={tokens.colors.text.secondary} fontSize="12px" mt="2px">
+                {t('settings.autoSaveDesc')}
+              </Text>
+            </Box>
+            <NativeSelect.Root size="sm" width="180px" flexShrink={0}>
+              <NativeSelect.Field
+                bg={tokens.colors.bg.input}
+                borderColor={tokens.colors.border.input}
+                color={tokens.colors.text.primary}
+                value={autoSave}
+                onChange={function (e) {
+                  const v = e.target.value
+                  if (v === 'off' || v === 'afterDelay' || v === 'onFocusChange') setAutoSave(v)
+                }}
+              >
+                <option value="afterDelay">{t('settings.autoSaveAfterDelay')}</option>
+                <option value="onFocusChange">{t('settings.autoSaveOnFocusChange')}</option>
+                <option value="off">{t('settings.autoSaveOff')}</option>
+              </NativeSelect.Field>
+              <NativeSelect.Indicator />
+            </NativeSelect.Root>
           </HStack>
         </Field.Root>
       </SettingsGroup>

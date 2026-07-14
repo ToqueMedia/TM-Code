@@ -25,6 +25,15 @@ export interface Env {
    * the emulator path (FIRESTORE_REST_BASE set).
    */
   CONTROL_PLANE_URL?: string
+
+  /**
+   * Cloudflare Calls TURN key (SECRETS — `wrangler secret put`, never [vars]).
+   * When set, each `welcome` carries ephemeral TURN credentials so peers with
+   * no direct path still get P2P media/data (voice needs this; the DO data
+   * relay cannot carry audio). Absent → clients stay STUN-only.
+   */
+  TURN_KEY_ID?: string
+  TURN_KEY_API_TOKEN?: string
 }
 
 export interface AuthenticatedUser {
@@ -70,16 +79,35 @@ export interface RelayMessage {
 /** Any message a peer can address to another (forwarded by the DO). */
 export type AddressedMessage = SignalMessage | RelayMessage
 
-/** Server → client: presence + relayed signals/data. */
+/** Server → client: presence + relayed signals/data. On welcome, `iceServers`
+ *  carries ephemeral TURN credentials (when the Calls TURN key is configured —
+ *  see turn.ts) and `mediaPolicy` the per-plan voice/screen limits the client
+ *  enforces (see mediaPolicy.ts). */
 export type ServerMessage =
-  | { type: 'welcome'; selfId: string; peers: PeerInfo[] }
+  | {
+      type: 'welcome'
+      selfId: string
+      peers: PeerInfo[]
+      iceServers?: IceServerEntry[]
+      mediaPolicy?: import('./mediaPolicy').MediaPolicy
+    }
   | { type: 'peer-join'; peer: PeerInfo }
   | { type: 'peer-leave'; peerId: string }
   | { type: SignalType; from: string; payload: unknown }
   | { type: 'relay'; from: string; channel: 'control' | 'bulk'; payload: string }
+  /** Heartbeat probe — the client answers `{type:'pong'}`; ANY inbound frame
+   *  (pong included) refreshes the peer's liveness in the room. */
+  | { type: 'ping' }
 
 export interface PeerInfo {
   peerId: string
   uid: string
   name: string
+}
+
+/** RTCIceServer-shaped entry (ephemeral TURN credentials) sent on welcome. */
+export interface IceServerEntry {
+  urls: string[]
+  username?: string
+  credential?: string
 }

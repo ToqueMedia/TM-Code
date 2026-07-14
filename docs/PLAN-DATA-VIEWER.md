@@ -12,7 +12,7 @@
 The agent now writes user data to two distinct stores depending on environment:
 
 - **Dev**: `file:./dev.db` — a local SQLite file in the project directory, accessed by `drizzle-orm/libsql/node`.
-- **Prod**: TM Code Database (Turso libSQL) — accessed via the worker proxy at `https://api-agents.toquemedia.net/v1/apps/{projectId}/db` with the app-scoped `TMDB_TOKEN`. Provisioned by `provision_database` (see `toolExecutor.ts:3178` and the worker's `/v1/apps/{projectId}/database/provision` endpoint).
+- **Prod**: TM Code Database (Turso libSQL) — accessed by the deployed app via the worker proxy with Cloud Run-injected `TMDB_URL` + `TMDB_TOKEN`. Publish/deploy provisions or reuses Turso and applies the bundled schema/migrations there. `provision_database` is an explicit production preflight/repair or IDE-inspection path, not the normal local scaffolding path.
 
 Today there is no in-IDE way to inspect either. Developers fall back to:
 
@@ -111,10 +111,10 @@ The viewer can:
 
 | Path | How | Pros | Cons |
 |---|---|---|---|
-| A — Read from `.env` | `await invoke('read_env_var', { key: 'TMDB_TOKEN' })` | Reuses the credential the user code already has. | The IDE process and the app share the same token — if the app rotates, viewer breaks until reload. |
-| B — Mint a viewer-scoped token | New worker endpoint `POST /v1/apps/{projectId}/db/viewer-token` returning a short-lived read-only TMDB token | Read-only enforcement is server-side; viewer-only path can be killed without rotating the app's token. | New endpoint + token-issuance plumbing. |
+| A — Read inspection creds from local `.env` | `await invoke('read_env_vars', { keys: ['TMDB_URL', 'TMDB_TOKEN'] })` | Matches the current IDE implementation and works after an explicit `provision_database` preflight/repair writes inspection creds locally. | Publish/deploy injects `TMDB_*` directly into Cloud Run and does not make those values a local scaffolding default. Without local inspection creds, PROD viewer stays disabled even though the deployed app can use its DB. |
+| B — Mint a viewer-scoped token | New worker endpoint `POST /v1/apps/{projectId}/db/viewer-token` returning a short-lived read-only TMDB token | Read-only enforcement is server-side; viewer-only path can be killed without rotating the app's runtime token; works after Publish/deploy without writing `TMDB_*` to project `.env`. | New endpoint + token-issuance plumbing. |
 
-Pick A for v1, B for v2. The worker's `handleDbQuery` already enforces method types (`all`/`get`/`run`/`values`); a write-rejection check in the viewer call site is enough.
+Pick A for v1 because it matches the shipped service. B is the correct long-term shape if PROD browsing should work automatically after Publish/deploy without local `.env` inspection credentials. The worker's `handleDbQuery` already enforces method types (`all`/`get`/`run`/`values`); a write-rejection check in the viewer call site is enough.
 
 ### 4.3 Source selection
 
@@ -122,8 +122,8 @@ Pick A for v1, B for v2. The worker's `handleDbQuery` already enforces method ty
 // Auto-detect priority order:
 // 1. Manual override in localStorage (`data-viewer-source:{projectId}` → 'dev'|'prod')
 // 2. Presence of dev.db file → 'dev' default
-// 3. Presence of TMDB_URL in .env → 'prod' default
-// 4. Neither → empty state with "Provision database to start" CTA
+// 3. Presence of TMDB_URL + TMDB_TOKEN in local .env inspection creds → 'prod' available
+// 4. Neither → empty state with local migration CTA; PROD viewer requires local inspection credentials in v1
 ```
 
 Detection result is shown in the source toggle; user can flip it manually at any time.
@@ -137,7 +137,7 @@ src/components/data-viewer/
   TableView.tsx                                    // table header + paginated rows + page-size selector
   Pagination.tsx                                   // ‹ X / Y › control
   SourceToggle.tsx                                 // DEV / PROD switcher
-  EmptyState.tsx                                   // "no tables yet" / "no project open" / "no database provisioned"
+  EmptyState.tsx                                   // "no tables yet" / "no project open" / "production DB unavailable"
 ```
 
 State:

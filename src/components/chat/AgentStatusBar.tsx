@@ -2,7 +2,7 @@ import { memo } from 'react'
 import { Flex, Text, Box } from '@chakra-ui/react'
 import { FiSquare, FiCheckSquare, FiLoader } from 'react-icons/fi'
 import { useAgentStore, type AgentTask } from '../../stores/agentStore'
-import { useChatStore, resolveAllPendingDiffApprovals, selectLastCompletedToolName } from '../../stores/chatStore'
+import { useChatStore, selectLastCompletedToolName } from '../../stores/chatStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useAgentElapsed } from '../../hooks/useAgentElapsed'
 import { useSkillStore } from '../../stores/skillStore'
@@ -12,7 +12,7 @@ import { useThinkingToggle } from '../../hooks/useThinkingToggle'
 import { useSubAgentStore } from '../../stores/subAgentStore'
 import { useBackgroundCommandStore } from '../../stores/backgroundCommandStore'
 import { getCommandQueueSnapshot } from '../../services/agent/messageQueue'
-import AgentService from '../../services/agent/agentService'
+import { stopAgentRun } from '../../services/agent/stopAgentRun'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -47,25 +47,11 @@ function AgentStatusBar() {
   const agentTasks = useAgentStore(s => s.tasks)
   const queueLength = getCommandQueueSnapshot().length
 
+  // Shared implementation with the prompt-bar Stop (stopAgentRun): drops
+  // steering, PARKS queued tasks (paused, not destroyed), kills all live
+  // work. The two buttons had drifted into opposite queue semantics.
   const handleStop = () => {
-    // Check if there are pending permissions that will be cancelled
-    const pendingCount = usePermissionStore.getState().getQueuedCount()
-    if (pendingCount > 0) {
-      const confirmed = window.confirm(
-        `There are ${pendingCount} pending permission${pendingCount > 1 ? 's' : ''} in the queue. ` +
-        `Stopping will cancel all of them. Continue?`
-      )
-      if (!confirmed) return
-    }
-
-    usePermissionStore.getState().clearPending()
-    usePermissionStore.getState().resetAutoApprove()
-    resolveAllPendingDiffApprovals(false)
-    // Abort all running sub-agents before stopping the main agent
-    useSubAgentStore.getState().abortAll()
-    AgentService.getInstance().cancelLoop()
-    useAgentStore.getState().setStatus('idle')
-    useChatStore.getState().finalizeAssistantMessage()
+    stopAgentRun()
   }
 
   const statusConfig: Record<string, { color: string; label: string; pulse: boolean }> = {
@@ -75,6 +61,7 @@ function AgentStatusBar() {
     generating: { color: tokens.colors.accent.primary, label: t('chat.generating'), pulse: true },
     applying: { color: tokens.colors.accent.green, label: t('chat.applying'), pulse: true },
     compressing: { color: tokens.colors.accent.orange, label: t('chat.compressing'), pulse: true },
+    cancelled: { color: tokens.colors.text.disabled, label: t('chat.cancelled'), pulse: false },
     error: { color: tokens.colors.accent.red, label: error || 'Error', pulse: false },
   }
 
@@ -100,7 +87,7 @@ function AgentStatusBar() {
   // Per-phase elapsed timer. Pauses automatically when a permission dialog
   // is open (shared hook keeps all three timer surfaces aligned).
   const { elapsedMs, isPaused } = useAgentElapsed('phase')
-  const isBusy = status !== 'idle' && status !== 'error'
+  const isBusy = status !== 'idle' && status !== 'cancelled' && status !== 'error'
   const showElapsed = isBusy && elapsedMs >= 5000
   // Thinking is no longer user-toggleable mid-session (claude-vaz parity).
   // The mandatory badge below renders only when the backend reports the

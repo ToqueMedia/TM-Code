@@ -11,6 +11,7 @@ pub struct SearchOptions {
     pub include_patterns: Vec<String>,
     pub exclude_patterns: Vec<String>,
     pub max_results: Option<usize>,
+    pub context_lines: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -52,6 +53,66 @@ pub struct SearchResult {
 const GLOBAL_MAX_MATCHES: usize = 500;
 /// Max line length sent to frontend (longer lines are truncated).
 const MAX_LINE_LENGTH: usize = 500;
+/// Max before/after context lines per match. Keeps agent/UI payloads bounded.
+const MAX_CONTEXT_LINES: usize = 10;
+
+fn truncate_search_line(text_raw: &str) -> String {
+    if text_raw.len() > MAX_LINE_LENGTH {
+        match text_raw.char_indices().nth(MAX_LINE_LENGTH) {
+            Some((byte_idx, _)) => format!("{}…", &text_raw[..byte_idx]),
+            None => text_raw.to_string(),
+        }
+    } else {
+        text_raw.to_string()
+    }
+}
+
+fn requested_context_lines(options: &SearchOptions) -> usize {
+    options.context_lines.unwrap_or(0).min(MAX_CONTEXT_LINES)
+}
+
+fn attach_match_context(files: &mut [FileSearchResult], context_lines: usize) {
+    if context_lines == 0 {
+        return;
+    }
+
+    for file in files {
+        let Ok(content) = std::fs::read_to_string(&file.file_path) else {
+            continue;
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        if lines.is_empty() {
+            continue;
+        }
+
+        for m in &mut file.matches {
+            if m.line_number == 0 {
+                continue;
+            }
+            let line_index = (m.line_number - 1) as usize;
+            if line_index >= lines.len() {
+                continue;
+            }
+
+            let before_start = line_index.saturating_sub(context_lines);
+            m.context_before = lines[before_start..line_index]
+                .iter()
+                .map(|line| truncate_search_line(line))
+                .collect();
+
+            let after_start = line_index.saturating_add(1);
+            let after_end = (after_start + context_lines).min(lines.len());
+            m.context_after = if after_start < after_end {
+                lines[after_start..after_end]
+                    .iter()
+                    .map(|line| truncate_search_line(line))
+                    .collect()
+            } else {
+                vec![]
+            };
+        }
+    }
+}
 
 #[tauri::command]
 pub async fn search_in_files(
@@ -278,14 +339,7 @@ pub async fn search_in_files(
             .unwrap_or("");
 
         // Truncate long lines to prevent IPC bloat (char-safe for UTF-8)
-        let text = if text_raw.len() > MAX_LINE_LENGTH {
-            match text_raw.char_indices().nth(MAX_LINE_LENGTH) {
-                Some((byte_idx, _)) => format!("{}…", &text_raw[..byte_idx]),
-                None => text_raw.to_string(), // fewer chars than MAX despite more bytes
-            }
-        } else {
-            text_raw.to_string()
-        };
+        let text = truncate_search_line(text_raw);
 
         // Start new file group if path changed
         if current_file.is_none() || current_file.as_ref().unwrap().file_path != path {
@@ -334,6 +388,8 @@ pub async fn search_in_files(
     if let Some(file) = current_file {
         files.push(file);
     }
+
+    attach_match_context(&mut files, requested_context_lines(&options));
 
     if !truncated {
         if let Some(max) = options.max_results {
@@ -451,14 +507,7 @@ async fn search_with_grep(
         let file_path = normalize_str_for_frontend(parts[0]);
         let line_number = parts[1].parse::<u32>().unwrap_or(0);
         let text_raw = parts[2];
-        let text = if text_raw.len() > MAX_LINE_LENGTH {
-            match text_raw.char_indices().nth(MAX_LINE_LENGTH) {
-                Some((byte_idx, _)) => format!("{}…", &text_raw[..byte_idx]),
-                None => text_raw.to_string(),
-            }
-        } else {
-            text_raw.to_string()
-        };
+        let text = truncate_search_line(text_raw);
 
         let entry = file_map
             .entry(file_path.clone())
@@ -480,7 +529,8 @@ async fn search_with_grep(
         total_matches += 1;
     }
 
-    let files: Vec<FileSearchResult> = file_map.into_values().collect();
+    let mut files: Vec<FileSearchResult> = file_map.into_values().collect();
+    attach_match_context(&mut files, requested_context_lines(options));
     let duration = start_time.elapsed();
     let truncated = total_matches >= GLOBAL_MAX_MATCHES;
 
@@ -582,14 +632,7 @@ async fn search_with_findstr(
 
         let file_path = normalize_str_for_frontend(&file_path);
 
-        let text = if text.len() > MAX_LINE_LENGTH {
-            match text.char_indices().nth(MAX_LINE_LENGTH) {
-                Some((byte_idx, _)) => format!("{}…", &text[..byte_idx]),
-                None => text,
-            }
-        } else {
-            text
-        };
+        let text = truncate_search_line(&text);
 
         let entry = file_map
             .entry(file_path.clone())
@@ -611,7 +654,8 @@ async fn search_with_findstr(
         total_matches += 1;
     }
 
-    let files: Vec<FileSearchResult> = file_map.into_values().collect();
+    let mut files: Vec<FileSearchResult> = file_map.into_values().collect();
+    attach_match_context(&mut files, requested_context_lines(options));
     let duration = start_time.elapsed();
     let truncated = total_matches >= GLOBAL_MAX_MATCHES;
 

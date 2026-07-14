@@ -9,11 +9,11 @@ import { slashCommandRegistry, type SlashCommand } from '../../services/agent/sl
  *   - the user has already typed args (command followed by non-empty token)
  *   - the command declares no `argHint`
  *
- * Used by both `PromptTextarea` (chat mode) and `CmdModePromptInput`
- * (terminal mode) so the UX parity is mechanical, not duplicated.
+ * Used by both prompt input surfaces so the UX parity is mechanical,
+ * not duplicated.
  *
  * @param extraCommands - Optional additional commands to check beyond the
- *   global registry (e.g. CMD_MODE_COMMANDS for terminal mode).
+ *   global registry (e.g. session-control commands).
  */
 export function resolveInlineArgHint(value: string, extraCommands?: SlashCommand[]): string | null {
   if (!value.startsWith('/')) return null

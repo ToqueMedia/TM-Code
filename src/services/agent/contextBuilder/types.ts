@@ -4,6 +4,7 @@
  */
 
 import type { TemplateManifest } from '../../templateService'
+import type { ProjectManifest } from '../../projectManifestService'
 
 export interface MCPToolSummary {
   name: string
@@ -43,37 +44,7 @@ export interface PathAlias {
 }
 
 /**
- * Inputs every cmd-mode section function needs. Built once per
- * `buildCmdModeSystemPrompt` call.
- */
-export interface CmdPromptContext {
-  // Paths and platform
-  cwd: string
-  normalizedCwd: string
-  homeDir: string | null
-  normalizedHome: string | null
-  // Memory
-  globalTmsContent: string | null
-  /** Project-level TMS.md content (<project>/TMS.md). Null when missing. */
-  tmsContent: string | null
-  claudeMdContent: string | null
-  /** Session-scoped memory notes (same source as chat mode). */
-  sessionMemory: string | null
-  /** Pre-loaded user-scope MEMORY.md index content (cross-project facts).
-   *  Null when no user memory exists yet. */
-  userMemoryIndex: string | null
-  /** Pre-loaded project-scope MEMORY.md index content (project-bound facts).
-   *  Null when none exists yet. */
-  projectMemoryIndex: string | null
-  /** True iff at least one injected memory file is past the stale threshold. */
-  memoryHasStale: boolean
-  // Runtime config
-  langInstruction: string
-  mcpTools: { name: string; description: string; serverName: string }[]
-}
-
-/**
- * Inputs every chat-mode section function needs. Built once per
+ * Inputs every project prompt section function needs. Built once per
  * `buildSystemPrompt` call from the parallel gather phase, then passed
  * through. Lets section functions stay pure (input → string | null), so
  * order changes and conditional inclusion are array-level concerns, not
@@ -103,6 +74,7 @@ export interface PromptContext {
   planContent: string | null
   todoContent: string | null
   templateManifest: TemplateManifest | null
+  projectManifest: ProjectManifest | null
   // Runtime config
   langInstruction: string
   modelProfile: import('../modelProfiles').ModelProfile | null
@@ -112,13 +84,8 @@ export interface PromptContext {
    *  reminder so the model is reminded which skill contracts apply, since
    *  the skill index itself sits mid-prompt (U-curve attention dip). */
   loadedSkillNames: string[]
-  /** Already-applied scaffolding (one-shot flows like #auth-google,
-   *  /payments) detected from filesystem markers. Surfaced as a system-prompt
-   *  section so the agent reads existing files instead of re-scaffolding. */
-  appliedScaffolding: import('../../scaffoldingDetector').ScaffoldingState
   /** Skill names triggered by hashtags in the CURRENT user message
-   *  (#auth-google, #auth-email-password, #design). Used to inline CRITICAL
-   *  rules at turn 1 — before scaffoldingDetector has anything to find. */
+   *  (#design). Used to inline CRITICAL rules at turn 1. */
   hashtagSkills: string[]
   /** Live snapshot of the in-memory task tracker (the one `update_tasks`
    *  writes to via agentStore). Distinct from `todoContent` (which is the
@@ -159,4 +126,20 @@ export interface PromptCacheEntry {
   key: string
   prompt: string
   expiresAt: number
+  symbolIndexTelemetry?: {
+    filesConsidered: number
+    filesScanned: number
+    entries: number
+    truncated: boolean
+    tokensEstimate: number
+  }
+  /** Auxiliary-context ctx captured at build time, restored on cache hit so
+   *  the `request_context` on-demand loader (which needs pmDetected for the
+   *  scaffolding/install block) works even when the prompt itself is cached. */
+  auxiliaryCtx?: {
+    pmDetected: string
+    isVanillaWeb: boolean
+    promptCtx?: PromptContext
+    loadedSkills?: import('../skillService').Skill[]
+  }
 }

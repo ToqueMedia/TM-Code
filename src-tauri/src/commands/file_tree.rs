@@ -1,10 +1,12 @@
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::AsyncReadExt;
 
 use super::{canonicalize_path, normalize_path_for_frontend};
 
@@ -143,6 +145,46 @@ pub struct FileOperationResult {
     pub success: bool,
     pub message: String,
     pub path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSignature {
+    pub path: String,
+    pub size: u64,
+    pub modified_ms: Option<u64>,
+    pub sha256: String,
+}
+
+/// Cheap file stat — size + modification time only, NO content read, NO
+/// SHA-256. Mirrors claude-vaz's `getFileModificationTimeAsync` (a single
+/// `stat` syscall) used by the Read dedup freshness gate. `file_signature`
+/// reads the whole file to hash it, which defeats the dedup fast-path; this
+/// command lets the frontend prove a file is unchanged in O(1).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FileStat {
+    pub path: String,
+    pub size: u64,
+    pub modified_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadFileWithSignatureResult {
+    pub content: String,
+    pub signature: FileSignature,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadFileRangeWithSignatureResult {
+    pub content: String,
+    pub signature: FileSignature,
+    pub start_line: usize,
+    pub line_count: usize,
+    pub total_lines: usize,
+    pub has_more: bool,
 }
 
 // Error types specific to file tree operations
@@ -837,6 +879,238 @@ pub fn path_exists(path: String) -> bool {
     }
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn modified_ms(metadata: &std::fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+}
+
+#[tauri::command]
+pub async fn file_signature(path: String) -> Result<FileSignature> {
+    let file_path = Path::new(&path);
+    let canonical = validate_path_safe(file_path)?;
+
+    if !canonical.exists() {
+        return Err(FileTreeError::PathNotFound(path));
+    }
+
+    if canonical.is_dir() {
+        return Err(FileTreeError::InvalidOperation(
+            "Path is a directory".to_string(),
+        ));
+    }
+
+    let metadata = tokio::fs::metadata(&canonical).await?;
+    if metadata.len() > MAX_READ_FILE_SIZE {
+        return Err(FileTreeError::InvalidOperation(format!(
+            "File too large ({:.1} MB). Maximum allowed: {:.0} MB",
+            metadata.len() as f64 / (1024.0 * 1024.0),
+            MAX_READ_FILE_SIZE as f64 / (1024.0 * 1024.0)
+        )));
+    }
+
+    let mut file = tokio::fs::File::open(&canonical).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    let digest = hasher.finalize();
+    let sha256: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+
+    Ok(FileSignature {
+        path: normalize_path_for_frontend(&canonical),
+        size: metadata.len(),
+        modified_ms: modified_ms(&metadata),
+        sha256,
+    })
+}
+
+/// Cheap stat (metadata only — no content read, no hashing). Returns the
+/// file size and modification time so the frontend's read-dedup freshness
+/// gate can prove a file is unchanged without re-reading it (parity with
+/// claude-vaz `getFileModificationTimeAsync`). Throws PathNotFound for
+/// missing files and InvalidOperation for directories.
+#[tauri::command]
+pub async fn file_stat(path: String) -> Result<FileStat> {
+    let file_path = Path::new(&path);
+    let canonical = validate_path_safe(file_path)?;
+
+    if !canonical.exists() {
+        return Err(FileTreeError::PathNotFound(path));
+    }
+
+    if canonical.is_dir() {
+        return Err(FileTreeError::InvalidOperation(
+            "Path is a directory".to_string(),
+        ));
+    }
+
+    let metadata = tokio::fs::metadata(&canonical).await?;
+    Ok(FileStat {
+        path: normalize_path_for_frontend(&canonical),
+        size: metadata.len(),
+        modified_ms: modified_ms(&metadata),
+    })
+}
+
+#[tauri::command]
+pub async fn read_file_with_signature(path: String) -> Result<ReadFileWithSignatureResult> {
+    let file_path = Path::new(&path);
+    let canonical = validate_path_safe(file_path)?;
+
+    if !canonical.exists() {
+        return Err(FileTreeError::PathNotFound(path));
+    }
+
+    if canonical.is_dir() {
+        return Err(FileTreeError::InvalidOperation(
+            "Path is a directory".to_string(),
+        ));
+    }
+
+    let metadata = tokio::fs::metadata(&canonical).await?;
+    if metadata.len() > MAX_READ_FILE_SIZE {
+        return Err(FileTreeError::InvalidOperation(format!(
+            "File too large ({:.1} MB). Maximum allowed: {:.0} MB",
+            metadata.len() as f64 / (1024.0 * 1024.0),
+            MAX_READ_FILE_SIZE as f64 / (1024.0 * 1024.0)
+        )));
+    }
+
+    let bytes = tokio::fs::read(&canonical).await?;
+    let sha256 = sha256_hex(&bytes);
+    let content = String::from_utf8(bytes).map_err(|_| {
+        FileTreeError::InvalidOperation("Cannot read binary file as text".to_string())
+    })?;
+
+    Ok(ReadFileWithSignatureResult {
+        content,
+        signature: FileSignature {
+            path: normalize_path_for_frontend(&canonical),
+            size: metadata.len(),
+            modified_ms: modified_ms(&metadata),
+            sha256,
+        },
+    })
+}
+
+#[tauri::command]
+pub async fn read_file_range_with_signature(
+    path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<ReadFileRangeWithSignatureResult> {
+    let file_path = Path::new(&path);
+    let canonical = validate_path_safe(file_path)?;
+
+    if !canonical.exists() {
+        return Err(FileTreeError::PathNotFound(path));
+    }
+
+    if canonical.is_dir() {
+        return Err(FileTreeError::InvalidOperation(
+            "Path is a directory".to_string(),
+        ));
+    }
+
+    let metadata = tokio::fs::metadata(&canonical).await?;
+    let start_line = offset.unwrap_or(1).max(1);
+    let end_line = limit
+        .map(|n| n.max(1))
+        .and_then(|n| start_line.checked_add(n - 1))
+        .unwrap_or(usize::MAX);
+
+    let mut file = tokio::fs::File::open(&canonical).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut selected = Vec::<u8>::new();
+    let mut current_line = 1usize;
+    let mut current_selected_line = Vec::<u8>::new();
+    let mut selected_lines = 0usize;
+    let mut saw_any_byte = false;
+
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        saw_any_byte = true;
+        let chunk = &buffer[..read];
+        hasher.update(chunk);
+
+        for &byte in chunk {
+            let in_range = current_line >= start_line && current_line <= end_line;
+            if in_range && byte != b'\n' {
+                current_selected_line.push(byte);
+            }
+
+            if byte == b'\n' {
+                if in_range {
+                    if current_selected_line.ends_with(&[b'\r']) {
+                        current_selected_line.pop();
+                    }
+                    if selected_lines > 0 {
+                        selected.push(b'\n');
+                    }
+                    selected.extend_from_slice(&current_selected_line);
+                    current_selected_line.clear();
+                    selected_lines += 1;
+                }
+                current_line = current_line.saturating_add(1);
+            }
+        }
+    }
+
+    if saw_any_byte {
+        if current_line >= start_line && current_line <= end_line {
+            if current_selected_line.ends_with(&[b'\r']) {
+                current_selected_line.pop();
+            }
+            if selected_lines > 0 {
+                selected.push(b'\n');
+            }
+            selected.extend_from_slice(&current_selected_line);
+            selected_lines += 1;
+        }
+    }
+
+    let total_lines = if saw_any_byte { current_line } else { 0 };
+    let content = String::from_utf8(selected).map_err(|_| {
+        FileTreeError::InvalidOperation("Cannot read binary file as text".to_string())
+    })?;
+
+    let digest = hasher.finalize();
+    let sha256: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+
+    Ok(ReadFileRangeWithSignatureResult {
+        content,
+        signature: FileSignature {
+            path: normalize_path_for_frontend(&canonical),
+            size: metadata.len(),
+            modified_ms: modified_ms(&metadata),
+            sha256,
+        },
+        start_line,
+        line_count: selected_lines,
+        total_lines,
+        has_more: end_line < total_lines,
+    })
+}
+
 /// Search common subdirectories for SQLite database files (*.db, *.sqlite, *.sqlite3).
 /// Returns true if ANY database file is found in the project.
 #[tauri::command]
@@ -927,9 +1201,41 @@ pub async fn write_file(path: String, content: String) -> Result<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    tokio::fs::write(&canonical, content)
-        .await
-        .map_err(FileTreeError::from)
+    // Atomic save: write to a temp file in the same directory, then rename
+    // over the target. A crash/power-cut mid-write can never leave the real
+    // file truncated — the reader sees either the old or the new content,
+    // never a partial one. rename() is atomic on POSIX and maps to
+    // MoveFileEx(REPLACE_EXISTING) on Windows.
+    let file_name = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let tmp = canonical.with_file_name(format!(".{}.tm-write-{}", file_name, std::process::id()));
+
+    if let Err(e) = tokio::fs::write(&tmp, &content).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(FileTreeError::from(e));
+    }
+
+    // Preserve the original file's permissions — rename would otherwise
+    // replace them with the temp file's default mode (e.g. drop +x).
+    #[cfg(unix)]
+    if let Ok(meta) = tokio::fs::metadata(&canonical).await {
+        let _ = tokio::fs::set_permissions(&tmp, meta.permissions()).await;
+    }
+
+    match tokio::fs::rename(&tmp, &canonical).await {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // Some filesystems (network mounts, exotic FUSE) reject the
+            // rename — fall back to a direct write rather than failing the
+            // save outright.
+            let _ = tokio::fs::remove_file(&tmp).await;
+            tokio::fs::write(&canonical, content)
+                .await
+                .map_err(FileTreeError::from)
+        }
+    }
 }
 
 // Append to a file (creates parent dirs and the file if needed). Used for

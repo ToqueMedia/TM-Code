@@ -1,7 +1,7 @@
-import { memo, lazy, Suspense, useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react'
+import { memo, useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react'
 import { Flex, Box, HStack, Text, VStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiSidebar, FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle, FiDatabase, FiEye } from 'react-icons/fi'
+import { FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle, FiEye, FiMoreHorizontal } from 'react-icons/fi'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { useChatStore } from '../../stores/chatStore'
 import { useProjectStore } from '../../stores/projectStore'
@@ -11,7 +11,7 @@ import { activatePreview } from '../../services/previewActivation'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useBillingStore, extraConsumptionPct } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
-import { useCollabStore } from '../../stores/collabStore'
+import { canShareCode, useCollabStore } from '../../stores/collabStore'
 import { useByokState } from '../../hooks/useByokState'
 import MessageBubble from '../chat/MessageBubble'
 import { useMessageWindow } from '../../hooks/useMessageWindow'
@@ -24,8 +24,6 @@ import TmSpeedIndicator from '../chat/TmSpeedIndicator'
 import SessionDropdown from './SessionDropdown'
 import ChatSuggestions from './ChatSuggestions'
 import { CollabShareControls } from '../collab/CollabShareControls'
-import { GoalCelebration } from '../celebration/GoalCelebration'
-const CheckpointPanel = lazy(() => import('../chat/CheckpointPanel'))
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -37,10 +35,10 @@ function ChatView() {
   const isStreaming = useChatStore(s => s.isStreaming)
   const isLoadingSession = useChatStore(s => s.isLoadingSession)
   const currentProject = useProjectStore(s => s.currentProject)
-  const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPlanViewerOpen = useLayoutStore(s => s.isPlanViewerOpen)
-  const isSidebarMode = viewMode === 'preview' || isPlanViewerOpen
+  const isCheckpointDrawerOpen = useLayoutStore(s => s.isCheckpointDrawerOpen)
+  const isSidebarMode = viewMode === 'preview' || isPlanViewerOpen || isCheckpointDrawerOpen
   const mcpServers = useMcpStore(s => s.servers)
   const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
@@ -78,6 +76,7 @@ function ChatView() {
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
   const rawMessages = session?.messages || []
+  const hasProject = Boolean(currentProject?.path)
   // claude-vaz parity: when the agent compresses the conversation, hide
   // every message above the most recent compact_boundary marker. The pre-
   // compression history stays in storage (so session export and re-open
@@ -117,12 +116,12 @@ function ChatView() {
   //
   // `resize: 'instant'` is deliberate. 'smooth' animates a SPRING scroll every
   // time the content grows while pinned — which on SEND is very visible and
-  // wrong: the user's message lands, then the assistant placeholder + the
-  // sticky AgentActivityIndicator mount, and the viewport visibly slides down
-  // to chase them. Instant keeps the bottom pinned imperceptibly: new content
-  // just appears, the view never animates. (If a streaming "tremble" ever
-  // resurfaces it must be fixed at the source — redundant/competing scrollers —
-  // not by turning every pin into a visible animation.)
+  // wrong: the user's message lands, then the assistant placeholder + activity
+  // indicator mount, and the viewport visibly slides down to chase them.
+  // Instant keeps the bottom pinned imperceptibly: new content just appears,
+  // the view never animates. (If a streaming "tremble" ever resurfaces it must
+  // be fixed at the source — redundant/competing scrollers — not by turning
+  // every pin into a visible animation.)
   const { scrollRef, contentRef, scrollToBottom, isAtBottom } = useStickToBottom({
     resize: 'instant',
     initial: 'instant',
@@ -256,6 +255,16 @@ function ChatView() {
     const bodySize = `${chatTextFontSize}px`
     const codeSize = `${Math.max(12, chatTextFontSize - 1)}px`
     return {
+      // The chat COLUMN is the responsive unit, not the window. Side drawers
+      // (team chat 360px, terminal, checkpoints) squeeze this column without
+      // changing the viewport, so a viewport @media query left the toolbar's
+      // wide-only cluster visible while 360px of room vanished — the
+      // flexShrink=0 indicators painted over the session dropdown. The
+      // container query below measures THIS element instead. The file-tree
+      // sidebar is an overlay (takes no width), so in plain chat mode
+      // container width ≈ viewport width and the 1180px threshold keeps its
+      // original meaning exactly.
+      containerType: 'inline-size',
       '--chat-a11y-text-size': bodySize,
       '--chat-a11y-code-size': codeSize,
       '& [data-chat-transcript]': {
@@ -288,6 +297,29 @@ function ChatView() {
       '& [data-chat-transcript] :is(button, [role="button"])': {
         whiteSpace: 'normal',
       },
+      '& [data-chat-toolbar]': {
+        minHeight: '52px',
+        maxHeight: '52px',
+        overflow: 'visible',
+      },
+      '& [data-chat-toolbar] :is(button, [role="button"])': {
+        whiteSpace: 'nowrap',
+      },
+      '& [data-chat-toolbar-label]': {
+        whiteSpace: 'nowrap',
+        lineHeight: '1',
+      },
+      '& [data-chat-toolbar-overflow-trigger]': {
+        display: 'none',
+      },
+      '@container (max-width: 1180px)': {
+        '& [data-chat-toolbar-wide-only]': {
+          display: 'none !important',
+        },
+        '& [data-chat-toolbar-overflow-trigger]': {
+          display: 'flex !important',
+        },
+      },
     }
   }, [chatTextFontSize])
 
@@ -300,38 +332,20 @@ function ChatView() {
       fontSize={`${chatTextFontSize}px`}
       css={chatTextScaleStyles}
     >
-      {/* Goal celebration overlay (World Cup 2026) — absolute, pointer-events
-          none; fires when an agent run completes. */}
-      <GoalCelebration />
-
       {/* Session header bar */}
-      <Flex
-        align="center"
-        justify="space-between"
-        px={4}
-        py={2}
-        borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}
-        flexShrink={0}
-        position="relative"
-      >
-        <Flex align="center" gap={2} minW={0}>
-          <Box
-            as="button"
-            display="flex"
-            alignItems="center"
-            justifyContent="center"
-            w="28px"
-            h="28px"
-            borderRadius="6px"
-            color={isProjectsSidebarVisible ? tokens.colors.accent.primary : tokens.colors.text.secondary}
-            cursor="pointer"
-            transition={`all ${tokens.transition.fast}`}
-            _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-            onClick={() => useLayoutStore.getState().toggleProjectsSidebar()}
-            aria-label={t("view.toggleProjects")}
-          >
-            <FiSidebar size={15} />
-          </Box>
+      {hasProject && (
+        <Flex
+          data-chat-toolbar
+          align="center"
+          justify="space-between"
+          gap={2}
+          px={4}
+          py={2}
+          borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}
+          flexShrink={0}
+          position="relative"
+        >
+        <Flex align="center" gap={2} minW={0} flex="1" overflow="visible">
           <Box flex={1} minW={0}>
             <SessionDropdown
               projectPath={projectPath}
@@ -345,86 +359,83 @@ function ChatView() {
               the session dropdown, so sharing stays reachable while the
               preview is open. */}
           {isSidebarMode && <CollabShareControls compact />}
-          {!isSidebarMode && (
-            <Box
-              as="button"
-              display="flex"
-              alignItems="center"
-              gap="5px"
-              px="8px"
-              h="28px"
-              borderRadius="6px"
-              color={tokens.colors.text.secondary}
-              cursor="pointer"
-              transition={`all ${tokens.transition.fast}`}
-              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-              onClick={() => useLayoutStore.getState().setViewMode('data')}
-              aria-label={t('view.dataManager')}
-            >
-              <FiDatabase size={13} />
-              <Text fontSize="11px" fontWeight="500">{t('view.dataManager')}</Text>
-            </Box>
-          )}
         </Flex>
 
-        {/* Credits + Isolation + MCP indicators — hidden in sidebar mode
-            because 380px can't fit them all. */}
+        {/* Isolation + MCP + team indicators — hidden in sidebar mode because
+            380px can't fit them all. Credits are NOT here: the CreditIndicator
+            renders after this block, outside both this gate and the wide-only
+            cluster, so it survives every responsive compaction. */}
         {!isSidebarMode && (
-          <HStack gap={1.5}>
-            <TmSpeedIndicator />
-            <ModelIndicator />
-            {!showModelIndicator && (
-              <CreditIndicator
-                plan={billingPlan}
-                noCredits={noCredits}
-                isStreaming={isStreaming}
-                consumedPct={consumedPct}
-                tokensConsumed={tokensConsumed}
-                tokenBudget={tokenBudget}
-                cycleEnd={cycleEnd}
-                status={billingStatus}
-                tmsRemaining={tmsRemaining}
+          <>
+            <HStack data-chat-toolbar-wide-only gap={1.5} flexShrink={0} overflow="visible">
+              <TmSpeedIndicator />
+              <ModelIndicator />
+              {sandboxEnabled && (
+                <IsolationPill
+                  icon={FiShield}
+                  label={t('chat.sandboxMode')}
+                  color={tokens.colors.accent.orange}
+                  onClick={() => useLayoutStore.getState().setViewMode('settings')}
+                />
+              )}
+              <McpIndicator
+                servers={mcpServers}
+                isInitializing={mcpIsInitializing}
               />
-            )}
-            {sandboxEnabled && (
-              <IsolationPill
-                icon={FiShield}
-                label={t('chat.sandboxMode')}
-                color={tokens.colors.accent.orange}
-                onClick={() => useLayoutStore.getState().setViewMode('settings')}
-              />
-            )}
-            <McpIndicator
-              servers={mcpServers}
-              isInitializing={mcpIsInitializing}
-            />
-            {/* Team collaboration — presence + share live preview + chat.
-                Renders nothing for non-team-members. */}
-            <CollabShareControls />
-            <Box
-              as="button"
-              display="flex"
-              alignItems="center"
-              gap="5px"
-              px="8px"
-              h="28px"
-              borderRadius="6px"
-              color={tokens.colors.text.secondary}
-              cursor={isSharingLivePreview ? 'not-allowed' : 'pointer'}
-              opacity={isSharingLivePreview ? 0.4 : 1}
-              aria-disabled={isSharingLivePreview}
-              transition={`all ${tokens.transition.fast}`}
-              _hover={isSharingLivePreview ? {} : { bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-              onClick={() => { if (!isSharingLivePreview) void activatePreview(projectPath) }}
-              aria-label={t('view.preview')}
-              title={isSharingLivePreview ? t('team.previewBlockedBySharing') : t('view.preview')}
-            >
-              <FiEye size={13} />
-              <Text fontSize="11px" fontWeight="500">{t('view.preview')}</Text>
-            </Box>
-          </HStack>
+              {/* Team collaboration — presence + share live preview + chat.
+                  Renders nothing for non-team-members. */}
+              <CollabShareControls />
+              <Box
+                as="button"
+                data-chat-toolbar-action
+                display="flex"
+                alignItems="center"
+                gap="5px"
+                px="8px"
+                h="28px"
+                borderRadius="6px"
+                color={tokens.colors.text.secondary}
+                cursor={isSharingLivePreview ? 'not-allowed' : 'pointer'}
+                opacity={isSharingLivePreview ? 0.4 : 1}
+                aria-disabled={isSharingLivePreview}
+                transition={`all ${tokens.transition.fast}`}
+                _hover={isSharingLivePreview ? {} : { bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+                onClick={() => { if (!isSharingLivePreview) void activatePreview(projectPath) }}
+                aria-label={t('view.preview')}
+                title={isSharingLivePreview ? t('team.previewBlockedBySharing') : t('view.preview')}
+              >
+                <FiEye size={13} />
+                <Text data-chat-toolbar-secondary-label fontSize="11px" fontWeight="500">{t('view.preview')}</Text>
+              </Box>
+            </HStack>
+            <HeaderOverflowMenu />
+          </>
         )}
-      </Flex>
+
+        {/* Créditos SEMPRE visíveis — deliberadamente FORA do cluster
+            data-chat-toolbar-wide-only (que a container query esconde a
+            ≤1180px, empurrando tudo para o menu ⋯) e fora do gate de
+            isSidebarMode: o consumo do ciclo é a informação de billing que
+            o user nunca pode perder de vista, em nenhuma largura. O gate
+            showModelIndicator mantém-se — em BYOK o billing é a chave do
+            próprio user (decisão de produto, não responsividade). */}
+        {!showModelIndicator && (
+          <Box flexShrink={0}>
+            <CreditIndicator
+              plan={billingPlan}
+              noCredits={noCredits}
+              isStreaming={isStreaming}
+              consumedPct={consumedPct}
+              tokensConsumed={tokensConsumed}
+              tokenBudget={tokenBudget}
+              cycleEnd={cycleEnd}
+              status={billingStatus}
+              tmsRemaining={tmsRemaining}
+            />
+          </Box>
+        )}
+        </Flex>
+      )}
 
       {/* Scaffold pipeline status banner */}
       <AnimatePresence>
@@ -489,9 +500,15 @@ function ChatView() {
         )}
       </AnimatePresence>
 
+      {/* Aviso de expiração de plano (≤10 dias) — mesma janela do banner da
+          Web (PlanExpiryBanner). Fonte: billing.planExpiresAt do /v1/me
+          (subscription.expiresAt; para equipas, a expiração da subscrição da
+          equipa). Ausente em workers antigos → sem banner (degrada limpo). */}
+      <PlanExpiryNotice />
+
       {/* Agent error banner — surfaces 402/429/5xx/AUTH_EXPIRED messages
-          from the agent loop. CMD mode shows this in TerminalStatusLine's
-          error label; chat had nothing equivalent, so a "Sem créditos
+          from the agent loop. The shell-styled status line has its own
+          error label; this keeps the main chat equally visible, so a "Sem créditos
           disponíveis" or "Sessão expirada" message would land in
           agentStore.error and never render. Visibility is tied to status
           ('error') so the banner clears automatically when the next turn
@@ -539,8 +556,8 @@ function ChatView() {
       {/* Billing overage banner — always visible (loading / empty state / with
           messages) when the cycle budget is exhausted. The previous version
           lived inside the messages-only branch, so an over-budget user that
-          opened a fresh session saw nothing. CMD mode already had a
-          top-level banner; this brings chat to parity. The text adapts to
+          opened a fresh session saw nothing. This top-level banner keeps
+          the main chat consistent. The text adapts to
           BYOK so the user understands their own key is now serving the
           requests instead of the platform's plan tokens. */}
       {consumedPct > 1 && (
@@ -607,7 +624,7 @@ function ChatView() {
         >
           <Box ref={contentRef} minH="100%" display="flex" flexDirection="column">
             {isLoadingSession ? (
-              <Box maxW="900px" mx="auto" w="100%" py={4}>
+              <Box maxW="980px" mx="auto" w="100%" py={4}>
                 <ChatSkeleton />
               </Box>
             ) : messages.length === 0 ? (
@@ -619,7 +636,7 @@ function ChatView() {
               <ChatSuggestions />
             ) : (
               <Box
-                maxW="900px"
+                maxW="980px"
                 mx="auto"
                 w="100%"
                 py={4}
@@ -695,9 +712,6 @@ function ChatView() {
                 ))}
                 <AgentActivityIndicator />
                 {postCompactSurveyPending && !isStreaming && <PostCompactSurvey />}
-                <Suspense fallback={null}>
-                  <CheckpointPanel />
-                </Suspense>
               </Box>
             )}
           </Box>
@@ -732,11 +746,281 @@ function ChatView() {
         )}
         </Box>
 
-      {/* Rotating command tips — parity with Terminal mode's TerminalWorkingTips.
+      {/* Rotating command tips — parity with the shell-styled working tips.
           Subtle line above the PromptBar, only while the agent is working;
           surfaces the slash-command catalogue progressively. */}
       <ChatWorkingTips />
 
+    </Flex>
+  )
+}
+
+function HeaderOverflowMenu() {
+  const [isOpen, setIsOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const currentProject = useProjectStore(s => s.currentProject)
+  const projectPath = currentProject?.path || ''
+  const isSharingLivePreview = useCollabStore(s => s.sharingPreview)
+  const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
+  const mcpServers = useMcpStore(s => s.servers)
+  const mcpIsInitializing = useMcpStore(s => s.isInitializing)
+  const shouldShowMcp = mcpIsInitializing || mcpServers.some(server => server.status === 'running' || server.status === 'error')
+  const shouldShowCollab = canShareCode()
+
+  useEffect(() => {
+    if (!isOpen) return
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) {
+        setIsOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handlePointerDown)
+    return () => document.removeEventListener('mousedown', handlePointerDown)
+  }, [isOpen])
+
+  const runAndClose = useCallback((callback: () => void) => {
+    setIsOpen(false)
+    callback()
+  }, [])
+
+  return (
+    <Box
+      data-chat-toolbar-overflow-trigger
+      ref={menuRef}
+      position="relative"
+      alignItems="center"
+      justifyContent="center"
+      flexShrink={0}
+    >
+      <Box
+        as="button"
+        display="flex"
+        alignItems="center"
+        justifyContent="center"
+        w="30px"
+        h="30px"
+        borderRadius="8px"
+        color={isOpen ? tokens.colors.accent.primary : tokens.colors.text.secondary}
+        cursor="pointer"
+        transition={`all ${tokens.transition.fast}`}
+        _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+        onClick={() => setIsOpen(open => !open)}
+        aria-label={t('view.moreActions')}
+        aria-expanded={isOpen}
+        aria-haspopup="menu"
+      >
+        <FiMoreHorizontal size={16} />
+      </Box>
+
+      {isOpen && (
+        <VStack
+          role="menu"
+          position="absolute"
+          top="calc(100% + 8px)"
+          right={0}
+          zIndex={tokens.zIndex.dropdown}
+          w="280px"
+          gap={1}
+          align="stretch"
+          p={1.5}
+          bg={tokens.colors.bg.overlay}
+          border={`1px solid ${tokens.colors.border.panel}`}
+          borderRadius="10px"
+          boxShadow="0 14px 40px rgba(0,0,0,0.45)"
+        >
+          <ToolbarMenuItem
+            icon={<FiEye size={14} />}
+            label={t('view.preview')}
+            disabled={isSharingLivePreview}
+            hint={isSharingLivePreview ? t('team.previewBlockedBySharing') : undefined}
+            onClick={() => {
+              if (!projectPath || isSharingLivePreview) return
+              runAndClose(() => { void activatePreview(projectPath) })
+            }}
+          />
+          {sandboxEnabled && (
+            <ToolbarMenuItem
+              icon={<FiShield size={14} />}
+              label={t('chat.sandboxMode')}
+              onClick={() => runAndClose(() => useLayoutStore.getState().setViewMode('settings'))}
+            />
+          )}
+
+          <Flex
+            align="center"
+            justify="space-between"
+            gap={2}
+            px={2.5}
+            py={2}
+            borderTop={`1px solid ${tokens.colors.border.panel}`}
+            mt={1}
+            minH="34px"
+          >
+            <Text fontSize="10px" color={tokens.colors.text.muted} fontWeight="700" textTransform="uppercase">
+              Status
+            </Text>
+            {/* CreditIndicator já não vive aqui — está sempre visível na
+                toolbar (fora do cluster wide-only), portanto duplicá-lo no
+                menu seria redundante. */}
+            <HStack gap={1.5} justify="flex-end" minW={0} overflow="visible">
+              <TmSpeedIndicator />
+              <ModelIndicator />
+            </HStack>
+          </Flex>
+
+          {shouldShowMcp && (
+            <Flex
+              align="center"
+              justify="space-between"
+              gap={2}
+              px={2.5}
+              py={2}
+              minH="34px"
+            >
+              <Text fontSize="10px" color={tokens.colors.text.muted} fontWeight="700" textTransform="uppercase">
+                MCP
+              </Text>
+              <McpIndicator servers={mcpServers} isInitializing={mcpIsInitializing} />
+            </Flex>
+          )}
+
+          {shouldShowCollab && (
+            <Flex
+              align="center"
+              justify="space-between"
+              gap={2}
+              px={2.5}
+              py={2}
+              borderTop={`1px solid ${tokens.colors.border.panel}`}
+              mt={1}
+              minH="34px"
+            >
+              <Text fontSize="10px" color={tokens.colors.text.muted} fontWeight="700" textTransform="uppercase">
+                Team
+              </Text>
+              <CollabShareControls compact />
+            </Flex>
+          )}
+        </VStack>
+      )}
+    </Box>
+  )
+}
+
+function ToolbarMenuItem({
+  icon,
+  label,
+  hint,
+  disabled,
+  onClick,
+}: {
+  icon: React.ReactNode
+  label: string
+  hint?: string
+  disabled?: boolean
+  onClick: () => void
+}) {
+  return (
+    <Box
+      as="button"
+      role="menuitem"
+      display="flex"
+      alignItems="center"
+      gap={2}
+      w="100%"
+      h="34px"
+      px={2.5}
+      borderRadius="8px"
+      color={disabled ? tokens.colors.text.disabled : tokens.colors.text.secondary}
+      cursor={disabled ? 'not-allowed' : 'pointer'}
+      opacity={disabled ? 0.55 : 1}
+      transition={`all ${tokens.transition.fast}`}
+      _hover={disabled ? {} : { bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
+      onClick={disabled ? undefined : onClick}
+      title={hint}
+    >
+      <Box display="flex" alignItems="center" justifyContent="center" flexShrink={0}>
+        {icon}
+      </Box>
+      <Text fontSize="12px" fontWeight="500" whiteSpace="nowrap" lineHeight="1">
+        {label}
+      </Text>
+    </Box>
+  )
+}
+
+// ─── Plan expiry notice ─────────────────────────────────────────────────────
+// Aviso "o plano expira em N dias" (pedido 2026-07-14). Janela partilhada com
+// o banner da Web — mudar aqui pede mudança em PlanExpiryBanner.tsx (web).
+const PLAN_EXPIRY_WARNING_DAYS = 10
+
+function PlanExpiryNotice() {
+  const plan = useBillingStore(s => s.plan)
+  const planExpiresAt = useBillingStore(s => s.planExpiresAt)
+  const [dismissed, setDismissed] = useState(false)
+
+  if (dismissed || plan === 'explorer' || !planExpiresAt) return null
+  const expiresMs = Date.parse(planExpiresAt)
+  if (!Number.isFinite(expiresMs)) return null
+  const msLeft = expiresMs - Date.now()
+  if (msLeft <= 0) return null
+  const daysLeft = Math.ceil(msLeft / 86_400_000)
+  if (daysLeft > PLAN_EXPIRY_WARNING_DAYS) return null
+
+  return (
+    <Flex
+      align="center"
+      gap={2}
+      px={4}
+      py="6px"
+      flexShrink={0}
+      bg="rgba(247, 127, 0, 0.08)"
+      borderBottom="1px solid rgba(247, 127, 0, 0.25)"
+    >
+      <Box flexShrink={0} color={tokens.colors.accent.orange}>
+        <FiAlertCircle size={14} />
+      </Box>
+      <Text fontSize="12px" color={tokens.colors.accent.orange} fontWeight={500} flex={1} lineClamp={2}>
+        {t('chat.planExpiresSoon').replace('{days}', String(daysLeft))}
+      </Text>
+      <Box
+        as="button"
+        px={2}
+        py="2px"
+        borderRadius="4px"
+        fontSize="11px"
+        fontWeight="600"
+        color={tokens.colors.accent.orange}
+        bg="rgba(247, 127, 0, 0.15)"
+        cursor="pointer"
+        transition={`opacity ${tokens.transition.fast}`}
+        _hover={{ opacity: 0.85 }}
+        onClick={() => {
+          import('@tauri-apps/plugin-opener').then(opener => {
+            opener.openUrl('https://code.toquemedia.net/account/billing').catch(() => {})
+          })
+        }}
+      >
+        {t('chat.planExpiresRenew')}
+      </Box>
+      <Box
+        as="button"
+        display="flex"
+        alignItems="center"
+        justifyContent="center"
+        w="20px"
+        h="20px"
+        borderRadius="4px"
+        color={tokens.colors.accent.orange}
+        opacity={0.7}
+        cursor="pointer"
+        transition={`all ${tokens.transition.fast}`}
+        _hover={{ opacity: 1, bg: 'rgba(247, 127, 0, 0.12)' }}
+        onClick={() => setDismissed(true)}
+        aria-label={t('chat.dismissError')}
+      >
+        <Text fontSize="14px" lineHeight="1">×</Text>
+      </Box>
     </Flex>
   )
 }

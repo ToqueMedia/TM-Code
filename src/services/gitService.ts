@@ -8,7 +8,7 @@ export interface GitLineChange {
 
 export interface GitFileStatus {
   path: string;
-  status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked';
+  status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked' | 'conflicted';
   staged: boolean;
 }
 

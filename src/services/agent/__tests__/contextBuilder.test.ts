@@ -1,8 +1,39 @@
 import { invoke } from '@tauri-apps/api/core'
 import ContextBuilder from '../contextBuilder'
+import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../contextBuilder/helpers'
+
+// contextBuilder → contextPlanner → firebaseAuth, which reads
+// import.meta.env at module load (Jest cannot parse import.meta). Stub it
+// with the repo's established mock shape (see agentServiceRequestType.test.ts).
+jest.mock('../../auth/firebaseAuth', () => ({
+  __esModule: true,
+  default: {
+    getInstance: () => ({
+      getIdToken: jest.fn().mockResolvedValue('mock-firebase-token'),
+    }),
+  },
+  getAppCheckHeader: jest.fn().mockResolvedValue({ 'X-Firebase-AppCheck': 'mock-appcheck' }),
+}))
 
 // invoke is already mocked in setupTests.ts
 const mockedInvoke = invoke as jest.MockedFunction<typeof invoke>
+
+function completionEnvelope(content: string): string {
+  return JSON.stringify({
+    choices: [{ message: { content } }],
+  })
+}
+
+function mockResponse(body: string, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: {
+      get: () => undefined,
+    },
+    text: jest.fn().mockResolvedValue(body),
+  } as unknown as Response
+}
 
 describe('ContextBuilder', () => {
   let builder: ContextBuilder
@@ -24,6 +55,7 @@ describe('ContextBuilder', () => {
     const { __resetFsVersionForTests } = require('../../fsVersion')
     __resetIpcCacheForTests()
     __resetFsVersionForTests()
+    Reflect.deleteProperty(globalThis, 'fetch')
   })
 
   describe('singleton', () => {
@@ -36,14 +68,6 @@ describe('ContextBuilder', () => {
 
   describe('buildSystemPrompt', () => {
     beforeEach(() => {
-      // Reset scaffolding detector cache so tests don't pollute each other.
-      // Without this, a previous test that triggered detection caches an
-      // empty state, then a later test setting up VITE_GOOGLE_CLIENT_ID
-      // sees the cached empty state and never re-scans.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { clearAllScaffoldingCache } = require('../../scaffoldingDetector')
-      clearAllScaffoldingCache()
-
       // Default mock: file tree returns a simple tree, other reads return null
       mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
         if (cmd === 'build_file_tree') {
@@ -115,6 +139,51 @@ describe('ContextBuilder', () => {
       expect(prompt).toContain('# Constraints')
     })
 
+    it('does not inject missing-TMS creation guidance into the normal task prompt', async () => {
+      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+
+      expect(prompt).not.toContain('No TMS.md yet')
+      expect(prompt).not.toContain('After completing your first significant task')
+      expect(prompt).not.toContain('This project has no TMS.md')
+    })
+
+    it('does not abort prompt build when the context planner returns empty content', async () => {
+      const fetchMock = jest.fn()
+        .mockResolvedValueOnce(mockResponse(completionEnvelope('')) as never)
+        .mockResolvedValueOnce(mockResponse(completionEnvelope('')) as never)
+        .mockResolvedValueOnce(mockResponse(completionEnvelope('')) as never)
+        .mockResolvedValueOnce(mockResponse(completionEnvelope('')) as never)
+      Object.defineProperty(globalThis, 'fetch', {
+        value: fetchMock,
+        configurable: true,
+        writable: true,
+      })
+
+      const prompt = await builder.buildSystemPrompt(
+        '/test/project',
+        'web',
+        [],
+        20,
+        'Rota: /billing ou /payments. Detectar NIF e abrir modal.',
+        [],
+        {
+          profile: 'frontend_ui',
+          readOnly: false,
+          source: 'model',
+          confidence: 'high',
+          reason: 'frontend UI task',
+        },
+      )
+      const selection = builder.getLastAuxiliarySelection()
+
+      expect(prompt).toContain('# Role')
+      expect(fetchMock).toHaveBeenCalledTimes(4)
+      expect(selection?.profile).toBe('frontend_ui')
+      expect(selection?.contextPlannerStatus).toBe('fallback')
+      expect(selection?.contextPlan.selectedContexts).toEqual([])
+      expect(selection?.contextPlannerError).toContain('context planner failed after')
+    })
+
     it('includes system section', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
       expect(prompt).toContain('# System')
@@ -125,108 +194,16 @@ describe('ContextBuilder', () => {
       expect(prompt).toContain('# Reminder')
     })
 
-    it('omits "Already-applied scaffolding" section when no scaffolding is detected', async () => {
-      // Default mock has no .env keys, no marker files → detection returns
-      // empty applied list → section short-circuits to null and is filtered
-      // out of the joined prompt.
+    it('omits the scaffolding/hashtag sections for a plain message on a plain project', async () => {
+      // MANAGED-PLATFORM cut (2026-07): filesystem-marker scaffolding
+      // detection was removed with the managed layer. The prompt must not
+      // resurrect the applied-scaffolding framing, and without a hashtag in
+      // the user message the hashtag-intent section stays out too.
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
       expect(prompt).not.toContain('# Already-applied scaffolding')
-    })
-
-    it('renders "Already-applied scaffolding" section with evidence when auth.google detected', async () => {
-      mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
-        if (cmd === 'build_file_tree') {
-          return { name: 'project', is_directory: true, children: [] }
-        }
-        if (cmd === 'read_file') {
-          const path = (args as Record<string, unknown>)?.path as string
-          if (path?.endsWith('/.env')) {
-            return 'VITE_GOOGLE_CLIENT_ID=clid.apps.googleusercontent.com\n'
-          }
-          throw new Error('File not found')
-        }
-        if (cmd === 'path_exists') {
-          const path = (args as Record<string, unknown>)?.path as string
-          // auth.google requires BOTH .env key AND a marker file (useGoogleSignIn)
-          if (path?.includes('useGoogleSignIn')) return true
-          return false
-        }
-        return null
-      })
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('# Already-applied scaffolding')
-      expect(prompt).toContain('auth.google')
-      expect(prompt).toContain('.env:VITE_GOOGLE_CLIENT_ID')
-      // Instruction lines must be present so the agent knows what to do.
-      expect(prompt).toContain('DO NOT call `provision_auth` again')
-      // Exception clause must allow explicit re-provisioning.
-      expect(prompt).toContain('EXCEPTION')
-      expect(prompt).toContain('rotate credentials')
-      // Skill-read instruction must be present so the agent picks up
-      // CRITICAL rules from the skill before patching from intuition
-      // (the original scaffold may have ignored some rules).
-      expect(prompt).toContain("read_skill('auth-proxy')")
-      expect(prompt).toContain("read_skill('google-signin')")
-    })
-
-    it('omits skill-read hint when no auth/payments scaffolding is applied', async () => {
-      // Default mock has no scaffolding markers — section is null entirely.
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      // The exact phrase only appears inside getAppliedScaffoldingSection;
-      // when that section is null, the phrase is absent.
+      expect(prompt).not.toContain('# Hashtag-signalled intent')
       expect(prompt).not.toContain("read_skill('auth-proxy')")
       expect(prompt).not.toContain("read_skill('mom-factura-payments')")
-    })
-
-    it('lists payments.momenu skill-read hint when payments detected', async () => {
-      mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
-        if (cmd === 'build_file_tree') {
-          return { name: 'project', is_directory: true, children: [] }
-        }
-        if (cmd === 'read_file') {
-          const path = (args as Record<string, unknown>)?.path as string
-          if (path?.endsWith('/package.json')) {
-            return JSON.stringify({ dependencies: { 'mom-factura': '^1.0.0' } })
-          }
-          throw new Error('File not found')
-        }
-        if (cmd === 'path_exists') return false
-        return null
-      })
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('payments.momenu')
-      expect(prompt).toContain("read_skill('mom-factura-payments')")
-      // Auth-skill hint must NOT appear (no auth scaffolding detected)
-      expect(prompt).not.toContain("read_skill('google-signin')")
-    })
-
-    it('lists multiple scaffoldings when several are detected simultaneously', async () => {
-      mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
-        if (cmd === 'build_file_tree') {
-          return { name: 'project', is_directory: true, children: [] }
-        }
-        if (cmd === 'read_file') {
-          const path = (args as Record<string, unknown>)?.path as string
-          if (path?.endsWith('/.env')) {
-            return 'VITE_FIREBASE_API_KEY=k\nVITE_GIP_TENANT_ID=t\nVITE_GOOGLE_CLIENT_ID=c\nMOM_FACTURA_API_KEY=m\n'
-          }
-          if (path?.endsWith('/package.json')) {
-            return JSON.stringify({ dependencies: { 'mom-factura': '^1.0.0' } })
-          }
-          throw new Error('File not found')
-        }
-        if (cmd === 'path_exists') {
-          // src/routes/auth-proxy.ts exists → satisfies email-password conjunction
-          const path = (args as Record<string, unknown>)?.path as string
-          return /auth-proxy\.ts$|useGoogleSignIn\.ts$/.test(path)
-        }
-        return null
-      })
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('# Already-applied scaffolding')
-      expect(prompt).toContain('auth.email-password')
-      expect(prompt).toContain('auth.google')
-      expect(prompt).toContain('payments.momenu')
     })
 
     it('includes anti-recap directive for post-compaction continuation', async () => {
@@ -241,6 +218,13 @@ describe('ContextBuilder', () => {
       expect(prompt).toContain('resume directly')
     })
 
+    it('allows multiple serial diff-producing tools in one response', async () => {
+      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+      expect(prompt).toContain('each `write_file`/`edit_file`/`create_file` call produces a reviewable diff')
+      expect(prompt).toContain('You MAY make multiple file-change tool calls in the same assistant response')
+      expect(prompt).not.toMatch(new RegExp(['Claude', 'Code parity'].join('\\s+')))
+    })
+
     it('interpolates tool names from toolNames.ts (not hardcoded literals)', async () => {
       // Catch a regression where someone reverts a `${EXECUTE_COMMAND}`
       // back to the literal "execute_command" in a way that would
@@ -251,24 +235,84 @@ describe('ContextBuilder', () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
       expect(prompt).toMatch(/execute_command/)
       expect(prompt).toMatch(/read_dev_server_logs/)
+      expect(prompt).toMatch(/stop_dev_server/)
       expect(prompt).toMatch(/request_credentials/)
     })
 
-    it('includes terminal-style loop guidance in Chat mode', async () => {
+    it('keeps Chat-mode preview handoff manual after dev server verification', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('# Terminal-style agent loop')
-      expect(prompt).toContain('Operate like an interactive terminal operator')
+      expect(prompt).toContain('The Preview view does NOT open automatically')
+      expect(prompt).toContain('click the **Preview** button at the top-right of Chat')
+    })
+
+    it('includes shell execution loop guidance', async () => {
+      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+      expect(prompt).toContain('# Shell execution loop')
+      expect(prompt).toContain('Operate like an interactive shell operator')
       expect(prompt).toContain('execute_command_background')
       expect(prompt).toContain('check_background_commands')
     })
 
-    it('includes terminal-style loop guidance in Terminal mode', async () => {
-      const prompt = await builder.buildCmdModeSystemPrompt('/test/project', '/test/home')
-      expect(prompt).toContain('**Mode: TERMINAL**')
-      expect(prompt).toContain('# Terminal-style agent loop')
-      expect(prompt).toContain('Operate like an interactive terminal operator')
-      expect(prompt).toContain('execute_command_background')
-      expect(prompt).toContain('check_background_commands')
+    it('keeps selected auxiliary content below the dynamic boundary', async () => {
+      const plannerJson = JSON.stringify({
+        taskDomain: 'test/auxiliary-boundary',
+        requiredCapabilities: ['scaffold_workflow', 'vision', 'dev_server', 'semantic_tokens'],
+        minimumContextNeeded: 'summary',
+        candidateContexts: [
+          'scaffold.workflow',
+          'vision.image_rules',
+          'delivery.dev_server',
+          'design_system.semantic_tokens',
+        ],
+        selectedContexts: [
+          'scaffold.workflow',
+          'vision.image_rules',
+          'delivery.dev_server',
+          'design_system.semantic_tokens',
+        ],
+        toolGroups: ['FILE_OPS', 'SHELL'],
+        fallbackRisk: 'medium',
+        reason: 'exercise dynamic-boundary placement',
+      })
+      const fetchMock = jest.fn().mockResolvedValue(mockResponse(completionEnvelope(plannerJson)) as never)
+      Object.defineProperty(globalThis, 'fetch', {
+        value: fetchMock,
+        configurable: true,
+        writable: true,
+      })
+
+      const prompt = await builder.buildSystemPrompt(
+        '/test/project',
+        'web',
+        [],
+        20,
+        'Create a new React app with auth from a screenshot',
+        [],
+        {
+          profile: 'scaffold_project',
+          readOnly: false,
+          source: 'model',
+          confidence: 'high',
+          reason: 'boundary regression test',
+        },
+      )
+
+      const boundaryIndex = prompt.indexOf(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+      expect(boundaryIndex).toBeGreaterThan(-1)
+
+      const beforeBoundary = prompt.slice(0, boundaryIndex)
+      const afterBoundary = prompt.slice(boundaryIndex + SYSTEM_PROMPT_DYNAMIC_BOUNDARY.length)
+      const dynamicAuxiliaryMarkers = [
+        '## Scaffolding workflow — REQUIRED for new projects',
+        '## Vision (images)',
+        '## Dev servers',
+        '# Design system: semantic tokens',
+      ]
+
+      for (const marker of dynamicAuxiliaryMarkers) {
+        expect(afterBoundary).toContain(marker)
+        expect(beforeBoundary).not.toContain(marker)
+      }
     })
 
     it('includes package.json summary when available', async () => {
@@ -301,25 +345,30 @@ describe('ContextBuilder', () => {
       expect(typeof prompt).toBe('string')
     })
 
-    describe('fsVersion-aware cache', () => {
-      // Pins the contract that a filesystem mutation (anywhere) invalidates
-      // the cached system prompt. Without this, turn N+1 would see the file
-      // tree as it was at the start of turn N — exactly the regression the
-      // fsVersion counter was introduced to fix.
+    describe('dynamic prompt cache', () => {
+      // The cache key includes a signature of dynamic prompt content. Even if
+      // fsVersion does not move, a newly observed tree/memory/tracker snapshot
+      // must not reuse a stale full prompt.
 
-      it('cache hits when fsVersion is unchanged between builds', async () => {
-        let buildCount = 0
-        mockedInvoke.mockImplementation(async (cmd: string) => {
-          if (cmd === 'build_file_tree') {
-            buildCount++
-            return { name: 'root', children: [] }
-          }
-          throw new Error('not found')
-        })
-        await builder.buildSystemPrompt('/p', 'web')
-        await builder.buildSystemPrompt('/p', 'web')
-        // Second call should hit cache → no new file-tree build.
-        expect(buildCount).toBe(1)
+      it('does not serve stale session memory when dynamic content changes without fsVersion', async () => {
+        const { useChatStore } = await import('../../../stores/chatStore')
+        useChatStore.getState().createSession('/p')
+        const intentOverride = {
+          profile: 'bugfix_local' as const,
+          readOnly: false,
+          reason: 'test',
+          source: 'keyword' as const,
+          confidence: 'high' as const,
+        }
+
+        useChatStore.getState().setSessionMemory('first session note')
+        const first = await builder.buildSystemPrompt('/p', 'web', [], 20, 'fix it', [], intentOverride)
+        useChatStore.getState().setSessionMemory('second session note')
+        const second = await builder.buildSystemPrompt('/p', 'web', [], 20, 'fix it', [], intentOverride)
+
+        expect(first).toContain('first session note')
+        expect(second).toContain('second session note')
+        expect(second).not.toContain('first session note')
       })
 
       it('cache misses after bumpFsVersion (write happened between builds)', async () => {

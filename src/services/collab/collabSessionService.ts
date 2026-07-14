@@ -9,11 +9,12 @@
 
 import FirebaseAuthService from '@/services/auth/firebaseAuth'
 import { CollabService } from '@/services/collabService'
-import { CollabMesh } from '@/services/collab/collabMesh'
+import { CollabMesh, reconcilePeerPath, type PeerPath } from '@/services/collab/collabMesh'
 import { BulkReassembler } from '@/services/collab/bulkFraming'
 import { attachTunnel, detachTunnel, onTunnelMessage, setLocalShare } from '@/services/collab/previewTunnelService'
 import {
   buildChatControl,
+  dedupeChatById,
   parseControlMessage,
   parseStoredChat,
   type ChatMessage,
@@ -24,6 +25,24 @@ import {
   subscribeOfflineQueue,
   getTeamRoster,
 } from '@/services/collab/collabOfflineQueue'
+import {
+  attachVoiceTransport,
+  handleVoiceControl,
+  joinVoiceCall,
+  onRemoteAudioTrack,
+  onVoicePeerGone,
+  replayVoiceStateTo,
+  resetVoiceService,
+} from '@/services/collab/collabVoice'
+import {
+  attachScreenTransport,
+  handleScreenControl,
+  onRemoteVideoTrack,
+  onScreenPeerGone,
+  replayScreenStateTo,
+  resetScreenService,
+} from '@/services/collab/collabScreen'
+import { invoke } from '@/utils/invokeMetrics'
 import { resolveCollabSignalingUrl } from '@/utils/devUrls'
 import { playMessageChime } from '@/utils/notificationSound'
 import { stopLivePreviewServer } from '@/services/collab/livePreviewServer'
@@ -54,9 +73,32 @@ let reconnectAttempts = 0
 const MAX_RECONNECT_DELAY_MS = 30_000
 /** Our currently-advertised live-preview offer, replayed to new joiners. */
 let activeShareOffer: PreviewOffer | null = null
+/** Per-peer media-path classifications, reconciled worst-of for the UI.
+ *  `local` = what MY getStats says about the pair; `remote` = what the PEER's
+ *  getStats says (arrives as a directed 'path-state' control message). One
+ *  map per side — see reconcilePeerPath for why a single side can honestly
+ *  get it wrong (TURN allocations surface as prflx on the far end). */
+const localPeerPaths = new Map<string, PeerPath>()
+const remotePeerPaths = new Map<string, PeerPath>()
+
+/** Push the reconciled (worst-of) path for a peer into the store badges. */
+function publishPeerPath(peerId: string): void {
+  const effective = reconcilePeerPath(localPeerPaths.get(peerId), remotePeerPaths.get(peerId))
+  if (effective) useCollabStore.getState().setPeerPath(peerId, effective)
+}
 /** Unsubscribe for the RTDB offline-chat queue (durable delivery to members who
  *  were offline at send time). Null when not subscribed / RTDB unconfigured. */
 let offlineUnsub: (() => void) | null = null
+/** Set when an UNEXPECTED socket drop interrupted an active voice call: the
+ *  next successful reconnect auto-rejoins (a network blip shouldn't kick you
+ *  out of the conversation). Cleared by intentional stops — leaving the team /
+ *  signing out must never re-arm the mic. Scoped to the ROOM the call lived
+ *  in: rooms are per-project, and switching projects inside the rejoin window
+ *  must not silently re-open the mic in a DIFFERENT project's call. */
+let voiceRejoin: { droppedAt: number; room: string } | null = null
+/** How stale a dropped call may be and still auto-rejoin. Beyond this,
+ *  silently re-opening the mic is a privacy surprise, not a convenience. */
+const VOICE_REJOIN_WINDOW_MS = 120_000
 /** How many of our OWN recent chat messages to replay to a peer that connects
  *  after we spoke (chat is ephemeral P2P — there is no server transcript, so the
  *  sender re-sends; the receiver dedups by message id). */
@@ -75,27 +117,76 @@ function selfIdentity(): { uid: string; name: string; email: string } {
   }
 }
 
-/** Project path that works in BOTH Chat mode (currentProject) and Terminal mode
- *  (cmdModeProjectPath) — Terminal mode never populates `currentProject`, so the
- *  chat history would otherwise neither load nor persist there. */
+/** Path of the currently open project (null when none is open). */
 function activeProjectPath(): string | null {
-  const ps = useProjectStore.getState()
-  return ps.currentProject?.path ?? ps.cmdModeProjectPath ?? null
+  return useProjectStore.getState().currentProject?.path ?? null
+}
+
+/** Normalise a git remote URL into a machine-independent identity: protocol,
+ *  credentials and `.git` stripped, `git@host:path` → `host/path`, lowercase.
+ *  Two teammates who cloned the same repo produce the same string. */
+function normalizeGitRemote(url: string): string {
+  let out = url.trim().toLowerCase()
+  const scp = /^[\w.-]+@([^:]+):(.+)$/.exec(out)
+  if (scp) out = `${scp[1]}/${scp[2]}`
+  out = out.replace(/^[a-z+]+:\/\//, '').replace(/^[^@/]+@/, '')
+  return out.replace(/\.git$/, '').replace(/\/+$/, '')
+}
+
+/**
+ * Stable project identity for the room key. Team chat is PER PROJECT — two
+ * members only meet when they're in the SAME project. Cross-machine identity:
+ * the git remote (teammates clone the same repo) hashed short; projects
+ * without a remote fall back to the folder name (same team + same project
+ * name = same room, which matches how teams talk about "the project").
+ */
+async function deriveProjectRoomKey(projectPath: string): Promise<string> {
+  let identity = ''
+  try {
+    const cfg = await invoke<string>('read_file', { path: `${projectPath}/.git/config` })
+    const m = /\[remote "origin"\][^[]*?url\s*=\s*([^\n\r]+)/i.exec(cfg)
+    if (m) identity = `git:${normalizeGitRemote(m[1])}`
+  } catch {
+    /* not a git repo (or worktree indirection) — fall back to the name */
+  }
+  if (!identity) {
+    const base = projectPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? projectPath
+    identity = `name:${base.toLowerCase()}`
+  }
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(identity))
+  return Array.from(new Uint8Array(digest).slice(0, 8))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
 }
 
 /**
  * Start (or restart) the collaboration session for the team the user belongs
- * to. Idempotent: re-calling for the same room is a no-op; switching teams
- * tears down the old mesh first. Silently does nothing when not in a team.
+ * to. Idempotent: re-calling for the same room is a no-op; switching teams OR
+ * projects tears down the old mesh first (the room is team+project scoped).
+ * Silently does nothing when not in a team or without an open project.
  */
 export async function startCollabSession(): Promise<void> {
   if (!COLLAB_ENABLED) return
-  const room = useBillingStore.getState().teamMemberOf
-  if (!room) return
+  const teamId = useBillingStore.getState().teamMemberOf
+  if (!teamId) return
+  // Per-project scope: no open project → no room. A teammate in a DIFFERENT
+  // project must not appear online (the room key isolates them), and someone
+  // on the Welcome screen is in NO room at all.
+  const projectPath = activeProjectPath()
+  if (!projectPath) {
+    stopCollabSession()
+    return
+  }
+  const room = `${teamId}~${await deriveProjectRoomKey(projectPath)}`
   // Synchronous guard: a session for this room is already live OR being opened.
+  // (Two rapid calls both awaiting the key resolve to the SAME room string, so
+  // the second lands here and bails; a project switch mid-flight is rescued by
+  // the post-token `activeRoom !== room` check below.)
   if (activeRoom === room && (mesh || connecting)) return
 
-  stopCollabSession() // clears wantConnection + any pending reconnect
+  // Internal teardown (NOT stopCollabSession): the reconnect path re-enters
+  // here and must keep `voiceRejoin` alive to restore an interrupted call.
+  teardownSession() // clears wantConnection + any pending reconnect
   wantConnection = true
   connecting = true
   activeRoom = room
@@ -114,6 +205,7 @@ export async function startCollabSession(): Promise<void> {
         useCollabStore.getState().setConnected(true)
         useCollabStore.getState().setPeers(peers)
         reconnectAttempts = 0 // a live presence = a healthy connection
+        maybeRejoinVoice()
       },
       // Fires when a peer's channel is actually OPEN (P2P) or relay-ready — the
       // only point at which sends to it land. Presence (peer-join) is too early:
@@ -133,7 +225,38 @@ export async function startCollabSession(): Promise<void> {
         if (activeShareOffer) {
           mesh.sendControl(peer.peerId, { t: 'preview-offer' as const, offer: activeShareOffer })
         }
+        // Replay our voice-call / screen-share state so the newcomer sees the
+        // ongoing call/presentation.
+        replayVoiceStateTo(peer.peerId)
+        replayScreenStateTo(peer.peerId)
+        // Replay our path classification: it computes at ICE 'connected',
+        // milliseconds BEFORE the channels open — the eager send in
+        // onPeerPath can race a closed channel and drop.
+        const knownPath = localPeerPaths.get(peer.peerId)
+        if (knownPath && knownPath !== 'relay') {
+          mesh.sendControl(peer.peerId, { t: 'path-state' as const, path: knownPath })
+        }
       },
+      onPeerDisconnected: (peerId) => {
+        localPeerPaths.delete(peerId)
+        remotePeerPaths.delete(peerId)
+        onVoicePeerGone(peerId)
+        onScreenPeerGone(peerId)
+      },
+      onPeerAudioTrack: (peer, track, stream) => onRemoteAudioTrack(peer, track, stream),
+      onPeerVideoTrack: (peer, track, stream) => onRemoteVideoTrack(peer, track, stream),
+      onPeerPath: (peerId, path) => {
+        localPeerPaths.set(peerId, path)
+        publishPeerPath(peerId)
+        // Tell the peer what OUR stats say about the pair — the side flowing
+        // through its own TURN allocation is the only one that knows for sure
+        // (the far side sees the relay as a prflx candidate and reads 'direct').
+        // 'relay' needs no telling: the DO fallback is symmetric by definition.
+        if (path !== 'relay' && mesh) {
+          mesh.sendControl(peerId, { t: 'path-state' as const, path })
+        }
+      },
+      onMediaPolicy: (policy) => useCollabStore.getState().setMediaPolicy(policy),
       onSessionClosed: () => {
         useCollabStore.getState().setConnected(false)
         useCollabStore.getState().setPeers([])
@@ -168,12 +291,41 @@ export async function startCollabSession(): Promise<void> {
           }
         } else if (control?.t === 'preview-stop') {
           useCollabStore.getState().removeLivePreviewByUid(control.uid)
+        } else if (control?.t === 'voice-state' || control?.t === 'voice-speaking') {
+          handleVoiceControl(peerId, control)
+        } else if (
+          control?.t === 'screen-state' ||
+          control?.t === 'screen-watch' ||
+          control?.t === 'screen-full'
+        ) {
+          handleScreenControl(peerId, control)
+        } else if (control?.t === 'path-state') {
+          // The peer's view of OUR shared pair — worst-of wins (see the maps).
+          remotePeerPaths.set(peerId, control.path)
+          publishPeerPath(peerId)
         }
       },
     })
     mesh.connect()
     // Wire the live-preview tunnel to send over this mesh.
     attachTunnel((peerId, frame) => mesh?.sendBulk(peerId, frame))
+    // Wire voice calls + screen share to send over this mesh (closures read
+    // the live `mesh` var, so a torn-down mesh degrades to no-ops instead of
+    // stale sends). One object satisfies both transports structurally.
+    const mediaTransport = {
+      broadcastControl: (data: Parameters<CollabMesh['broadcastControl']>[0]) =>
+        mesh?.broadcastControl(data),
+      sendControl: (peerId: string, data: unknown) => mesh?.sendControl(peerId, data),
+      setVoiceTrackForPeer: (peerId: string, track: MediaStreamTrack | null) =>
+        mesh?.setVoiceTrackForPeer(peerId, track),
+      setScreenTrackForPeer: (peerId: string, track: MediaStreamTrack | null, maxBitrateBps?: number) =>
+        mesh?.setScreenTrackForPeer(peerId, track, maxBitrateBps),
+      hasVoicePath: (peerId: string) => mesh?.hasVoicePath(peerId) ?? false,
+      hasScreenPath: (peerId: string) => mesh?.hasScreenPath(peerId) ?? false,
+      peers: () => mesh?.currentPeers() ?? [],
+    }
+    attachVoiceTransport(mediaTransport, () => selfIdentity())
+    attachScreenTransport(mediaTransport, () => selfIdentity())
 
     // Rehydrate recent local chat history for continuity (best-effort).
     void loadChatHistory()
@@ -190,6 +342,17 @@ export async function startCollabSession(): Promise<void> {
 /** Reconnect after an unexpected socket drop, with capped exponential backoff. */
 function scheduleReconnect(): void {
   if (reconnectTimer || !wantConnection || !COLLAB_ENABLED) return
+  // Remember an active call across the gap (read BEFORE the reset wipes it);
+  // don't overwrite droppedAt on retry cycles — freshness counts from the drop.
+  if (useCollabStore.getState().voiceInCall && !voiceRejoin && activeRoom) {
+    voiceRejoin = { droppedAt: Date.now(), room: activeRoom }
+  }
+  // The mic must not stay hot across the gap — the call does not survive a
+  // dropped session (maybeRejoinVoice restores it after the mesh heals). The
+  // screen capture stops too and does NOT auto-resume: re-acquiring a capture
+  // surface requires a user gesture by design.
+  resetVoiceService()
+  resetScreenService()
   // Tear down the dead mesh (notify=false → no recursive onSessionClosed) so
   // startCollabSession's guard lets a fresh connect through.
   mesh?.disconnect()
@@ -208,12 +371,53 @@ async function loadChatHistory(): Promise<void> {
   const projectPath = activeProjectPath()
   if (!projectPath) return
   const lines = await CollabService.chatLoad(projectPath)
-  const messages = lines.map(parseStoredChat).filter((m): m is ChatMessage => m !== null)
+  // Dedupe on load: the JSONL is append-only and (pre-fix) replays appended
+  // the same message repeatedly — setChat with duplicated ids means duplicated
+  // React keys in both chat panels. Keeping the first occurrence heals old
+  // transcripts without needing a rewrite primitive on the Rust side.
+  const messages = dedupeChatById(
+    lines.map(parseStoredChat).filter((m): m is ChatMessage => m !== null),
+  )
   if (messages.length > 0) useCollabStore.getState().setChat(messages)
 }
 
-/** Tear down the session (team switch, leave, sign-out, project close). */
+/** Auto-rejoin the voice call after a self-healed reconnect (consume-once).
+ *  Fires on the first healthy presence; joinVoiceCall itself surfaces mic
+ *  errors, so this only announces the success case. */
+function maybeRejoinVoice(): void {
+  if (!voiceRejoin) return
+  const fresh = Date.now() - voiceRejoin.droppedAt <= VOICE_REJOIN_WINDOW_MS
+  const sameRoom = voiceRejoin.room === activeRoom
+  voiceRejoin = null
+  if (!fresh || !sameRoom) return
+  void joinVoiceCall().then(() => {
+    // Transparency: the mic just re-opened without a click — say so.
+    if (useCollabStore.getState().voiceInCall) toast('info', t('team.voiceRejoined'))
+  })
+}
+
+/** Tear down the session (team switch, leave, sign-out, project close).
+ *  Intentional by definition — also disarms any pending voice auto-rejoin. */
 export function stopCollabSession(): void {
+  voiceRejoin = null
+  teardownSession()
+}
+
+// Closing the IDE window must end the session IMMEDIATELY — mic, screen
+// share, live-preview server and presence die with it. On macOS the window
+// can close while the PROCESS lives on (dock convention), leaving a zombie
+// socket that kept "B is sharing a live preview" alive for the whole team.
+// pagehide fires on webview teardown in WKWebView and WebView2 alike, and
+// socket.close() flushes the FIN synchronously → the room broadcasts our
+// peer-leave right away. The worker-side heartbeat covers the remaining
+// cases (crash, sleep, cable pull) where no unload event ever runs.
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', () => stopCollabSession())
+}
+
+/** Shared teardown for stopCollabSession AND the (re)start path — keeps
+ *  `voiceRejoin` untouched so a reconnect can restore an interrupted call. */
+function teardownSession(): void {
   wantConnection = false
   if (reconnectTimer) {
     clearTimeout(reconnectTimer)
@@ -226,16 +430,24 @@ export function stopCollabSession(): void {
   activeShareOffer = null
   offlineUnsub?.()
   offlineUnsub = null
+  // Media first, while the mesh is still up: releases the mic + screen
+  // capture, clears the senders and removes every sink. Never let capture
+  // devices outlive the session.
+  resetVoiceService()
+  resetScreenService()
   mesh?.disconnect()
   mesh = null
   activeRoom = null
   connecting = false
   detachTunnel()
   bulkReassembler = new BulkReassembler()
+  localPeerPaths.clear()
+  remotePeerPaths.clear()
   const store = useCollabStore.getState()
   store.setConnected(false)
   store.setPeers([])
   store.setSharingPreview(false)
+  store.setMediaPolicy(null)
   // Tearing down the session (team/project switch, sign-out) must also kill any
   // Live Preview server we started — it has no reason to outlive the session.
   void stopLivePreviewServer()
@@ -250,8 +462,16 @@ function persistChat(msg: ChatMessage): void {
 }
 
 function onChatReceived(msg: ChatMessage): void {
-  const wasOpen = useCollabStore.getState().chatOpen
-  useCollabStore.getState().addChat(msg)
+  const store = useCollabStore.getState()
+  // Re-deliveries are ROUTINE, not exceptional: the P2P replay re-sends the
+  // sender's recent messages to every late joiner, and the RTDB offline queue
+  // can hand us a message that already arrived P2P. addChat always deduped the
+  // UI — but persisting unconditionally appended a duplicate JSONL line per
+  // re-delivery, which came back as a duplicated transcript (duplicate React
+  // keys) on the next load. Drop known ids before ANY side effect.
+  if (store.chat.some((m) => m.id === msg.id)) return
+  const wasOpen = store.chatOpen
+  store.addChat(msg)
   persistChat(msg)
   // Short chime to wake the user to an incoming message — ONLY when the chat
   // panel is closed (an open panel already shows the message).

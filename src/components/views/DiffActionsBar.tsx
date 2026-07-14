@@ -14,50 +14,55 @@ function DiffActionsBar({ activeDiffsCount, onRejectAll, onAcceptAll }: DiffActi
     <Flex
       align="center"
       justify="space-between"
-      px={4}
-      py="8px"
-      bg="rgba(255, 255, 255, 0.02)"
-      borderBottom="1px solid rgba(255, 255, 255, 0.05)"
+      gap={3}
+      px={{ base: 3, md: 4 }}
+      py="10px"
+      bg="rgba(10, 10, 10, 0.72)"
+      borderBottom="1px solid rgba(255, 255, 255, 0.075)"
       flexShrink={0}
+      backdropFilter="blur(14px)"
     >
-      <Flex align="center" gap={2}>
-        <Text fontSize="13px" color={tokens.colors.text.primary} fontWeight="600" letterSpacing="-0.01em">
+      <Flex align="center" gap={2} minW={0}>
+        <Text fontSize="13px" color={tokens.colors.text.primary} fontWeight="700">
           Changes
         </Text>
         {activeDiffsCount > 0 && (
           <Text
             fontSize="10px"
-            fontWeight="600"
+            fontWeight="700"
             color={tokens.colors.accent.primary}
-            bg="rgba(254, 16, 99, 0.1)"
-            px="6px"
-            py="1px"
-            borderRadius="4px"
+            bg="rgba(254, 16, 99, 0.12)"
+            border="1px solid rgba(254, 16, 99, 0.22)"
+            px="7px"
+            py="2px"
+            borderRadius="999px"
+            lineHeight="1"
           >
             {activeDiffsCount}
           </Text>
         )}
       </Flex>
       {activeDiffsCount > 0 && (
-        <Flex gap="6px">
+        <Flex gap="8px" flexWrap="wrap" justify="flex-end">
           <Box
             as="button"
             display="flex"
             alignItems="center"
             gap="5px"
-            px="10px"
-            py="4px"
+            px="11px"
+            py="6px"
             bg="transparent"
-            border="1px solid rgba(248, 81, 73, 0.2)"
-            borderRadius="6px"
+            border="1px solid rgba(248, 81, 73, 0.18)"
+            borderRadius="8px"
             color={tokens.colors.accent.red}
             fontSize="11px"
-            fontWeight="500"
+            fontWeight="650"
             cursor="pointer"
-            transition="all 0.15s"
-            _hover={{ bg: 'rgba(248, 81, 73, 0.1)', borderColor: 'rgba(248, 81, 73, 0.35)' }}
-            _active={{ transform: 'scale(0.97)' }}
+            transition="all 0.15s ease"
+            _hover={{ bg: 'rgba(248, 81, 73, 0.1)', borderColor: 'rgba(248, 81, 73, 0.32)', transform: 'translateY(-1px)' }}
+            _active={{ transform: 'translateY(0) scale(0.98)' }}
             onClick={onRejectAll}
+            aria-label="Reject all pending changes"
           >
             <FiX size={12} /> Reject All
           </Box>
@@ -66,19 +71,20 @@ function DiffActionsBar({ activeDiffsCount, onRejectAll, onAcceptAll }: DiffActi
             display="flex"
             alignItems="center"
             gap="5px"
-            px="10px"
-            py="4px"
-            bg="rgba(46, 160, 67, 0.1)"
-            border="1px solid rgba(46, 160, 67, 0.2)"
-            borderRadius="6px"
+            px="11px"
+            py="6px"
+            bg="rgba(46, 160, 67, 0.13)"
+            border="1px solid rgba(46, 160, 67, 0.24)"
+            borderRadius="8px"
             color={tokens.colors.accent.green}
             fontSize="11px"
-            fontWeight="500"
+            fontWeight="650"
             cursor="pointer"
-            transition="all 0.15s"
-            _hover={{ bg: 'rgba(46, 160, 67, 0.18)', borderColor: 'rgba(46, 160, 67, 0.35)' }}
-            _active={{ transform: 'scale(0.97)' }}
+            transition="all 0.15s ease"
+            _hover={{ bg: 'rgba(46, 160, 67, 0.2)', borderColor: 'rgba(46, 160, 67, 0.38)', transform: 'translateY(-1px)' }}
+            _active={{ transform: 'translateY(0) scale(0.98)' }}
             onClick={onAcceptAll}
+            aria-label="Accept all pending changes"
           >
             <FiCheck size={12} /> Accept All
           </Box>

@@ -12,13 +12,14 @@
  */
 
 import type OpenAI from 'openai'
-import type { ContentBlockAPI } from '../../types/chat'
+import type { ContentBlockAPI, RequestUsageEntry } from '../../types/chat'
 import {
   query,
   type QueryMessage,
   type QueryStreamEvent,
   type QueryTerminal,
   type QueryParams,
+  type QueuedSteeringContent,
   type ToolExecutorFn,
 } from './query'
 
@@ -41,12 +42,18 @@ export interface QueryEngineOptions {
   tools: OpenAI.ChatCompletionTool[]
   /** Tool execution function. */
   executeTool: ToolExecutorFn
+  /** Streaming-execution predicate — see QueryParams.isStreamSafeTool. */
+  isStreamSafeTool?: (toolName: string) => boolean
   /** Max output tokens override. */
   maxOutputTokensOverride?: number
   /** Thinking config. */
   thinkingConfig?: Record<string, unknown>
   /** Usage callback. */
   onUsage?: (inputTokens: number, outputTokens: number) => void
+  /** Override for tests: max time without useful model progress while streaming. */
+  streamSemanticIdleTimeoutMs?: number
+  /** Per-request usage callback (real tokens + inspector estimate + breakdown). */
+  onRequestUsage?: (entry: RequestUsageEntry) => void
   /** Compact instructions. */
   compactInstructions?: string
   /** Max turns (default: Infinity). */
@@ -58,9 +65,26 @@ export interface QueryEngineOptions {
   /** Inter-turn attachment collector — see QueryParams.collectInterTurnContext. */
   collectInterTurnContext?: () => Promise<string>
   /** Queued-message steering collector — see QueryParams.collectQueuedSteering. */
-  collectQueuedSteering?: () => Promise<string | null>
+  collectQueuedSteering?: () => Promise<QueuedSteeringContent | null>
   /** Live active-model limits for auto-compact — see QueryParams.getContextLimits. */
   getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null }
+  /** Dynamic toolset selector — when present, the loop filters tools per turn. */
+  toolsetSelector?: import('./toolsetSelector').ToolsetSelector
+  /** Auxiliary-context selection — core/auxiliary breakdown for the inspector. */
+  auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection
+  /** Execution phase for bootstrap/original-task telemetry and guardrails. */
+  executionPhase?: 'project_bootstrap' | 'original_task'
+  /** True when the original user request asks to implement/change/fix files. */
+  mutableTask?: boolean
+  /** Delegate telemetry — see QueryParams.getDelegateTelemetry. */
+  getDelegateTelemetry?: () => {
+    requestedMember: string | null;
+    resolvedMember: string | null;
+    blocked: boolean;
+    blockedReason: string | null;
+    inputSchemaVersion: string;
+    recoveryAttempted: boolean;
+  } | null;
 }
 
 export interface QueryEngineState {
@@ -153,6 +177,7 @@ export class QueryEngine {
       model: this.options.model ?? DEFAULT_MODEL,
       tools: this.options.tools,
       executeTool: this.options.executeTool,
+      isStreamSafeTool: this.options.isStreamSafeTool,
       signal: this.abortController.signal,
       maxTurns: this.options.maxTurns,
       maxOutputTokensOverride: this.options.maxOutputTokensOverride,
@@ -162,12 +187,21 @@ export class QueryEngine {
         this._state.totalOutputTokens += outputTokens
         this.options.onUsage?.(inputTokens, outputTokens)
       },
+      streamSemanticIdleTimeoutMs: this.options.streamSemanticIdleTimeoutMs,
+      onRequestUsage: (entry) => {
+        this.options.onRequestUsage?.(entry)
+      },
       compactInstructions: this.options.compactInstructions,
       extraHeaders: this.options.extraHeaders,
       onResponseHeaders: this.options.onResponseHeaders,
       collectInterTurnContext: this.options.collectInterTurnContext,
       collectQueuedSteering: this.options.collectQueuedSteering,
       getContextLimits: this.options.getContextLimits,
+      toolsetSelector: this.options.toolsetSelector,
+      auxiliarySelection: this.options.auxiliarySelection,
+      executionPhase: this.options.executionPhase,
+      mutableTask: this.options.mutableTask,
+      getDelegateTelemetry: this.options.getDelegateTelemetry,
     }
 
     try {

@@ -5,19 +5,34 @@
 //   - `control`: small JSON messages (presence, chat, share notifications)
 //   - `bulk`:    larger payloads (changeset patches), chunked by the caller
 //
-// DataChannels are DTLS-encrypted end-to-end, so nothing the team shares is
-// ever readable by the signaling server. This is STUN-only (v1): if a peer is
-// behind a symmetric NAT and no direct path exists, that peer connection simply
-// fails — surfaced via onPeerFailed. TURN is a documented follow-up.
+// Voice + screen: every connection ALSO pre-negotiates one `sendrecv` audio
+// transceiver AND one `sendrecv` video transceiver during the initial
+// offer/answer, with no tracks attached. Joining a voice call / starting a
+// screen share is then just `sender.replaceTrack(mic|screen | null)` — which
+// requires NO renegotiation, so the one-shot signaling handshake stays
+// sufficient and there is no offer-glare to handle. While unused the m-lines
+// are negotiated but silent (no RTP flows for a null track).
+//
+// DataChannels are DTLS-encrypted end-to-end and voice is SRTP-encrypted
+// end-to-end, so nothing the team shares is ever readable by the signaling
+// server. ICE runs STUN-first; when the worker has a Cloudflare Calls TURN key
+// configured, the `welcome` carries ephemeral TURN credentials and peers with
+// no direct path connect through TURN (which only forwards encrypted packets —
+// the E2E privacy model is preserved). Without TURN (or if even TURN fails)
+// the DO WebSocket relay remains the last resort for DATA; voice does NOT
+// survive that path (media through a WebSocket relay is unusable) — relay
+// peers can see call state but cannot send/receive audio.
 
 import { SignalingClient } from './signalingClient'
 import {
   shouldInitiate,
+  type MediaPolicy,
   type PeerInfo,
   type SignalType,
 } from './signalingProtocol'
 
-/** STUN-only ICE configuration (decision: v1 has no TURN). */
+/** Base STUN config. Ephemeral TURN servers from the welcome (when the worker
+ *  has a Calls TURN key) are appended per-session — see onWelcome. */
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
@@ -26,6 +41,29 @@ const ICE_SERVERS: RTCIceServer[] = [
 /** If a peer's WebRTC channels aren't open within this window, fall back to
  *  relaying its data through the DO (don't wait the full ICE-failure timeout). */
 const RELAY_FALLBACK_MS = 8000
+
+/** Default encoder ceiling for the screen-share track (per watcher) when the
+ *  caller doesn't pass one (media policy carries the per-plan value). This is
+ *  a CEILING — WebRTC congestion control adapts below it on weak uplinks. */
+const DEFAULT_SCREEN_MAX_BITRATE_BPS = 4_000_000
+
+/**
+ * Prefer codecs that excel at screen content — VP9 (whose screen-content
+ * tools are what Meet-class sharing leans on), then AV1, then the engine
+ * default order. Must run BEFORE the offer/answer that negotiates the m-line;
+ * silently a no-op on engines without codec control (older WebKit).
+ */
+function preferScreenCodecs(tx: RTCRtpTransceiver): void {
+  try {
+    const caps = RTCRtpReceiver.getCapabilities?.('video')
+    if (!caps?.codecs?.length || typeof tx.setCodecPreferences !== 'function') return
+    const score = (c: { mimeType: string }): number =>
+      /vp9/i.test(c.mimeType) ? 0 : /av1/i.test(c.mimeType) ? 1 : 2
+    tx.setCodecPreferences([...caps.codecs].sort((a, b) => score(a) - score(b)))
+  } catch {
+    /* codec control unsupported — the negotiated default still works */
+  }
+}
 
 /** Diagnostic logger for the WebRTC handshake (enable while debugging P2P). */
 const COLLAB_MESH_DEBUG = true
@@ -37,6 +75,70 @@ function candidateKind(candidate: string): string {
   const typ = /\btyp (\w+)/.exec(candidate)?.[1] ?? '?'
   const addr = candidate.split(' ')[4] ?? ''
   return `${typ}${candidate.includes('.local') ? ' MDNS' : ''} ${addr}`
+}
+
+/** How my connection to a given peer is actually flowing.
+ *  'direct' = P2P (host↔host on the LAN or srflx across NATs);
+ *  'turn'   = P2P through a TURN relay (media works, no direct line);
+ *  'relay'  = DO WebSocket data relay (WebRTC failed — data only, NO media). */
+export type PeerPath = 'direct' | 'turn' | 'relay'
+
+/**
+ * Classify the SELECTED ICE candidate pair from a getStats() report.
+ * Standard path: the 'transport' stat carries selectedCandidatePairId.
+ * Fallback: a 'candidate-pair' with selected=true (pre-standard) or
+ * nominated+succeeded. Either side being a 'relay' candidate means the
+ * media is flowing through TURN. Returns null while nothing is selected.
+ * Pure and Map-friendly on purpose — unit-tested with synthetic reports.
+ */
+export function classifySelectedPair(
+  report: Iterable<[string, Record<string, unknown>]>,
+): 'direct' | 'turn' | null {
+  const stats = new Map<string, Record<string, unknown>>()
+  for (const [id, entry] of report) stats.set(id, entry)
+
+  let pair: Record<string, unknown> | undefined
+  for (const entry of stats.values()) {
+    if (entry.type === 'transport' && typeof entry.selectedCandidatePairId === 'string') {
+      pair = stats.get(entry.selectedCandidatePairId)
+      if (pair) break
+    }
+  }
+  if (!pair) {
+    for (const entry of stats.values()) {
+      if (entry.type !== 'candidate-pair') continue
+      if (entry.selected === true || (entry.nominated === true && entry.state === 'succeeded')) {
+        pair = entry
+        break
+      }
+    }
+  }
+  if (!pair) return null
+
+  const local = typeof pair.localCandidateId === 'string' ? stats.get(pair.localCandidateId) : undefined
+  const remote = typeof pair.remoteCandidateId === 'string' ? stats.get(pair.remoteCandidateId) : undefined
+  if (!local && !remote) return null
+  const isRelay = (c?: Record<string, unknown>) => c?.candidateType === 'relay'
+  return isRelay(local) || isRelay(remote) ? 'turn' : 'direct'
+}
+
+/**
+ * Worst-of reconciliation of the two sides' path classifications. The
+ * selected pair is ONE and its traffic symmetric, but getStats is per-side:
+ * the peer sending through ITS TURN allocation sees local=relay ('turn'),
+ * while the far side receives from the TURN server's address as a prflx
+ * remote candidate and honestly reports 'direct'. Trust the pessimist.
+ * (DO relay is symmetric by construction — the RTCPeerConnection failed for
+ * both — so 'relay' short-circuits first.)
+ */
+export function reconcilePeerPath(
+  local: PeerPath | undefined,
+  remote: PeerPath | undefined,
+): PeerPath | undefined {
+  if (local === 'relay' || remote === 'relay') return 'relay'
+  if (local === 'turn' || remote === 'turn') return 'turn'
+  if (local === 'direct' || remote === 'direct') return 'direct'
+  return undefined
 }
 
 export interface MeshHandlers {
@@ -52,6 +154,20 @@ export interface MeshHandlers {
   onPresence?: (peers: PeerInfo[]) => void
   /** The signaling socket dropped (not via disconnect()) — session is over. */
   onSessionClosed?: () => void
+  /** The peer's remote audio track is live (fires at initial negotiation via
+   *  the pre-negotiated voice transceiver; the track stays silent until the
+   *  peer joins a call and feeds a real mic track into it). */
+  onPeerAudioTrack?: (peer: PeerInfo, track: MediaStreamTrack, stream: MediaStream) => void
+  /** Same for the pre-negotiated video transceiver — black/frozen until the
+   *  peer starts a screen share and feeds a display track into it. */
+  onPeerVideoTrack?: (peer: PeerInfo, track: MediaStreamTrack, stream: MediaStream) => void
+  /** Per-plan voice/screen limits from the welcome (null = no limits — old
+   *  worker). Fires once per (re)connect, before any peer exists. */
+  onMediaPolicy?: (policy: MediaPolicy | null) => void
+  /** How data/media to this peer is flowing (direct P2P, TURN, DO relay).
+   *  Fires when the connection establishes and again if the selected pair
+   *  changes (ICE promotion/restart) or WebRTC falls back to the DO relay. */
+  onPeerPath?: (peerId: string, path: PeerPath) => void
 }
 
 interface PeerState {
@@ -59,6 +175,11 @@ interface PeerState {
   pc: RTCPeerConnection
   control?: RTCDataChannel
   bulk?: RTCDataChannel
+  /** Pre-negotiated audio transceiver — voice joins/leaves via
+   *  `audioTx.sender.replaceTrack`, never via renegotiation. */
+  audioTx?: RTCRtpTransceiver
+  /** Pre-negotiated video transceiver — screen share via replaceTrack. */
+  videoTx?: RTCRtpTransceiver
   /** 'p2p' = direct DataChannels; 'relay' = data forwarded via the DO when the
    *  WebRTC connection couldn't be established. */
   mode: 'p2p' | 'relay'
@@ -66,12 +187,25 @@ interface PeerState {
   ready: boolean
   /** Pending relay-fallback timer (cleared once ready or switched). */
   timer?: ReturnType<typeof setTimeout>
+  /** Pending P2P-recovery retry while in relay mode. */
+  retryTimer?: ReturnType<typeof setTimeout>
+  /** Consecutive failed P2P attempts — drives the retry backoff. */
+  retryAttempts?: number
 }
+
+/** P2P-recovery backoff while a peer sits in relay mode: 15s, 30s, then every
+ *  60s forever. Networks change (VPN off, firewall prompt accepted, wifi swap)
+ *  — a peer must never be STUCK on the dead-end relay until a full restart. */
+const P2P_RETRY_BASE_MS = 15_000
+const P2P_RETRY_MAX_MS = 60_000
 
 export class CollabMesh {
   private signaling: SignalingClient | null = null
   private selfId = ''
   private readonly peers = new Map<string, PeerState>()
+  /** Session ICE config: STUN base + the welcome's ephemeral TURN servers.
+   *  Set before any peer exists (peers are only created from welcome onward). */
+  private iceServers: RTCIceServer[] = ICE_SERVERS
 
   constructor(
     private readonly base: string,
@@ -83,8 +217,14 @@ export class CollabMesh {
 
   connect(): void {
     this.signaling = new SignalingClient(this.base, this.teamId, this.idToken, this.displayName, {
-      onWelcome: (selfId, peers) => {
+      onWelcome: (selfId, peers, iceServers, mediaPolicy) => {
         this.selfId = selfId
+        this.iceServers = iceServers?.length ? [...ICE_SERVERS, ...iceServers] : ICE_SERVERS
+        dlog(
+          'welcome:', peers.length, 'peers,', iceServers?.length ?? 0, 'TURN server entries,',
+          mediaPolicy ? `policy(call≤${mediaPolicy.maxCallParticipants})` : 'no policy',
+        )
+        this.handlers.onMediaPolicy?.(mediaPolicy)
         for (const peer of peers) this.addPeer(peer)
         this.emitPresence()
       },
@@ -141,19 +281,98 @@ export class CollabMesh {
     if (peer) this.sendOn(peer, 'bulk', data)
   }
 
-  /** Route a payload to a peer over its open DataChannel, or via the DO relay
-   *  when the peer fell back to relay mode. Returns the path used (or null). */
-  private sendOn(peer: PeerState, channel: 'control' | 'bulk', payload: string): 'p2p' | 'relay' | null {
+  /**
+   * Feed (or clear) our mic track toward ONE peer — `replaceTrack` on the
+   * pre-negotiated transceiver, so this never renegotiates. Who gets the track
+   * is the voice service's policy (only in-call peers); the mesh just routes.
+   * No-op for relay-mode peers: they have no RTCPeerConnection, so voice
+   * cannot reach them (see header).
+   */
+  setVoiceTrackForPeer(peerId: string, track: MediaStreamTrack | null): void {
+    const peer = this.peers.get(peerId)
+    const sender = peer?.mode === 'p2p' ? peer.audioTx?.sender : undefined
+    if (!sender) return
+    dlog('voice track', track ? 'ON' : 'off', '→', peerId)
+    void sender
+      .replaceTrack(track)
+      .then(() => {
+        if (!track) return
+        // Voice must survive a concurrent screen share on a congested uplink:
+        // mark the audio sender high-priority so the congestion controller
+        // starves the video first, never the narration. Best-effort — the
+        // fields are Chromium-first; engines without them ignore the hint.
+        const params = sender.getParameters()
+        if (!params.encodings?.length) params.encodings = [{}]
+        const enc = params.encodings[0] as RTCRtpEncodingParameters & {
+          priority?: string
+          networkPriority?: string
+        }
+        enc.priority = 'high'
+        enc.networkPriority = 'high'
+        return sender.setParameters(params)
+      })
+      .catch(() => {
+        /* pc closed mid-flight — nothing to route anymore */
+      })
+  }
+
+  /** True when a direct (P2P) audio path to this peer is negotiated. Relay
+   *  peers exchange call-state messages fine but can't carry media. */
+  hasVoicePath(peerId: string): boolean {
+    const peer = this.peers.get(peerId)
+    return Boolean(peer && peer.mode === 'p2p' && peer.audioTx)
+  }
+
+  /**
+   * Feed (or clear) our screen-capture track toward ONE peer — same
+   * no-renegotiation contract as setVoiceTrackForPeer. Which peers get it is
+   * the screen service's policy (only opted-in watchers). Also caps the
+   * encoder bitrate: screen content is mostly static, and without a cap a
+   * scroll/video moment would happily eat the whole uplink × N watchers.
+   */
+  setScreenTrackForPeer(peerId: string, track: MediaStreamTrack | null, maxBitrateBps?: number): void {
+    const peer = this.peers.get(peerId)
+    const sender = peer?.mode === 'p2p' ? peer.videoTx?.sender : undefined
+    if (!sender) return
+    dlog('screen track', track ? 'ON' : 'off', '→', peerId)
+    void sender
+      .replaceTrack(track)
+      .then(() => {
+        if (!track) return
+        const params = sender.getParameters()
+        if (!params.encodings?.length) params.encodings = [{}]
+        params.encodings[0].maxBitrate = maxBitrateBps ?? DEFAULT_SCREEN_MAX_BITRATE_BPS
+        // Text stays sharp under pressure: drop frames before resolution.
+        ;(params as RTCRtpSendParameters & { degradationPreference?: string }).degradationPreference =
+          'maintain-resolution'
+        return sender.setParameters(params)
+      })
+      .catch(() => {
+        /* pc closed mid-flight — nothing to route anymore */
+      })
+  }
+
+  /** True when a direct (P2P) video path to this peer is negotiated. */
+  hasScreenPath(peerId: string): boolean {
+    const peer = this.peers.get(peerId)
+    return Boolean(peer && peer.mode === 'p2p' && peer.videoTx)
+  }
+
+  /** Route a payload to a peer over its open DataChannel, falling back to the
+   *  DO relay whenever the channel isn't open — not just in relay MODE. The
+   *  P2P-recovery loop re-opens the handshake window on an established peer
+   *  every retry cycle; without the unconditional fallback, control/bulk
+   *  messages sent during those seconds were silently dropped (the relay —
+   *  the signaling socket — is always there). Receivers treat relayed data
+   *  identically, and control state is idempotent / chat dedups by id. */
+  private sendOn(peer: PeerState, channel: 'control' | 'bulk', payload: string): 'p2p' | 'relay' {
     const dc = channel === 'control' ? peer.control : peer.bulk
     if (dc?.readyState === 'open') {
       dc.send(payload)
       return 'p2p'
     }
-    if (peer.mode === 'relay') {
-      this.signaling?.sendRelay(peer.info.peerId, channel, payload)
-      return 'relay'
-    }
-    return null
+    this.signaling?.sendRelay(peer.info.peerId, channel, payload)
+    return 'relay'
   }
 
   private dispatchControl(peerId: string, raw: string): void {
@@ -178,11 +397,23 @@ export class CollabMesh {
 
   private addPeer(info: PeerInfo): void {
     if (this.peers.has(info.peerId)) return
-    const initiate = shouldInitiate(this.selfId, info.peerId)
-    dlog('addPeer', info.peerId, 'self=', this.selfId, 'initiate=', initiate)
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
-    const state: PeerState = { info, pc, mode: 'p2p', ready: false }
+    const state: PeerState = {
+      info,
+      pc: new RTCPeerConnection({ iceServers: this.iceServers }),
+      mode: 'p2p',
+      ready: false,
+    }
     this.peers.set(info.peerId, state)
+    this.wirePeer(state)
+  }
+
+  /** (Re)wire a peer's RTCPeerConnection — shared by the initial addPeer and
+   *  the relay-recovery rebuild. Assumes `state.pc` is a FRESH connection. */
+  private wirePeer(state: PeerState): void {
+    const info = state.info
+    const pc = state.pc
+    const initiate = shouldInitiate(this.selfId, info.peerId)
+    dlog('wirePeer', info.peerId, 'self=', this.selfId, 'initiate=', initiate)
     // Don't wait the full ICE timeout — relay if not connected within the window.
     state.timer = setTimeout(() => {
       if (!state.ready) this.switchToRelay(state)
@@ -196,9 +427,22 @@ export class CollabMesh {
         dlog('local ICE gathering complete for', info.peerId)
       }
     }
+    pc.ontrack = (event) => {
+      dlog('remote', event.track.kind, 'track ←', info.peerId)
+      // addTransceiver-without-stream on the far side → `streams` can be empty.
+      const stream = event.streams[0] ?? new MediaStream([event.track])
+      if (event.track.kind === 'audio') this.handlers.onPeerAudioTrack?.(info, event.track, stream)
+      else if (event.track.kind === 'video') this.handlers.onPeerVideoTrack?.(info, event.track, stream)
+    }
     pc.oniceconnectionstatechange = () => dlog('iceConnectionState', info.peerId, pc.iceConnectionState)
     pc.onconnectionstatechange = () => {
       dlog('connectionState', info.peerId, pc.connectionState)
+      if (pc.connectionState === 'connected') {
+        // Report whether traffic flows direct or through TURN (UI badges), and
+        // keep reporting if ICE later promotes/demotes the selected pair.
+        this.reportPeerPath(state)
+        this.watchSelectedPair(state)
+      }
       // P2P couldn't establish (symmetric NAT, mDNS across a VM, …) → don't drop
       // the peer; fall back to relaying its data through the DO. 'closed' here is
       // our own teardown (relay switch / dropPeer) — ignore it.
@@ -209,6 +453,12 @@ export class CollabMesh {
       // Initiator owns the channels; the answerer receives them via ondatachannel.
       this.attachChannel(state, pc.createDataChannel('control'), 'control')
       this.attachChannel(state, pc.createDataChannel('bulk'), 'bulk')
+      // Pre-negotiate the voice + screen m-lines (trackless) so a later call
+      // join / screen share is a pure replaceTrack — see the header. The
+      // answerer adopts them in onSignal.
+      state.audioTx = pc.addTransceiver('audio', { direction: 'sendrecv' })
+      state.videoTx = pc.addTransceiver('video', { direction: 'sendrecv' })
+      preferScreenCodecs(state.videoTx)
       void this.makeOffer(state)
     } else {
       pc.ondatachannel = (event) => {
@@ -233,11 +483,46 @@ export class CollabMesh {
     }
   }
 
+  /** Ask the live stats for the selected pair and report direct/TURN to the UI.
+   *  Async by nature — guarded so a relay switch or peer drop mid-await can't
+   *  publish a stale 'p2p' classification. */
+  private reportPeerPath(state: PeerState): void {
+    void state.pc
+      .getStats()
+      .then((report) => {
+        if (this.peers.get(state.info.peerId) !== state || state.mode !== 'p2p') return
+        const path = classifySelectedPair(report as Iterable<[string, Record<string, unknown>]>)
+        if (path) {
+          dlog('peerPath', state.info.peerId, path)
+          this.handlers.onPeerPath?.(state.info.peerId, path)
+        }
+      })
+      .catch(() => {
+        /* stats unavailable — keep the last known path */
+      })
+  }
+
+  /** Re-classify when ICE switches the selected pair (promotion after a late
+   *  direct route appears, or demotion to TURN). Chromium-only event; absent
+   *  support just means the connect-time classification stands. */
+  private watchSelectedPair(state: PeerState): void {
+    try {
+      const dtls = state.pc.getSenders().find((s) => s.transport)?.transport
+      const ice = dtls?.iceTransport as
+        | (RTCIceTransport & { onselectedcandidatepairchange: (() => void) | null })
+        | undefined
+      if (ice) ice.onselectedcandidatepairchange = () => this.reportPeerPath(state)
+    } catch {
+      /* older engine without RTCIceTransport surface */
+    }
+  }
+
   /** WebRTC failed for this peer — keep it, route its data via the DO relay. */
   private switchToRelay(state: PeerState): void {
     if (state.mode === 'relay') return
     dlog('switchToRelay', state.info.peerId)
     state.mode = 'relay'
+    this.handlers.onPeerPath?.(state.info.peerId, 'relay')
     try {
       state.pc.close()
     } catch {
@@ -245,8 +530,67 @@ export class CollabMesh {
     }
     state.control = undefined
     state.bulk = undefined
+    // Closing the pc above ended any remote audio/video tracks (the voice and
+    // screen services clean up via track.onended). No transceivers → no media.
+    state.audioTx = undefined
+    state.videoTx = undefined
     // The relay path (the WebSocket) is already up → the peer is usable now.
     this.markReady(state)
+    // Relay is a dead end for media — keep trying to get P2P back. Only the
+    // deterministic initiator drives retries (no glare); the answerer joins in
+    // when the fresh offer arrives (see onSignal's relay-mode rebuild).
+    if (shouldInitiate(this.selfId, state.info.peerId)) this.scheduleP2PRetry(state)
+  }
+
+  /** Schedule the next P2P attempt for a relay-mode peer (15s → 30s → 60s cap,
+   *  forever — network conditions change and a retry is one signaling round). */
+  private scheduleP2PRetry(state: PeerState): void {
+    if (state.retryTimer) return
+    const attempt = (state.retryAttempts = (state.retryAttempts ?? 0) + 1)
+    const delay = Math.min(P2P_RETRY_MAX_MS, P2P_RETRY_BASE_MS * 2 ** (attempt - 1))
+    dlog('scheduleP2PRetry', state.info.peerId, 'attempt', attempt, 'in', delay, 'ms')
+    state.retryTimer = setTimeout(() => {
+      state.retryTimer = undefined
+      if (this.peers.get(state.info.peerId) !== state || state.mode !== 'relay') return
+      this.rebuildPeer(state)
+    }, delay)
+  }
+
+  /**
+   * Tear down a relay-mode peer's dead RTCPeerConnection and negotiate a fresh
+   * one IN PLACE (the peer never leaves presence). `ready` flips back to false
+   * so the recovered connection re-fires onPeerConnected — the session then
+   * replays chat (deduped), voice/screen state and the path classification,
+   * restoring media both ways. If the attempt fails, the fallback timer lands
+   * back in switchToRelay and the backoff schedules the next try.
+   */
+  private rebuildPeer(state: PeerState): void {
+    dlog('rebuildPeer', state.info.peerId)
+    if (state.timer) {
+      clearTimeout(state.timer)
+      state.timer = undefined
+    }
+    try {
+      state.pc.close()
+    } catch {
+      /* already closed */
+    }
+    state.control = undefined
+    state.bulk = undefined
+    state.audioTx = undefined
+    state.videoTx = undefined
+    state.mode = 'p2p'
+    state.ready = false
+    // Honest UI while rebuilding: the session clears this peer's voice/screen/
+    // path state; a successful handshake brings it all back via the replays.
+    this.handlers.onPeerDisconnected?.(state.info.peerId)
+    // …but keep the badge STEADY on relay while the attempt runs — the
+    // disconnect above wiped it, and a blank-then-red blink every retry
+    // cycle reads as instability. Success overwrites this with the real
+    // classification; failure lands back here anyway.
+    this.handlers.onPeerPath?.(state.info.peerId, 'relay')
+    state.pc = new RTCPeerConnection({ iceServers: this.iceServers })
+    this.wirePeer(state)
   }
 
   /** Fire onPeerConnected once per peer (P2P channels open OR relay ready). */
@@ -254,6 +598,14 @@ export class CollabMesh {
     if (state.timer) {
       clearTimeout(state.timer)
       state.timer = undefined
+    }
+    if (state.mode === 'p2p') {
+      // Real P2P is back — stop the recovery loop and reset its backoff.
+      if (state.retryTimer) {
+        clearTimeout(state.retryTimer)
+        state.retryTimer = undefined
+      }
+      state.retryAttempts = 0
     }
     if (state.ready) return
     state.ready = true
@@ -276,7 +628,31 @@ export class CollabMesh {
     dlog('signal', type, '←', from)
     try {
       if (type === 'offer') {
+        // A fresh offer for a peer we already gave up on (relay mode, closed
+        // pc) is the initiator's P2P-recovery attempt — rebuild our side and
+        // answer it. This is the answerer half of the retry loop; no extra
+        // coordination message needed.
+        if (state.mode === 'relay') {
+          dlog('offer for relay-mode peer — rebuilding to answer', from)
+          this.rebuildPeer(state)
+        }
         await state.pc.setRemoteDescription(payload as RTCSessionDescriptionInit)
+        // Adopt the audio/video transceivers the remote offer created and
+        // answer them sendrecv — a remotely-created transceiver defaults to
+        // recvonly, which would let us hear/watch but never speak/present.
+        // Older clients whose offer carries fewer m-lines simply leave the
+        // corresponding tx undefined (that media no-ops toward them).
+        for (const tx of state.pc.getTransceivers()) {
+          const kind = tx.receiver.track?.kind
+          if (kind === 'audio' && !state.audioTx) {
+            state.audioTx = tx
+            tx.direction = 'sendrecv'
+          } else if (kind === 'video' && !state.videoTx) {
+            state.videoTx = tx
+            tx.direction = 'sendrecv'
+            preferScreenCodecs(tx)
+          }
+        }
         const answer = await state.pc.createAnswer()
         await state.pc.setLocalDescription(answer)
         dlog('answer →', from)
@@ -296,6 +672,7 @@ export class CollabMesh {
     const state = this.peers.get(peerId)
     if (!state) return
     if (state.timer) clearTimeout(state.timer)
+    if (state.retryTimer) clearTimeout(state.retryTimer)
     try {
       state.pc.close()
     } catch {

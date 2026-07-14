@@ -8,6 +8,7 @@
 //   generating        — visible text deltas streaming to the user.
 //   applying          — a tool call is dispatched / executing.
 //   compressing       — context compression is in flight.
+//   cancelled         — user stopped the current run; not an error.
 export type AgentStatus =
   | 'idle'
   | 'awaiting_response'
@@ -15,6 +16,7 @@ export type AgentStatus =
   | 'generating'
   | 'applying'
   | 'compressing'
+  | 'cancelled'
   | 'error'
 
 export interface AgentTool {
@@ -25,6 +27,7 @@ export interface AgentTool {
 
 export type AgentToolName =
   | 'read_file'
+  | 'read_around'
   | 'write_file'
   | 'edit_file'
   | 'create_file'

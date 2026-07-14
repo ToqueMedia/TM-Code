@@ -23,13 +23,10 @@ export const DEFAULT_WORKER_URL = 'http://localhost:8787'
 export const DEFAULT_AI_WORKER_URL = 'http://localhost:8788'
 
 /**
- * Production Worker URL — ALWAYS used for the deploy pipeline, even in
- * dev mode. Reason: wrangler dev (localhost:8787) emulates R2/D1 locally,
- * so a Publish from a dev-mode IDE would write to ~/.wrangler/state/
- * and the served <slug>.toquemedia.net would 404 against real R2.
- *
- * Override via VITE_DEPLOY_URL only for staging the deploy pipeline
- * itself (e.g. a parallel preview Worker).
+ * Production control-plane Worker URL. Used as the production fallback by
+ * `resolveWorkerUrl()` when no (valid) VITE_WORKER_URL override is present.
+ * (The name predates the dev-only pivot — the managed Publish/deploy
+ * pipeline is gone; this is simply the control-plane endpoint.)
  */
 export const PRODUCTION_DEPLOY_URL = 'https://api-agents.toquemedia.net'
 
@@ -41,8 +38,14 @@ export const DEFAULT_COLLAB_SIGNALING_URL = 'ws://localhost:8789'
 /** Production collab signaling Worker (WebSocket) endpoint. */
 export const PRODUCTION_COLLAB_SIGNALING_URL = 'wss://collab-signaling-worker.geral-871.workers.dev'
 
-/** Optional override for deploys (staging the pipeline). Undefined → use PRODUCTION_DEPLOY_URL. */
-export const VITE_DEPLOY_URL: string | undefined = import.meta.env.VITE_DEPLOY_URL as string | undefined
+/** Default local TM Code Web URL used by "Send to Web" while the IDE runs in Vite dev. */
+export const DEFAULT_TM_CODE_WEB_URL = 'http://localhost:5173'
+
+/** Production TM Code Web URL. */
+export const PRODUCTION_TM_CODE_WEB_URL = 'https://code.toquemedia.net'
+
+/** Optional TM Code Web URL override for "Send to Web" target. */
+export const VITE_TM_CODE_WEB_URL: string | undefined = import.meta.env.VITE_TM_CODE_WEB_URL as string | undefined
 
 /** User-provided Ollama URL override (Vite env); undefined in Jest. */
 export const VITE_OLLAMA_URL: string | undefined = import.meta.env.VITE_OLLAMA_URL as string | undefined

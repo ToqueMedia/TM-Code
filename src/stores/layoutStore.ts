@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type ViewMode = 'chat' | 'generating' | 'preview' | 'editor' | 'settings' | 'data'
+export type ViewMode = 'chat' | 'generating' | 'preview' | 'editor' | 'settings'
 /** UI surface in the preview area. Derived from `devServer.projectKind` + static preview state. */
 export type PreviewMode = 'server' | 'static' | 'api'
 export type DevLogLevel = 'info' | 'warn' | 'error'
@@ -47,9 +47,6 @@ interface LayoutState {
   viewMode: ViewMode
   previousViewMode: ViewMode | null
   isSidebarVisible: boolean
-  isProjectsSidebarVisible: boolean
-  /** Tracks if sidebar was open before entering preview — to restore on exit */
-  projectsSidebarBeforePreview: boolean | null
   showTemplateSelector: boolean
   isPreviewServerLoading: boolean
   /** True while a one-click preview is installing missing `node_modules` before
@@ -70,10 +67,6 @@ interface LayoutState {
    *  Toggled from the PreviewView toolbar and reset whenever preview is left,
    *  so the chat is always back the next time the preview opens. */
   isPreviewFullscreen: boolean
-  /** Cross-component publish modal flag — both MinimalTitleBar and the
-   *  PreviewView toolbar trigger the same modal so we keep a single source
-   *  of truth here. The modal itself is mounted by MinimalTitleBar. */
-  isPublishModalOpen: boolean
   previewHtmlContent: string | null
   previewSourcePath: string | null
   /** Incremented to signal the preview iframe should reload */
@@ -87,6 +80,8 @@ interface LayoutState {
   isPlanViewerOpen: boolean
   /** Concrete plan file path currently shown by the Plan Viewer. */
   planViewerPath: string | null
+  /** True when the Checkpoints drawer is open */
+  isCheckpointDrawerOpen: boolean
   /**
    * Reference count of open overlays that must cover the native preview webview.
    * On Windows/Linux the wry child webview is an OS child window that sits ABOVE
@@ -114,7 +109,6 @@ interface LayoutState {
 interface LayoutActions {
   setViewMode: (mode: ViewMode) => void
   toggleSidebar: () => void
-  toggleProjectsSidebar: () => void
   setShowTemplateSelector: (show: boolean) => void
   setPreviewServerLoading: (loading: boolean) => void
   /** Toggle the "installing dependencies" phase of a one-click preview. */
@@ -143,15 +137,14 @@ interface LayoutActions {
   /** Toggle fullscreen preview — hide the chat sidebar so the preview fills
    *  the pane; toggle again to bring the chat back. */
   togglePreviewFullscreen: () => void
-  /** Open / close the deploy publish modal. Single source of truth so both
-   *  the title bar and the preview toolbar trigger the same dialog. */
-  setPublishModalOpen: (open: boolean) => void
   goBack: () => void
   setScaffoldPhase: (phase: ScaffoldPhase, message?: string) => void
   /** Set the section SettingsView should open on. Pair with setViewMode('settings'). */
   setSettingsInitialSection: (section: string | null) => void
   togglePlanViewer: () => void
   setPlanViewerOpen: (open: boolean, planPath?: string | null) => void
+  toggleCheckpointDrawer: () => void
+  setCheckpointDrawerOpen: (open: boolean) => void
   /** Drop the pending section so a subsequent Settings open defaults to Profile. */
   clearSettingsInitialSection: () => void
 }
@@ -165,8 +158,6 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   viewMode: 'chat',
   previousViewMode: null,
   isSidebarVisible: false,
-  isProjectsSidebarVisible: false,
-  projectsSidebarBeforePreview: null,
   showTemplateSelector: false,
   isPreviewServerLoading: false,
   isInstallingDeps: false,
@@ -174,13 +165,13 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
   previewMode: 'server',
   isHttpDrawerOpen: false,
   isPreviewFullscreen: false,
-  isPublishModalOpen: false,
   previewHtmlContent: null,
   previewSourcePath: null,
   previewReloadKey: 0,
   previewServerTimedOut: false,
   isPlanViewerOpen: false,
   planViewerPath: null,
+  isCheckpointDrawerOpen: false,
   devServerLogs: [],
   isConsoleVisible: false,
   overlayCount: 0,
@@ -192,29 +183,12 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
     const current = get().viewMode
     if (current === mode) return
 
-    const state = get()
-
-    // Entering preview — auto-hide projects sidebar, remember its state
-    if (mode === 'preview' && current !== 'preview') {
+    // Entering/leaving preview — clear fullscreen state.
+    if ((mode === 'preview') !== (current === 'preview')) {
       set({
         viewMode: mode,
         previousViewMode: current,
-        projectsSidebarBeforePreview: state.isProjectsSidebarVisible,
-        isProjectsSidebarVisible: false,
         isPreviewFullscreen: false,
-      })
-      return
-    }
-
-    // Leaving preview — restore projects sidebar if it was open before
-    if (current === 'preview' && mode !== 'preview') {
-      const restore = state.projectsSidebarBeforePreview
-      set({
-        viewMode: mode,
-        previousViewMode: current,
-        projectsSidebarBeforePreview: null,
-        isPreviewFullscreen: false,
-        ...(restore ? { isProjectsSidebarVisible: true } : {}),
       })
       return
     }
@@ -227,10 +201,6 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
 
   toggleSidebar: () => {
     set(state => ({ isSidebarVisible: !state.isSidebarVisible }))
-  },
-
-  toggleProjectsSidebar: () => {
-    set(state => ({ isProjectsSidebarVisible: !state.isProjectsSidebarVisible }))
   },
 
   setShowTemplateSelector: (show: boolean) => {
@@ -328,10 +298,6 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
     set(state => ({ isPreviewFullscreen: !state.isPreviewFullscreen }))
   },
 
-  setPublishModalOpen: (open: boolean) => {
-    set({ isPublishModalOpen: open })
-  },
-
   addDevServerLog: (text: string, level: DevLogLevel = 'info') => {
     set(state => {
       const MAX_LOG_ENTRIES = 500
@@ -391,6 +357,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
     set(state => ({
       isPlanViewerOpen: !state.isPlanViewerOpen,
       planViewerPath: state.isPlanViewerOpen ? null : state.planViewerPath,
+      isCheckpointDrawerOpen: state.isPlanViewerOpen ? state.isCheckpointDrawerOpen : false,
     }))
   },
 
@@ -398,6 +365,23 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
     set(state => ({
       isPlanViewerOpen: open,
       planViewerPath: open ? (planPath ?? state.planViewerPath) : null,
+      isCheckpointDrawerOpen: open ? false : state.isCheckpointDrawerOpen,
+    }))
+  },
+
+  toggleCheckpointDrawer: () => {
+    set(state => ({
+      isCheckpointDrawerOpen: !state.isCheckpointDrawerOpen,
+      isPlanViewerOpen: state.isCheckpointDrawerOpen ? state.isPlanViewerOpen : false,
+      planViewerPath: state.isCheckpointDrawerOpen ? state.planViewerPath : null,
+    }))
+  },
+
+  setCheckpointDrawerOpen: (open: boolean) => {
+    set(state => ({
+      isCheckpointDrawerOpen: open,
+      isPlanViewerOpen: open ? false : state.isPlanViewerOpen,
+      planViewerPath: open ? null : state.planViewerPath,
     }))
   },
 

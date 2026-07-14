@@ -1,6 +1,5 @@
 import { extractHashtags } from '../../utils/hashtagParser'
 import { t } from '@/i18n'
-import type { Provider } from './commands/authCommand'
 
 /**
  * Closed vocabulary of skill-trigger hashtags. The prompt-bar autocomplete
@@ -10,6 +9,10 @@ import type { Provider } from './commands/authCommand'
  * Anything not in this list is ignored — free-form `#tags` (issue refs, etc.)
  * pass through to the agent as plain text. Add a new entry only when there's
  * a corresponding skill bundle to load.
+ *
+ * NOTE (2026-07): the managed-auth tags (`#auth-email-password`,
+ * `#auth-google`) were removed with the MANAGED-PLATFORM layer — the IDE
+ * agent is a pure dev tool; managed provisioning lives in TM Code Web.
  */
 export interface HashtagOption {
   /** The full tag including the leading '#'. */
@@ -19,9 +22,7 @@ export interface HashtagOption {
 }
 
 export const HASHTAG_OPTIONS: HashtagOption[] = [
-  { tag: '#auth-email-password', description: t('hashtag.authShort') },
-  { tag: '#auth-google',         description: t('hashtag.googleSignInShort') },
-  { tag: '#design',              description: t('hashtag.designShort') },
+  { tag: '#design', description: t('hashtag.designShort') },
 ]
 
 /**
@@ -36,24 +37,9 @@ export function filterHashtagOptions(query: string): HashtagOption[] {
   )
 }
 
-/** Map of recognised auth-hashtag tokens (without `#`) to their provider. */
-const AUTH_TAG_TO_PROVIDER: Record<string, Provider> = {
-  'auth-email-password': 'email-password',
-  'auth-google': 'google',
-}
-
 const DESIGN_TAG_TOKEN = 'design'
 
-export interface AuthHashtagDetection {
-  /** Distinct providers signalled by the recognised tags. */
-  providers: Provider[]
-  /** Original text minus the recognised auth hashtags (whitespace collapsed). */
-  cleanedText: string
-}
-
 export interface PreprocessedHashtags {
-  /** Distinct auth providers signalled by `#auth-*` tags. */
-  authProviders: Provider[]
   /** True when `#design` is present — caller should force-load `frontend-design`. */
   hasDesign: boolean
   /** Original text minus all recognised hashtags (whitespace collapsed). */
@@ -71,21 +57,16 @@ export interface PreprocessedHashtags {
 export function preprocessHashtags(text: string): PreprocessedHashtags {
   const tags = extractHashtags(text)
   if (tags.length === 0) {
-    return { authProviders: [], hasDesign: false, cleanedText: text }
+    return { hasDesign: false, cleanedText: text }
   }
 
-  const providers = new Set<Provider>()
   let hasDesign = false
   let cleaned = text
 
   for (let i = tags.length - 1; i >= 0; i--) {
     const tag = tags[i]
     const lowerToken = tag.token.toLowerCase()
-    const provider = AUTH_TAG_TO_PROVIDER[lowerToken]
-    if (provider !== undefined) {
-      providers.add(provider)
-      cleaned = cleaned.slice(0, tag.start) + cleaned.slice(tag.end)
-    } else if (lowerToken === DESIGN_TAG_TOKEN) {
+    if (lowerToken === DESIGN_TAG_TOKEN) {
       hasDesign = true
       cleaned = cleaned.slice(0, tag.start) + cleaned.slice(tag.end)
     }
@@ -93,14 +74,5 @@ export function preprocessHashtags(text: string): PreprocessedHashtags {
   }
 
   cleaned = cleaned.replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim()
-  return { authProviders: Array.from(providers), hasDesign, cleanedText: cleaned }
-}
-
-/**
- * Detect known auth hashtags only (legacy API kept for callers that don't
- * care about `#design`). Use `preprocessHashtags` when you need both.
- */
-export function detectAuthHashtags(text: string): AuthHashtagDetection {
-  const pre = preprocessHashtags(text)
-  return { providers: pre.authProviders, cleanedText: pre.cleanedText }
+  return { hasDesign, cleanedText: cleaned }
 }

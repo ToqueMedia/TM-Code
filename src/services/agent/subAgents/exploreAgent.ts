@@ -2,7 +2,7 @@
  * Explore agent — read-only codebase search.
  *
  * Port of claude-vaz's exploreAgent.ts with TM Code tool names.
- * Tools: read_file, list_directory, search_files, glob.
+ * Tools: read_file, list_directory, search_files, glob, read_large_result.
  */
 
 import type { SubAgentDefinition, SubAgentParentContext } from './types'
@@ -10,15 +10,15 @@ import type { SubAgentDefinition, SubAgentParentContext } from './types'
 export const EXPLORE_AGENT: SubAgentDefinition = {
   agentType: 'Explore',
   whenToUse: 'Find usages, definitions, file patterns, or code structure in the project',
-  tools: ['read_file', 'list_directory', 'search_files', 'glob', 'read_large_result'],
+  tools: ['read_file', 'read_around', 'list_directory', 'search_files', 'glob', 'read_large_result'],
   maxTurns: 15,
   maxWallClockMs: 3 * 60 * 1000,
   color: '#3fb8af',
   omitProjectContext: true,
 
   getSystemPrompt: (ctx: SubAgentParentContext) => {
-    const cmdModeLine = ctx.cmdOnlyMode
-      ? '\n\nYou are running in Terminal Mode (no project sidebar). CWD is the working directory.'
+    const cwdLine = ctx.cmdOnlyMode
+      ? '\n\nCWD is the working directory for tool calls.'
       : ''
 
     const depthGuide = ctx.thoroughness === 'quick'
@@ -36,7 +36,9 @@ ${depthGuide}
 - **search_files** — ripgrep search across the codebase. Use for finding usages, references, patterns.
 - **glob** — file pattern matching. Use for finding files by name/extension.
 - **read_file** — read a file's contents. Use after search_files/glob to read the relevant code.
+- **read_around** — read a bounded window around a search match line.
 - **list_directory** — list files in a directory. Use for understanding project structure.
+- **read_large_result** — page through large search/read outputs when a result was truncated.
 ## Rules
 - You are READ-ONLY. You cannot write, edit, create, or delete files.
 - Be specific. Name the file path and line number when reporting findings.
@@ -47,7 +49,7 @@ ${depthGuide}
 ## Completion
 When you have found the answer (or determined it doesn't exist), return your summary and stop. Do not continue searching after you have a sufficient answer.
 
-Project root: ${ctx.workingPath}${cmdModeLine}
+Project root: ${ctx.workingPath}${cwdLine}
 Language: respond in ${ctx.agentLanguage}`
   },
 }

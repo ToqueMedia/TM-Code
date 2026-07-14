@@ -60,17 +60,17 @@ describe('createPermissionAwareTimeout', () => {
   })
 
   test('error message includes the tool name', async () => {
-    const { promise, cleanup } = createPermissionAwareTimeout('provision_auth', 50)
+    const { promise, cleanup } = createPermissionAwareTimeout('request_credentials', 50)
     try {
-      await expect(promise).rejects.toThrow(/Tool "provision_auth" timed out/)
+      await expect(promise).rejects.toThrow(/Tool "request_credentials" timed out/)
     } finally {
       cleanup()
     }
   })
 
   test('does NOT fire while permission is continuously pending', async () => {
-    setPending('provision_auth')
-    const { promise, cleanup } = createPermissionAwareTimeout('provision_auth', 80)
+    setPending('request_credentials')
+    const { promise, cleanup } = createPermissionAwareTimeout('request_credentials', 80)
 
     // Race the timeout against a wall-clock window twice as long. If the
     // timer were still ticking, it would fire before our marker resolved.
@@ -92,8 +92,8 @@ describe('createPermissionAwareTimeout', () => {
   test('resumes the timer when permission is approved (cleared)', async () => {
     // Start with permission pending. The timer should accumulate ZERO active
     // ms during this period, then start counting once we clear the dialog.
-    setPending('provision_auth')
-    const { promise, cleanup } = createPermissionAwareTimeout('provision_auth', 100)
+    setPending('request_credentials')
+    const { promise, cleanup } = createPermissionAwareTimeout('request_credentials', 100)
 
     // Sit on the dialog for longer than the timeout — proves the pause works
     await new Promise((r) => setTimeout(r, 150))

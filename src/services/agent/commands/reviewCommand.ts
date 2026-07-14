@@ -9,7 +9,7 @@ import { getQueryGuard } from '../queryGuard'
 import { languageDirective } from './_languageInstruction'
 import { logger } from '../../../utils/logger'
 import { t } from '../../../i18n'
-import type { SlashCommandMode } from '../slashCommandRegistry'
+import { GLOB_ALIAS, GREP_ALIAS, LS_ALIAS, READ_ALIAS } from '../toolNames'
 
 /**
  * Cap on how many files we ask the sub-agent to review when scope is
@@ -73,17 +73,13 @@ interface ResolvedScope {
 export async function executeReview(
   args: string,
   projectPath: string,
-  mode: SlashCommandMode = 'chat',
 ): Promise<void> {
   const chatStore = useChatStore.getState()
   const agentStore = useAgentStore.getState()
   const trimmed = args.trim()
 
-  // Pre-condition: a project must be open. We trust the projectPath the
-  // dispatcher passed in (resolved from currentProject?.path ||
-  // cmdModeProjectPath) so the check works in both chat and CMD modes —
-  // previously this read useProjectStore.currentProject directly and
-  // failed in CMD mode where currentProject is never populated.
+  // Pre-condition: a project must be open. Trust the dispatcher-provided
+  // projectPath (resolved from currentProject?.path).
   if (!projectPath) {
     chatStore.addSystemMessage(t('review.noProject'))
     return
@@ -157,18 +153,6 @@ export async function executeReview(
   }
 
   const toolExecutor = ToolExecutor.getInstance()
-  // /review's read-only tools resolve paths via toolExecutor.getProjectRoot()
-  // which checks cmdModeCwd first, then falls back to currentProject.path.
-  // /review goes through createLightweight + runAgentLoop directly (not
-  // through runAgentWithCallbacks), so the standard cmdOnlyMode wiring in
-  // agentRunner.ts doesn't apply — we enable cmdMode ourselves here when
-  // dispatched from CMD, and the finally block below clears it. Matches
-  // chat-mode behaviour exactly: in chat the fallback to currentProject is
-  // enough; in CMD currentProject is empty and we need the cwd.
-  const enabledCmdModeHere = mode === 'terminal'
-  if (enabledCmdModeHere) {
-    toolExecutor.enableCmdMode(projectPath)
-  }
   // Read-only tool palette. Crucially excludes write/edit/create/delete/
   // execute_command — the sub-agent must reason about the code, not change
   // it. Includes diagnostics so it can spot type errors as evidence, and
@@ -315,9 +299,6 @@ export async function executeReview(
     agentStore.setStatus('error')
   } finally {
     subAgent.setRequestType(null)
-    if (enabledCmdModeHere) {
-      toolExecutor.disableCmdMode()
-    }
     if (typeof window !== 'undefined') {
       window.removeEventListener('agent-stop-requested', stopHandler)
     }
@@ -428,7 +409,7 @@ async function resolveScopeFiles(
     }
 
     case 'description': {
-      // Sub-agent discovers its own files via search_files / glob. We pass
+      // Sub-agent discovers its own files via Grep / Glob. We pass
       // the description through unchanged.
       return { scope, files: [], capped: false, originalCount: 0 }
     }
@@ -553,7 +534,7 @@ LOW — naming, organization, micro-readability. Defaults: do NOT report unless 
 <protocol>
 1. Read the review request and identify the scope (specific file, last commit, session changes, or free-form description).
 
-2. Read the relevant files completely. Do not skim. If the request mentions a flow that spans multiple files, follow the references with read_file / search_files / glob.
+2. Read the relevant files completely. Do not skim. If the request mentions a flow that spans multiple files, follow the references with ${READ_ALIAS} / ${GREP_ALIAS} / ${GLOB_ALIAS}.
 
 3. If the project has a TMS.md (project memory), read it. It often documents intentional architectural choices that look unusual but are deliberate.
 
@@ -597,13 +578,13 @@ function buildReviewPrompt(resolved: ResolvedScope): string {
 
   switch (scope.type) {
     case 'file':
-      return `Review the file: \`${files[0]}\`\n\nRead it in full, follow references as needed using read_file/search_files, and report findings per the protocol.`
+      return `Review the file: \`${files[0]}\`\n\nRead it in full, follow references as needed using ${READ_ALIAS}/${GREP_ALIAS}, and report findings per the protocol.`
 
     case 'last_commit':
       return `Review the files changed in the last git commit (HEAD~1..HEAD). The IDE already resolved the file list:\n\n${fileList}\n\nRead each in full and report findings per the protocol. Pay special attention to the diff between HEAD~1 and HEAD where you can — those are the lines that just landed.`
 
     case 'description':
-      return `Review the feature/area described: "${scope.description}"\n\nFind the relevant files yourself using search_files / glob / list_directory, then review per the protocol. Don't review unrelated files.`
+      return `Review the feature/area described: "${scope.description}"\n\nFind the relevant files yourself using ${GREP_ALIAS} / ${GLOB_ALIAS} / ${LS_ALIAS}, then review per the protocol. Don't review unrelated files.`
 
     case 'session':
     default: {

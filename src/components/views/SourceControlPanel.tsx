@@ -3,7 +3,7 @@ import { Flex, Text, Box, HStack } from '@chakra-ui/react'
 import {
   VscCheck, VscRefresh, VscAdd, VscRemove, VscDiscard,
   VscChevronDown, VscChevronRight, VscSparkle,
-  VscSync, VscError, VscSourceControl,
+  VscSync, VscError, VscSourceControl, VscWarning, VscGoToFile,
 } from 'react-icons/vsc'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog'
@@ -15,13 +15,19 @@ import { useGitStatusStore } from '@/stores/gitStatusStore'
 import { useCurrentProject } from '@/hooks/useProjectState'
 import { getFileIconByExtension } from '@/utils/iconMapper'
 import { CollabShareControls } from '@/components/collab/CollabShareControls'
+import {
+  cleanGeneratedCommitMessage, ensureTmCodeCommitSignature,
+  buildCommitPrompt, selectTopChangedPaths, COMMIT_PROMPT_LIMITS,
+} from './sourceControlCommit'
 
 const statusMeta: Record<string, { color: string; label: string }> = {
-  added:     { color: tokens.colors.accent.greenBright, label: 'A' },
-  untracked: { color: tokens.colors.accent.greenBright, label: 'U' },
-  modified:  { color: tokens.colors.accent.orangeBright, label: 'M' },
-  deleted:   { color: tokens.colors.accent.red, label: 'D' },
-  renamed:   { color: tokens.colors.accent.purple, label: 'R' },
+  added:      { color: tokens.colors.accent.greenBright, label: 'A' },
+  untracked:  { color: tokens.colors.accent.greenBright, label: 'U' },
+  modified:   { color: tokens.colors.accent.orangeBright, label: 'M' },
+  deleted:    { color: tokens.colors.accent.red, label: 'D' },
+  renamed:    { color: tokens.colors.accent.purple, label: 'R' },
+  // Convenção do VS Code: conflitos de merge com "!" a vermelho.
+  conflicted: { color: tokens.colors.accent.red, label: '!' },
 }
 
 type FeedbackType = 'success' | 'error' | null
@@ -31,40 +37,9 @@ const ROW_HEIGHT = 28
 // commit button + file list out of the overflow-hidden column (user, 2026-06-17).
 const COMMIT_TEXTAREA_MIN_HEIGHT = 48
 const COMMIT_TEXTAREA_MAX_HEIGHT = 200
-const TM_CODE_COMMIT_SIGNATURE = 'Co-Authored-By: TM Code <tm.code@toquemedia.net>'
-
-// The signature is invisible to the user (never shown in the textarea) and is
-// appended at commit time — so both AI-generated and hand-typed messages get
-// signed, and the textarea stays clean (user request, 2026-06-12).
-function ensureTmCodeCommitSignature(message: string): string {
-  const trimmed = message.trim()
-  if (!trimmed) return ''
-  if (/^Co-Authored-By:\s*TM Code\s*</im.test(trimmed)) return trimmed
-  return `${trimmed}\n\n${TM_CODE_COMMIT_SIGNATURE}`
-}
-
-/** Strip any TM Code trailer the AI may still emit, so it never reaches the textarea. */
-function stripTmCodeCommitSignature(message: string): string {
-  return message.replace(/\n*^Co-Authored-By:\s*TM Code\s*<[^>]*>\s*$/gim, '').trim()
-}
-
-/**
- * Strip chain-of-thought from the AI message. The commit-message call is
- * non-streaming, so reasoning models (notably Gemini via the data-plane) emit
- * their `<think>…</think>` block INLINE in `message.content` instead of in a
- * separate streamed reasoning channel — without this it leaks straight into the
- * commit textarea (see screenshot, 2026-06-16).
- */
-function stripReasoningBlocks(text: string): string {
-  // 1. Remove well-formed <think>…</think> blocks.
-  let out = text.replace(/<think>[\s\S]*?<\/think>/gi, '')
-  // 2. A dangling close tag means the opener arrived as a separate field (or
-  //    was trimmed upstream) — keep only what follows the last </think>.
-  const lastClose = out.toLowerCase().lastIndexOf('</think>')
-  if (lastClose !== -1) out = out.slice(lastClose + '</think>'.length)
-  // 3. Drop any stray tag left over, but keep the surrounding text.
-  return out.replace(/<\/?think>/gi, '').trim()
-}
+const COMMIT_MESSAGE_AI_TIMEOUT_MS = 90_000
+const COMMIT_MESSAGE_WORKER_TIMEOUT_SECS = Math.ceil(COMMIT_MESSAGE_AI_TIMEOUT_MS / 1000)
+const COMMIT_MESSAGE_AI_MAX_ATTEMPTS = 2
 
 // ── Styles (injected once) ──────────────────────────────────────────────
 
@@ -255,6 +230,7 @@ function SourceControlPanel() {
   const [committing, setCommitting] = useState(false)
   const [stagedOpen, setStagedOpen] = useState(true)
   const [changesOpen, setChangesOpen] = useState(true)
+  const [conflictsOpen, setConflictsOpen] = useState(true)
   const [feedback, setFeedback] = useState<{ type: FeedbackType; msg: string }>({ type: null, msg: '' })
   const [generating, setGenerating] = useState(false)
   const [syncing, setSyncing] = useState(false)
@@ -298,8 +274,9 @@ function SourceControlPanel() {
     return acquireGitStatusPolling(projectPath)
   }, [projectPath])
 
-  const staged = files.filter(f => f.staged)
-  const unstaged = files.filter(f => !f.staged)
+  const conflicted = files.filter(f => f.status === 'conflicted')
+  const staged = files.filter(f => f.staged && f.status !== 'conflicted')
+  const unstaged = files.filter(f => !f.staged && f.status !== 'conflicted')
 
   // ── Git actions ──────────────────────────────────────────────────────
 
@@ -346,9 +323,37 @@ function SourceControlPanel() {
     window.dispatchEvent(new CustomEvent('editor:open-diff', { detail: { relPath, projectPath } }))
   }, [projectPath])
 
+  // ── Conflitos de merge (secção "Merge Changes", como no VS Code) ─────
+
+  // Conflito abre o FICHEIRO editável (com os marcadores <<<<<<<), não a
+  // vista de diff — é aí que se resolve.
+  const onOpenConflictFile = useCallback((relPath: string) => {
+    if (!projectPath) return
+    window.dispatchEvent(new CustomEvent('editor:open-file', { detail: `${projectPath}/${relPath}` }))
+  }, [projectPath])
+
+  // Marcar como resolvido = git add (a semântica do git e do VS Code).
+  // Confirmação quando o ficheiro ainda tem marcadores de conflito seria o
+  // ideal; mantemos a ação explícita e reversível (unstage devolve o estado).
+  const onMarkResolved = useCallback(async (path: string) => {
+    try { await GitService.stageFile(projectPath, path); await refreshGitStatus(); refreshGutter(path) }
+    catch (e) { showFeedback('error', t('sourceControl.markResolved').replace('{file}', String(e))) }
+  }, [projectPath, showFeedback, refreshGutter])
+
+  const onMarkAllResolved = useCallback(async () => {
+    try {
+      for (const file of conflicted) {
+        await GitService.stageFile(projectPath, file.path)
+      }
+      await refreshGitStatus()
+      refreshGutter()
+    } catch (e) { showFeedback('error', t('sourceControl.markResolved').replace('{file}', String(e))) }
+  }, [projectPath, conflicted, showFeedback, refreshGutter])
+
   // ── Commit ───────────────────────────────────────────────────────────
 
   const handleCommit = useCallback(async () => {
+    if (conflicted.length > 0) { showFeedback('error', t('sourceControl.resolveConflictsFirst')); return }
     if (!commitMsg.trim()) { showFeedback('error', t('sourceControl.enterCommitMessage')); return }
     if (staged.length === 0) { showFeedback('error', t('sourceControl.stageFilesFirst')); return }
     setCommitting(true)
@@ -363,11 +368,12 @@ function SourceControlPanel() {
       if (mountedRef.current) showFeedback('error', t('sourceControl.commit').replace('{file}', String(e)))
     }
     if (mountedRef.current) setCommitting(false)
-  }, [projectPath, commitMsg, staged.length, showFeedback, branch])
+  }, [projectPath, commitMsg, staged.length, conflicted.length, showFeedback, branch])
 
   // ── Stage All & Commit (quick action) ────────────────────────────────
 
   const handleStageAllAndCommit = useCallback(async () => {
+    if (conflicted.length > 0) { showFeedback('error', t('sourceControl.resolveConflictsFirst')); return }
     if (!commitMsg.trim()) { showFeedback('error', t('sourceControl.enterCommitMessage')); return }
     setCommitting(true)
     try {
@@ -382,7 +388,7 @@ function SourceControlPanel() {
       if (mountedRef.current) showFeedback('error', t('sourceControl.commit').replace('{file}', String(e)))
     }
     if (mountedRef.current) setCommitting(false)
-  }, [projectPath, commitMsg, showFeedback, branch])
+  }, [projectPath, commitMsg, conflicted.length, showFeedback, branch])
 
   // ── Sync (pull, then push) ───────────────────────────────────────────
   // After a commit the main button becomes "Pull & Push": one click brings
@@ -414,89 +420,110 @@ function SourceControlPanel() {
   const handleGenerateCommitMsg = useCallback(async () => {
     if (files.length === 0 || generating) return
     setGenerating(true)
+    const aiAbort = new AbortController()
+    const aiTimeout = setTimeout(() => aiAbort.abort(), COMMIT_MESSAGE_AI_TIMEOUT_MS)
     try {
       const { invoke: inv } = await import('@tauri-apps/api/core')
-      const diffBase = staged.length > 0 ? 'git diff --cached' : 'git diff HEAD'
-      const maxDiffChars = 24_000
-      const diffResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
-        'execute_command',
-        { command: `${diffBase} --stat --compact-summary`, cwd: projectPath, timeoutSecs: 8 }
-      )
-      const diffStat = diffResult.success ? diffResult.stdout.trim() : ''
-      const nameStatusResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
-        'execute_command',
-        { command: `${diffBase} --name-status`, cwd: projectPath, timeoutSecs: 8 }
-      )
-      const nameStatus = nameStatusResult.success ? nameStatusResult.stdout.trim() : ''
-      const numstatResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
-        'execute_command',
-        { command: `${diffBase} --numstat`, cwd: projectPath, timeoutSecs: 8 }
-      )
-      const numstat = numstatResult.success ? numstatResult.stdout.trim() : ''
-      const detailResult = await inv<{ stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }>(
-        'execute_command',
-        {
-          command: `${diffBase} --no-color --find-renames --find-copies --diff-algorithm=histogram -U4`,
-          cwd: projectPath,
-          timeoutSecs: 10,
+      type CommandResult = { stdout: string; exitCode: number; success: boolean; timedOut: boolean; stderr: string }
+      const runGit = async (command: string, timeoutSecs: number): Promise<{ text: string; note: string }> => {
+        try {
+          const result = await inv<CommandResult>('execute_command', { command, cwd: projectPath, timeoutSecs })
+          if (result.success) return { text: result.stdout.trim(), note: '' }
+          const reason = result.timedOut ? `timed out after ${timeoutSecs}s` : (result.stderr || `exit ${result.exitCode}`).trim()
+          return { text: result.stdout.trim(), note: `${command}: ${reason}` }
+        } catch (err) {
+          return { text: '', note: `${command}: ${err instanceof Error ? err.message : String(err)}` }
         }
+      }
+      const diffBase = staged.length > 0 ? 'git diff --cached' : 'git diff HEAD'
+
+      // Summaries first (cheap, parallel). The DETAIL diff command is decided
+      // from numstat afterwards: for big changesets, `git diff -U3` over the
+      // whole tree can produce tens of MB that the Rust side buffers in full
+      // and ships over IPC only for us to keep 12KB — that transfer was the
+      // main reason generation failed with many modified files.
+      const [diffStatResult, nameStatusResult, numstatResult] = await Promise.all([
+        runGit(`${diffBase} --stat --compact-summary`, 20),
+        runGit(`${diffBase} --name-status`, 20),
+        runGit(`${diffBase} --numstat`, 20),
+      ])
+      const diffStat = diffStatResult.text
+      const nameStatus = nameStatusResult.text
+      const numstat = numstatResult.text
+
+      const changedFileCount = numstat.split('\n').filter(l => l.trim()).length
+      // Generated/vendored files (lockfiles, dist, node_modules, minified
+      // bundles) are excluded from the DETAIL diff — their hunks are pure
+      // noise for a commit message and routinely dwarf the real changes.
+      // They still appear in the summaries above, so the model knows they
+      // changed. Double quotes work in both `sh -c` (mac) and `cmd /C` (win).
+      const detailExcludes = [
+        '*node_modules/*', '*package-lock.json', '*yarn.lock', '*pnpm-lock.yaml',
+        '*bun.lockb', '*Cargo.lock', '*.min.js', '*.min.css', '*.map',
+      ].map(p => `":(exclude)${p}"`).join(' ')
+      let detailPathspec = `-- ${detailExcludes}`
+      if (changedFileCount > COMMIT_PROMPT_LIMITS.detailFileThreshold) {
+        // Huge changeset: fetch hunks only for the files with the most churn
+        // instead of diffing the whole tree.
+        const topPaths = selectTopChangedPaths(numstat, COMMIT_PROMPT_LIMITS.detailTopFiles)
+        if (topPaths.length > 0) {
+          detailPathspec = `-- ${topPaths.map(p => `"${p}"`).join(' ')}`
+        }
+      }
+      const detailResult = await runGit(
+        `${diffBase} --no-color --find-renames --find-copies --diff-algorithm=histogram -U3 ${detailPathspec}`,
+        25,
       )
-      const rawDiffDetail = detailResult.success ? detailResult.stdout.trim() : ''
-      const diffDetail = rawDiffDetail.length > maxDiffChars
-        ? `${rawDiffDetail.slice(0, maxDiffChars)}\n\n[Diff truncated: ${rawDiffDetail.length - maxDiffChars} additional characters omitted]`
-        : rawDiffDetail
+
+      const diffNotes = [
+        diffStatResult.note, nameStatusResult.note, numstatResult.note, detailResult.note,
+        changedFileCount > COMMIT_PROMPT_LIMITS.detailFileThreshold
+          ? `Changeset has ${changedFileCount} files; detailed hunks included only for the ${COMMIT_PROMPT_LIMITS.detailTopFiles} most-changed files.`
+          : '',
+      ].filter(Boolean).join('\n')
+
       const targetFiles = staged.length > 0 ? staged : unstaged
-      const fileList = targetFiles.map(f => `${f.status}: ${f.path}`).join('\n')
+      const sections = {
+        fileList: targetFiles.map(f => `${f.status}: ${f.path}`).join('\n'),
+        nameStatus,
+        numstat,
+        diffStat,
+        diffDetail: detailResult.text,
+        diffNotes,
+      }
 
-      const promptContent = `Generate a detailed git commit message for these changes using conventional commits format.
-
-Base the message on the actual diff hunks and changed files below. Mention concrete modules, components, APIs, config, tests, and behavior changes when they are visible in the diff. Do not invent changes that are not supported by the diff.
-
-Format:
-<type>(<scope>): <subject line, max 72 chars>
-
-<body: 6-12 bullet points explaining what changed, why, and the impact>
-
-Rules:
-- type: feat, fix, refactor, chore, docs, style, perf, test
-- scope: the main area affected (component, service, worker endpoint, etc.)
-- subject: imperative mood, lowercase, no period, specific to the main change
-- body: each line starts with "- "
-- be THOROUGH: cover every meaningful change visible in the diff — new functions/components, changed behavior, removed code, edge cases handled, UI/UX adjustments, config/dependency changes
-- group related bullets by area (e.g. UI, service, worker) when multiple areas changed
-- for each significant bullet, include the "why" or the user-visible effect, not just the "what"
-- call out breaking changes or migrations explicitly with "BREAKING:" if the diff shows any
-- do not pad with filler: every bullet must be backed by the diff, but do not omit real changes either
-- do not add any signature, trailer, attribution, user name or email — the app appends those automatically
-- Output ONLY the commit message, no quotes, no markdown, no explanation
-
-Files changed:
-${fileList}
-
-Name/status:
-${nameStatus}
-
-Line changes:
-${numstat}
-
-Diff stat:
-${diffStat}
-
-Diff hunks:
-${diffDetail}`
-
-      const commitMessages = [{ role: 'user', content: promptContent }]
       let aiMsg = ''
       const { resolveAuxByokRoute, byokAuxCompletion } = await import('../../services/agent/byokRouting')
       const auxRoute = resolveAuxByokRoute()
-      if (auxRoute) {
-        // Free + BYOK: generate the commit message on the user's own key.
-        aiMsg = ((await byokAuxCompletion(auxRoute.snapshot, {
-          messages: commitMessages,
-          maxTokens: 1200,
-          temperature: 0.2,
-        })) ?? '').trim()
-      } else {
+
+      const callAi = async (attempt: number): Promise<string> => {
+        // Attempt 2 rebuilds the prompt with a smaller diff budget — if the
+        // first attempt failed on prompt size (worker 400 / timeout),
+        // retrying the identical payload could never succeed.
+        const promptContent = buildCommitPrompt(sections, {
+          detailBudget: attempt === 1
+            ? COMMIT_PROMPT_LIMITS.detailChars
+            : COMMIT_PROMPT_LIMITS.detailCharsRetry,
+        })
+        const messages = attempt === 1
+          ? [{ role: 'user', content: promptContent }]
+          : [{
+              role: 'user',
+              content: `${promptContent}\n\nThe previous generation attempt failed or returned empty content. Retry now and output a non-empty commit message only.`,
+            }]
+
+        if (auxRoute) {
+          // Free + BYOK: generate the commit message on the user's own key.
+          const content = ((await byokAuxCompletion(auxRoute.snapshot, {
+            messages,
+            maxTokens: 1200,
+            temperature: attempt === 1 ? 0.2 : 0.1,
+            signal: aiAbort.signal,
+          })) ?? '').trim()
+          if (aiAbort.signal.aborted) throw new DOMException('Request aborted', 'AbortError')
+          return content
+        }
+
         const FirebaseAuthService = (await import('../../services/auth/firebaseAuth')).default
         let token = await FirebaseAuthService.getInstance().getIdToken()
         if (!token) token = await FirebaseAuthService.getInstance().getIdToken(true)
@@ -507,10 +534,17 @@ ${diffDetail}`
         const { tauriFetch } = await import('../../services/tauriFetch')
         const response = await tauriFetch(`${workerUrl}/v1/chat/completions`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+            'X-Request-Type': 'utility',
+          },
+          timeoutSecs: COMMIT_MESSAGE_WORKER_TIMEOUT_SECS,
+          signal: aiAbort.signal,
           body: JSON.stringify({
-            messages: commitMessages,
-            temperature: 0.2,
+            model: 'tm-active-model',
+            messages,
+            temperature: attempt === 1 ? 0.2 : 0.1,
             max_tokens: 1200,
             stream: false,
           }),
@@ -518,22 +552,39 @@ ${diffDetail}`
 
         if (!response.ok) throw new Error(`API ${response.status}`)
         const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
-        aiMsg = data.choices?.[0]?.message?.content?.trim() || ''
+        return data.choices?.[0]?.message?.content?.trim() || ''
+      }
+
+      let lastError: unknown = null
+      for (let attempt = 1; attempt <= COMMIT_MESSAGE_AI_MAX_ATTEMPTS; attempt++) {
+        try {
+          aiMsg = await callAi(attempt)
+          if (aiMsg) break
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') throw err
+          lastError = err
+        }
+      }
+
+      if (!aiMsg && lastError) {
+        throw lastError
       }
 
       if (aiMsg) {
-        const cleaned = stripReasoningBlocks(aiMsg)
-          .replace(/^["'`]+|["'`]+$/g, '')
-          .replace(/^(commit message:?\s*)/i, '')
-          .trim()
-        setCommitMsg(stripTmCodeCommitSignature(cleaned))
+        setCommitMsg(cleanGeneratedCommitMessage(aiMsg))
         requestAnimationFrame(resizeTextarea)
       } else {
-        showFeedback('error', 'AI returned empty message')
+        showFeedback('error', `AI returned empty after ${COMMIT_MESSAGE_AI_MAX_ATTEMPTS} attempts`)
       }
     } catch (e) {
-      showFeedback('error', `Generate failed: ${e instanceof Error ? e.message : e}`)
-    } finally { setGenerating(false) }
+      const message = e instanceof DOMException && e.name === 'AbortError'
+        ? `timed out after ${COMMIT_MESSAGE_WORKER_TIMEOUT_SECS}s`
+        : e instanceof Error ? e.message : String(e)
+      showFeedback('error', `Generate failed after ${COMMIT_MESSAGE_AI_MAX_ATTEMPTS} attempts: ${message}`)
+    } finally {
+      clearTimeout(aiTimeout)
+      setGenerating(false)
+    }
   }, [files, staged, unstaged, projectPath, generating, showFeedback, resizeTextarea])
 
   // ── Keyboard ─────────────────────────────────────────────────────────
@@ -546,8 +597,9 @@ ${diffDetail}`
     }
   }, [handleCommit, handleStageAllAndCommit, staged.length, unstaged.length])
 
-  const canCommit = commitMsg.trim().length > 0 && staged.length > 0
-  const canStageAndCommit = commitMsg.trim().length > 0 && staged.length === 0 && unstaged.length > 0
+  const hasConflicts = conflicted.length > 0
+  const canCommit = commitMsg.trim().length > 0 && staged.length > 0 && !hasConflicts
+  const canStageAndCommit = commitMsg.trim().length > 0 && staged.length === 0 && unstaged.length > 0 && !hasConflicts
   // Working tree clean but commits to sync → the main button becomes "Pull & Push".
   const canSync = files.length === 0 && hasUpstream && (ahead > 0 || behind > 0)
 
@@ -674,6 +726,24 @@ ${diffDetail}`
         </button>
       </Box>
 
+      {/* Conflitos bloqueiam o commit — aviso persistente (padrão VS Code) */}
+      {hasConflicts && (
+        <Box px={2.5} pb={1.5} flexShrink={0} role="alert">
+          <Flex
+            align="center" gap={1.5} px={2} py="5px" borderRadius="4px"
+            bg={tokens.colors.accent.redSubtle}
+            border={`1px solid ${tokens.colors.accent.redMuted}`}
+          >
+            <Box flexShrink={0} display="flex">
+              <VscWarning size={11} color={tokens.colors.accent.red} />
+            </Box>
+            <Text fontSize="11px" color={tokens.colors.accent.red} lineClamp={2}>
+              {t('sourceControl.conflictsBanner').replace('{count}', String(conflicted.length))}
+            </Text>
+          </Flex>
+        </Box>
+      )}
+
       {/* Feedback */}
       {feedback.type && (
         <Box px={2.5} pb={1.5} flexShrink={0} role="status" aria-live="polite">
@@ -713,17 +783,23 @@ ${diffDetail}`
 
         {files.length > 0 && (
           <VirtualFileList
+            conflicted={conflicted}
             staged={staged}
             unstaged={unstaged}
+            conflictsOpen={conflictsOpen}
             stagedOpen={stagedOpen}
             changesOpen={changesOpen}
             projectName={projectName}
+            onToggleConflicts={() => setConflictsOpen(v => !v)}
             onToggleStaged={() => setStagedOpen(v => !v)}
             onToggleChanges={() => setChangesOpen(v => !v)}
             onOpenFile={onOpenFile}
+            onOpenConflictFile={onOpenConflictFile}
             onStageFile={onStageFile}
             onUnstageFile={onUnstageFile}
             onDiscardFile={onDiscardFile}
+            onMarkResolved={onMarkResolved}
+            onMarkAllResolved={onMarkAllResolved}
             onStageAll={stageAll}
             onUnstageAll={unstageAll}
             onDiscardAll={discardAll}
@@ -736,27 +812,37 @@ ${diffDetail}`
 
 // ── Virtual File List ────────────────────────────────────────────────────
 
+type ListSection = 'conflicted' | 'staged' | 'unstaged'
+
 type ListItem =
-  | { type: 'header'; section: 'staged' | 'unstaged'; count: number; isOpen: boolean }
-  | { type: 'file'; file: GitFileStatus; section: 'staged' | 'unstaged' }
+  | { type: 'header'; section: ListSection; count: number; isOpen: boolean }
+  | { type: 'file'; file: GitFileStatus; section: ListSection }
 
 const VirtualFileList = memo<{
-  staged: GitFileStatus[]; unstaged: GitFileStatus[]
-  stagedOpen: boolean; changesOpen: boolean; projectName: string
-  onToggleStaged: () => void; onToggleChanges: () => void
+  conflicted: GitFileStatus[]; staged: GitFileStatus[]; unstaged: GitFileStatus[]
+  conflictsOpen: boolean; stagedOpen: boolean; changesOpen: boolean; projectName: string
+  onToggleConflicts: () => void; onToggleStaged: () => void; onToggleChanges: () => void
   onOpenFile: (path: string) => void
+  onOpenConflictFile: (path: string) => void
   onStageFile: (path: string) => void; onUnstageFile: (path: string) => void
   onDiscardFile: (path: string) => void
+  onMarkResolved: (path: string) => void; onMarkAllResolved: () => void
   onStageAll: () => void; onUnstageAll: () => void; onDiscardAll: () => void
 }>(({
-  staged, unstaged, stagedOpen, changesOpen,
-  onToggleStaged, onToggleChanges,
-  onOpenFile, onStageFile, onUnstageFile, onDiscardFile,
+  conflicted, staged, unstaged, conflictsOpen, stagedOpen, changesOpen,
+  onToggleConflicts, onToggleStaged, onToggleChanges,
+  onOpenFile, onOpenConflictFile, onStageFile, onUnstageFile, onDiscardFile,
+  onMarkResolved, onMarkAllResolved,
   onStageAll, onUnstageAll, onDiscardAll,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null)
 
+  // Conflitos primeiro — é a secção que bloqueia tudo o resto (VS Code).
   const items: ListItem[] = []
+  if (conflicted.length > 0) {
+    items.push({ type: 'header', section: 'conflicted', count: conflicted.length, isOpen: conflictsOpen })
+    if (conflictsOpen) for (const f of conflicted) items.push({ type: 'file', file: f, section: 'conflicted' })
+  }
   if (staged.length > 0) {
     items.push({ type: 'header', section: 'staged', count: staged.length, isOpen: stagedOpen })
     if (stagedOpen) for (const f of staged) items.push({ type: 'file', file: f, section: 'staged' })
@@ -782,17 +868,28 @@ const VirtualFileList = memo<{
             <div key={vItem.index} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: vItem.size, transform: `translateY(${vItem.start}px)` }}>
               {item.type === 'header' ? (
                 <SectionHeader
-                  label={item.section === 'staged' ? t('sourceControl.staged') : t('sourceControl.changes')}
+                  label={
+                    item.section === 'conflicted' ? t('sourceControl.mergeChanges')
+                    : item.section === 'staged' ? t('sourceControl.staged')
+                    : t('sourceControl.changes')
+                  }
                   count={item.count} isOpen={item.isOpen}
-                  onToggle={item.section === 'staged' ? onToggleStaged : onToggleChanges}
+                  onToggle={
+                    item.section === 'conflicted' ? onToggleConflicts
+                    : item.section === 'staged' ? onToggleStaged
+                    : onToggleChanges
+                  }
                   section={item.section}
                   onStageAll={onStageAll} onUnstageAll={onUnstageAll} onDiscardAll={onDiscardAll}
+                  onMarkAllResolved={onMarkAllResolved}
                 />
               ) : (
                 <FileRow
                   file={item.file} section={item.section}
-                  onOpenFile={onOpenFile} onStageFile={onStageFile}
+                  onOpenFile={item.section === 'conflicted' ? onOpenConflictFile : onOpenFile}
+                  onStageFile={onStageFile}
                   onUnstageFile={onUnstageFile} onDiscardFile={onDiscardFile}
+                  onMarkResolved={onMarkResolved}
                 />
               )}
             </div>
@@ -808,9 +905,10 @@ VirtualFileList.displayName = 'VirtualFileList'
 
 const SectionHeader = memo<{
   label: string; count: number; isOpen: boolean; onToggle: () => void
-  section: 'staged' | 'unstaged'
+  section: ListSection
   onStageAll: () => void; onUnstageAll: () => void; onDiscardAll: () => void
-}>(({ label, count, isOpen, onToggle, section, onStageAll, onUnstageAll, onDiscardAll }) => (
+  onMarkAllResolved: () => void
+}>(({ label, count, isOpen, onToggle, section, onStageAll, onUnstageAll, onDiscardAll, onMarkAllResolved }) => (
   <div
     className="sc-row"
     style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 8px', height: ROW_HEIGHT, cursor: 'pointer', userSelect: 'none' }}
@@ -824,7 +922,9 @@ const SectionHeader = memo<{
     </div>
     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }} onClick={e => e.stopPropagation()}>
       <span className="sc-actions" style={{ display: 'flex', gap: 2 }}>
-        {section === 'staged' ? (
+        {section === 'conflicted' ? (
+          <button type="button" className="sc-btn green" title={t('sourceControl.markAllResolved')} aria-label={t('sourceControl.markAllResolved')} onClick={onMarkAllResolved}><VscCheck size={13} /></button>
+        ) : section === 'staged' ? (
           <button type="button" className="sc-btn" title={t("view.unstageAll")} aria-label={t("view.unstageAll")} onClick={onUnstageAll}><VscRemove size={13} /></button>
         ) : (
           <>
@@ -848,10 +948,11 @@ SectionHeader.displayName = 'SectionHeader'
 // ── File Row ─────────────────────────────────────────────────────────────
 
 const FileRow = memo<{
-  file: GitFileStatus; section: 'staged' | 'unstaged'
+  file: GitFileStatus; section: ListSection
   onOpenFile: (path: string) => void; onStageFile: (path: string) => void
   onUnstageFile: (path: string) => void; onDiscardFile: (path: string) => void
-}>(({ file, section, onOpenFile, onStageFile, onUnstageFile, onDiscardFile }) => {
+  onMarkResolved: (path: string) => void
+}>(({ file, section, onOpenFile, onStageFile, onUnstageFile, onDiscardFile, onMarkResolved }) => {
   const cfg = statusMeta[file.status] || statusMeta.modified
   const fileName = file.path.split('/').pop() || file.path
   const dirPath = file.path.includes('/') ? file.path.substring(0, file.path.lastIndexOf('/')) : ''
@@ -901,7 +1002,12 @@ const FileRow = memo<{
       {/* Right cluster — pinned, fixed-width status column so M/U/A align. */}
       <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, gap: 4 }}>
         <div className="sc-actions" style={{ display: 'flex' }} onClick={e => e.stopPropagation()}>
-          {section === 'staged' ? (
+          {section === 'conflicted' ? (
+            <>
+              <button type="button" className="sc-btn" title={t('sourceControl.openConflict')} aria-label={t('sourceControl.openConflict')} onClick={() => onOpenFile(file.path)}><VscGoToFile size={12} /></button>
+              <button type="button" className="sc-btn green" title={t('sourceControl.markResolvedBtn')} aria-label={t('sourceControl.markResolvedBtn')} onClick={() => onMarkResolved(file.path)}><VscCheck size={12} /></button>
+            </>
+          ) : section === 'staged' ? (
             <button type="button" className="sc-btn" title={t('sourceControl.unstageBtn')} aria-label={t('sourceControl.unstageBtn')} onClick={() => onUnstageFile(file.path)}><VscRemove size={12} /></button>
           ) : (
             <>
@@ -924,6 +1030,7 @@ const FileRow = memo<{
   prev.onStageFile === next.onStageFile &&
   prev.onUnstageFile === next.onUnstageFile &&
   prev.onDiscardFile === next.onDiscardFile &&
+  prev.onMarkResolved === next.onMarkResolved &&
   prev.onOpenFile === next.onOpenFile
 )
 FileRow.displayName = 'FileRow'

@@ -2,13 +2,11 @@ import { useChatStore } from '@/stores/chatStore'
 import AgentService from '../agentService'
 import { useAgentStore } from '@/stores/agentStore'
 import type { CompactProgressEvent } from '@/types/agent'
-import type { SlashCommandMode } from '../slashCommandRegistry'
 import { t } from '@/i18n/useTranslation'
 
 export async function executeCompact(
   args: string,
   _projectPath: string,
-  _mode: SlashCommandMode = 'chat',
 ): Promise<void> {
   const chatStore = useChatStore.getState()
   const agentStore = useAgentStore.getState()

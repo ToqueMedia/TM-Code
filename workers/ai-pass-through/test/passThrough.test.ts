@@ -10,6 +10,7 @@ import { clearPlanBudgetCache, resolveEnforcementMode, resetBillingDisabledWarni
 import { clearAccessTokenCache } from '../src/googleAuth'
 import { handleRequest } from '../src/index'
 import { clearPlanCache } from '../src/planGate'
+import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../src/dashscopePromptCache'
 import type { Env } from '../src/types'
 
 const activeConfig = {
@@ -415,6 +416,109 @@ test('body is preserved except for model injection and stream_options.include_us
     model: activeConfig.model,
     stream_options: { include_usage: true },
   })
+})
+
+test('DashScope explicit prompt cache is applied for Kimi K2.7 Code', async () => {
+  const dashscopeConfig = {
+    ...activeConfig,
+    provider: 'dashscope',
+    model: 'kimi-k2.7-code',
+    baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+    authHeader: 'Authorization',
+    authScheme: 'Bearer',
+    apiKeyEnv: 'DASHSCOPE_API_KEY',
+  }
+  const staticPart = 'S'.repeat(5000)
+  const dynamicPart = 'dynamic project context'
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+
+  await handleRequest(
+    request('/v1/chat/completions', {
+      messages: [
+        {
+          role: 'system',
+          content: `${staticPart}\n\n${SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\n${dynamicPart}`,
+        },
+        { role: 'user', content: 'hi' },
+      ],
+      stream: true,
+    }),
+    env({
+      ACTIVE_AI_CONFIG_JSON: JSON.stringify(dashscopeConfig),
+      DASHSCOPE_API_KEY: 'dashscope-secret',
+    }),
+    { fetcher },
+  )
+
+  const system = fetcher.calls[0].body.messages[0]
+  assert.equal(Array.isArray(system.content), true)
+  assert.deepEqual(system.content[0].cache_control, { type: 'ephemeral' })
+  assert.equal(system.content[0].text, staticPart)
+  assert.equal(system.content[1].text, dynamicPart)
+})
+
+test('DashScope GLM-5.2 managed path uses implicit cache shape without cache_control', async () => {
+  const dashscopeConfig = {
+    ...activeConfig,
+    provider: 'dashscope',
+    model: 'glm-5.2',
+    baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+    authHeader: 'Authorization',
+    authScheme: 'Bearer',
+    apiKeyEnv: 'DASHSCOPE_API_KEY',
+  }
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+
+  await handleRequest(
+    request('/v1/chat/completions', {
+      messages: [
+        { role: 'system', content: `static${SYSTEM_PROMPT_DYNAMIC_BOUNDARY}dynamic` },
+      ],
+      stream: true,
+    }),
+    env({
+      ACTIVE_AI_CONFIG_JSON: JSON.stringify(dashscopeConfig),
+      DASHSCOPE_API_KEY: 'dashscope-secret',
+    }),
+    { fetcher },
+  )
+
+  const system = fetcher.calls[0].body.messages[0]
+  assert.equal(system.content, 'static\n\ndynamic')
+})
+
+test('DashScope Kimi K2.7 Code managed path routes through compatible-mode unchanged', async () => {
+  const dashscopeConfig = {
+    ...activeConfig,
+    provider: 'dashscope',
+    model: 'kimi-k2.7-code',
+    baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+    authHeader: 'Authorization',
+    authScheme: 'Bearer',
+    apiKeyEnv: 'DASHSCOPE_API_KEY',
+    contextWindow: 262_144,
+  }
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+
+  const res = await handleRequest(
+    request('/v1/chat/completions', {
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    }),
+    env({
+      ACTIVE_AI_CONFIG_JSON: JSON.stringify(dashscopeConfig),
+      DASHSCOPE_API_KEY: 'dashscope-secret',
+    }),
+    { fetcher },
+  )
+
+  assert.equal(res.status, 200)
+  assert.equal(String(fetcher.calls[0].input), 'https://dashscope-us.aliyuncs.com/compatible-mode/v1/chat/completions')
+  assert.equal(fetcher.calls[0].headers.get('authorization'), 'Bearer dashscope-secret')
+  assert.equal(fetcher.calls[0].body.model, 'kimi-k2.7-code')
+  assert.deepEqual(fetcher.calls[0].body.stream_options, { include_usage: true })
+  assert.equal(res.headers.get('x-tm-model'), 'kimi-k2.7-code')
+  assert.equal(res.headers.get('x-model-context-window'), '262144')
 })
 
 test('non-streaming bodies do not get stream_options injected', async () => {
@@ -1465,8 +1569,8 @@ test('sidecar: X-Request-Type web_search routes to the published sidecar config'
   assert.equal(res.headers.get('x-tm-model'), 'qwen3.7-plus')
 })
 
-test('sidecar: memory-* and summarize share the utility sidecar', async () => {
-  for (const type of ['memory-extractor', 'memory-selector', 'memory-distiller', 'summarize']) {
+test('sidecar: memory/planner/router and summarize share the utility sidecar', async () => {
+  for (const type of ['memory-extractor', 'memory-selector', 'memory-distiller', 'summarize', 'intent-router', 'context-planner']) {
     clearActiveConfigCache()
     const fetcher = fakeFetcher(Response.json({ ok: true }))
     const res = await handleRequest(
@@ -1478,11 +1582,12 @@ test('sidecar: memory-* and summarize share the utility sidecar', async () => {
   }
 })
 
-test('sidecar: unpublished specialized sidecar (vision/web_search/fim) returns 503 without an upstream call', async () => {
+test('sidecar: unpublished strict sidecar (vision/web_search/fim/context-planner) returns 503 without an upstream call', async () => {
   // Degradar visão/pesquisa/FIM para o modelo ativo GERAL produz 404 (imagem a
   // modelo de texto), alucinação (pesquisa sem motor) ou lixo (FIM sem template).
-  // O worker falha já com 503, sem o pedido upstream condenado.
-  for (const type of ['vision', 'web_search', 'fim']) {
+  // O context-planner exige JSON; degradar para active mascara o erro e devolve
+  // prosa ao parser. O worker falha já com 503 e o cliente usa fallback de código.
+  for (const type of ['vision', 'web_search', 'fim', 'context-planner']) {
     clearActiveConfigCache()
     const fetcher = fakeFetcher(Response.json({ ok: true }))
     const res = await handleRequest(typedRequest(type), kvEnv({}), { fetcher })
@@ -1541,6 +1646,8 @@ function firestoreTeamDoc(opts: {
   cycleEnd?: string
   percentAllocation?: number
   memberConsumed?: number
+  byokTeamConsumed?: number
+  byokMemberConsumed?: number
   memberBlocked?: boolean
   subscriptionActive?: boolean
   uid?: string
@@ -1556,6 +1663,11 @@ function firestoreTeamDoc(opts: {
       tokenBudget: { mapValue: { fields: {
         purchasedExtra: { integerValue: String(opts.purchasedExtra ?? 0) },
       } } },
+      ...(opts.byokTeamConsumed !== undefined ? {
+        byokBudget: { mapValue: { fields: {
+          consumed: { integerValue: String(opts.byokTeamConsumed) },
+        } } },
+      } : {}),
       cycle: { mapValue: { fields: {
         cycleEnd: { stringValue: opts.cycleEnd ?? '2026-12-31' },
       } } },
@@ -1563,6 +1675,7 @@ function firestoreTeamDoc(opts: {
         [uid]: { mapValue: { fields: {
           percentAllocation: { doubleValue: opts.percentAllocation ?? 0 },
           tokensConsumed: { integerValue: String(opts.memberConsumed ?? 0) },
+          ...(opts.byokMemberConsumed !== undefined ? { byokConsumed: { integerValue: String(opts.byokMemberConsumed) } } : {}),
           ...(opts.memberBlocked !== undefined ? { blocked: { booleanValue: opts.memberBlocked } } : {}),
         } } },
       } } },
@@ -1876,6 +1989,50 @@ test('team BYOK: getTeamByokConfig resolves + DECRYPTS the inline key', async ()
   assert.equal(resolved!.config.baseUrl, 'https://dashscope-us.aliyuncs.com/compatible-mode/v1')
   // Decrypted back to the real key for buildUpstreamHeaders.
   assert.equal(resolved!.config.apiKey, 'sk-team-real-key')
+})
+
+test('team BYOK: metered pool is shared, not capped by member allocation', async () => {
+  const cfg = await teamCfg({ pool: 1_000_000 })
+  const fetcher = teamFetcher({
+    userDoc: () => firestoreTeamUserDoc('T1'),
+    teamDoc: () => firestoreTeamDoc({
+      percentAllocation: 0,
+      byokTeamConsumed: 470_000,
+      byokMemberConsumed: 470_000,
+    }),
+  })
+  const res = await handleRequest(
+    request(),
+    kvEnv({ 'team:T1': cfg }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY, BUDGET_ENFORCEMENT: 'enforce' }),
+    { fetcher },
+  )
+
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-tm-team-byok'), 'true')
+  assert.equal(fetcher.calls.length, 1)
+})
+
+test('team BYOK: metered pool blocks only when the shared pool is exhausted', async () => {
+  const cfg = await teamCfg({ pool: 1_000_000 })
+  const fetcher = teamFetcher({
+    userDoc: () => firestoreTeamUserDoc('T1'),
+    teamDoc: () => firestoreTeamDoc({
+      percentAllocation: 1,
+      byokTeamConsumed: 1_000_000,
+      byokMemberConsumed: 0,
+    }),
+  })
+  const res = await handleRequest(
+    request(),
+    kvEnv({ 'team:T1': cfg }, { TEAM_BYOK_ENC_KEY: TEST_ENC_KEY, BUDGET_ENFORCEMENT: 'enforce' }),
+    { fetcher },
+  )
+
+  assert.equal(res.status, 402)
+  const body = await res.text()
+  assert.match(body, /tm_team_byok_exhausted/)
+  assert.doesNotMatch(body, /slice/i)
+  assert.equal(fetcher.calls.length, 0)
 })
 
 test('team BYOK: missing enc key / bad ciphertext / disabled / oauth / absent → null', async () => {

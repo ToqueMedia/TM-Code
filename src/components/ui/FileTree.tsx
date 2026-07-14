@@ -77,7 +77,14 @@ const FileTree: React.FC<FileTreeProps> = ({ rootPath, onFileSelect, onRefresh }
     overscan: 8,
   });
 
-  if (loading) return <FileTreePlaceholder variant="loading" onRefresh={handleRefresh} />;
+  // Placeholder ONLY when there is no tree at all (first load / project
+  // switch, which nulls `root`). During background reloads (file watcher,
+  // agent tool runs, panel switches back to explorer) keep rendering the
+  // stale tree — the store already swaps `root` atomically when the fresh
+  // one arrives. Gating on `loading` alone replaced the whole tree with a
+  // one-line placeholder on EVERY refresh: a full-panel flash plus a scroll
+  // reset, repeating for as long as the agent kept writing files.
+  if (loading && !root) return <FileTreePlaceholder variant="loading" onRefresh={handleRefresh} />;
   if (error) return <FileTreePlaceholder variant="error" error={error} onRefresh={handleRefresh} />;
   if (!root) return <FileTreePlaceholder variant="empty" onRefresh={handleRefresh} />;
 

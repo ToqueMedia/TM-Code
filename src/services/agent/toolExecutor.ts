@@ -12,7 +12,6 @@ import FirebaseAuthService from '../auth/firebaseAuth'
 import { registerTaskTools } from './toolExecutor/taskOps'
 import { registerMemoryTools } from './toolExecutor/memoryOps'
 import { registerInteractionTools } from './toolExecutor/interactionOps'
-import { registerProvisionTools } from './toolExecutor/provisionOps'
 import type { ToolRegistrationContext } from './toolExecutor/context'
 import {
   isEnvFile,
@@ -24,24 +23,41 @@ import {
   DANGEROUS_COMMANDS,
   STATE_MUTATING_COMMANDS,
   normalizePath,
-  checkForbiddenAuthImports,
-  checkForbiddenItkV2,
-  checkForbiddenServiceAccountImport,
-  checkForbiddenDataLayerDeps,
-  checkForbiddenDockerfileShape,
 } from './toolExecutor/checks'
 import { tauriFetch } from '../tauriFetch'
 import { devServerManager } from '../devServerManager'
 import { resolveWorkerUrl, resolveAIWorkerUrl } from '../../utils/devUrls'
 import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
-import { READ_FILE, WRITE_FILE, EDIT_FILE } from './toolNames'
-import { createFileStateCacheWithSizeLimit, type FileStateCache } from './toolExecutor/fileStateCache'
-import { checkReadDedup } from './toolExecutor/readDedup'
+import {
+  GLOB_ALIAS,
+  GREP_ALIAS,
+  LS_ALIAS,
+  READ_AROUND,
+  READ_ALIAS,
+  WRITE_FILE,
+  EDIT_FILE,
+  STOP_DEV_SERVER,
+  LSP,
+  ENTER_WORKTREE,
+  EXIT_WORKTREE,
+  canonicalToolName,
+  normalizeToolInputForCanonical,
+} from './toolNames'
+import { ENTER_WORKTREE_DESCRIPTION, EXIT_WORKTREE_DESCRIPTION } from './toolExecutor/worktrees'
+import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileState, type FileStateCache } from './toolExecutor/fileStateCache'
+import { FILE_UNCHANGED_STUB } from './toolExecutor/readDedup'
+import { checkReadRangeOverlap, recordReadRange, clearReadRangeTracker } from './toolExecutor/readRangeTracker'
+import { isToolResultContextVisible, clearToolResultVisibility } from './toolExecutor/toolResultVisibility'
+import { clearMentionContextTracker } from './mentionContextTracker'
+import { addLineNumbers } from './toolExecutor/lineNumbers'
+import { hasBinaryExtension } from './toolExecutor/binaryExtensions'
 import { getSnippetForTwoFileDiff } from './toolExecutor/changedFileSnippet'
 import { extractReadFilesFromMessages } from './toolExecutor/readStateRecovery'
+import { getLegacyProjectStateDir, getProjectStateDir } from '../projectStatePaths'
 import { getFsVersion, bumpFsVersion } from '../fsVersion'
 import CheckpointService from './checkpointService'
+import { markReadBeforeWriteBlocked, markTmsCreated, markTmsFullContextSent } from './tmsContext'
 import type { MCPTool } from '../mcp/mcpService'
 import type { AgentCallbacks } from './types'
 import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, hasPendingDiffApprovals } from '../../stores/chatStore'
@@ -95,6 +111,23 @@ export interface OpenAIToolDefinition {
 interface ToolEntry {
   definition: ToolDefinition
   execute: (input: Record<string, unknown>) => Promise<string>
+}
+
+interface ReadFileWithSignatureResult {
+  content: string
+  signature: FileContentSignature
+}
+
+interface ReadFileRangeWithSignatureResult extends ReadFileWithSignatureResult {
+  startLine: number
+  lineCount: number
+  totalLines: number
+  hasMore: boolean
+}
+
+interface ReadVisibility {
+  range: { offset?: number; limit?: number } | null
+  partialView: boolean
 }
 
 interface AgentShellSession {
@@ -164,12 +197,6 @@ function createLinkedAbortController(parentSignal?: AbortSignal): AbortControlle
   }
   return child
 }
-
-// Platform-managed credential gate (`PLATFORM_MANAGED_FIELD_IDS` /
-// `describePlatformManagedField`) moved to `./toolExecutor/checks` — see
-// the import block above. The set + describer are re-exported there with
-// the same identity so the existing call sites in this file (and any
-// future caller) keep using the canonical name.
 
 // === Tool Executor ===
 
@@ -252,15 +279,19 @@ class ToolExecutor {
    *  Mirrors claude-vaz's `FileStateCache` / `readFileState`. */
   private readFileState: FileStateCache = createFileStateCacheWithSizeLimit()
   /**
-   * CMD mode CWD — when set, the executor operates like Claude Code CLI:
-   * no project required, file writes go directly to disk (no diff/approval),
-   * and path validation is scoped to this directory instead of a project root.
+   * Cwd-scoped execution root. When set, no project-store entry is required,
+   * file writes go directly to disk, and path validation is scoped to this
+   * directory instead of the open-project root.
    */
   private cmdModeCwd: string | null = null
+  /** Active worktree session (enter_worktree) — while set, getProjectRoot()
+   *  resolves here so every file/shell operation lands in the isolated
+   *  checkout. Forked to delegate children; cleared on session reset. */
+  private worktreeState: import('./toolExecutor/worktrees').WorktreeState | null = null
 
   /**
    * Plan mode — when true, /plan is active and only architecture-producing
-   * tools may run. Implementation tools (provision_auth, request_credentials,
+   * tools may run. Implementation tools (request_credentials,
    * execute_command, start_dev_server, install commands) are blocked at
    * execute() entry with an instructive error so the model is forced back
    * onto producing PLAN.md. Belt-and-braces over the architect system prompt:
@@ -278,6 +309,17 @@ class ToolExecutor {
    * No shared mutable state between concurrent sub-agents.
    */
   private memoryScopeAgentType: string | null = null
+  private requestType: string | null = null
+
+  /** Telemetry from the last delegate call — read by query.ts onRequestUsage. */
+  lastDelegateInfo: {
+    requestedMember: string | null
+    resolvedMember: string | null
+    blocked: boolean
+    blockedReason: string | null
+    inputSchemaVersion: string
+    recoveryAttempted: boolean
+  } | null = null
 
   /**
    * Plan-mode progress flags. Together they enforce the architect contract:
@@ -322,13 +364,15 @@ class ToolExecutor {
    * Create an isolated executor for a sub-agent run.
    *
    * The child gets its own read-file cache, large-result store, shell sessions,
-   * and memory scope state, while inheriting the parent execution mode. This
+   * and memory scope state, while inheriting the parent execution scope. This
    * mirrors the claude-vaz pattern of per-agent tool contexts without changing
    * the main-agent singleton contract.
    */
   createIsolatedChild(): ToolExecutor {
     const child = new ToolExecutor()
     child.cmdModeCwd = this.cmdModeCwd
+    child.worktreeState = this.worktreeState
+    child.requestType = this.requestType
     child.planMode = this.planMode
     child.planModePlanFileName = this.planModePlanFileName
     child.planFileWritten = this.planFileWritten
@@ -346,7 +390,21 @@ class ToolExecutor {
     this.memoryScopeAgentType = null
   }
 
-  /** Enable CLI/CMD mode: file ops write directly to disk, no project required. */
+  setRequestType(type: string | null): void {
+    this.requestType = type
+  }
+
+  clearDelegateTelemetry(): void {
+    this.lastDelegateInfo = null
+  }
+
+  consumeDelegateTelemetry(): ToolExecutor['lastDelegateInfo'] {
+    const info = this.lastDelegateInfo
+    this.lastDelegateInfo = null
+    return info
+  }
+
+  /** Enable cwd-scoped execution: file ops write directly to disk, no project required. */
   enableCmdMode(cwd: string): void {
     this.cmdModeCwd = cwd
   }
@@ -364,6 +422,7 @@ class ToolExecutor {
       getMemoryScopeAgentType: () => this.memoryScopeAgentType,
       getPlanMode: () => this.planMode,
       getPlanFileWritten: () => this.planFileWritten,
+      getPlanReadyForTaskSeed: () => this.isPlanReadyForTaskSeed(),
       setPlanTasksSeeded: (v: boolean) => { this.planTasksSeeded = v },
       truncateResult: (r, maxChars) => this.truncateResult(r, maxChars),
       trackShownRange: (id, o, e) => this.trackShownRange(id, o, e),
@@ -375,7 +434,7 @@ class ToolExecutor {
     }
   }
 
-  /** Disable CLI/CMD mode and return to IDE diff mode. */
+  /** Disable cwd-scoped execution and return to project diff approval flow. */
   disableCmdMode(): void {
     this.cmdModeCwd = null
   }
@@ -403,8 +462,14 @@ class ToolExecutor {
 
   /** Clears session-scoped state. Call on new sessions. */
   resetSessionState(): void {
+    clearMentionContextTracker()
+    // A worktree session never survives a session reset — the next run must
+    // resolve against the real project root, not a possibly-stale worktree.
+    this.worktreeState = null
     this.readFileTimestamps.clear()
     this.readFileState.clear()
+    clearReadRangeTracker()
+    clearToolResultVisibility()
     this.largeResults.clear()
     this.largeResultsTotalBytes = 0
     this.largeResultRangesShown.clear()
@@ -529,20 +594,25 @@ class ToolExecutor {
 
   /**
    * Whether the model already has a fresh FULL view of this file in context.
-   * Maps claude-vaz's `already_read_file` check (attachments.ts:3077-3120 —
-   * entry timestamp matches the file mtime exactly): when true, the mention
-   * renders to NOTHING because re-sending the content would only burn
-   * cache_creation tokens. TM Code's freshness primitive is `fsVersion`
-   * (no cheap per-file stat over Tauri IPC): offset === undefined means the
-   * entry holds the whole file (full read, write_file or edit_file), and an
-   * unchanged global fsVersion guarantees no tool writes happened since.
-   * Conservative like the read dedup: external edits bump nothing, but the
-   * external-change sweep (`collectExternallyChangedFiles`) covers that side.
+   * Used by @mentions to render NOTHING instead of re-sending content the
+   * model already has. Fast path is fsVersion; when that changed because some
+   * other file was written, a Rust SHA-256 signature proves this path is still
+   * unchanged without fetching the full file body.
    */
-  isFileFreshInContext(filePath: string): boolean {
+  async isFileFreshInContext(filePath: string): Promise<boolean> {
     const abs = this.resolveToAbsolute(filePath)
     const entry = this.readFileState.get(abs)
-    return !!entry && entry.offset === undefined && entry.fsVersion === getFsVersion()
+    if (!entry || entry.offset !== undefined || entry.limit !== undefined) return false
+    if (entry.source !== 'read' || entry.isPartialView) return false
+    if (entry.fsVersion === getFsVersion()) return true
+    if (!entry.signature) return false
+
+    try {
+      const current = await invoke<FileContentSignature>('file_signature', { path: abs })
+      return current.size === entry.signature.size && current.sha256 === entry.signature.sha256
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -578,6 +648,59 @@ class ToolExecutor {
       }
     }
     return tool.execute(input)
+  }
+
+  private recordReadBeforeWriteBlocked(
+    toolName: typeof WRITE_FILE | typeof EDIT_FILE,
+    reason: 'not_read' | 'partial_view' | 'modified_since_read',
+  ): void {
+    markReadBeforeWriteBlocked(toolName, reason)
+    void import('../../services/analytics').then(({ trackEvent }) => {
+      void trackEvent('read_before_write_blocked', {
+        tool: toolName,
+        reason,
+      })
+    }).catch(() => { /* analytics never blocks tool execution */ })
+  }
+
+  private async hasFileChangedSinceRead(
+    path: string,
+    currentContent: string,
+    readState: { hash: number },
+    cachedState: FileState | undefined,
+  ): Promise<boolean> {
+    const currentHash = this.simpleHash(currentContent)
+    if (currentHash === readState.hash) return false
+
+    const isRangedRead =
+      cachedState?.source === 'read' &&
+      (cachedState.offset !== undefined || cachedState.limit !== undefined)
+    const readModifiedMs = cachedState?.signature?.modifiedMs
+    if (!isRangedRead || readModifiedMs === undefined || readModifiedMs === null) {
+      return true
+    }
+
+    try {
+      const current = await invoke<{ modifiedMs: number | null }>('file_stat', { path })
+      return current.modifiedMs === undefined ||
+        current.modifiedMs === null ||
+        current.modifiedMs !== readModifiedMs
+    } catch {
+      return true
+    }
+  }
+
+  /**
+   * Large @mentions intentionally show only a compact outline/preview to the
+   * model. The underlying read_file call still refreshes signatures and hashes,
+   * but the model did NOT see the full file, so write/edit tools must require
+   * an explicit read_file before mutating it.
+   */
+  markMentionPathAsPartialView(filePath: string): void {
+    const abs = this.resolveToAbsolute(filePath)
+    const entry = this.readFileState.get(abs)
+    if (!entry) return
+    this.readFileState.set(abs, { ...entry, isPartialView: true })
   }
 
   /**
@@ -618,8 +741,11 @@ class ToolExecutor {
       if (mtimeMs !== null && mtimeMs <= entry.timestamp) continue
 
       let current: string
+      let signature: FileContentSignature | undefined
       try {
-        current = await invoke<string>('read_file', { path })
+        const result = await invoke<ReadFileWithSignatureResult>('read_file_with_signature', { path })
+        current = result.content
+        signature = result.signature
       } catch {
         continue
       }
@@ -637,6 +763,8 @@ class ToolExecutor {
         timestamp: now,
         offset: entry.offset,
         limit: entry.limit,
+        source: entry.source ?? 'read',
+        signature,
         hash: newHash,
         fsVersion: getFsVersion(),
       })
@@ -683,6 +811,10 @@ class ToolExecutor {
     signal?: AbortSignal,
     memoryScope?: string | null,
   ): Promise<string> {
+    const requestedToolName = toolName
+    toolName = canonicalToolName(toolName)
+    input = normalizeToolInputForCanonical(requestedToolName, input)
+
     const tool = this.tools.get(toolName)
     if (!tool) {
       throw new Error(`Unknown tool: ${toolName}`)
@@ -765,14 +897,14 @@ class ToolExecutor {
 
     // .env files are ALWAYS blocked — read, write, edit, delete
     const filePath = (input.file_path || input.oldPath || '') as string
-    if (this.isEnvFile(filePath) && ['read_file', 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'].includes(toolName)) {
+    if (this.isEnvFile(filePath) && ['read_file', READ_AROUND, 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'].includes(toolName)) {
       return 'Blocked: .env is sealed (it holds secrets) — the agent cannot read or write it. This block is by design and is NOT a sign that a key is missing. To supply a credential, call request_credentials (it writes straight to .env); once it returns "Credentials saved to .env", that key IS present — trust that result, do not re-read .env to verify, and never ask the developer to edit .env by hand. A .env.example with placeholder values is fine for documentation only.'
     }
 
     // Path scope check — file tools targeting paths outside all allowed
     // roots (project + additionalDirectories) prompt the user for access.
     const FILE_SCOPE_TOOLS = new Set([
-      'read_file', 'write_file', 'edit_file', 'create_file',
+      'read_file', READ_AROUND, 'write_file', 'edit_file', 'create_file',
       'create_directory', 'delete_file', 'rename_file', 'copy_file',
       'list_directory', 'search_files', 'glob', 'path_exists', 'append_file',
       'execute_command', 'execute_command_background', 'agent_shell_start'
@@ -803,9 +935,9 @@ class ToolExecutor {
     // cannot drift into building the project. The model's *system prompt*
     // already forbids these (see planCommand.ts:buildArchitectSystemPrompt),
     // but strong-prior models (instruction-tuned for "build the thing") have
-    // been observed to call provision_auth on turn 1 anyway. The mechanical
-    // block returns an instructive error the model has to read in its next
-    // tool result, redirecting it back onto PLAN.md.
+    // been observed to reach for implementation tools on turn 1 anyway. The
+    // mechanical block returns an instructive error the model has to read in
+    // its next tool result, redirecting it back onto PLAN.md.
     if (this.planMode) {
       const planBlock = this.checkPlanModeAccess(toolName, filePath)
       if (planBlock) return planBlock
@@ -815,6 +947,9 @@ class ToolExecutor {
       // written plan the tasks have no source-of-truth to derive from.
       if (toolName === 'update_tasks' && !this.planFileWritten) {
         return `Blocked in /plan architect mode: ${toolName} must follow write_file('${this.planModePlanFileName}'). The task list mirrors ${this.planModePlanFileName}'s Implementation Phases — write the plan first, then derive tasks from its phase structure (one task per coherent unit of work, IDs like "1.1", "1.2", "2.1" matching the phase numbering). Calling update_tasks before write_file is a contract violation.`
+      }
+      if (toolName === 'update_tasks' && !(await this.isPlanReadyForTaskSeed())) {
+        return `Blocked in /plan architect mode: ${toolName} must follow the final edit that flips ${this.planModePlanFileName} to "Status: PENDING APPROVAL". The task list must derive from the completed plan, not from a draft scaffold. Finish every plan section, flip the status, then call update_tasks.`
       }
 
       // M5 — Strict STOP after both PLAN.md and update_tasks have completed.
@@ -827,7 +962,7 @@ class ToolExecutor {
     }
 
     // Sensitive files require explicit developer authorization
-    const isSensitive = toolName === 'read_file' && this.isSensitiveFile(input.file_path as string)
+    const isSensitive = (toolName === 'read_file' || toolName === READ_AROUND) && this.isSensitiveFile(input.file_path as string)
 
     // Dangerous commands: all commands in the DANGEROUS_COMMANDS list.
     // - If BLOCKED by user in Settings → rejected immediately (never runs)
@@ -925,13 +1060,23 @@ class ToolExecutor {
       const parsed = JSON.parse(result)
       if (parsed?.type === 'diff') return result
     } catch { /* not JSON — proceed to truncation */ }
-    // read_large_result already produced a model-bounded slice (limit ≤ 30000) +
+    // read_large_result already produced a model-bounded slice (limit ≤ 25000) +
     // a continuation suffix. Passing it through truncateResult would nest a new
-    // large_result every time the slice + suffix exceeds the 30K threshold —
+    // large_result every time the slice + suffix exceeds the threshold —
     // the model then chases pagination of pagination, doubling content in
     // context and starving the output budget before write_file lands.
     if (toolName === 'read_large_result') return result
-    return this.truncateResult(result)
+    // Token-reduction phase (2026-06-26): per-tool limits so heavy outputs
+    // (command logs, search dumps) enter the cumulative history at a fraction
+    // of their raw size. The full body is preserved in the large_result store
+    // and the model can page it via read_large_result when it actually needs
+    // the rest. read_file gets a larger head preview (8K) because file
+    // content is the most likely to be needed verbatim; execute_command gets
+    // a TAIL preview because errors and exit code live at the bottom.
+    const toolMaxChars = ToolExecutor.getToolResultMaxChars(toolName)
+    const toolPreviewBudget = toolName === 'read_file' || toolName === READ_AROUND ? 8_000 : 2_000
+    const toolPreviewFromEnd = toolName === 'execute_command' || toolName === 'execute_command_background' || toolName === 'check_background_commands'
+    return this.truncateResult(result, toolMaxChars, toolPreviewBudget, toolPreviewFromEnd)
   }
 
   /** Number of core (non-MCP) tools registered. */
@@ -1031,6 +1176,278 @@ class ToolExecutor {
    *  are evicted until we fit. Independent from the entry-count cap below. */
   private static readonly LARGE_RESULT_MAX_BYTES = 8 * 1024 * 1024 // 8MB
   private static readonly LARGE_RESULT_MAX_ENTRIES = 20
+  private static readonly READ_FILE_MAX_BYTES = 256 * 1024
+
+  /**
+   * Per-tool max-chars limit for the result that enters the model's context
+   * (token-reduction phase, 2026-06-26). Results exceeding this go to the
+   * large_result store; the model gets a bounded preview + a read_large_result
+   * ref to page the rest on demand. Heavy-output tools (command logs, search
+   * dumps) get tighter limits than file reads, because their content is less
+   * likely to be needed verbatim on subsequent turns.
+   */
+  static getToolResultMaxChars(toolName: string): number {
+    toolName = canonicalToolName(toolName)
+    switch (toolName) {
+      case 'execute_command':
+      case 'execute_command_background':
+      case 'check_background_commands':
+        return 8_000
+      case 'search_files':
+        return 8_000
+      case READ_AROUND:
+      case 'read_file':
+        // claude-vaz parity (FileReadTool limits.ts): ~25k TOKENS per read
+        // (~100k chars), not 12k chars. The old cap forced every real file
+        // through preview+paging round-trips — the model kept "re-reading"
+        // because no single read ever satisfied it. Anthropic A/B-tested
+        // capping reads harder and REVERTED: mean tokens went UP, because
+        // paginated re-reads cost more than one complete read.
+        return 100_000
+      case 'edit_file':
+      case 'write_file':
+      case 'create_file':
+        return 12_000
+      default:
+        return 12_000
+    }
+  }
+
+  private static sliceReadFileRange(
+    fullRead: ReadFileWithSignatureResult,
+    offset: number,
+    limit: number | undefined,
+  ): ReadFileRangeWithSignatureResult {
+    const lines = fullRead.content.length > 0 ? fullRead.content.split('\n') : []
+    const startLine = Math.max(1, offset)
+    const start = startLine - 1
+    const end = limit !== undefined ? Math.min(start + Math.max(1, limit), lines.length) : lines.length
+    const selected = start < lines.length ? lines.slice(start, end) : []
+
+    return {
+      content: selected.join('\n'),
+      signature: fullRead.signature,
+      startLine,
+      lineCount: selected.length,
+      totalLines: lines.length,
+      hasMore: end < lines.length,
+    }
+  }
+
+  private async readFileRange(input: {
+    filePath: string
+    offset: number
+    limit: number
+    limitProvided: boolean
+    preStat?: { size: number; modifiedMs: number | null }
+  }): Promise<ReadFileRangeWithSignatureResult> {
+    // claude-vaz parity: small regular files take the fast path
+    // (read whole file, slice lines in memory). The native range scanner is
+    // reserved for larger files where reading the whole body would be wasteful.
+    if (input.preStat && input.preStat.size <= ToolExecutor.READ_FILE_MAX_BYTES) {
+      try {
+        const fullRead = await invoke<ReadFileWithSignatureResult>('read_file_with_signature', { path: input.filePath })
+        return ToolExecutor.sliceReadFileRange(
+          fullRead,
+          input.offset,
+          input.limitProvided ? input.limit : undefined,
+        )
+      } catch {
+        // Fall through to the native range reader so the original filesystem
+        // error path still gets a chance to produce a precise failure.
+      }
+    }
+
+    const rangeArgs = {
+      path: input.filePath,
+      offset: input.offset,
+      ...(input.limitProvided ? { limit: input.limit } : {}),
+    }
+
+    try {
+      return await invoke<ReadFileRangeWithSignatureResult>('read_file_range_with_signature', rangeArgs)
+    } catch (error) {
+      const msg = formatError(error)
+      const looksLikeRangePathOrCommandFailure =
+        /not found|pathnotfound|no such file|does not exist|unknown command|command .*not.*found/i.test(msg)
+
+      if (
+        !looksLikeRangePathOrCommandFailure ||
+        !input.preStat ||
+        input.preStat.size > ToolExecutor.READ_FILE_MAX_BYTES
+      ) {
+        throw error
+      }
+
+      // Recovery path for the failure mode seen in exported sessions:
+      // search/list can prove the file exists, but the native range reader
+      // reports "not found". For small files, recover by reading the full
+      // signature-aware body once and slicing in JS. Large files keep the
+      // native-range error so we never silently dump huge files into memory.
+      try {
+        const fullRead = await invoke<ReadFileWithSignatureResult>('read_file_with_signature', { path: input.filePath })
+        return ToolExecutor.sliceReadFileRange(
+          fullRead,
+          input.offset,
+          input.limitProvided ? input.limit : undefined,
+        )
+      } catch {
+        throw error
+      }
+    }
+  }
+
+  /**
+   * Compute the line range that actually enters the model context for Read.
+   * read_file results above the generic result cap are reduced later by
+   * truncateResult() to an 8K head preview. The read-range tracker must only
+   * record complete file lines in that preview, not the full internal disk
+   * read; otherwise a later Read can be falsely blocked for lines the model
+   * never saw.
+   */
+  private static getModelVisibleReadRange(input: {
+    result: string
+    fileBodyStart: number
+    fileBodyLength: number
+    startLine: number
+    requestedOffset: number | undefined
+    requestedLimit: number | undefined
+  }): ReadVisibility {
+    const maxChars = ToolExecutor.getToolResultMaxChars('read_file')
+    if (input.result.length <= maxChars) {
+      return {
+        range: { offset: input.requestedOffset, limit: input.requestedLimit },
+        partialView: false,
+      }
+    }
+
+    const previewBudget = 8_000
+    const lastNewline = input.result.lastIndexOf('\n', previewBudget)
+    const previewEnd = lastNewline >= previewBudget * 0.5
+      ? lastNewline + 1
+      : Math.min(previewBudget, input.result.length)
+
+    const fileStart = input.fileBodyStart
+    const fileEnd = fileStart + input.fileBodyLength
+    if (previewEnd <= fileStart || input.fileBodyLength <= 0) {
+      return { range: null, partialView: true }
+    }
+
+    const visibleFileEnd = Math.min(previewEnd, fileEnd)
+    const visibleFileText = input.result.slice(fileStart, visibleFileEnd)
+
+    // A hard char cut inside a line does not make that source line safe to
+    // mark as covered. The model saw only a prefix of the line.
+    if (visibleFileEnd < fileEnd && !visibleFileText.endsWith('\n')) {
+      return { range: null, partialView: true }
+    }
+
+    const visibleLineCount = visibleFileEnd >= fileEnd
+      ? input.fileBodyLength === 0 ? 0 : input.result.slice(fileStart, fileEnd).split(/\r?\n/).length
+      : (visibleFileText.match(/\n/g) ?? []).length
+
+    if (visibleLineCount <= 0) {
+      return { range: null, partialView: true }
+    }
+
+    return {
+      range: { offset: input.startLine, limit: visibleLineCount },
+      partialView: true,
+    }
+  }
+
+  /**
+   * Compact search-result formatter (token-reduction phase, 2026-06-26).
+   * Replaces the old `JSON.stringify(result, null, 2)` which was ~3-4× larger
+   * than necessary (every match carried context_before/context_after arrays,
+   * full file_path repetition, JSON braces/indentation). Output is now:
+   *
+   *   Found N matches in M files (showing up to 50)
+   *   path/to/file.ts:42:1: match_text
+   *     context line (the text field)
+   *   path/other.ts:100:5: another_match
+   *     context line
+   *
+   * Handles both the { files: [...] } and bare-array shapes the Rust side can
+   * return. Never throws — falls back to JSON on an unexpected shape.
+   */
+  private formatSearchResultsCompact(result: unknown): string {
+    try {
+      // Normalise: extract the files array from either a wrapper or bare array.
+      let files: unknown[]
+      let totalMatches: number | undefined
+      let totalFiles: number | undefined
+
+      if (Array.isArray(result)) {
+        files = result
+      } else if (result && typeof result === 'object') {
+        const obj = result as Record<string, unknown>
+        files = Array.isArray(obj.files) ? obj.files as unknown[] : []
+        totalMatches = typeof obj.total_matches === 'number' ? obj.total_matches
+          : typeof obj.totalMatches === 'number' ? obj.totalMatches : undefined
+        totalFiles = typeof obj.total_files === 'number' ? obj.total_files
+          : typeof obj.totalFiles === 'number' ? obj.totalFiles : undefined
+      } else {
+        return JSON.stringify(result, null, 2)
+      }
+
+      if (files.length === 0) {
+        return 'No matches found.'
+      }
+
+      const lines: string[] = []
+      const matchCount = totalMatches ?? files.reduce<number>((sum, f) => {
+        const m = (f as Record<string, unknown>)?.matches
+        return sum + (Array.isArray(m) ? m.length : 0)
+      }, 0)
+      const header = `Found ${matchCount} match${matchCount === 1 ? '' : 's'} in ${totalFiles ?? files.length} file${files.length === 1 ? '' : 's'}`
+      lines.push(header)
+
+      for (const file of files) {
+        const f = file as Record<string, unknown>
+        const filePath = (f.file_path ?? f.path ?? '?') as string
+        const matches = Array.isArray(f.matches) ? f.matches as Record<string, unknown>[] : []
+        for (const m of matches) {
+          const lineNum = m.line_number ?? m.lineNumber ?? '?'
+          const col = m.column ?? '?'
+          const text = (m.text as string | undefined) ?? ''
+          const matchText = (m.match_text as string | undefined) ?? ''
+          const before = Array.isArray(m.context_before) ? m.context_before as string[] : []
+          const after = Array.isArray(m.context_after) ? m.context_after as string[] : []
+          // Format: path:line:col: match_text (one line, grep-like)
+          const matchPart = matchText ? matchText.replace(/\n/g, ' ').slice(0, 120) : ''
+          lines.push(`${filePath}:${lineNum}:${col}:${matchPart}`)
+          const numericLine = typeof lineNum === 'number'
+            ? lineNum
+            : typeof lineNum === 'string'
+              ? Number.parseInt(lineNum, 10)
+              : Number.NaN
+          if (Number.isFinite(numericLine) && before.length > 0) {
+            before.forEach((ctxLine, i) => {
+              const n = numericLine - before.length + i
+              lines.push(`  ${n}: ${ctxLine.replace(/\n/g, '↵').slice(0, 200)}`)
+            })
+          }
+          // Include the matching line as context (indented), trimmed.
+          if (text) {
+            const ctx = text.replace(/\n/g, '↵').slice(0, 200)
+            lines.push(Number.isFinite(numericLine) ? `> ${numericLine}: ${ctx}` : `> ${ctx}`)
+          }
+          if (Number.isFinite(numericLine) && after.length > 0) {
+            after.forEach((ctxLine, i) => {
+              const n = numericLine + i + 1
+              lines.push(`  ${n}: ${ctxLine.replace(/\n/g, '↵').slice(0, 200)}`)
+            })
+          }
+        }
+      }
+
+      return lines.join('\n')
+    } catch {
+      // Fallback: never break the tool on a formatting error
+      return JSON.stringify(result, null, 2)
+    }
+  }
 
   /**
    * Set the disk directory for large result persistence. Called when a
@@ -1074,8 +1491,18 @@ class ToolExecutor {
    * stores the full output in memory and returns a reference with a preview.
    * The model can retrieve the full output via read_large_result tool.
    * This prevents information loss from truncation (like Claude Code's disk persistence).
+   *
+   * Token-reduction phase (2026-06-26): default maxChars lowered 30K→12K so
+   * fewer chars enter the cumulative history. Per-tool limits are passed by
+   * the caller via getToolResultMaxChars(). `previewFromEnd` serves command
+   * output where the useful part (errors, exit code) is at the TAIL.
    */
-  private truncateResult(result: string, maxChars: number = 30000): string {
+  private truncateResult(
+    result: string,
+    maxChars: number = 12_000,
+    previewBudget: number = 2_000,
+    previewFromEnd: boolean = false,
+  ): string {
     if (result.length <= maxChars) return result
 
     // Store full result in memory for later retrieval. Update the
@@ -1102,43 +1529,65 @@ class ToolExecutor {
     }
     const nearCap = this.largeResults.size >= ToolExecutor.LARGE_RESULT_MAX_ENTRIES - 2
 
-    const previewBudget = 2000
-    // Cut on a line boundary so the preview never ends mid-token / mid-JSON.
-    // A raw slice(0, 2000) produced syntactically-broken fragments (half a
-    // JSON object, a truncated identifier) that a model could try to parse as
-    // a complete result (context pollution audit, 2026-06-12). Honor the
-    // boundary only when it still keeps a substantial preview, so an early
-    // newline near the start doesn't collapse the preview to nothing. When the
-    // output is one giant line (e.g. minified JSON) there is no newline to cut
-    // on — fall back to the hard budget; the marker's guard still applies.
-    const lastNewline = result.lastIndexOf('\n', previewBudget)
-    // Include the newline in the preview (cut AFTER it) so the preview is
-    // whole lines and the continuation offset lands on the next line's first
-    // char — not on a leading '\n'.
-    const previewEnd = lastNewline >= previewBudget * 0.5 ? lastNewline + 1 : Math.min(previewBudget, result.length)
-    const preview = result.slice(0, previewEnd)
-    const omitted = result.length - previewEnd
     const totalSize = result.length > 1024
       ? `${(result.length / 1024).toFixed(1)}KB`
       : `${result.length} chars`
 
-    // B1: was "byte ${previewSize}" — the unit is JS string code units,
-    //     not bytes (matters for non-ASCII content like emoji / CJK).
-    // B2: explicit offset-to-continue, so the model doesn't waste a call
-    //     re-reading the preview region from offset 0. Uses previewEnd (the
-    //     ACTUAL chars shown after the line-boundary cut), not the nominal
-    //     budget — otherwise the chars between the cut and 2000 would be
-    //     silently skipped on continuation.
-    // B3: terminology now matches the read_large_result suffix.
+    // ── Build preview ──
+    // Head preview (default): first N chars, cut at a line boundary at the END
+    //   so the preview never ends mid-token. `previewFromEnd` flips to a TAIL
+    //   preview (last N chars, cut at a line boundary at the START) — used for
+    //   command output where errors and exit code live at the bottom.
+    let preview: string
+    let shownChars: number
+    let omitted: number
+    let continueOffset: number
+    let isTail: boolean
+
+    if (previewFromEnd) {
+      const start = Math.max(0, result.length - previewBudget)
+      // Cut at the START on a line boundary so the tail preview begins on a
+      // whole line (same reasoning as the head case, mirrored).
+      const nextNewline = result.indexOf('\n', start)
+      const previewStart = nextNewline >= 0 && nextNewline < start + previewBudget * 0.5
+        ? nextNewline + 1
+        : start
+      preview = result.slice(previewStart)
+      shownChars = preview.length
+      omitted = previewStart
+      continueOffset = 0
+      isTail = true
+    } else {
+      // Head: cut on a line boundary so the preview never ends mid-token.
+      const lastNewline = result.lastIndexOf('\n', previewBudget)
+      // Include the newline in the preview (cut AFTER it) so the preview is
+      // whole lines and the continuation offset lands on the next line's first
+      // char.
+      const previewEnd = lastNewline >= previewBudget * 0.5
+        ? lastNewline + 1
+        : Math.min(previewBudget, result.length)
+      preview = result.slice(0, previewEnd)
+      shownChars = previewEnd
+      omitted = result.length - previewEnd
+      continueOffset = previewEnd
+      isTail = false
+    }
+
     // B4: cap-approaching nudge.
     const capNote = nearCap
       ? ` [warning: ${this.largeResults.size}/${ToolExecutor.LARGE_RESULT_MAX_ENTRIES} cached large results — oldest will be evicted as new ones arrive; save what you need now.]`
       : ''
-    return `<system-reminder>Partial view: this tool produced ${totalSize} of output but only the first ${previewEnd} characters are shown below, cut at a line boundary. Continue from offset ${previewEnd} unless you need a specific slice — call read_large_result("${refId}", offset: ${previewEnd}). Do not reason about content past character ${previewEnd} from this preview alone — the preview ends mid-output and the remainder may change the meaning.${capNote}</system-reminder>
 
-Preview (first ${previewEnd} characters):
+    const positionLabel = isTail ? `last ${shownChars}` : `first ${shownChars}`
+    const continueHint = isTail
+      ? `Read from offset 0 for earlier output — call read_large_result("${refId}", offset: 0, limit: ${Math.min(omitted, 25000)}).`
+      : `Continue from offset ${continueOffset} — call read_large_result("${refId}", offset: ${continueOffset}).`
+
+    return `<system-reminder>Partial view: this tool produced ${totalSize} of output but only the ${positionLabel} characters are shown below, cut at a line boundary. ${continueHint} Do not reason about content outside this preview alone — it ends mid-output and the remainder may change the meaning.${capNote}</system-reminder>
+
+${isTail ? 'Preview (last characters):' : `Preview (first ${shownChars} characters):`}
 ${preview}
-<system-reminder>[end of partial view — ${omitted} more character${omitted === 1 ? '' : 's'} omitted; read_large_result("${refId}", offset: ${previewEnd}) for the rest]</system-reminder>
+<system-reminder>[end of partial view — ${omitted} more character${omitted === 1 ? '' : 's'} omitted; read_large_result("${refId}", offset: ${continueOffset}) for the rest]</system-reminder>
 `
   }
 
@@ -1276,7 +1725,7 @@ ${preview}
     allOutput.push(data)
     if (!toolCallId) return
 
-    // Accumulate full output into commandLogs for the terminal-style log viewer.
+    // Accumulate full output into commandLogs for the shell log viewer.
     // Each chunk may contain multiple lines. Append in one store update to
     // avoid React/Zustand nested update explosions on verbose commands.
     const chunks = data.split('\n')
@@ -1429,8 +1878,22 @@ ${preview}
         return `${tail}\nExit code: 0`
       }
 
-      // Failure: return full output for model to diagnose
-      return `${fullOutput}\nExit code: ${exitCode}`
+      // Failure: return the last N lines (where errors, stack traces and
+      // test-failure summaries live) + exit code, instead of the full output.
+      // The full body is still accessible: truncateResult (in execute()) will
+      // store it in the large_result store if it exceeds the per-tool limit,
+      // and the model can page it via read_large_result. Token-reduction phase.
+      {
+        const lines = fullOutput.split('\n')
+        const MAX_FAIL_LINES = 50
+        const tail = lines.length > MAX_FAIL_LINES
+          ? lines.slice(-MAX_FAIL_LINES).join('\n')
+          : fullOutput
+        const note = lines.length > MAX_FAIL_LINES
+          ? `\n[showing last ${MAX_FAIL_LINES} of ${lines.length} lines — earlier output available via read_large_result if needed]`
+          : ''
+        return `${tail}${note}\nExit code: ${exitCode}`
+      }
     } catch (error) {
       cleanup()
       const msg = error instanceof Error ? error.message : String(error)
@@ -1480,14 +1943,29 @@ ${preview}
     }
   }
 
+  /** Run a git (or small shell) command for the worktree tools. Never throws. */
+  private async runGit(command: string, cwd: string): Promise<{ ok: boolean; out: string }> {
+    try {
+      const r = await invoke<{ stdout: string; stderr: string; exitCode: number; success: boolean }>(
+        'execute_command',
+        { command, cwd, timeoutSecs: 60 },
+      )
+      const out = [r.stdout, r.stderr].filter(Boolean).join('\n').trim()
+      return { ok: r.success && r.exitCode === 0, out }
+    } catch (e) {
+      return { ok: false, out: formatError(e) }
+    }
+  }
+
   private getProjectRoot(): string {
+    // Active worktree session (enter_worktree) redirects the WHOLE session —
+    // file resolution and shell cwd — into the isolated checkout until
+    // exit_worktree. The app/editor keeps pointing at the main checkout.
+    if (this.worktreeState) return this.worktreeState.path
     const project = useProjectStore.getState().currentProject
     if (project?.path) return project.path
-    // CMD-mode fallback: TerminalView never populates currentProject
-    // (it invokes Rust open_project directly). cmdModeProjectPath is set
-    // by the WelcomeScreen and persists for the entire CMD session.
-    const cmdPath = useProjectStore.getState().cmdModeProjectPath
-    if (cmdPath) return cmdPath
+    // Cwd-scoped fallback (enableCmdMode, used by /plan): the run may be
+    // executing without a populated currentProject.
     if (this.cmdModeCwd) return this.cmdModeCwd
     throw new Error('No project is open. Cannot perform file operations without an active project.')
   }
@@ -1657,32 +2135,11 @@ ${preview}
     }
   }
 
-  // Forbidden pattern checks moved to ./toolExecutor/checks — thin wrappers
-  // kept so existing private-method call sites (this.checkForbiddenAuthImports
-  // etc.) continue to work without rewrites. Same applies to .env / sensitive
-  // detection just below. Bodies live in the imported pure functions; the
-  // class is now an orchestrator.
-  private checkForbiddenAuthImports(path: string, content: string): string | null {
-    return checkForbiddenAuthImports(path, content)
-  }
-  private checkForbiddenItkV2(path: string, content: string): string | null {
-    return checkForbiddenItkV2(path, content)
-  }
-  private checkForbiddenServiceAccountImport(path: string, content: string): string | null {
-    return checkForbiddenServiceAccountImport(path, content)
-  }
-  private async checkForbiddenDockerfileShape(path: string, content: string): Promise<string | null> {
-    return checkForbiddenDockerfileShape(path, content)
-  }
-  private checkForbiddenDataLayerDeps(path: string, newContent: string, oldContent: string = ''): string | null {
-    // CMD/Terminal mode is stack-free — no data-layer restriction applies.
-    // The forbidden deps list (FORBIDDEN_DATA_LAYER_DEPS) is a Chat-mode /
-    // Publish-flow constraint only. Terminal mode must be able to install
-    // any database driver (mysql2, pg, Prisma, etc.) without mechanical
-    // rejection from the harness.
-    if (this.cmdModeCwd) return null
-    return checkForbiddenDataLayerDeps(path, newContent, oldContent)
-  }
+  // All managed-platform pattern gates (Dockerfile/Cloud Run shapes,
+  // firebase-auth imports, ITK v2, service-account keys, data-layer deps)
+  // were removed in the dev-only-IDE pivot (2026-07): the developer's own
+  // stack and infrastructure choices are theirs to make. What remains is
+  // genuine safety (.env / sensitive-file detection, below).
   private isEnvFile(filePath: string): boolean {
     return isEnvFile(filePath)
   }
@@ -1694,6 +2151,24 @@ ${preview}
    */
   private checkPlanModeAccess(toolName: string, filePath: string): string | null {
     return checkPlanModeAccess(toolName, filePath, this.getProjectRoot(), this.planModePlanFileName)
+  }
+
+  /**
+   * /plan may seed the task tracker only after the plan artifact is complete
+   * and has flipped from DRAFT to PENDING APPROVAL. `planFileWritten` alone is
+   * not enough: the scaffold write happens before the final status edit.
+   */
+  private async isPlanReadyForTaskSeed(): Promise<boolean> {
+    if (!this.planMode || !this.planFileWritten) return false
+    const root = this.getProjectRoot()
+    if (!root) return false
+    const planPath = `${root.replace(/[\\/]+$/, '')}/${this.planModePlanFileName}`
+    try {
+      const content = await invoke<string>('read_file', { path: planPath })
+      return /^\s*>?\s*Status:\s*PENDING APPROVAL\s*$/im.test(content)
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -1851,6 +2326,7 @@ ${preview}
       timestamp: now,
       offset: undefined,
       limit: undefined,
+      source: 'write',
       hash,
       fsVersion: versionBeforeBump,
     })
@@ -1858,22 +2334,6 @@ ${preview}
     // (system prompt, skills) miss on the next read so the IDE sees the
     // real post-write state. Path-agnostic by design — see fsVersion.ts.
     bumpFsVersion(`write:${path}`)
-    // Invalidate scaffolding detector cache when files that change scaffold
-    // state are written. Without this, the badge / smart-router / system-
-    // prompt section would lag the agent's own writes by up to the cache TTL
-    // (3s) — short, but observable when the agent finishes a scaffolding
-    // turn and the developer immediately tries to type a hashtag. Covers:
-    //   - package.json (payments deps)
-    //   - auth-proxy / authClient / useGoogleSignIn marker files
-    // .env writes are funneled through write_env_vars (which has its own
-    // invalidation hook in provision_auth) so we don't include .env here —
-    // the agent's write_file path can't reach it (mechanical block).
-    if (/(^|\/)package\.json$|(^|\/)(auth-proxy|authClient|useGoogleSignIn)\.(ts|tsx|js)$/.test(path)) {
-      const root = this.getProjectRoot()
-      if (root) {
-        import('../scaffoldingDetector').then(m => m.invalidateScaffoldingCache(root)).catch(() => { /* non-critical */ })
-      }
-    }
     // Plan-mode progress: the active plan artefact at the project root unblocks update_tasks
     // and enables the strict-STOP guard once update_tasks has also run.
     if (this.planMode && isPlanArtefactAtRoot(path, this.getProjectRoot(), this.planModePlanFileName)) {
@@ -1886,21 +2346,113 @@ ${preview}
   // `this.simpleHash(...)` call sites.
   private simpleHash(str: string): number { return simpleHash(str) }
 
-  private validateCommand(command: string): void {
+  private splitCommandTokens(command: string): string[] {
+    return command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => {
+      if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+        return token.slice(1, -1)
+      }
+      return token
+    }) ?? []
+  }
+
+  private isEphemeralCurlOutputPath(pathValue: string): boolean {
+    return pathValue === '/dev/null'
+      || pathValue === '-'
+      || pathValue.startsWith('/tmp/')
+      || pathValue.startsWith('/private/tmp/')
+  }
+
+  private curlWritesOutsideEphemeralPath(command: string): boolean {
+    if (!/\bcurl\s/.test(command)) return false
+    const tokens = this.splitCommandTokens(command)
+
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i]
+
+      if (token === '--remote-name' || /^-[A-Za-z]*O[A-Za-z]*$/.test(token)) {
+        // Destination is derived from the URL and usually lands in CWD.
+        return true
+      }
+
+      let outputPath: string | undefined
+      if (token === '--output' || /^-[A-Za-z]*o$/.test(token)) {
+        outputPath = tokens[i + 1]
+      } else if (token.startsWith('--output=')) {
+        outputPath = token.slice('--output='.length)
+      } else {
+        const shortOutput = token.match(/^-[A-Za-z]*o(.+)$/)
+        if (shortOutput) outputPath = shortOutput[1]
+      }
+
+      if (outputPath !== undefined && !this.isEphemeralCurlOutputPath(outputPath)) {
+        return true
+      }
+    }
+
+    return false
+  }
+
+  private curlUsesMutatingHttpRequest(command: string): boolean {
+    if (!/\bcurl\s/.test(command)) return false
+    const tokens = this.splitCommandTokens(command)
+    const mutatingMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i]
+
+      let method: string | undefined
+      if (token === '-X' || token === '--request') {
+        method = tokens[i + 1]
+      } else if (token.startsWith('--request=')) {
+        method = token.slice('--request='.length)
+      } else {
+        const shortRequest = token.match(/^-X(.+)$/)
+        if (shortRequest) method = shortRequest[1]
+      }
+
+      if (method && mutatingMethods.has(method.toUpperCase())) {
+        return true
+      }
+
+      if (
+        token === '-d' ||
+        token === '-F' ||
+        token === '-T' ||
+        /^-[A-Za-z]*[dFT].+/.test(token) ||
+        token === '--json' ||
+        token.startsWith('--json=') ||
+        token === '--upload-file' ||
+        token.startsWith('--upload-file=') ||
+        token.startsWith('--data') ||
+        token.startsWith('--form')
+      ) {
+        return true
+      }
+    }
+
+    return false
+  }
+
+  private validateCommand(command: string, options: { allowDevServer?: boolean } = {}): void {
     // Read-only mode: block file-writing shell operations (verification agents).
-    // Allow common test/lint/typecheck commands even if they contain patterns
-    // that look like writes (e.g., npm test may use internal redirects).
     if (this.readOnlyMode) {
       // Strip common prefixes that don't affect read/write nature: cd ../ &&, env VAR=val, etc.
       const strippedCmd = command.replace(/^\s*(cd\s+\S+\s*&&\s*)+/, '').replace(/^\s*([\w]+=\S+\s+)+/, '').trim()
-      // Allowlist: commands that are safe diagnostic operations
-      const isAllowedDiagnostic = /^(npm\s+(test|run\s+(test|lint|typecheck|check|tsc|build))|npx\s+(tsc|eslint|jest|vitest|mocha|next\s+lint)|pnpm\s+(test|run\s+(test|lint|typecheck|check|tsc|build))|yarn\s+(test|run\s+(test|lint|typecheck|check|tsc|build))|bun\s+(test|run\s+(test|lint|typecheck|check|tsc|build))|ng\s+(test|lint|build)|curl\s|cat\s|head\s|tail\s|wc\s|grep\s|rg\s|find\s|ls\s|echo\s)/.test(strippedCmd)
+      const pipeToInterpreter = /\|\s*(?:sh|bash|zsh|fish|python3?|node|ruby|perl|php|deno|bun)\b/i.test(command)
+      const hasWritePattern = ToolExecutor.WRITE_COMMAND_PATTERNS.some((pattern) => pattern.test(command))
+      const curlWriteOutsideEphemeralPath = this.curlWritesOutsideEphemeralPath(command)
+      const curlMutatingHttpRequest = this.curlUsesMutatingHttpRequest(command)
+      const mutatingCommand = this.matchStateMutatingCommand(command)
+      if (hasWritePattern || curlWriteOutsideEphemeralPath || curlMutatingHttpRequest || mutatingCommand || pipeToInterpreter) {
+        throw new Error(`Command blocked: "${command}" would modify files or execute unsafe shell flow, but you are running in read-only verification mode. Only diagnostic commands (tests, linters, type checkers, curl) are allowed.`)
+      }
+
+      // Allowlist: commands that are safe diagnostic operations.
+      const isDevServerCommand = options.allowDevServer === true
+        && /^(npm\s+(start|run\s+(dev|start|serve))|npx\s+(vite|next\s+dev)|pnpm\s+(dev|start|serve|run\s+(dev|start|serve))|yarn\s+(dev|start|serve|run\s+(dev|start|serve))|bun\s+(dev|start|serve|run\s+(dev|start|serve))|vite\b|next\s+dev\b)/.test(strippedCmd)
+      const isAllowedDiagnostic = isDevServerCommand || /^(npm\s+(test|run\s+(test|lint|typecheck|check|tsc|build))|npx\s+(tsc|eslint|jest|vitest|mocha|next\s+lint)|pnpm\s+(test|build|lint|typecheck|tsc|run\s+(test|lint|typecheck|check|tsc|build))|yarn\s+(test|build|lint|typecheck|tsc|run\s+(test|lint|typecheck|check|tsc|build))|bun\s+(test|build|lint|typecheck|tsc|run\s+(test|lint|typecheck|check|tsc|build))|ng\s+(test|lint|build)|git\s+(status|diff|show|log|ls-files)\b|curl\s|cat\s|head\s|tail\s|wc\s|grep\s|rg\s|find\s|ls\s|echo\s|pwd\b|date\b|which\s|command\s+-v\s|ps\s)/.test(strippedCmd)
       if (!isAllowedDiagnostic) {
-        for (const pattern of ToolExecutor.WRITE_COMMAND_PATTERNS) {
-          if (pattern.test(command)) {
-            throw new Error(`Command blocked: "${command}" would modify files, but you are running in read-only verification mode. Only diagnostic commands (tests, linters, type checkers, curl) are allowed.`)
-          }
-        }
+        throw new Error(`Command blocked: "${command}" is not an approved diagnostic command in read-only verification mode. Use tests, linters, type checkers, curl, read-only inspection commands, or start_dev_server for supervised dev servers.`)
       }
     }
   }
@@ -2005,6 +2557,20 @@ ${preview}
     }
   }
 
+  // After a cwd-scoped (auto-applied) agent write, reload the buffer of an
+  // open tab so the editor reflects the change live. Without this, only the
+  // diff-APPROVAL path (diffService.acceptDiff) refreshed open buffers, and
+  // direct writes required closing + reopening the tab to be seen.
+  // refreshFileContent skips dirty buffers — unsaved user edits always win.
+  private refreshEditorIfOpen(path: string) {
+    try {
+      const editorState = useEditorRepository.getState()
+      if (editorState.openFiles.some(f => f.path === path)) {
+        void editorState.refreshFileContent(path).catch(() => {})
+      }
+    } catch { /* editor refresh is best-effort */ }
+  }
+
   private formatFileTreeCompact(node: Record<string, unknown>, indent: string = ''): string {
     if (!node) return ''
     let result = ''
@@ -2032,85 +2598,185 @@ ${preview}
           type: 'object',
           properties: {
             file_path: { type: 'string', description: 'Absolute path to the file to read' },
+            path: { type: 'string', description: 'Alias for file_path' },
             offset: { type: 'number', description: '1-indexed line number to start from. Combine with `limit` to read a slice of a large file.' },
-            limit: { type: 'number', description: 'Maximum number of lines to read. Default: read to end of file.' }
+            limit: { type: 'number', description: 'Maximum number of lines to read. Default: read to end of file.' },
+            force: { type: 'boolean', description: 'Bypass duplicate-read suppression only when a previous Read range is no longer available after compaction/context loss. Do not use for normal navigation.' }
           },
-          required: ['file_path']
+          required: []
         },
         concurrencySafe: true,
       },
       execute: async (input) => {
-        let filePath = input.file_path as string
+        let filePath = (input.file_path ?? input.path) as string | undefined
+        if (!filePath) return 'Error: read_file requires file_path or path.'
         // Resolve relative paths to absolute (agent often sends relative paths)
         filePath = this.resolveToAbsolute(filePath)
         
         // Detect "provided" BEFORE clamping — Math.max(1, 0) would turn
         // a missing offset into 1 and make sliceRequested always true.
-        const offsetProvided = typeof input.offset === 'number' && input.offset > 0
-        const limitProvided = typeof input.limit === 'number' && input.limit > 0
-        const offset = offsetProvided ? Math.max(1, input.offset as number) : 1
-        const limit = limitProvided ? Math.max(1, input.limit as number) : 0
-        const sliceRequested = offsetProvided || limitProvided
+        let offsetProvided = typeof input.offset === 'number' && input.offset > 0
+        let limitProvided = typeof input.limit === 'number' && input.limit > 0
+        let offset = offsetProvided ? Math.max(1, input.offset as number) : 1
+        let limit = limitProvided ? Math.max(1, input.limit as number) : 0
+        let sliceRequested = offsetProvided || limitProvided
+        const forceRead = input.force === true
+        // Injected by execute(); undefined em caminhos sem tool_call
+        // (executeForMention). Guarda-se no FileState/readRangeTracker para
+        // o dedup poder perguntar ao toolResultVisibility se o resultado que
+        // levou este conteúdo ao modelo ainda segue INTACTO nos pedidos.
+        const readToolCallId = typeof input._toolCallId === 'string' ? input._toolCallId : undefined
         await this.requirePathAccess(filePath)
 
-        // ── Dedup check ──────────────────────────────────────────────
-        // If we've already read this exact file+range and no writes have
-        // occurred since (fsVersion unchanged), return a short stub instead
-        // of re-sending the full content. The earlier tool_result is still
-        // in the conversation context — two full copies waste cache_creation
-        // tokens. Uses fsVersion (O(1)) instead of re-reading the file.
-        // Mirrors claude-vaz FileReadTool.ts:523-573.
         const currentFsVersion = getFsVersion()
-        const dedupResult = checkReadDedup(
-          filePath,
-          offsetProvided ? offset : undefined,
-          limitProvided ? limit : undefined,
-          this.readFileState,
-          currentFsVersion,
-        )
-        if (dedupResult.isDuplicate && dedupResult.stub) {
-          return dedupResult.stub
+
+        // ── Binary check (pre-read, claude-vaz parity) ──────────────
+        // claude-vaz rejects binary files by extension before reading
+        // (constants/files.ts hasBinaryExtension). The TM is text-only
+        // (Rust read_to_string), so reject all binary extensions up-front
+        // with a short error rather than letting UTF-8 decode fail.
+        if (hasBinaryExtension(filePath)) {
+          return `Error: ${filePath} is a binary file. read_file only supports text files. Use a dedicated tool to inspect binary content.`
         }
 
         try {
-          const MAX_FILE_BYTES = 256 * 1024
-          const fullContent = await invoke<string>('read_file', { path: filePath })
+          let requestedOffset = offsetProvided ? offset : undefined
+          let requestedLimit = limitProvided ? limit : undefined
+          const existingState = this.readFileState.get(filePath)
 
-          // Byte-size guard (claude-vaz adoption, FileReadTool/limits.ts).
-          // The cheap pre-flight stat that claude-vaz uses isn't available
-          // on the Rust side yet, so we check AFTER read — still buys us
-          // throw-and-instruct (the 256 KB doesn't ship to the model;
-          // only a ~150-byte error does), which the claude-vaz #21841
-          // experiment showed beats auto-truncation in mean token cost.
-          // Skipped when the model is explicitly slicing — that's the
-          // refinement path the error tells it to use.
-          if (!sliceRequested && fullContent.length > MAX_FILE_BYTES) {
+          // ── Pre-read stat: size guard + dedup freshness (claude-vaz parity) ──
+          // claude-vaz does a single getFileModificationTimeAsync(path) stat
+          // — O(1), no content read — to (a) reject >256KB files pre-read
+          // (limits.ts) and (b) gate read dedup on the file's actual mtime
+          // (FileReadTool.ts:523-573). The Rust `file_stat` command mirrors
+          // that: size + modifiedMs only, no SHA-256. This replaces the prior
+          // fsVersion gate (a global counter that doesn't advance on external
+          // edits — formatters/git pull/manual edits — so it could stub a
+          // re-read of a file that had actually changed) and the expensive
+          // SHA-256 signature preflight (which read the whole file to hash
+          // it, defeating the dedup fast-path).
+          let preStat: { size: number; modifiedMs: number | null } | undefined
+          try {
+            preStat = await invoke<{ size: number; modifiedMs: number | null }>('file_stat', { path: filePath })
+          } catch {
+            // stat failed (file missing / unreadable / directory) — fall
+            // through to read_file_with_signature, which errors helpfully
+            // (File not found / Cannot read binary file as text).
+            preStat = undefined
+          }
+
+          // (a) Size guard, pre-read — claude-vaz limits.ts throws before
+          // reading a >256KB file; we now match that instead of reading the
+          // whole body first. Skipped when slicing (the slice IS the
+          // refinement path the error would recommend).
+          if (preStat && !sliceRequested && preStat.size > ToolExecutor.READ_FILE_MAX_BYTES) {
             void import('../../services/analytics').then(({ trackEvent }) => {
               trackEvent('read_file_oversize_throw', {
                 path: filePath,
-                size_kb: Math.round(fullContent.length / 1024),
+                size_kb: Math.round(preStat.size / 1024),
               })
             }).catch(() => {})
-            return `Error: File is ${(fullContent.length / 1024).toFixed(1)} KB which exceeds the 256 KB read cap. Use \`offset\` + \`limit\` to read a line range, or use search_files / glob to locate specific content. Reading the whole file would saturate the output budget for one call.`
+            return `Error: File is ${(preStat.size / 1024).toFixed(1)} KB which exceeds the 256 KB read cap. Use ${READ_ALIAS} with \`offset\` + \`limit\` to read a line range, or use ${GREP_ALIAS} / ${GLOB_ALIAS} to locate specific content. Reading the whole file would saturate the output budget for one call.`
           }
 
-          // Apply line-based slice if requested. Lines are 1-indexed for
-          // model parity with Claude Code's Read tool.
-          let content = fullContent
-          if (sliceRequested) {
-            const lines = fullContent.split('\n')
-            const start = Math.max(0, offset - 1)
-            const end = limit > 0 ? start + limit : lines.length
-            const slice = lines.slice(start, end)
-            const hasMore = end < lines.length
-            content = slice.join('\n')
-            if (hasMore) {
-              const nextOffset = end + 1
-              content += `\n\n[truncated at line ${end} of ${lines.length}; use offset: ${nextOffset} to continue]`
+          // (b) Dedup freshness — claude-vaz FileReadTool.ts:523-573:
+          // only stub when offset+limit match a prior read EXACTLY AND the
+          // file's mtime is unchanged on disk. fsVersion is no longer the
+          // gate (it missed external edits). The cached mtime lives in the
+          // FileContentSignature captured at the prior read.
+          // isToolResultContextVisible: TM-specific extra gate — the stub
+          // claims "the content is still in the conversation", so it can only
+          // fire when the tool_result that carried this content went INTACT in
+          // the last provider request. If context management compacted it, we
+          // fall through and serve the content (no stub, no force:true dance).
+          if (
+            !forceRead &&
+            existingState?.source === 'read' &&
+            !existingState.isPartialView &&
+            isToolResultContextVisible(existingState.toolCallId) &&
+            existingState.offset === requestedOffset &&
+            existingState.limit === requestedLimit &&
+            existingState.signature?.modifiedMs !== undefined &&
+            existingState.signature?.modifiedMs !== null &&
+            preStat?.modifiedMs !== undefined &&
+            preStat?.modifiedMs !== null &&
+            preStat.modifiedMs === existingState.signature.modifiedMs
+          ) {
+            const now = Date.now()
+            this.readFileTimestamps.set(filePath, { timestamp: now, hash: existingState.hash })
+            // Refresh fsVersion on the cached entry so downstream
+            // fsVersion-keyed caches (ipcCache, prompt cache) stay coherent.
+            this.readFileState.set(filePath, {
+              ...existingState,
+              timestamp: now,
+              fsVersion: currentFsVersion,
+            })
+            return FILE_UNCHANGED_STUB
+          }
+
+          // ── Overlap dedup / narrowing ─────────────────────────────
+          // `limit` omitted means read-to-EOF. A prior read-to-EOF range
+          // fully covers later sub-ranges; a partially covered request is
+          // narrowed to the first missing line range before the disk read.
+          if (!forceRead) {
+            const overlap = checkReadRangeOverlap(
+              filePath,
+              requestedOffset,
+              requestedLimit,
+              currentFsVersion,
+              preStat?.modifiedMs,
+            )
+            if (overlap.kind === 'fully_covered' && overlap.stub) {
+              return overlap.stub
+            }
+            if (overlap.kind === 'partially_covered' && overlap.adjustedRange) {
+              offset = overlap.adjustedRange.offset
+              limit = overlap.adjustedRange.limit ?? 0
+              offsetProvided = true
+              limitProvided = overlap.adjustedRange.limit !== undefined
+              sliceRequested = true
+              requestedOffset = offset
+              requestedLimit = overlap.adjustedRange.limit
             }
           }
-          const newHash = this.simpleHash(fullContent)
 
+          const readResult = sliceRequested
+            ? await this.readFileRange({
+              filePath,
+              offset,
+              limit,
+              limitProvided,
+              preStat,
+            })
+            : await invoke<ReadFileWithSignatureResult>('read_file_with_signature', { path: filePath })
+          const rangeResult = sliceRequested ? readResult as ReadFileRangeWithSignatureResult : null
+          const signatureForRead = readResult.signature
+          const contentHash = this.simpleHash(readResult.content)
+
+          // (Second-stage content dedup + post-read byte-size guard removed
+          // for claude-vaz parity: claude-vaz gates dedup solely on mtime
+          // (done above via file_stat) and rejects >256KB pre-read (done
+          // above via file_stat.size). Re-adding a post-read content
+          // equality check would diverge from Claude's "stat is the gate"
+          // model.)
+
+          // Apply line-based slice if requested. For ranged reads, Rust does
+          // the line-oriented scan and returns only the selected lines (parity
+          // with claude-vaz readFileInRange); full reads keep the existing
+          // whole-file path. The truncation suffix is kept separate so
+          // addLineNumbers (cat -n) only numbers the actual file body, not
+          // the metadata line.
+          let content = readResult.content
+          let truncationSuffix = ''
+          const startLine = sliceRequested ? offset : 1
+          const totalLines = rangeResult
+            ? rangeResult.totalLines
+            : (content.length > 0 ? content.split('\n').length : 0)
+          if (rangeResult?.hasMore) {
+            const end = rangeResult.startLine + Math.max(0, rangeResult.lineCount) - 1
+            const nextOffset = end + 1
+            truncationSuffix = `\n\n[truncated at line ${end} of ${rangeResult.totalLines}; use offset: ${nextOffset} to continue]`
+          }
           // Detect external modification BEFORE overwriting the stored
           // timestamp. If the file's content hash differs from what we
           // saw on the previous read — and the agent itself didn't write
@@ -2118,53 +2784,141 @@ ${preview}
           // this map on success) — something else touched the file
           // (formatter, git pull, manual edit, dev server output). Inject
           // a system-reminder INSIDE the tool result so the model sees
-          // it in the same turn the read completes. Same shape as
-          // claude-vaz FileReadTool.ts:706-730.
+          // it in the same turn the read completes.
+          // NOTE: claude-vaz does NOT inject this reminder (it relies on
+          // the mtime stat to either stub-or-read; when it reads changed
+          // content it just sends it). Kept here as a TM-specific aid.
           const prev = this.readFileTimestamps.get(filePath)
-          const externalChange = prev !== undefined && prev.hash !== newHash
+          const externalChange = !sliceRequested && prev !== undefined && prev.hash !== contentHash
 
           // Track read timestamp + content hash for read-before-write enforcement.
           // Set AFTER the externalChange comparison so the comparison uses the
           // truly-previous state.
           const now = Date.now()
-          this.readFileTimestamps.set(filePath, { timestamp: now, hash: newHash })
-
-          // ── Update content cache ────────────────────────────────────
-          // Store the file content in the cache for dedup and state recovery.
-          // offset/limit reflect what was actually requested so future dedup
-          // checks can match exact ranges. fsVersion is captured so the
-          // dedup freshness check is O(1) — no need to re-read the file.
-          this.readFileState.set(filePath, {
-            content: fullContent,
+          this.readFileTimestamps.set(filePath, {
             timestamp: now,
-            offset: offsetProvided ? offset : undefined,
-            limit: limitProvided ? limit : undefined,
-            hash: newHash,
-            fsVersion: currentFsVersion,
+            // Ranged reads intentionally do not load the whole file into JS.
+            // Keep the previous full-file hash when available; write/edit
+            // falls back to the range mtime below when only a ranged view is
+            // known.
+            hash: sliceRequested && prev ? prev.hash : contentHash,
           })
+          if (/[\\/]TMS\.md$/i.test(filePath)) {
+            markTmsFullContextSent('read_file:TMS.md')
+          }
+
+          const commitReadState = (visibility: ReadVisibility): void => {
+            // Store the file content in the cache for dedup and state recovery.
+            // offset/limit describe the range that actually reached the model,
+            // not necessarily the whole internal disk read. This keeps exact
+            // dedup and overlap dedup aligned with model-visible context.
+            this.readFileState.set(filePath, {
+              content,
+              timestamp: now,
+              offset: visibility.range?.offset,
+              limit: visibility.range?.limit,
+              source: 'read',
+              signature: signatureForRead,
+              hash: contentHash,
+              fsVersion: currentFsVersion,
+              isPartialView: visibility.partialView || undefined,
+              toolCallId: readToolCallId,
+            })
+
+            if (visibility.range) {
+              // `limit === undefined` means read-to-EOF, not a hidden default
+              // page size. The usage export marks those ranges with readToEnd.
+              recordReadRange(
+                filePath,
+                visibility.range.offset,
+                visibility.range.limit,
+                currentFsVersion,
+                signatureForRead.modifiedMs,
+                readToolCallId,
+              )
+            }
+          }
 
           // Empty content: distinguish "file is empty" (no slice requested,
           // file genuinely has no bytes) from "slice past EOF" (model paged
-          // beyond the last line) — generic "empty" message would mislead.
+          // beyond the last line). Wording mirrors claude-vaz
+          // FileReadTool.ts mapToolResultToToolResultBlockParam.
           if (content.length === 0) {
-            if (sliceRequested && fullContent.length > 0) {
-              const totalLines = fullContent.split('\n').length
-              return `<system-reminder>The slice (offset ${offset}${limit > 0 ? `, limit ${limit}` : ''}) is past the end of the file. The file has ${totalLines} lines; pick an offset within range.</system-reminder>`
+            if (sliceRequested && rangeResult && rangeResult.lineCount > 0) {
+              const numStr = String(startLine)
+              const body = numStr.length >= 6 ? `${numStr}→` : `${numStr.padStart(6, ' ')}→`
+              const result = body + truncationSuffix
+              commitReadState(ToolExecutor.getModelVisibleReadRange({
+                result,
+                fileBodyStart: 0,
+                fileBodyLength: body.length,
+                startLine,
+                requestedOffset,
+                requestedLimit,
+              }))
+              return result
             }
-            return '<system-reminder>The file exists but the contents are empty.</system-reminder>'
+            if (sliceRequested && totalLines > 0 && offset > totalLines) {
+              const result = `<system-reminder>Warning: the file exists but is shorter than the provided offset (${offset}). The file has ${totalLines} lines.</system-reminder>`
+              commitReadState(ToolExecutor.getModelVisibleReadRange({
+                result,
+                fileBodyStart: 0,
+                fileBodyLength: 0,
+                startLine,
+                requestedOffset,
+                requestedLimit,
+              }))
+              return result
+            }
+            const result = '<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>'
+            commitReadState(ToolExecutor.getModelVisibleReadRange({
+              result,
+              fileBodyStart: 0,
+              fileBodyLength: 0,
+              startLine,
+              requestedOffset,
+              requestedLimit,
+            }))
+            return result
           }
 
+          // cat -n line numbers (claude-vaz parity — addLineNumbers). The
+          // model relies on these to target offset/limit and edit ranges.
+          // Only applied when the numbered result stays under the truncation
+          // threshold (12_000 chars = ToolExecutor.getToolResultMaxChars('read_file')):
+          // larger outputs flow through truncateResult → a char-offset preview
+          // + read_large_result paging, where numbering a partial char-window
+          // would mislead (line numbers wouldn't track real file lines across
+          // a sliced preview, and read_large_result's char offset would land
+          // mid-prefix). claude-vaz avoids this by throwing past 25k tokens
+          // instead of previewing; the TM's preview path is a divergence for
+          // large files only.
+          const READ_TRUNCATION_THRESHOLD = 12_000
+          const numbered = addLineNumbers(content, startLine)
+          const displayContent =
+            numbered.length < READ_TRUNCATION_THRESHOLD ? numbered : content
+
+          let reminder = ''
           if (externalChange) {
-            const reminder =
+            reminder =
               '<system-reminder>The contents of this file have changed since you last read it '
               + '(external modification — a formatter, git pull, dev server output, or manual edit '
               + 'touched it). Treat the content below as authoritative; assumptions from the previous '
               + 'read are stale and any planned edit must be reconciled against this new content.'
               + '</system-reminder>\n\n'
-            return reminder + content
           }
 
-          return content
+          const result = reminder + displayContent + truncationSuffix
+          commitReadState(ToolExecutor.getModelVisibleReadRange({
+            result,
+            fileBodyStart: reminder.length,
+            fileBodyLength: displayContent.length,
+            startLine,
+            requestedOffset,
+            requestedLimit,
+          }))
+
+          return result
         } catch (error) {
           // formatError handles Tauri's plain-object throws — the previous
           // `String(error)` could yield "[object Object]" which both swallowed
@@ -2186,7 +2940,211 @@ ${preview}
       }
     })
 
+    // === read_around ===
+    this.tools.set(READ_AROUND, {
+      definition: {
+        name: READ_AROUND,
+        description: 'Read a bounded line window around a specific 1-indexed line in a file. Use this after search_files returns a matching line and you need the surrounding code. This is a convenience wrapper over read_file offset/limit, so duplicate-read suppression and range tracking still apply.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            file_path: { type: 'string', description: 'Absolute path to the file to read' },
+            path: { type: 'string', description: 'Alias for file_path' },
+            line: { type: 'number', description: '1-indexed target line to center the read around' },
+            before: { type: 'number', description: 'Number of lines to include before line. Default: 40, max: 200.' },
+            after: { type: 'number', description: 'Number of lines to include after line. Default: 40, max: 200.' },
+            force: { type: 'boolean', description: 'Bypass duplicate-read suppression only when prior context was compacted away.' },
+          },
+          required: ['line'],
+        },
+        concurrencySafe: true,
+      },
+      execute: async (input) => {
+        const requestedPath = (input.file_path ?? input.path) as string | undefined
+        if (!requestedPath) return `Error: ${READ_AROUND} requires file_path or path.`
+        const line = typeof input.line === 'number' ? Math.floor(input.line) : 0
+        if (line <= 0) {
+          return `Error: ${READ_AROUND} requires a positive 1-indexed "line" number.`
+        }
+        const clampWindow = (value: unknown, fallback: number): number => {
+          const n = typeof value === 'number' ? Math.floor(value) : fallback
+          return Math.min(Math.max(0, n), 200)
+        }
+        const before = clampWindow(input.before, 40)
+        const after = clampWindow(input.after, 40)
+        const offset = Math.max(1, line - before)
+        const endLine = line + after
+        const limit = endLine - offset + 1
+        // Propaga o contexto por-chamada injetado pelo execute() de origem:
+        // o _toolCallId é o que liga o FileState/readRangeTracker ao registo
+        // de visibilidade (sem ele, releituras pós-evicção voltavam a levar
+        // stub), e o _abortSignal mantém o cancelamento a meio do voo.
+        return this.execute(
+          'read_file',
+          {
+            file_path: requestedPath,
+            offset,
+            limit,
+            ...(input.force === true ? { force: true } : {}),
+          },
+          typeof input._toolCallId === 'string' ? input._toolCallId : undefined,
+          input._abortSignal as AbortSignal | undefined,
+          typeof input._memoryScope === 'string' ? input._memoryScope : undefined,
+        )
+      },
+    })
+
     // === list_directory ===
+    // === enter_worktree / exit_worktree (claude-vaz parity) ===
+    this.tools.set(ENTER_WORKTREE, {
+      definition: {
+        name: ENTER_WORKTREE,
+        description: ENTER_WORKTREE_DESCRIPTION,
+        input_schema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Optional worktree name (slug). Random when omitted.' },
+          },
+          required: [],
+        },
+        concurrencySafe: false,
+      },
+      execute: async (input) => {
+        if (this.worktreeState) {
+          return `Error: already in worktree "${this.worktreeState.name}" (${this.worktreeState.path}). Call exit_worktree first.`
+        }
+        let root: string
+        try {
+          root = this.getProjectRoot()
+        } catch (e) {
+          return `Error: ${formatError(e)}`
+        }
+        const head = await this.runGit('git rev-parse HEAD', root)
+        if (!head.ok) {
+          return `Error: enter_worktree requires a git repository with at least one commit. git said: ${head.out || 'not a git repository'}`
+        }
+        const { sanitizeWorktreeName, worktreeBranch, WORKTREES_REL_DIR } = await import('./toolExecutor/worktrees')
+        const name = sanitizeWorktreeName(input.name) ?? `wt-${Date.now().toString(36)}`
+        const branch = worktreeBranch(name)
+        const dir = `${root}/${WORKTREES_REL_DIR}/${name}`
+        // Keep the worktrees dir out of the MAIN checkout's git status via the
+        // repo-local (never versioned) exclude file. Best-effort.
+        await this.runGit(
+          `mkdir -p .git/info && { grep -qxF '${WORKTREES_REL_DIR}/' .git/info/exclude 2>/dev/null || echo '${WORKTREES_REL_DIR}/' >> .git/info/exclude; }`,
+          root,
+        )
+        const add = await this.runGit(`git worktree add "${dir}" -b "${branch}"`, root)
+        if (!add.ok) {
+          return `Error: git worktree add failed — ${add.out}`
+        }
+        this.worktreeState = { originalRoot: root, path: dir, branch, name, baseRef: head.out.split('\n')[0] }
+        return (
+          `Entered worktree "${name}".\n` +
+          `- path: ${dir}\n- branch: ${branch} (off ${this.worktreeState.baseRef.slice(0, 10)})\n` +
+          `All file tools and shell commands now resolve inside the worktree until exit_worktree. ` +
+          `Note for the developer: the editor still shows the MAIN checkout — this session's work lives under ${WORKTREES_REL_DIR}/${name}.`
+        )
+      },
+    })
+
+    this.tools.set(EXIT_WORKTREE, {
+      definition: {
+        name: EXIT_WORKTREE,
+        description: EXIT_WORKTREE_DESCRIPTION,
+        input_schema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['keep', 'remove'], description: '"keep" leaves the worktree on disk; "remove" deletes it (and its branch)' },
+            discard_changes: { type: 'boolean', description: 'Only with action "remove": delete even when there is uncommitted/unmerged work. Confirm with the user first.' },
+          },
+          required: ['action'],
+        },
+        concurrencySafe: false,
+      },
+      execute: async (input) => {
+        const state = this.worktreeState
+        if (!state) {
+          return 'No worktree session is active — nothing to exit. Filesystem unchanged.'
+        }
+        const action = input.action as string
+        if (action !== 'keep' && action !== 'remove') {
+          return 'Error: exit_worktree requires action: "keep" | "remove".'
+        }
+        if (action === 'keep') {
+          this.worktreeState = null
+          return (
+            `Exited worktree "${state.name}" (kept on disk).\n` +
+            `- path: ${state.path}\n- branch: ${state.branch}\n` +
+            `Session root restored to ${state.originalRoot}. The branch can be merged or revisited later.`
+          )
+        }
+        const { decideRemove } = await import('./toolExecutor/worktrees')
+        const status = await this.runGit('git status --porcelain', state.path)
+        const aheadRes = await this.runGit(`git rev-list --count ${state.baseRef}..HEAD`, state.path)
+        const ahead = aheadRes.ok ? parseInt(aheadRes.out, 10) || 0 : 0
+        const decision = decideRemove(status.ok ? status.out : '', ahead, input.discard_changes === true)
+        if (!decision.proceed) {
+          return decision.refusal as string
+        }
+        // Restore the root BEFORE deleting — a failed removal must never
+        // leave the session pointing into a half-deleted directory.
+        this.worktreeState = null
+        const remove = await this.runGit(`git worktree remove --force "${state.path}"`, state.originalRoot)
+        await this.runGit(`git branch -D "${state.branch}"`, state.originalRoot)
+        return remove.ok
+          ? `Exited and removed worktree "${state.name}" (directory + branch deleted). Session root restored to ${state.originalRoot}.`
+          : `Exited worktree "${state.name}" (session root restored), but removal reported: ${remove.out}. You may need to clean ${state.path} manually.`
+      },
+    })
+
+    // === lsp — code intelligence (claude-vaz LSPTool contract, TS/JS) ===
+    this.tools.set(LSP, {
+      definition: {
+        name: LSP,
+        description:
+          'Code intelligence for TypeScript/JavaScript via the project language service — compiler-grade answers instead of grep guesses. Operations: ' +
+          'goToDefinition (where is the symbol at file/line/character defined), ' +
+          'findReferences (usages of that symbol across files loaded so far; use Grep for an exhaustive project-wide sweep), ' +
+          'hover (type signature + docs for the symbol at the position), ' +
+          'documentSymbol (outline of functions/classes/exports in a file), ' +
+          'diagnostics (type + syntax errors for ONE file — much cheaper than running tsc after editing a single file). ' +
+          'line/character are 1-based, exactly as shown by Read. Prefer this over Grep when the question is about a SYMBOL (definition, type, usages); prefer Grep for text/strings.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            operation: {
+              type: 'string',
+              enum: ['goToDefinition', 'findReferences', 'hover', 'documentSymbol', 'diagnostics'],
+              description: 'The code-intelligence operation to run',
+            },
+            file_path: { type: 'string', description: 'Absolute path to the file' },
+            line: { type: 'number', description: '1-based line of the symbol (required for goToDefinition/findReferences/hover)' },
+            character: { type: 'number', description: '1-based character offset of the symbol (required for goToDefinition/findReferences/hover)' },
+          },
+          required: ['operation', 'file_path'],
+        },
+        concurrencySafe: true,
+      },
+      execute: async (input) => {
+        const requestedPath = input.file_path as string | undefined
+        if (!requestedPath) return 'Error: lsp requires file_path.'
+        await this.requirePathAccess(requestedPath)
+        const absolute = this.resolveToAbsolute(requestedPath)
+        // Lazy import: keeps Monaco out of the agent module graph until the
+        // model actually asks a code-intelligence question.
+        const { executeLspTool } = await import('./lspTool')
+        return executeLspTool(
+          {
+            operation: input.operation as never,
+            file_path: absolute,
+            line: input.line as number | undefined,
+            character: input.character as number | undefined,
+          },
+          this.getProjectRoot(),
+        )
+      },
+    })
+
     this.tools.set('list_directory', {
       definition: {
         name: 'list_directory',
@@ -2195,18 +3153,51 @@ ${preview}
           type: 'object',
           properties: {
             file_path: { type: 'string', description: 'Absolute path to the directory to list' },
+            path: { type: 'string', description: 'Alias for file_path' },
+            directory: { type: 'string', description: 'Alias for file_path' },
             maxDepth: { type: 'number', description: 'Maximum depth to traverse. Default: 3' }
           },
-          required: ['file_path']
+          required: []
         },
         concurrencySafe: true,
       },
       execute: async (input) => {
-        await this.requirePathAccess(input.file_path as string)
-        const dirPath = this.resolveToAbsolute(input.file_path as string)
+        const requestedPath = (input.file_path ?? input.path ?? input.directory) as string | undefined
+        if (!requestedPath) {
+          return 'Error: list_directory requires file_path, path, or directory.'
+        }
+        await this.requirePathAccess(requestedPath)
+        const dirPath = this.resolveToAbsolute(requestedPath)
         const filter = { showHidden: false, maxDepth: (input.maxDepth as number) || 3 }
         const tree = await invoke('build_file_tree', { rootPath: dirPath, filter })
         return this.formatFileTreeCompact(tree as Record<string, unknown>)
+      }
+    })
+
+    // === get_project_state_dir ===
+    this.tools.set('get_project_state_dir', {
+      definition: {
+        name: 'get_project_state_dir',
+        description: 'Return TM Code app-managed state directories for the current project. Use this when looking for sessions, checkpoints, saved agent state, permissions, queues, or project metadata. The active location is the global per-project store under ~/.toquemedia-studio/projects/{projectId}; do not search ${project}/.toquemedia unless explicitly investigating legacy migration.',
+        input_schema: {
+          type: 'object',
+          properties: {},
+          required: []
+        },
+        concurrencySafe: true,
+      },
+      execute: async () => {
+        const projectRoot = this.getProjectRoot()
+        if (!projectRoot) {
+          return 'No project root is active, so there is no project state directory to report.'
+        }
+        const stateDir = await getProjectStateDir(projectRoot)
+        return [
+          `project_root: ${projectRoot}`,
+          `project_state_dir: ${stateDir}`,
+          `sessions_dir: ${stateDir}/sessions`,
+          `legacy_project_state_dir: ${getLegacyProjectStateDir(projectRoot)} (legacy only; do not use for current sessions unless checking migration)`,
+        ].join('\n')
       }
     })
 
@@ -2214,7 +3205,7 @@ ${preview}
     this.tools.set('search_files', {
       definition: {
         name: 'search_files',
-        description: 'Search for text patterns across files in a directory using ripgrep. Returns up to 50 matching lines with file paths and line numbers. If you need more results, narrow your search with includePatterns.',
+        description: 'Search for text patterns across files in a directory using ripgrep. Returns up to 50 matching lines with file paths and line numbers. Set contextLines (1-10) when you need a few surrounding lines; for deeper inspection, follow a match with read_around or read_file offset/limit. If you need more results, narrow your search with includePatterns.',
         input_schema: {
           type: 'object',
           properties: {
@@ -2222,7 +3213,8 @@ ${preview}
             directory: { type: 'string', description: 'Absolute path to a directory to search in, or a single file to search within' },
             caseSensitive: { type: 'boolean', description: 'Case sensitive search. Default: false' },
             useRegex: { type: 'boolean', description: 'Interpret query as regex. Default: false' },
-            includePatterns: { type: 'array', items: { type: 'string' }, description: 'Glob patterns to include (e.g., ["*.tsx", "*.ts"])' }
+            includePatterns: { type: 'array', items: { type: 'string' }, description: 'Glob patterns to include (e.g., ["*.tsx", "*.ts"])' },
+            contextLines: { type: 'number', description: 'Number of lines before and after each match to include. Default: 0, max: 10.' },
           },
           required: ['query', 'directory']
         },
@@ -2241,14 +3233,17 @@ ${preview}
           use_regex: (input.useRegex as boolean) || false,
           include_patterns: (input.includePatterns as string[]) || [],
           exclude_patterns: ['node_modules/**', '.git/**', 'dist/**', 'build/**'],
-          max_results: 50
+          max_results: 50,
+          context_lines: typeof input.contextLines === 'number'
+            ? Math.min(Math.max(0, Math.floor(input.contextLines)), 10)
+            : 0,
         }
         const result = await invoke('search_in_files', {
           query: input.query,
           directory: directory,
           options
         })
-        return JSON.stringify(result, null, 2)
+        return this.formatSearchResultsCompact(result)
       }
     })
 
@@ -2256,7 +3251,7 @@ ${preview}
     this.tools.set('write_file', {
       definition: {
         name: 'write_file',
-        description: 'Replace the entire content of an existing file, or create a new file. Always read_file first on existing files to understand what you are replacing. For creating new files, prefer create_file. For small edits (1–20 lines), prefer edit_file instead.',
+        description: 'Replace the entire content of an existing file, or create a new file. Always use Read first on existing files to understand what you are replacing. For creating new files, prefer create_file. For small edits (1-20 lines), prefer edit_file instead.',
         input_schema: {
           type: 'object',
           properties: {
@@ -2271,20 +3266,6 @@ ${preview}
         const path = this.resolveToAbsolute(input.file_path as string)
         const newContent = input.content as string
 
-        // Mechanical blocks on prompt-rule violations the model commits
-        // anyway under generation pressure. Each check has an inline
-        // comment explaining the recurring failure mode it catches.
-        // Order: cheapest checks first (regex on string) before the
-        // package.json parse.
-        const authBlock = this.checkForbiddenAuthImports(path, newContent)
-        if (authBlock) return authBlock
-        const itkBlock = this.checkForbiddenItkV2(path, newContent)
-        if (itkBlock) return itkBlock
-        const saBlock = this.checkForbiddenServiceAccountImport(path, newContent)
-        if (saBlock) return saBlock
-        const dockerfileBlock = await this.checkForbiddenDockerfileShape(path, newContent)
-        if (dockerfileBlock) return dockerfileBlock
-
         // Read current content to generate diff data
         let oldContent = ''
         let isNewFile = true
@@ -2295,43 +3276,49 @@ ${preview}
           isNewFile = true
         }
 
-        const dataLayerBlock = this.checkForbiddenDataLayerDeps(path, newContent, oldContent)
-        if (dataLayerBlock) return dataLayerBlock
-
         // Enforce read-before-write for existing files (like Claude Code).
         // The model must read a file before overwriting it to understand what it's replacing.
         // Mirrors claude-vaz FileWriteTool.ts:275-294 (isPartialView check).
         if (!isNewFile) {
           const readState = this.readFileTimestamps.get(path)
           if (!readState) {
-            return `Error: You must ${READ_FILE}("${path}") before overwriting it. Read the file first to understand its current content, then call ${WRITE_FILE}.`
+            this.recordReadBeforeWriteBlocked(WRITE_FILE, 'not_read')
+            return `Error: You must call ${READ_ALIAS} on "${path}" before overwriting it. Read the file first to understand its current content, then call ${WRITE_FILE}.`
           }
           // isPartialView: if the model only saw an auto-injected partial view
-          // (e.g. CLAUDE.md with stripped frontmatter), it must do a full Read
+          // (e.g. stripped/truncated project memory), it must do a full Read
           // first — the auto-injected content may not match what's on disk.
           const cachedState = this.readFileState.get(path)
           if (cachedState?.isPartialView) {
-            return `Error: You must ${READ_FILE}("${path}") before overwriting it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${WRITE_FILE}.`
+            this.recordReadBeforeWriteBlocked(WRITE_FILE, 'partial_view')
+            return `Error: You must call ${READ_ALIAS} on "${path}" before overwriting it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${WRITE_FILE}.`
           }
-          // Concurrent modification detection: check if file changed on disk since the model read it
-          const currentHash = this.simpleHash(oldContent)
-          if (currentHash !== readState.hash) {
+          // Concurrent modification detection: full reads use the content
+          // hash; ranged reads use the file mtime captured by the range
+          // reader, matching claude-vaz's read-state gate.
+          if (await this.hasFileChangedSinceRead(path, oldContent, readState, cachedState)) {
             this.readFileTimestamps.delete(path)
-            return `Error: File "${path}" has been modified since you last read it (by the developer, a formatter, or another process). Read it again with ${READ_FILE} before writing.`
+            this.recordReadBeforeWriteBlocked(WRITE_FILE, 'modified_since_read')
+            return `Error: File "${path}" has been modified since you last read it (by the developer, a formatter, or another process). Read it again with ${READ_ALIAS} before writing.`
           }
         }
 
-        // CMD mode: write directly to disk, no approval needed — but still
-        // return diff JSON so the UI renders the before/after like in chat mode.
+        // Cwd-scoped execution: write directly to disk, no approval needed, but still
+        // return diff JSON so the UI renders the before/after consistently.
         // `alreadyApplied: true` tells chatStore to skip the approval queue.
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content: newContent })
+          if (/[\\/]TMS\.md$/i.test(path)) {
+            markTmsCreated(path)
+            useProjectStore.getState().setNoTmsFile(false)
+          }
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(newContent) })
-          this.readFileState.set(path, { content: newContent, timestamp: Date.now(), offset: undefined, limit: undefined, hash: this.simpleHash(newContent), fsVersion: getFsVersion() })
+          this.readFileState.set(path, { content: newContent, timestamp: Date.now(), offset: undefined, limit: undefined, source: 'write', hash: this.simpleHash(newContent), fsVersion: getFsVersion() })
           bumpFsVersion(`write:${path}`)
           this.refreshFileTree()
+          this.refreshEditorIfOpen(path)
           return JSON.stringify({
             type: 'diff',
             path,
@@ -2373,18 +3360,6 @@ ${preview}
         const path = this.resolveToAbsolute(input.file_path as string)
         const content = (input.content as string) || ''
 
-        // Mechanical blocks — see write_file for the rationale.
-        const authBlock = this.checkForbiddenAuthImports(path, content)
-        if (authBlock) return authBlock
-        const itkBlock = this.checkForbiddenItkV2(path, content)
-        if (itkBlock) return itkBlock
-        const saBlock = this.checkForbiddenServiceAccountImport(path, content)
-        if (saBlock) return saBlock
-        const dockerfileBlock = await this.checkForbiddenDockerfileShape(path, content)
-        if (dockerfileBlock) return dockerfileBlock
-        const dataLayerBlock = this.checkForbiddenDataLayerDeps(path, content)
-        if (dataLayerBlock) return dataLayerBlock
-
         // Check if file already exists
         try {
           await invoke<string>('read_file', { path })
@@ -2393,16 +3368,17 @@ ${preview}
           // File doesn't exist — good, proceed
         }
 
-        // CMD mode: write directly to disk, still return diff JSON so the UI
+        // Cwd-scoped execution: write directly to disk, still return diff JSON so the UI
         // renders the new file content. `alreadyApplied` skips approval queue.
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(content) })
-          this.readFileState.set(path, { content, timestamp: Date.now(), offset: undefined, limit: undefined, hash: this.simpleHash(content), fsVersion: getFsVersion() })
+          this.readFileState.set(path, { content, timestamp: Date.now(), offset: undefined, limit: undefined, source: 'write', hash: this.simpleHash(content), fsVersion: getFsVersion() })
           bumpFsVersion(`create:${path}`)
           this.refreshFileTree()
+          this.refreshEditorIfOpen(path)
           return JSON.stringify({
             type: 'diff',
             path,
@@ -2597,39 +3573,30 @@ ${preview}
 
         await this.requirePathAccess(path)
 
-        // Mechanical blocks on the new fragment — covers partial edits
-        // that introduce forbidden code without rewriting the file.
-        const authBlock = this.checkForbiddenAuthImports(path, newStr)
-        if (authBlock) return authBlock
-        const itkBlock = this.checkForbiddenItkV2(path, newStr)
-        if (itkBlock) return itkBlock
-        const saBlock = this.checkForbiddenServiceAccountImport(path, newStr)
-        if (saBlock) return saBlock
-        const dockerfileBlock = await this.checkForbiddenDockerfileShape(path, newStr)
-        if (dockerfileBlock) return dockerfileBlock
-
         // Enforce read-before-edit: the model must have read the file to know what to edit.
         // Mirrors claude-vaz FileEditTool.ts:275-287 (readFileState + isPartialView).
         const readState = this.readFileTimestamps.get(path)
         if (!readState) {
-          return `Error: You must ${READ_FILE}("${path}") before editing it. Read the file first to see the current content, then call ${EDIT_FILE}.`
+          this.recordReadBeforeWriteBlocked(EDIT_FILE, 'not_read')
+          return `Error: You must call ${READ_ALIAS} on "${path}" before editing it. Read the file first to see the current content, then call ${EDIT_FILE}.`
         }
         // isPartialView: if the model only saw an auto-injected partial view
-        // (e.g. CLAUDE.md with stripped frontmatter), it must do a full Read
+        // (e.g. stripped/truncated project memory), it must do a full Read
         // first — the auto-injected content may not match what's on disk.
         const readStateEntry = this.readFileState.get(path)
         if (readStateEntry?.isPartialView) {
-          return `Error: You must ${READ_FILE}("${path}") before editing it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${EDIT_FILE}.`
+          this.recordReadBeforeWriteBlocked(EDIT_FILE, 'partial_view')
+          return `Error: You must call ${READ_ALIAS} on "${path}" before editing it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${EDIT_FILE}.`
         }
 
         // Re-read from disk before generating the diff. `fsVersion` only tracks
         // agent writes, so relying on cached content would miss developer or
         // formatter changes made after the model's last read_file.
         const content = await invoke<string>('read_file', { path })
-        const currentHash = this.simpleHash(content)
-        if (currentHash !== readState.hash) {
+        if (await this.hasFileChangedSinceRead(path, content, readState, readStateEntry)) {
           this.readFileTimestamps.delete(path)
-          return `Error: File "${path}" has been modified since you last read it. Read it again with ${READ_FILE} before editing.`
+          this.recordReadBeforeWriteBlocked(EDIT_FILE, 'modified_since_read')
+          return `Error: File "${path}" has been modified since you last read it. Read it again with ${READ_ALIAS} before editing.`
         }
 
         const occurrences = content.split(oldStr).length - 1
@@ -2638,7 +3605,7 @@ ${preview}
           void import('../../services/analytics').then(({ trackEvent }) => {
             trackEvent('edit_file_error', { kind: 'not_found', wrong_name: '' })
           }).catch(() => {})
-          return `Error: old_string not found in ${path}. The content you're trying to replace doesn't exist in the file. Read the file first to see the current content.`
+          return `Error: old_string not found in ${path}. The content you're trying to replace doesn't exist in the file. Use ${READ_ALIAS} first to see the current content.`
         }
 
         if (occurrences > 1) {
@@ -2658,21 +3625,17 @@ ${preview}
         const { editFileReplace } = await import('./editLiteralReplace')
         const newContent = editFileReplace(content, oldStr, newStr)
 
-        // Mechanical block on forbidden SQL data-layer deps in package.json.
-        // Edits that add Prisma/SQLite/Drizzle to a package.json get rejected.
-        const dataLayerBlock = this.checkForbiddenDataLayerDeps(path, newContent, content)
-        if (dataLayerBlock) return dataLayerBlock
-
-        // CMD mode: write directly to disk, still return diff JSON so the UI
+        // Cwd-scoped execution: write directly to disk, still return diff JSON so the UI
         // renders the before/after. `alreadyApplied` skips approval queue.
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
           if (dir) await invoke('create_directories_all', { path: dir })
           await invoke('write_file', { path, content: newContent })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(newContent) })
-          this.readFileState.set(path, { content: newContent, timestamp: Date.now(), offset: undefined, limit: undefined, hash: this.simpleHash(newContent), fsVersion: getFsVersion() })
+          this.readFileState.set(path, { content: newContent, timestamp: Date.now(), offset: undefined, limit: undefined, source: 'write', hash: this.simpleHash(newContent), fsVersion: getFsVersion() })
           bumpFsVersion(`edit:${path}`)
           this.refreshFileTree()
+          this.refreshEditorIfOpen(path)
           return JSON.stringify({
             type: 'diff',
             path,
@@ -2726,6 +3689,90 @@ ${preview}
 
         return result.join('\n')
       }
+    })
+
+    // === Claude-like read aliases ===
+    // These names match the tool surface models commonly learn from Claude
+    // Code. ToolExecutor.execute canonicalizes them before execution, so they
+    // reuse the internal read_file/search_files/glob/list_directory handlers.
+    this.tools.set(READ_ALIAS, {
+      definition: {
+        name: READ_ALIAS,
+        description: 'Read a file. Claude Code-compatible alias for TM Code read_file. Use offset + limit for line ranges instead of cat/head/tail/sed.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            file_path: { type: 'string', description: 'File path to read' },
+            path: { type: 'string', description: 'Alias for file_path' },
+            offset: { type: 'number', description: '1-indexed line number to start from' },
+            limit: { type: 'number', description: 'Maximum number of lines to read' },
+            force: { type: 'boolean', description: 'Bypass duplicate-read suppression only when a previous Read range is no longer available after compaction/context loss.' },
+          },
+          required: [],
+        },
+        concurrencySafe: true,
+      },
+      execute: async () => 'Internal alias error: Read should be canonicalized to read_file before execution.',
+    })
+
+    this.tools.set(GREP_ALIAS, {
+      definition: {
+        name: GREP_ALIAS,
+        description: 'Search file contents. Claude Code-compatible alias for TM Code search_files. Use this instead of grep, rg, ack, or ag via shell.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            pattern: { type: 'string', description: 'Search pattern (text or regex)' },
+            query: { type: 'string', description: 'Alias for pattern' },
+            path: { type: 'string', description: 'Directory or file to search. Default: project root/current directory.' },
+            directory: { type: 'string', description: 'Alias for path' },
+            glob: { type: 'string', description: 'Optional include glob, e.g. "*.ts" or "**/*.tsx"' },
+            caseSensitive: { type: 'boolean', description: 'Case sensitive search. Default: false' },
+            useRegex: { type: 'boolean', description: 'Interpret pattern as regex. Default: false' },
+            includePatterns: { type: 'array', items: { type: 'string' }, description: 'Glob patterns to include' },
+          },
+          required: ['pattern'],
+        },
+        concurrencySafe: true,
+      },
+      execute: async () => 'Internal alias error: Grep should be canonicalized to search_files before execution.',
+    })
+
+    this.tools.set(GLOB_ALIAS, {
+      definition: {
+        name: GLOB_ALIAS,
+        description: 'Find files by glob pattern. Claude Code-compatible alias for TM Code glob. Use this instead of find or fd via shell.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            pattern: { type: 'string', description: 'Glob pattern, e.g. "**/*.tsx" or "**/package.json"' },
+            path: { type: 'string', description: 'Directory to search from. Default: project root.' },
+            directory: { type: 'string', description: 'Alias for path' },
+          },
+          required: ['pattern'],
+        },
+        concurrencySafe: true,
+      },
+      execute: async () => 'Internal alias error: Glob should be canonicalized to glob before execution.',
+    })
+
+    this.tools.set(LS_ALIAS, {
+      definition: {
+        name: LS_ALIAS,
+        description: 'List a directory. Claude Code-style alias for TM Code list_directory. Use this instead of ls or tree via shell.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Directory path to list. Default: project root/current directory.' },
+            file_path: { type: 'string', description: 'Alias for path' },
+            directory: { type: 'string', description: 'Alias for path' },
+            maxDepth: { type: 'number', description: 'Maximum depth to traverse. Default: 3' },
+          },
+          required: [],
+        },
+        concurrencySafe: true,
+      },
+      execute: async () => 'Internal alias error: LS should be canonicalized to list_directory before execution.',
     })
 
     // === web_search ===
@@ -2827,22 +3874,56 @@ ${preview}
         }
 
         if (!response.ok) {
-          return `Error: Failed to fetch ${url} (status: ${response.status})`
+          return `Error: Failed to fetch ${url} (status: ${response.status})\n\nDo not conclude the page is inaccessible from this fetch failure alone. If this is an official/current documentation page, try web_search for the canonical URL or an alternate docs path. If terminal access is available, use a browser-like fetch such as curl -L -A Mozilla/5.0 against the URL and extract the relevant text locally before reporting the docs as unavailable.`
         }
 
         const result = await response.json() as {
           url: string
           status: number
+          contentType?: string
+          strategy?: string
+          attempts?: Array<{
+            strategy: string
+            status: number
+            contentType?: string
+            finalUrl?: string
+            error?: string
+          }>
           content: string
           truncated: boolean
           error?: string
         }
 
+        const attemptsSummary = Array.isArray(result.attempts) && result.attempts.length > 0
+          ? result.attempts
+            .map((attempt) => {
+              const outcome = attempt.error ? `error=${attempt.error}` : `status=${attempt.status}`
+              const finalUrl = attempt.finalUrl && attempt.finalUrl !== result.url ? ` url=${attempt.finalUrl}` : ''
+              return `${attempt.strategy}(${outcome}${finalUrl})`
+            })
+            .join(' -> ')
+          : ''
+
         if (result.error) {
-          return `Error fetching ${url}: ${result.error}`
+          const attempts = attemptsSummary ? `\nFetch attempts: ${attemptsSummary}` : ''
+          return `Error fetching ${url}: ${result.error}${attempts}\n\nDo not conclude the page is inaccessible from this fetch failure alone. If this is an official/current documentation page, try web_search for the canonical URL or an alternate docs path. If terminal access is available, use a browser-like fetch such as curl -L -A Mozilla/5.0 against the URL and extract the relevant text locally before reporting the docs as unavailable.`
         }
 
-        let output = `URL: ${result.url}\nStatus: ${result.status}\n\n${result.content}`
+        let output = `URL: ${result.url}\nStatus: ${result.status}`
+
+        if (result.strategy) {
+          output += `\nFetch strategy: ${result.strategy}`
+        }
+
+        if (attemptsSummary) {
+          output += `\nFetch attempts: ${attemptsSummary}`
+        }
+
+        output += `\n\n${result.content}`
+
+        if (result.status >= 400) {
+          output += `\n\n[Fetch returned HTTP ${result.status}. For official/current documentation, verify with web_search for a canonical URL or a browser-like terminal fetch before concluding the page is unavailable.]`
+        }
 
         if (result.truncated) {
           output += '\n\n[Content was truncated to fit context window]'
@@ -2933,7 +4014,7 @@ ${preview}
     this.tools.set('start_dev_server', {
       definition: {
         name: 'start_dev_server',
-        description: `Start the project's dev server as a background process. Returns immediately and the server keeps running in the background. The preview does NOT open by itself — when you finish, tell the user the app is running and to click the **Preview** button (top-right of the chat) to open it. ONE dev server per project.
+        description: `Start the project's dev server as a background process. Returns immediately and the server keeps running in the background. The preview does NOT open by itself. If the user should inspect the running app, finish by telling them to click the **Preview** button (top-right of the chat). Leave the server running by default while the project is being developed; use stop_dev_server only on explicit request, before a required restart, during project switch/removal, or for port/process cleanup. ONE dev server per project.
 
 Pass the command that runs the WHOLE project (e.g. "npm run dev" — even if it fans out frontend+backend via concurrently, workspaces, or turbo).
 
@@ -2958,7 +4039,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         let projectKind = input.project_kind as 'frontend' | 'backend' | 'fullstack' | undefined
         const legacyServerType = input.server_type as 'frontend' | 'backend' | undefined
         const explicitHint = typeof input.frontend_port_hint === 'number' ? input.frontend_port_hint : undefined
-        this.validateCommand(command)
+        this.validateCommand(command, { allowDevServer: true })
         const projectRoot = this.getProjectRoot()
 
         // Legacy server_type maps to the new project_kind
@@ -2997,14 +4078,40 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           const url = devServerManager.getUrl()
           const hintNote = frontendPortHint ? ` [frontend port hint: ${frontendPortHint}]` : ''
           if (url) {
-            return `Dev server started and running at ${url} (${projectKind})${hintNote}. The preview does NOT open automatically — when you're done, tell the user the app is running and to click the Preview button (top-right of the chat) to view it.`
+            return `Dev server started and running at ${url} (${projectKind})${hintNote}. The preview does NOT open automatically. Keep it running for continued development and tell the user to click the Preview button (top-right of the chat) when they want to inspect it.`
           }
-          return `Dev server starting with command: ${command} (${projectKind})${hintNote}. It boots in the background; the preview does NOT open automatically. When you finish, tell the user to click the Preview button (top-right of the chat) to open it.`
+          return `Dev server starting with command: ${command} (${projectKind})${hintNote}. It boots in the background; the preview does NOT open automatically. Keep it running for continued development and tell the user to click the Preview button (top-right of the chat) when they want to inspect it.`
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
           return `Error starting dev server: ${msg}. You can try a different command or check that dependencies are installed.`
         }
       }
+    })
+
+    // === stop_dev_server ===
+    this.tools.set(STOP_DEV_SERVER, {
+      definition: {
+        name: STOP_DEV_SERVER,
+        description: 'Stop the currently running project dev server started by start_dev_server. Do not use this as routine cleanup after successful verification. Use it only when the user explicitly asks, before a required restart, during project switch/removal, or to resolve a port/process conflict.',
+        input_schema: {
+          type: 'object',
+          properties: {},
+          required: [],
+        },
+      },
+      execute: async () => {
+        if (!devServerManager.isActive()) {
+          return 'No dev server is running.'
+        }
+
+        try {
+          await devServerManager.stop()
+          return 'Dev server stopped.'
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error)
+          return `Error stopping dev server: ${msg}`
+        }
+      },
     })
 
 
@@ -3149,7 +4256,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('delegate', {
       definition: {
         name: 'delegate',
-        description: 'Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (glob, search_files, read_file, list_directory). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup (web_search, web_fetch, read_skill). Use for "find the API docs for X", "what\'s the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn.\n  • If you have nothing else to do, end your turn. Team results will be available on your next interaction. Tell the user you delegated the task and will synthesize results when ready.\n  • Do NOT call collect_results immediately after spawning unless you need the results right now to continue your current work.\n\nWhen NOT to use:\n  • The task is a single read_file call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.',
+        description: `Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (${GLOB_ALIAS}, ${GREP_ALIAS}, ${READ_ALIAS}, ${LS_ALIAS}). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup + read-only diagnostics (web_search, web_fetch, read_skill, curl via execute_command). Use for "find the API docs for X", "what's the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. Results are DELIVERED to you automatically when each member finishes — mid-run at your next step if you are still working, or by an auto-wake if you are idle. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn — results will arrive as you work.\n  • If you have nothing else to do, end your turn and tell the user you delegated and will synthesize when the results arrive.\n  • NEVER poll collect_results while members are running — it is a manual fallback for full untruncated text, not a waiting mechanism.\n\nWhen NOT to use:\n  • The task is a single ${READ_ALIAS} call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -3157,6 +4264,16 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
               type: 'string',
               enum: ['Explore', 'Research', 'Verify'],
               description: 'Which team member to delegate to.'
+            },
+            member: {
+              type: 'string',
+              enum: ['Explore', 'Research', 'Verify'],
+              description: 'Alias for subagent_type. Which team member to delegate to.'
+            },
+            team_member: {
+              type: 'string',
+              enum: ['Explore', 'Research', 'Verify'],
+              description: 'Alias for subagent_type. Which team member to delegate to.'
             },
             description: {
               type: 'string',
@@ -3166,27 +4283,108 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
               type: 'string',
               description: 'Self-contained task description. The team member sees nothing from your conversation. Be specific about what you need back as a final summary.'
             },
+            task: {
+              type: 'string',
+              description: 'Alias for prompt. Self-contained task description.'
+            },
             thoroughness: {
               type: 'string',
               enum: ['quick', 'medium', 'thorough'],
               description: 'Controls search depth. "quick" = first match, stop. "medium" = check 2-3 locations. "thorough" = comprehensive sweep across naming conventions and edge cases. Default: medium.'
             }
           },
-          required: ['subagent_type', 'description', 'prompt']
+          required: []
         },
         concurrencySafe: true,
       },
       execute: async (input) => {
-        const subagentType = input.subagent_type as string
-        const description = (input.description as string) || 'delegation'
-        const prompt = input.prompt as string
+        // ── Alias normalization ──
+        // The schema's canonical field is `subagent_type`, but models may send
+        // `member`, `type`, `agentType`, `subAgentType`, or `name` instead.
+        // Normalize defensively so a field-name mismatch never silently breaks
+        // delegation. The canonical field in the schema is `subagent_type`;
+        // `member` is declared as an alias property so the model sees it too.
+        const ALIASES = ['subagent_type', 'member', 'team_member', 'teamMember', 'type', 'agentType', 'subAgentType', 'name'] as const
+        let rawMember: string | undefined
+        for (const alias of ALIASES) {
+          const v = input[alias]
+          if (typeof v === 'string' && v.trim()) {
+            rawMember = v.trim()
+            break
+          }
+        }
+
+        // Track telemetry for the usage log (read by query.ts onRequestUsage).
+        this.lastDelegateInfo = {
+          requestedMember: rawMember ?? null,
+          resolvedMember: null,
+          blocked: false,
+          blockedReason: null,
+          inputSchemaVersion: 'v2-aliases',
+          recoveryAttempted: false,
+        }
+
+        const AVAILABLE = ['Explore', 'Research', 'Verify']
+        if (!rawMember) {
+          this.lastDelegateInfo.blocked = true
+          this.lastDelegateInfo.blockedReason = 'No member field found in input'
+          throw new Error(JSON.stringify({
+            status: 'blocked',
+            reason: 'No team member specified. Pass subagent_type (or member alias) as one of: Explore, Research, Verify.',
+            receivedInput: Object.keys(input),
+            availableMembers: AVAILABLE,
+          }))
+        }
+
+        // Case-insensitive resolve against the canonical names.
+        const resolved = AVAILABLE.find((a) => a.toLowerCase() === rawMember!.toLowerCase())
+        if (!resolved) {
+          this.lastDelegateInfo.blocked = true
+          this.lastDelegateInfo.blockedReason = `Unknown member '${rawMember}'`
+          throw new Error(JSON.stringify({
+            status: 'blocked',
+            reason: `Unknown team member '${rawMember}'. Available: ${AVAILABLE.join(', ')}.`,
+            receivedInput: { member: rawMember, description: input.description, prompt: input.prompt },
+            availableMembers: AVAILABLE,
+          }))
+        }
+
+        this.lastDelegateInfo.resolvedMember = resolved
+        const subagentType = resolved
+        const prompt =
+          typeof input.prompt === 'string' && input.prompt.trim()
+            ? input.prompt
+            : typeof input.task === 'string' && input.task.trim()
+              ? input.task
+              : ''
+        if (!prompt) {
+          this.lastDelegateInfo.blocked = true
+          this.lastDelegateInfo.blockedReason = 'No prompt/task field found in input'
+          throw new Error(JSON.stringify({
+            status: 'blocked',
+            reason: 'No task prompt specified. Pass prompt (or task alias) with a self-contained task for the team member.',
+            receivedInput: Object.keys(input),
+            availableMembers: AVAILABLE,
+          }))
+        }
+        const description =
+          (typeof input.description === 'string' && input.description.trim())
+            ? input.description
+            : prompt.split(/\s+/).slice(0, 5).join(' ')
         const thoroughness = (input.thoroughness as string as 'quick' | 'medium' | 'thorough') || 'medium'
 
         // Resolve the definition (concurrent limit is checked atomically inside startRun)
         const { getAgentDefinition } = await import('./subAgents/builtInAgents')
         const def = getAgentDefinition(subagentType as 'Explore' | 'Research' | 'Verify')
         if (!def) {
-          return `Blocked: unknown sub-agent type '${subagentType}'. Available: Explore, Research, Verify.`
+          this.lastDelegateInfo.blocked = true
+          this.lastDelegateInfo.blockedReason = `getAgentDefinition returned null for '${subagentType}'`
+          throw new Error(JSON.stringify({
+            status: 'blocked',
+            reason: `Internal error: team member '${subagentType}' is recognized but has no definition. Available: ${AVAILABLE.join(', ')}.`,
+            receivedInput: { member: rawMember },
+            availableMembers: AVAILABLE,
+          }))
         }
 
         // Build filtered tools — only the sub-agent's allowed tools
@@ -3243,9 +4441,10 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
             parentMessageId,
             parentCtx,
             filteredTools,
+            requestType: this.requestType ?? undefined,
           })
         } catch (e) {
-          return `Error: ${e instanceof Error ? e.message : String(e)}`
+          throw new Error(`Failed to start ${subagentType} sub-agent: ${e instanceof Error ? e.message : String(e)}`)
         }
 
         // Wire subAgentRunIds so SubAgentCard renders in the UI.
@@ -3261,7 +4460,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('collect_results', {
       definition: {
         name: 'collect_results',
-        description: 'Collect results from team members. Returns immediately with all finished results. If some members are still running, their status is shown but results are not yet available — call collect_results again later to get them. This is non-blocking by design.',
+        description: 'Collect results from team members. Returns immediately with all finished results. If some members are still running, their status is shown but results are not yet available. Do not poll repeatedly; the system auto-wakes you when new results arrive. After seeing running tasks, end your turn unless you have independent work to do.',
         input_schema: {
           type: 'object',
           properties: {},
@@ -3277,51 +4476,37 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           return 'No team tasks are active. Use the delegate tool to assign work to team members first.'
         }
 
-        const summaries = store.getRunSummaries()
-        const lines: string[] = ['## Team Results\n']
+        const { buildTeamResultsReport } = await import('./subAgents/resultsReport')
+        const { markSubAgentResultsDelivered } = await import('./subAgents/autoWake')
 
-        let runningCount = 0
-
-        for (const s of summaries) {
-          const duration = (s.duration / 1000).toFixed(0)
-          const icon = s.status === 'completed' ? '✅'
-            : s.status === 'error' ? '❌'
-            : s.status === 'timeout' ? '⏰'
-            : s.status === 'aborted' ? '🛑'
-            : '⏳'
-
-          if (s.status === 'running') {
-            runningCount++
-            // Show last tool call so the user/model can see the sub-agent is making progress
-            const run = store.runs.get(s.id)
+        const report = buildTeamResultsReport(store.getRunSummaries(), {
+          includeRunning: true,
+          lastActionFor: (id) => {
+            // Last tool call so the model can see the sub-agent is progressing.
+            const run = store.runs.get(id)
             const lastTc = run?.toolCalls.length ? run.toolCalls[run.toolCalls.length - 1] : null
-            const lastAction = lastTc ? ` — last action: ${lastTc.toolName} (${lastTc.status})` : ''
-            lines.push(`### ${icon} ${s.agentType}: "${s.description}" — still running (${duration}s, ${s.toolCallCount} tool calls so far${lastAction})`)
-          } else {
-            lines.push(`### ${icon} ${s.agentType}: "${s.description}" (${duration}s, ${s.toolCallCount} tool calls)`)
-            if (s.tokenUsage) {
-              lines.push(`Tokens: ${s.tokenUsage.input.toLocaleString()} in / ${s.tokenUsage.output.toLocaleString()} out`)
-            }
-            if (s.status === 'error' && s.errorText) {
-              lines.push(`Error: ${s.errorText}`)
-            } else if (s.finalText) {
-              lines.push(s.finalText)
-            } else if (s.status === 'aborted') {
-              lines.push('Task was aborted.')
-            }
-          }
-          lines.push('') // blank separator
-        }
+            return lastTc ? `${lastTc.toolName} (${lastTc.status})` : null
+          },
+        })
 
-        if (runningCount > 0) {
-          lines.push(`${runningCount} team member${runningCount > 1 ? 's' : ''} still working. Results will be available when they finish.`)
+        // These results are now in the model's context — the push-delivery
+        // path must never re-send them.
+        markSubAgentResultsDelivered(report.finishedIds)
+
+        const lines = [report.text]
+        if (report.runningCount > 0) {
+          lines.push(
+            `${report.runningCount} team member${report.runningCount > 1 ? 's are' : ' is'} still working. ` +
+            `Do NOT call collect_results again to wait — their results are DELIVERED to you automatically ` +
+            `(mid-run or via auto-wake). End your turn unless you have independent work to do.`,
+          )
         }
 
         // Only clear completed runs when ALL runs are done (no running left).
         // If some are still running, keep completed ones so the model can still
-        // reference them in its next turn (the auto-wake will fire again when
-        // the remaining ones finish).
-        if (runningCount === 0) {
+        // reference them in its next turn (deliveries fire again as the
+        // remaining ones finish).
+        if (report.runningCount === 0) {
           store.clearCompleted()
         }
 
@@ -3330,10 +4515,12 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     })
 
     // ── Domain extractions (SOLID decomposition) ─────────────────────
+    // provision_* tools (managed-platform auth/database/files/deploy) were
+    // deregistered in the dev-only-IDE pivot (2026-07); the managed layer
+    // lives in TM Code Web.
     registerTaskTools(this.ctx)
     registerMemoryTools(this.ctx)
     registerInteractionTools(this.ctx)
-    registerProvisionTools(this.ctx)
 
     // === agent_shell_* (persistent PTY controlled by the agent) ===
     this.tools.set('agent_shell_start', {
@@ -3343,7 +4530,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         input_schema: {
           type: 'object',
           properties: {
-            cwd: { type: 'string', description: 'Working directory. Defaults to project root or Terminal mode cwd.' },
+            cwd: { type: 'string', description: 'Working directory. Defaults to the project root or active workspace cwd.' },
             wait_ms: { type: 'number', description: 'How long to wait for the initial shell prompt/output. Default: 500. Max: 5000.' },
           },
           required: [],
@@ -3752,7 +4939,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         // Verification agent: read-only + execute (NO write/edit/create tools).
         // execute_command gets a modified description warning about read-only restrictions.
         const verifierToolNames = new Set([
-          'read_file', 'list_directory', 'search_files', 'glob',
+          'read_file', READ_AROUND, 'list_directory', 'search_files', 'glob',
           'execute_command', 'read_dev_server_logs',
           'read_large_result',
         ])

@@ -14,6 +14,7 @@ import { useByokStore } from '../../stores/byokStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { createByokAgentClient } from './sdkClient'
+import { extractAssistantTextFromCompletion } from './completionText'
 import { resolveThinkingHint } from './thinkingShapeDetection'
 import { BYOK_THINKING_BUDGET_TOKENS } from './agentConfig'
 import type { ByokSessionSnapshot } from '../../types/chat'
@@ -22,6 +23,40 @@ import { isFreePlan } from './byokPlans'
 
 // Re-export so existing importers (and tests) can keep getting it from here.
 export { isFreePlan }
+
+const ANTHROPIC_ADAPTIVE_THINKING_MODELS = [
+  /^claude-fable-5(?:-|$)/,
+  /^claude-mythos-5(?:-|$)/,
+  /^claude-mythos-preview(?:-|$)/,
+  /^claude-opus-4-(?:6|7|8)(?:-|$)/,
+  /^claude-sonnet-4-6(?:-|$)/,
+]
+
+type ByokReasoningEffort = NonNullable<ByokSessionSnapshot['reasoningEffort']>
+
+function defaultReasoningEffort(snapshot: ByokSessionSnapshot): ByokReasoningEffort {
+  if (snapshot.reasoningEffort) return snapshot.reasoningEffort
+  return 'medium'
+}
+
+function openAICompatibleReasoningEffort(effort: ByokReasoningEffort): 'low' | 'medium' | 'high' {
+  if (effort === 'xhigh' || effort === 'max') return 'high'
+  return effort
+}
+
+function anthropicThinkingConfig(snapshot: ByokSessionSnapshot): Record<string, unknown> {
+  const effort = defaultReasoningEffort(snapshot)
+  const usesAdaptiveThinking = ANTHROPIC_ADAPTIVE_THINKING_MODELS.some((pattern) =>
+    pattern.test(snapshot.modelId),
+  )
+  if (usesAdaptiveThinking) {
+    return {
+      thinking: { type: 'adaptive' },
+      output_config: { effort },
+    }
+  }
+  return { thinking: { type: 'enabled', budget_tokens: BYOK_THINKING_BUDGET_TOKENS } }
+}
 
 /** The active session's frozen BYOK snapshot + whether BYOK routing is live. */
 export function resolveActiveByokSnapshot(): {
@@ -82,7 +117,7 @@ export async function byokAuxCompletion(
       body as unknown as OpenAI.ChatCompletionCreateParamsNonStreaming,
       params.signal ? { signal: params.signal } : undefined,
     )
-    return resp.choices?.[0]?.message?.content ?? null
+    return extractAssistantTextFromCompletion(resp) || null
   } catch {
     return null
   }
@@ -163,13 +198,13 @@ export function buildByokThinkingConfig(
   })
   switch (thinkingShape) {
     case 'anthropic':
-      return { thinking: { type: 'enabled', budget_tokens: BYOK_THINKING_BUDGET_TOKENS } }
+      return anthropicThinkingConfig(snapshot)
     case 'qwen_enable_thinking':
       return { enable_thinking: true }
     case 'openai_reasoning_effort':
     case 'gemini_thinking_budget':
       // Gemini's OpenAI-compat endpoint maps reasoning_effort → thinkingConfig.
-      return { reasoning_effort: 'medium' }
+      return { reasoning_effort: openAICompatibleReasoningEffort(defaultReasoningEffort(snapshot)) }
     default:
       return undefined
   }

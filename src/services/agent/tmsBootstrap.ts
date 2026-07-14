@@ -1,38 +1,330 @@
-/**
- * TMS.md bootstrap service for external projects.
- *
- * When a project opened in TM Code lacks TMS.md (and has meaningful content),
- * this module provides a focused prompt that instructs the agent to:
- *   1. Analyze the project (read package.json, scan structure, detect framework)
- *   2. Create TMS.md at the project root
- *   3. Start the dev server using the detected command
- *
- * The prompt is designed to be the sole user input in a dedicated agent turn —
- * the agent has no competing user intent and must focus entirely on project setup.
- *
- * Reuses `buildInitPrompt` from initCommand.ts to avoid template duplication.
- *
- * @module tmsBootstrap
- */
+import { invoke } from '@/utils/invokeMetrics'
+import { setTmsTurnTelemetry } from './tmsContext'
+import type { TranslationKey } from '../../i18n'
 
-import { buildInitPrompt } from './commands/initCommand'
+const REQUIRED_SECTION_ALIASES = [
+  ['overview', 'visao geral'],
+  ['stack'],
+  ['commands', 'comandos'],
+  ['structure', 'estrutura'],
+  ['entrypoints'],
+  ['project patterns', 'padroes do projecto'],
+  ['agent rules', 'regras para o agente'],
+  ['confirmed'],
+  ['inferred'],
+  ['pending confirmation'],
+  ['lastgeneratedat'],
+  ['sourcefilesused'],
+]
 
-/**
- * Returns a focused bootstrap prompt for TMS.md creation + dev server start.
- * The caller runs this as a standalone agent turn before the user's real message.
- *
- * @param projectPath  Absolute path to the project root.
- */
-export function getTmsBootstrapPrompt(projectPath: string): string {
-  // Reuse the same prompt as /init (no existing TMS.md case)
-  const initPrompt = buildInitPrompt(projectPath, null)
+function estimateTokens(text: string): number {
+  return text ? Math.ceil(text.length / 4) : 0
+}
 
-  // Append dev server instruction — not part of /init (which lets the user decide)
-  return `${initPrompt}
+export interface TmsPreflightResult {
+  tmsFound: boolean
+  valid: boolean
+  stale: boolean
+  created: false
+  path: string
+  shouldBootstrap: boolean
+  reason: 'missing' | 'invalid' | 'stale' | 'ok'
+}
 
-After writing TMS.md, start the dev server using start_dev_server with:
-- command: the dev command you detected from package.json (e.g. "npm start", "npm run dev", "yarn dev")
-- project_kind: "frontend", "backend", or "fullstack" based on your analysis
+export function getTmsBootstrapStartMessageKey(result: TmsPreflightResult): TranslationKey {
+  if (result.reason === 'missing') return 'common.tmsBootstrapMissingStart'
+  if (result.reason === 'stale') return 'common.tmsBootstrapStaleStart'
+  return 'common.tmsBootstrapRepairStart'
+}
 
-If you cannot determine the dev command, skip the dev server step and report what you found.`
+export function getTmsBootstrapCompleteMessageKey(tmsCreated: boolean): TranslationKey {
+  return tmsCreated ? 'common.tmsBootstrapCreatedComplete' : 'common.tmsBootstrapUpdatedComplete'
+}
+
+function formatOriginalRequestForBootstrap(originalUserMessage?: string): string {
+  const trimmed = originalUserMessage?.trim()
+  if (!trimmed) return 'Original user request: (not included in this preflight).'
+  const compact = trimmed.length > 1200
+    ? `${trimmed.slice(0, 1200).trimEnd()}\n...[truncated]`
+    : trimmed
+  return `Original user request, pending for the next phase:\n${compact}`
+}
+
+function normalizeSectionName(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+}
+
+function parseSectionNames(content: string): string[] {
+  return content
+    .split('\n')
+    .filter(line => /^#{1,3}\s+/.test(line.trim()))
+    .map(line => normalizeSectionName(line.replace(/^#{1,3}\s+/, '').trim()))
+}
+
+function validateTms(content: string): boolean {
+  const sections = parseSectionNames(content)
+  return REQUIRED_SECTION_ALIASES.every(aliases =>
+    aliases.some(required => sections.some(section => section.includes(required))),
+  )
+}
+
+function parseLastGeneratedAt(content: string): string | null {
+  const match =
+    content.match(/lastGeneratedAt\s*:\s*([^\n]+)/i) ??
+    content.match(/##\s+lastGeneratedAt\s*\n+([^\n]+)/i)
+  return match?.[1]?.trim().replace(/^[-*]\s*/, '') ?? null
+}
+
+function parseSourceFilesUsed(content: string): string[] {
+  const section = content.match(/##\s+sourceFilesUsed\s*\n([\s\S]*?)(?=\n##\s+|\n#\s+|$)/i)?.[1] ?? ''
+  const lines = section
+    .split('\n')
+    .map(line => line.trim().replace(/^[-*]\s*/, ''))
+    .filter(Boolean)
+  return lines.filter(line =>
+    !line.startsWith('list_directory:') &&
+    !line.startsWith('glob:') &&
+    !line.startsWith('search_files:') &&
+    !line.startsWith('LS:') &&
+    !line.startsWith('Glob:') &&
+    !line.startsWith('Grep:') &&
+    !line.startsWith('Read:'),
+  )
+}
+
+async function isTmsStale(projectPath: string, content: string): Promise<boolean> {
+  const generatedRaw = parseLastGeneratedAt(content)
+  if (!generatedRaw) return false
+  const generatedMs = Date.parse(generatedRaw)
+  if (!Number.isFinite(generatedMs)) return false
+  const sourceFiles = parseSourceFilesUsed(content)
+  if (sourceFiles.length === 0) return false
+
+  for (const rel of sourceFiles.slice(0, 40)) {
+    try {
+      const stat = await invoke<{ modifiedMs: number | null }>('file_stat', {
+        path: `${projectPath}/${rel}`,
+      })
+      if (stat.modifiedMs && stat.modifiedMs > generatedMs) return true
+    } catch {
+      // Missing source files do not block the user's task.
+    }
+  }
+  return false
+}
+
+export function buildTmsBootstrapOnlyPrompt(result: TmsPreflightResult, originalUserMessage?: string): string {
+  if (!result.shouldBootstrap) return ''
+
+  const reasonText =
+    result.reason === 'missing'
+      ? 'TMS.md was not found'
+      : result.reason === 'invalid'
+        ? 'TMS.md exists but is incomplete or invalid'
+        : 'TMS.md appears stale based on lastGeneratedAt/sourceFilesUsed metadata'
+  const detectedText =
+    result.reason === 'missing'
+      ? 'You, as the coding agent, detected that the project memory/map is missing before executing the original request.'
+      : result.reason === 'invalid'
+        ? 'You, as the coding agent, detected that an existing TMS.md needs repair before executing the original request.'
+        : 'You, as the coding agent, detected that an existing TMS.md appears stale before executing the original request.'
+  const operationalDecision =
+    result.reason === 'missing'
+      ? 'First map the project and create TMS.md; then handle the original user request with that context.'
+      : 'First read and preserve the existing TMS.md, refresh/repair it with a focused project map, then handle the original user request with that context.'
+  const writeVerb = result.reason === 'missing' ? 'created' : 'updated'
+
+  return `TM Code internal preflight: ${reasonText}.
+
+The user did NOT ask you to create TMS.md. The user asked for a different task.
+${detectedText}
+
+${formatOriginalRequestForBootstrap(originalUserMessage)}
+
+Operational decision:
+${operationalDecision}
+
+Current phase: project_bootstrap.
+
+Mandatory rules:
+- Do not treat TMS.md creation as the user's request.
+- Do not solve the original task in this phase.
+- Do not use execute_command.
+- Use only LS, Glob, Grep, and Read to map the project.
+- If TMS.md already exists, read it first with Read and preserve human-authored sections.
+- Read focused key files only: package.json, README, configs, and src/app entrypoints.
+- Avoid mass-reading the repository.
+- Create or repair ${result.path} with these sections:
+  - overview
+  - stack
+  - commands
+  - structure
+  - entrypoints
+  - project patterns
+  - agent rules
+  - confirmed
+  - inferred
+  - pending confirmation
+  - lastGeneratedAt
+  - sourceFilesUsed
+- After write_file/create_file confirms the file was ${writeVerb}, stop the bootstrap phase.
+- The host will display the localized completion status and resume the original request in a separate call.`
+}
+
+export async function runTmsPreflight(options: {
+  projectPath: string
+  originalUserMessageDisplayed: boolean
+  originalUserMessage?: string
+  skipBootstrap?: boolean
+}): Promise<TmsPreflightResult> {
+  const tmsPath = `${options.projectPath}/TMS.md`
+  let existing: string | null = null
+  try {
+    existing = await invoke<string>('read_file', { path: tmsPath })
+  } catch {
+    existing = null
+  }
+
+  if (existing === null) {
+    // Automatic project bootstrap is only for the missing-file case. If a
+    // TMS.md already exists, even if it is stale or incomplete, normal user
+    // messages must not be hijacked into repair work; /init is the explicit
+    // refresh path.
+    const shouldBootstrap = !options.skipBootstrap
+    const result: TmsPreflightResult = {
+      tmsFound: false,
+      valid: false,
+      stale: false,
+      created: false,
+      path: tmsPath,
+      shouldBootstrap,
+      reason: 'missing',
+    }
+    setTmsTurnTelemetry({
+      executionPhase: shouldBootstrap ? 'project_bootstrap' : 'original_task',
+      bootstrapCompleted: false,
+      originalTaskStarted: false,
+      originalTaskCompleted: false,
+      originalTaskFailedReason: undefined,
+      tmsFound: false,
+      tmsFoundAtStart: false,
+      tmsAvailable: false,
+      tmsAvailableAfterBootstrap: false,
+      tmsBootstrapCompleted: false,
+      tmsBootstrapTriggered: shouldBootstrap,
+      tmsCreated: false,
+      tmsAlreadyExists: false,
+      tmsBootstrapFailed: false,
+      tmsPath,
+      tmsBootstrapInputTokens: shouldBootstrap ? estimateTokens(buildTmsBootstrapOnlyPrompt(result, options.originalUserMessage)) : 0,
+      tmsBootstrapOutputTokens: 0,
+      tmsBootstrapPhase: shouldBootstrap ? 'preflight_missing' : 'missing_skipped',
+      tmsBootstrapToolset: shouldBootstrap ? 'project_bootstrap' : undefined,
+      tmsWriteAttempted: false,
+      tmsWriteToolCallId: undefined,
+      tmsBootstrapFailedReason: undefined,
+      tmsContextSentFullThisTurn: false,
+      tmsContextStubTokens: 0,
+      tmsStubTokens: 0,
+      tmsSectionsAvailable: [],
+      tmsSectionsLoaded: [],
+      tmsRequestedSections: [],
+      tmsSectionsRequested: [],
+      originalUserMessageDisplayed: options.originalUserMessageDisplayed,
+      originalTaskResumedAfterBootstrap: false,
+      originalTaskResumeRequestId: undefined,
+      mutableTask: false,
+      originalTaskWriteActionCount: 0,
+      originalTaskFirstWriteTurn: undefined,
+      noEditGuardTriggered: false,
+      noEditGuardReason: undefined,
+      noEditRecoveryAction: undefined,
+      readBeforeWriteBlocked: false,
+      readBeforeWriteBlockCount: 0,
+      readBeforeWriteBlockedTools: [],
+      readBeforeWriteBlockedReasons: [],
+      symbolIndexRequested: false,
+      symbolIndexFilesConsidered: 0,
+      symbolIndexFilesScanned: 0,
+      symbolIndexEntries: 0,
+      symbolIndexTruncated: false,
+      symbolIndexTokensEstimate: 0,
+      shellReadBlocked: false,
+      shellReadConvertedToFileTool: false,
+      executeCommandPurpose: undefined,
+    })
+    return result
+  }
+
+  const valid = validateTms(existing)
+  const stale = await isTmsStale(options.projectPath, existing)
+  const reason: TmsPreflightResult['reason'] = !valid ? 'invalid' : stale ? 'stale' : 'ok'
+  const shouldBootstrap = false
+  const result: TmsPreflightResult = {
+    tmsFound: true,
+    valid,
+    stale,
+    created: false,
+    path: tmsPath,
+    shouldBootstrap,
+    reason,
+  }
+
+  setTmsTurnTelemetry({
+    executionPhase: shouldBootstrap ? 'project_bootstrap' : 'original_task',
+    bootstrapCompleted: !shouldBootstrap,
+    originalTaskStarted: false,
+    originalTaskCompleted: false,
+    originalTaskFailedReason: undefined,
+    tmsFound: true,
+    tmsFoundAtStart: true,
+    tmsAvailable: true,
+    tmsAvailableAfterBootstrap: true,
+    tmsBootstrapCompleted: true,
+    tmsBootstrapTriggered: shouldBootstrap,
+    tmsCreated: false,
+    tmsAlreadyExists: !shouldBootstrap,
+    tmsBootstrapFailed: false,
+    tmsPath,
+    tmsBootstrapInputTokens: shouldBootstrap ? estimateTokens(buildTmsBootstrapOnlyPrompt(result, options.originalUserMessage)) : 0,
+    tmsBootstrapOutputTokens: 0,
+    tmsBootstrapPhase: reason === 'ok' ? 'already_exists' : `already_exists_${reason}`,
+    tmsBootstrapToolset: undefined,
+    tmsWriteAttempted: false,
+    tmsWriteToolCallId: undefined,
+    tmsBootstrapFailedReason: undefined,
+    tmsContextSentFullThisTurn: false,
+    tmsContextStubTokens: 0,
+    tmsStubTokens: 0,
+    tmsSectionsAvailable: [],
+    tmsSectionsLoaded: [],
+    tmsRequestedSections: [],
+    tmsSectionsRequested: [],
+    originalUserMessageDisplayed: options.originalUserMessageDisplayed,
+    originalTaskResumedAfterBootstrap: false,
+    originalTaskResumeRequestId: undefined,
+    mutableTask: false,
+    originalTaskWriteActionCount: 0,
+    originalTaskFirstWriteTurn: undefined,
+    noEditGuardTriggered: false,
+    noEditGuardReason: undefined,
+    noEditRecoveryAction: undefined,
+    readBeforeWriteBlocked: false,
+    readBeforeWriteBlockCount: 0,
+    readBeforeWriteBlockedTools: [],
+    readBeforeWriteBlockedReasons: [],
+    symbolIndexRequested: false,
+    symbolIndexFilesConsidered: 0,
+    symbolIndexFilesScanned: 0,
+    symbolIndexEntries: 0,
+    symbolIndexTruncated: false,
+    symbolIndexTokensEstimate: 0,
+    shellReadBlocked: false,
+    shellReadConvertedToFileTool: false,
+    executeCommandPurpose: undefined,
+  })
+  return result
 }

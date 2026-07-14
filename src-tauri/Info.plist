@@ -4,5 +4,9 @@
 <dict>
 	<key>NSAllowsLocalNetworking</key>
 	<true/>
+	<!-- Team voice calls (getUserMedia). Required by TCC — without it macOS
+	     kills the process on first mic access. See also entitlements.plist. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>TM Code usa o microfone nas chamadas de voz da equipa. / TM Code uses the microphone for team voice calls.</string>
 </dict>
 </plist>

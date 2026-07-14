@@ -1,5 +1,4 @@
 import { useState, useCallback, useRef, useEffect, useSyncExternalStore } from 'react'
-import { invoke } from '@/utils/invokeMetrics'
 import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals, generateId } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { MODEL_PROFILES, getProfileForPlan } from '../../services/agent/modelProfiles'
@@ -7,15 +6,19 @@ import { describeImagesViaSidecar } from '../../services/agent/visionSidecar'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore, selectIsPreviewServerRunning } from '../../stores/layoutStore'
 import { useBillingStore } from '../../stores/billingStore'
+import { useByokStore } from '../../stores/byokStore'
 import { useAuthStore } from '../../stores/authStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
 import { useProblemsStore } from '../../stores/problemsStore'
+import { useToastStore } from '../../stores/toastStore'
+import { activatePreview, detectDevCommand, ensureDevServerRunning } from '../../services/previewActivation'
 import { devServerManager } from '../../services/devServerManager'
-import { activatePreview } from '../../services/previewActivation'
+import { improveUserPrompt } from '../../services/promptImprovementService'
 import AgentService from '../../services/agent/agentService'
 import ToolExecutor from '../../services/agent/toolExecutor'
 import ContextBuilder from '../../services/agent/contextBuilder'
+import { classifyIntent } from '../../services/agent/intentRouter'
 import MCPService from '../../services/mcp/mcpService'
 import { browserSession } from '../../services/browserSessionManager'
 import { isSlashCommandAllowedForPlan, slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
@@ -24,19 +27,17 @@ import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenSe
 import { findMentionAtCursor, findMentionTokenEnd } from '../../utils/mentionParser'
 import { preprocessHashtags } from '../../services/agent/hashtagRegistry'
 import { useHashtagMenu } from './useHashtagMenu'
-import { guardScaffoldReapply } from './scaffoldReapplyGuard'
-import { scaffoldKeyLabel, type ScaffoldKey } from '../../services/scaffoldingDetector'
 import { t } from '@/i18n'
-import { runAuthFlow, runDesignFlow } from '../../services/agent/commands/authCommand'
+import { runDesignFlow } from '../../services/agent/commands/authCommand'
 import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, resolveImageToDataUri } from '../../services/attachmentService'
 import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from '../../services/agent/atMentions'
 import {
   enqueue as enqueueMessage,
-  clearCommandQueue as clearMessageQueue,
-  dequeueAllMatching,
-  isSlashCommand,
+  drainSteerableMessages,
   joinPromptValues,
+  setQueuePaused,
 } from '../../services/agent/messageQueue'
+import { stopAgentRun } from '../../services/agent/stopAgentRun'
 import type { OpenAIContentPart } from '../../services/agent/agentService'
 // getModelProfile removed — model decided by backend based on plan
 import {
@@ -50,8 +51,17 @@ import { getQueryGuard } from '../../services/agent/queryGuard'
 import { isAtBlockingLimit, totalContextTokens } from '../../utils/contextWindow'
 import { enqueueSerializedRun } from '../../services/agent/agentRunner'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
+import type { ByokSessionSnapshot, ConversationMessage } from '../../types/chat'
 import { useQueueProcessor } from '../../hooks/useQueueProcessor'
 import { classifyPendingPlanIntent } from '../../services/agent/planResumeIntent'
+import {
+  buildTmsBootstrapOnlyPrompt,
+  getTmsBootstrapCompleteMessageKey,
+  getTmsBootstrapStartMessageKey,
+  runTmsPreflight,
+  type TmsPreflightResult,
+} from '../../services/agent/tmsBootstrap'
+import { getTmsTurnTelemetry, markOriginalTaskFailed } from '../../services/agent/tmsContext'
 
 /**
  * ServiceError codes that mean "transient upstream / network problem the user
@@ -70,35 +80,26 @@ const RECOVERABLE_UPSTREAM_CODES = new Set<string>([
   'STREAM_ERROR',     // SSE error event mid-turn
 ])
 
-/**
- * Detect the dev command for a project by checking manifest and package.json.
- * Extracted as a standalone function so it can be called both from the
- * useEffect (periodic re-detection) AND from togglePreview (just-in-time
- * when the user clicks the preview button before detection ran).
- */
-async function detectDevCommand(projectPath: string): Promise<string | null> {
-  // 1. Check .toquemedia-template manifest
-  try {
-    const raw = await invoke<string>('read_file', { path: `${projectPath}/.toquemedia-template` })
-    if (raw) {
-      const manifest = JSON.parse(raw)
-      if (manifest.devCommand) return manifest.devCommand
-    }
-  } catch { /* no manifest */ }
-
-  // 2. Check package.json for "dev" or "start" script
-  try {
-    const raw = await invoke<string>('read_file', { path: `${projectPath}/package.json` })
-    if (raw) {
-      const pkg = JSON.parse(raw)
-      if (pkg.scripts?.dev) return 'npm run dev'
-      if (pkg.scripts?.start) return 'npm start'
-    }
-  } catch { /* no package.json */ }
-
-  return null
-}
 import { logger } from '../../utils/logger'
+
+function resolveByokNativeVision(snapshot: ByokSessionSnapshot | null): boolean | null {
+  if (!snapshot) return null
+  if (snapshot.capabilities?.images !== undefined) return snapshot.capabilities.images
+
+  const byokState = useByokStore.getState()
+  const provider = byokState.providers.find(p => p.id === snapshot.providerId)
+  const config = byokState.perProviderConfig[snapshot.providerId]
+  const registryModel = provider?.models.find(m => m.id === snapshot.modelId)
+  if (registryModel) return registryModel.capabilities.images
+
+  const dynamicModel = config?.dynamicCatalog?.models.find(m => m.id === snapshot.modelId)
+  if (dynamicModel) return dynamicModel.capabilities.images
+
+  const userDefined = config?.userDefinedModel
+  if (userDefined?.id === snapshot.modelId) return userDefined.capabilities.images
+
+  return false
+}
 
 export function usePromptBar() {
   // Boolean-only selector. The full string used to live here (`s.draftInput`)
@@ -110,6 +111,17 @@ export function usePromptBar() {
   const hasInputContent = useChatStore(s => s.draftInput.trim().length > 0)
   const setInput = useChatStore(s => s.setDraftInput)
   const [devCommand, setDevCommand] = useState<string | null>(null)
+  const [isImprovingPrompt, setIsImprovingPrompt] = useState(false)
+  const [promptImprovementBackup, setPromptImprovementBackup] = useState<string | null>(null)
+  /**
+   * Composer Steer/Task toggle (visible only while the agent is busy).
+   * false → Enter steers the running task (claude-vaz parity, the default);
+   * true → Enter queues the message as a SEPARATE task that runs when the
+   * current one finishes (QueuedCommand.asTask). Sticky while the run
+   * lasts so the user can queue several tasks in a row; reset when the
+   * agent goes idle so the next run starts back at the parity default.
+   */
+  const [queueAsTask, setQueueAsTask] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const historyIndexRef = useRef(-1)
@@ -123,9 +135,32 @@ export function usePromptBar() {
   // Claude Code uses. Re-renders when reserve/tryStart/end/forceEnd fires.
   const queryGuard = getQueryGuard()
   const isAgentBusy = useSyncExternalStore(queryGuard.subscribe, queryGuard.getSnapshot)
+
+  // Reset the Steer/Task toggle whenever the agent goes idle — the toggle
+  // only has meaning against a live run, and the parity default (steer)
+  // must be restored for the next one.
+  useEffect(() => {
+    if (!isAgentBusy) setQueueAsTask(false)
+  }, [isAgentBusy])
+
+  // Sidebar "+ Nova tarefa" (and any other surface) can request task mode +
+  // focus without reaching into this hook's local state.
+  useEffect(() => {
+    const onNewTask = () => {
+      if (!getQueryGuard().getSnapshot()) return
+      setQueueAsTask(true)
+      // Defer focus so the composer re-render (toggle visible) lands first.
+      requestAnimationFrame(() => textareaRef.current?.focus())
+    }
+    window.addEventListener('app:new-task', onNewTask)
+    return () => window.removeEventListener('app:new-task', onNewTask)
+  }, [])
+
   const currentProject = useProjectStore(s => s.currentProject)
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewServerRunning = useLayoutStore(selectIsPreviewServerRunning)
+  const devServerStatus = useLayoutStore(s => s.devServer?.status ?? 'stopped')
+  const isPreviewServerLoading = useLayoutStore(s => s.isPreviewServerLoading)
   const previewHtmlContent = useLayoutStore(s => s.previewHtmlContent)
   const scaffoldPhase = useLayoutStore(s => s.scaffoldPhase)
   const isScaffolding = scaffoldPhase === 'installing' || scaffoldPhase === 'starting'
@@ -148,6 +183,9 @@ export function usePromptBar() {
   //   - If no devCommand: switches to preview view (shows "Waiting..." with instructions)
   // This ensures the user can always manually initiate the dev server.
   const hasPreview = !!currentProject?.path || isPreviewServerRunning || !!previewHtmlContent || !!devCommand
+  const canToggleDevServer = !!currentProject?.path || isPreviewServerRunning
+  const isDevServerActive = isPreviewServerRunning
+  const isDevServerStarting = devServerStatus === 'starting' || (isPreviewServerLoading && !isPreviewServerRunning)
 
   // Slash command menu state
   const [showCommandMenu, setShowCommandMenu] = useState(false)
@@ -163,8 +201,8 @@ export function usePromptBar() {
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0)
   const mentionStartRef = useRef(-1)
 
-  // #hashtag menu — closed-vocabulary skill triggers (e.g. #auth-google).
-  // State + handlers live in the shared hook (also used by cmd-mode).
+  // #hashtag menu — closed-vocabulary skill triggers (e.g. #design).
+  // State + handlers live in the shared hook used by prompt inputs.
   const hashtagMenu = useHashtagMenu({
     textareaRef,
     setInputValue: (next) => useChatStore.getState().setDraftInput(next),
@@ -206,33 +244,6 @@ export function usePromptBar() {
     // package.json with a "dev" script during scaffolding.
   }, [currentProject?.path, isAgentBusy])
 
-  // ── Already-applied scaffolding hints ─────────────────────────────
-  // Powers the "já aplicado" badge in HashtagMenu / SlashCommandMenu and
-  // the smart-router branch in handleSend below. Re-runs on project change
-  // and on agent-idle transitions (an agent turn may have just provisioned
-  // auth or scaffolded /payments). The detector caches per-projectPath so
-  // multiple subscribers don't re-scan the filesystem.
-  const [appliedHints, setAppliedHints] = useState<Map<string, string>>(new Map())
-  useEffect(() => {
-    if (!currentProject?.path) {
-      setAppliedHints(new Map())
-      return
-    }
-    let cancelled = false
-    Promise.all([
-      import('../../services/scaffoldingDetector'),
-    ]).then(async ([{ detectScaffolding, scaffoldFixHint, scaffoldUITrigger }]) => {
-      const state = await detectScaffolding(currentProject.path)
-      if (cancelled) return
-      const next = new Map<string, string>()
-      for (const key of state.applied) {
-        next.set(scaffoldUITrigger(key), scaffoldFixHint(key))
-      }
-      setAppliedHints(next)
-    }).catch(() => { /* non-critical — UI just shows no hints */ })
-    return () => { cancelled = true }
-  }, [currentProject?.path, isAgentBusy])
-
   // Auto-resize lived here when `input` was a reactive read on this hook.
   // Now that PromptTextarea owns the live subscription, it also owns the
   // height measurement (useLayoutEffect inside PromptTextarea). Leaving the
@@ -265,6 +276,7 @@ export function usePromptBar() {
   // Slash command input handler — detect "/" prefix and filter commands
   const handleInputChange = useCallback((value: string) => {
     setInput(value)
+    setPromptImprovementBackup(null)
 
     // Don't reset history index when the change came from history navigation
     if (navigatingHistoryRef.current) {
@@ -333,7 +345,7 @@ export function usePromptBar() {
       const cursorPos = textarea.selectionStart
       const text = textarea.value
 
-      // Closed-vocabulary hashtag (e.g. #auth-email-password, #auth-google).
+      // Closed-vocabulary hashtag (e.g. #design).
       // detect() returns true when a `#` token owns the autocomplete slot —
       // including the no-matches case — so we never fall through to the file
       // picker for an unknown tag.
@@ -605,16 +617,22 @@ export function usePromptBar() {
   const runAgentForPrompt = useCallback(async (
     content: PromptValue,
     skipUserMessage = false,
+    runOptions?: {
+      conversationHistoryOverride?: ConversationMessage[]
+      reuseAssistantMessage?: boolean
+    },
   ) => {
     const chatStore = useChatStore.getState()
     const agentStore = useAgentStore.getState()
     const projectPath = currentProject?.path || ''
     const projectType = currentProject?.projectType || 'unknown'
+    const historyBeforeCurrentUser = runOptions?.conversationHistoryOverride
+      ?? useChatStore.getState().conversationHistory
 
     // Ensure a session exists SYNCHRONOUSLY so addUserMessage below has a
     // home for the bubble. We use sync createSession (not async
     // createNewSession) for the same reason agentRunner.ts:113 does in
-    // cmd-mode: any await between dequeue and addUserMessage leaves the
+    // Direct prompt path: any await between dequeue and addUserMessage leaves the
     // chat blank for the duration — the queued strip already emptied,
     // and the bubble hasn't been added yet, so the user sees the message
     // disappear. App.tsx already initialised persistence for this project
@@ -622,53 +640,6 @@ export function usePromptBar() {
     // path is safe.
     if (!chatStore.activeSessionId) {
       chatStore.createSession(projectPath)
-    }
-
-    // ── TMS.md Bootstrap Gate ──
-    // When an external project lacks TMS.md, run a dedicated bootstrap turn
-    // that creates TMS.md and starts the dev server BEFORE processing the
-    // user's message. The recursive call uses skipUserMessage=true so the
-    // bootstrap prompt is invisible to the user — only the agent's work
-    // (reading files, creating TMS.md) appears in the chat.
-    const pState = useProjectStore.getState()
-    if (pState.noTmsFile && !pState.tmsBootstrapping && !skipUserMessage) {
-      pState.setTmsBootstrapping(true)
-      try {
-        const { getTmsBootstrapPrompt } = await import('../../services/agent/tmsBootstrap')
-        chatStore.addSystemMessage(t('common.tmsBootstrapStart'))
-
-        const bootstrapPrompt = getTmsBootstrapPrompt(projectPath)
-        const bootstrapOk = await runAgentForPrompt(bootstrapPrompt, true)
-
-        // Verify TMS.md was created
-        try {
-          await invoke('read_file', { path: `${projectPath}/TMS.md` })
-          pState.setNoTmsFile(false)
-          // Invalidate cached system prompt so next build picks up TMS.md
-          ContextBuilder.getInstance().invalidatePromptCache(projectPath)
-          if (bootstrapOk) {
-            chatStore.addSystemMessage(t('common.tmsBootstrapComplete'))
-
-            // Show the user's original message in the chat, then replace
-            // the content with a synthetic prompt that asks the agent to
-            // check with the user before proceeding. This prevents the
-            // redundant "run the project" after the bootstrap already did it.
-            const originalDisplay = extractDisplayFromValue(content)
-            chatStore.addUserMessage(originalDisplay.text, originalDisplay.attachments)
-
-            const originalText = typeof content === 'string' ? content : ''
-            content = `Project setup complete (TMS.md created, dev server started). The user's original request was: "${originalText}". Before doing anything else, ask the user if they still want you to carry out this request, since the initial setup is already done.`
-            skipUserMessage = true
-          }
-        } catch {
-          // TMS.md not created — show warning but continue with user's message
-          chatStore.addSystemMessage(t('common.tmsBootstrapFailed'))
-        }
-      } catch (err) {
-        logger.error('prompt', 'TMS bootstrap failed:', err)
-      } finally {
-        pState.setTmsBootstrapping(false)
-      }
     }
 
     // Render the user's bubble + assistant placeholder BEFORE the async
@@ -680,9 +651,26 @@ export function usePromptBar() {
       const blocks = typeof content === 'string' ? undefined : content
       chatStore.addUserMessage(display.text, display.attachments, blocks)
     }
-    chatStore.startAssistantMessage(
-      AgentService.getInstance().isThinkingRequestedForNextTurn(),
-    )
+
+    let tmsPreflight: TmsPreflightResult | null = null
+    if (projectPath && !skipUserMessage && !useProjectStore.getState().tmsBootstrapping) {
+      tmsPreflight = await runTmsPreflight({
+        projectPath,
+        originalUserMessageDisplayed: true,
+        originalUserMessage: display.text,
+      })
+    }
+    const bootstrapOnly = tmsPreflight?.shouldBootstrap === true
+
+    if (!runOptions?.reuseAssistantMessage) {
+      chatStore.startAssistantMessage(
+        AgentService.getInstance().isThinkingRequestedForNextTurn(),
+      )
+    }
+    if (bootstrapOnly) {
+      appendTextDeltaBuffered(`${t(getTmsBootstrapStartMessageKey(tmsPreflight!))}\n\n`)
+      flushBufferedDeltas()
+    }
     agentStore.setStatus('awaiting_response')
 
     // Split on model capability. Vision-capable models (Qwen 3.6 Plus
@@ -698,9 +686,18 @@ export function usePromptBar() {
     // free uses DeepSeek V3.2 (text-only).
     const { useBillingStore } = await import('../../stores/billingStore')
     const billingPlan = useBillingStore.getState().plan
-    const supportsAttachments = billingPlan !== 'explorer'
+    const planAllowsImagePipeline = billingPlan !== 'explorer'
+    const byokNativeVision = resolveByokNativeVision(chatStore.getActiveSession()?.byokSnapshot ?? null)
+    const modelName = useAgentStore.getState().modelName
+    const activeProfile = modelName && MODEL_PROFILES[modelName]
+      ? MODEL_PROFILES[modelName]
+      : getProfileForPlan(billingPlan)
+    const activeModelSupportsImageParts =
+      byokNativeVision !== null ? byokNativeVision : activeProfile.supportsAttachments
 
-    let userContent: string | OpenAIContentPart[] | null = null
+    let userContent: string | OpenAIContentPart[] | null = bootstrapOnly && tmsPreflight
+      ? buildTmsBootstrapOnlyPrompt(tmsPreflight, display.text)
+      : null
 
     // Bundle the Tauri-backed resolvers once — both helpers consume the
     // same shape, so call sites are immune to argument reordering.
@@ -709,7 +706,7 @@ export function usePromptBar() {
       resolveImageDataUri: resolveImageToDataUri,
     }
 
-    if (supportsAttachments && display.attachments.some(a => a.type === 'image')) {
+    if (!bootstrapOnly && planAllowsImagePipeline && display.attachments.some(a => a.type === 'image')) {
       // Build content parts (image_url). If buildContentParts returns null
       // (no images survived disk read / size limits / size budget), fall
       // through to the text path.
@@ -720,11 +717,7 @@ export function usePromptBar() {
         // active model (MiMo V2.5 Pro, GLM → supportsAttachments=false)
         // 404s with "no endpoints found that support image input". For those,
         // get an auxiliary image description and pass it to the agent as text.
-        const modelName = useAgentStore.getState().modelName
-        const activeProfile = modelName && MODEL_PROFILES[modelName]
-          ? MODEL_PROFILES[modelName]
-          : getProfileForPlan(billingPlan)
-        if (activeProfile.supportsAttachments) {
+        if (activeModelSupportsImageParts) {
           userContent = parts
         } else {
           const description = await describeImagesViaSidecar(parts)
@@ -738,9 +731,12 @@ export function usePromptBar() {
       }
     }
 
-    if (userContent === null) {
+    if (!bootstrapOnly && userContent === null) {
       // Text-only path — interleaved `<attached_image>` placeholders.
       userContent = await buildAugmentedPrompt(content, promptResolvers)
+    }
+    if (userContent === null) {
+      userContent = display.text
     }
 
     // ── @-mentions + external-modification sweep (claude-vaz parity) ──
@@ -750,12 +746,12 @@ export function usePromptBar() {
     // sweep covers files the model has in context that changed on disk
     // since it last saw them — claude-vaz injects the same note at turn
     // start via getAttachmentMessages.
-    try {
+    if (!bootstrapOnly) try {
       const mentionResolution = await resolveMentionContext(display.text)
       const changedContext = await collectChangedFileContext()
       if (mentionResolution.contextText || mentionResolution.imageParts.length > 0 || changedContext) {
         const applied = applyMentionResolution(
-          userContent, mentionResolution, changedContext, supportsAttachments,
+          userContent, mentionResolution, changedContext, activeModelSupportsImageParts,
         )
         userContent = applied.userContent
         // Persist on the user bubble so rebuildConversationHistory re-emits
@@ -800,17 +796,49 @@ export function usePromptBar() {
       }))
       const coreToolCount = ToolExecutor.getInstance().getCoreToolCount()
       // Pass the raw user text so contextBuilder can detect skill-trigger
-      // hashtags (#auth-google, #design, etc.) and inline the corresponding
-      // CRITICAL skill rules at turn 1 — before scaffoldingDetector has any
-      // filesystem markers to find.
-      const userMessageText = display.text
-      const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText)
+      // hashtags (#design, etc.) and inline the corresponding
+      // CRITICAL skill rules at turn 1.
+      const userMessageText = bootstrapOnly && tmsPreflight
+        ? buildTmsBootstrapOnlyPrompt(tmsPreflight, display.text)
+        : display.text
+      const rawHistory = bootstrapOnly
+        ? historyBeforeCurrentUser
+        : (runOptions?.conversationHistoryOverride ?? useChatStore.getState().conversationHistory)
+      // Intent Router: classify the user's intent via a lightweight model
+      // call (qwen3.7-plus, no tools, non-streaming) BEFORE assembling the
+      // system prompt. The result feeds the context builder (prompt profile +
+      // on-demand auxiliaries) and — via lastAuxiliarySelection — the
+      // ToolsetSelector (bound toolset + readOnly + requiresMutation).
+      // Replaces regex/keyword
+      // intent inference per the `no-regex-for-inference` rule. Never throws;
+      // on failure it falls back to { bugfix_local, readOnly:false } and
+      // buildSystemPrompt then uses the deterministic keyword classifier.
+      const intentStart = Date.now()
+      const intent = bootstrapOnly
+        ? {
+            profile: 'project_bootstrap' as const,
+            readOnly: false,
+            requiresMutation: true,
+            source: 'keyword' as const,
+            confidence: 'high' as const,
+            reason: 'TMS.md bootstrap preflight selected project_bootstrap before the original task',
+          }
+        : await classifyIntent(userMessageText, {
+            hasImage: display.attachments.some(a => a.type === 'image'),
+            conversationHistory: rawHistory,
+          })
+      const effectiveIntent = intent
+      AgentService.getInstance().clearPostTmsBootstrapToolProfile()
+      logger.info(
+        'agent',
+        `→ Intent router: profile=${effectiveIntent.profile} readOnly=${effectiveIntent.readOnly} requiresMutation=${effectiveIntent.requiresMutation} (${effectiveIntent.source}, ${Date.now() - intentStart}ms) — ${effectiveIntent.reason}`,
+      )
+      const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText, AgentService.getInstance().getAccessedFilePaths(), { profile: effectiveIntent.profile, readOnly: effectiveIntent.readOnly, requiresMutation: effectiveIntent.requiresMutation, reason: effectiveIntent.reason, source: effectiveIntent.source, confidence: effectiveIntent.confidence, error: effectiveIntent.error, diagnostics: effectiveIntent.diagnostics })
 
-      const rawHistory = useChatStore.getState().conversationHistory
       // The history is canonical (carries content parts when previous
       // turns had images). Downgrade to text if the active model is
       // text-only — its API cannot consume the array form.
-      const history = supportsAttachments
+      const history = activeModelSupportsImageParts
         ? rawHistory
         : downgradeHistoryToText(rawHistory)
       const agentService = AgentService.getInstance()
@@ -820,9 +848,11 @@ export function usePromptBar() {
       // agentRunner; a contabilidade real vive no worker ai-pass-through).
       useBillingStore.getState().resetLastRequestStats()
 
+      let streamedAssistantText = ''
       await agentService.runAgentLoop(userContent, history, {
         onTextDelta: (delta) => {
           agentStore.setStatus('generating')
+          streamedAssistantText += delta
           appendTextDeltaBuffered(delta)
         },
         onReasoningDelta: (delta) => {
@@ -844,54 +874,50 @@ export function usePromptBar() {
         onTurnComplete: () => {
           useChatStore.getState().incrementTurnCount()
         },
-        onDone: async () => {
+        onDone: async (finalText) => {
           flushBufferedDeltas()
-          useChatStore.getState().finalizeAssistantMessage()
-          agentStore.setStatus('idle')
+          if (finalText && finalText !== streamedAssistantText) {
+            const suffix = finalText.startsWith(streamedAssistantText)
+              ? finalText.slice(streamedAssistantText.length)
+              : finalText
+            if (suffix) {
+              appendTextDeltaBuffered(suffix)
+              flushBufferedDeltas()
+            }
+          }
+          const keepAssistantOpenForOriginalTask =
+            bootstrapOnly &&
+            (() => {
+              const tms = getTmsTurnTelemetry()
+              return tms.tmsCreated || tms.tmsAlreadyExists
+            })()
+          if (!keepAssistantOpenForOriginalTask) {
+            useChatStore.getState().finalizeAssistantMessage()
+          }
+          agentStore.setStatus(keepAssistantOpenForOriginalTask ? 'awaiting_response' : 'idle')
 
           // Re-scan project diagnostics after agent finishes
           useProblemsStore.getState().scanProject().catch(() => {})
 
           const layoutStore = useLayoutStore.getState()
 
-          // If preview server is running, reload and show preview
+          // If a preview server is running, keep it fresh but do not switch
+          // views. Chat-mode completion stays in Chat; the assistant's final
+          // answer tells the user to click Preview when they want to inspect it.
           if (selectIsPreviewServerRunning(layoutStore)) {
             layoutStore.reloadPreview()
-            layoutStore.setViewMode('preview')
-            return
-          }
-
-          // If a server is already starting (e.g. postScaffoldPipeline kicked
-          // it off and waitForServerReady hasn't resolved yet), don't start a
-          // second one — the first will auto-transition when ready.
-          if (devServerManager.isActive()) return
-
-          // Otherwise, try to start preview if we have a dev command
-          if (devCommand && currentProject?.path) {
-            layoutStore.addDevServerLog(`Starting dev server (${devCommand})...`, 'info')
-            // Detect project kind so fullstack monorepos get dual-port kill
-            // and port-authoritative URL classification (not just 'frontend').
-            let projectKind: 'frontend' | 'backend' | 'fullstack' | undefined
-            try {
-              const { detectProjectCategory, categoryToServerHint } = await import('../../services/projectTypeDetector')
-              const cat = await detectProjectCategory(currentProject.path)
-              projectKind = categoryToServerHint(cat)
-            } catch { /* non-fatal */ }
-            try {
-              const { resolveFrontendPortHint } = await import('../../services/templateService')
-              const frontendPortHint = projectKind
-                ? await resolveFrontendPortHint(currentProject.path, projectKind)
-                : undefined
-              await devServerManager.start(currentProject.path, devCommand, { projectKind, frontendPortHint })
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err)
-              layoutStore.addDevServerLog(`Could not start dev server: ${msg}`, 'error')
-            }
           }
         },
         onError: (error) => {
           flushBufferedDeltas()
           resolveAllPendingDiffApprovals(false)
+          if (AgentService.getInstance().isAborted()) {
+            agentStore.setError(null)
+            agentStore.setStatus('cancelled')
+            useChatStore.getState().finalizeAssistantMessage()
+            hadError = true
+            return
+          }
           agentStore.setStatus('error')
           agentStore.setError(error.message)
           useChatStore.getState().finalizeAssistantMessage()
@@ -918,6 +944,12 @@ export function usePromptBar() {
           // é exclusiva do worker ai-pass-through — ver billingStore.ts.
           useBillingStore.getState().addLastRequestTokens(inputTokens + outputTokens)
         },
+        onRequestUsage: (entry) => {
+          // Persist per-provider-call usage for session export. Serialized
+          // runs wire this through in agentRunner; this direct AgentService
+          // path must bridge the callback here as well.
+          try { useChatStore.getState().addRequestUsage(entry) } catch { /* observability never blocks */ }
+        },
         onContextCompression: (event) => {
           if (event.type === 'hooks_start') {
             agentStore.setCompactPhase(event.hookType === 'pre_compact' ? 'hooks_pre' : 'hooks_post')
@@ -936,20 +968,34 @@ export function usePromptBar() {
         // queue until the WHOLE run goes idle — because the idle drain
         // (useQueueProcessor) is gated on `!isQueryActive` and can't fire while
         // the QueryGuard is held. That was the "queued messages só entram no
-        // chat depois do agente terminar" bug: the Terminal/CMD runner wired
-        // this collector (agentRunner.ts) but this Chat dispatch path never did,
-        // so `agentService` got `collectQueuedSteering: undefined` and the
+        // chat depois do agente terminar" bug: one dispatch path wired this
+        // collector (agentRunner.ts) but this direct path did not, so
+        // `agentService` got `collectQueuedSteering: undefined` and the
         // per-turn drain in query.ts was a no-op. Draining here rides the
         // steered message onto the NEXT turn of the live run. This path is
         // always foreground (runAgentForPrompt), so there's no background gate.
-        collectSteeringMessages: async (): Promise<string | null> => {
-          // Only plain prompt-mode messages steer. Slash/bash/task-notif
-          // commands need executeInput's per-command handling, so they stay
-          // queued for the idle drain when this run ends.
-          const drained = dequeueAllMatching(
-            c => !isSlashCommand(c) && c.mode === 'prompt',
-          )
-          if (drained.length === 0) return null
+        collectSteeringMessages: async (): Promise<string | OpenAIContentPart[] | null> => {
+          // Sub-agent results are PUSHED here (never polled): finished team
+          // members queue their formatted reports and the live run picks them
+          // up at this turn boundary.
+          const { drainSubAgentDeliveries } = await import('../../services/agent/subAgents/autoWake')
+          const deliveries = drainSubAgentDeliveries()
+          const withDeliveries = (
+            v: string | OpenAIContentPart[],
+          ): string | OpenAIContentPart[] =>
+            !deliveries
+              ? v
+              : typeof v === 'string'
+                ? `${deliveries}\n\n${v}`
+                : [{ type: 'text', text: deliveries }, ...v]
+
+          // Only steerable messages BEFORE the first queued task ride the
+          // live run (drainSteerableMessages): slash/bash need
+          // executeInput's per-command handling, tasks wait for the idle
+          // drain, and a steer message the user reordered BELOW a task
+          // belongs to that task's run — not to this one.
+          const drained = drainSteerableMessages()
+          if (drained.length === 0) return deliveries
 
           // Coalesce a burst into ONE steered turn (joinPromptValues preserves
           // block ordering, same as the queue's batched dispatch).
@@ -958,38 +1004,61 @@ export function usePromptBar() {
               ? joinPromptValues(drained.map(c => c.value))
               : drained[0]!.value
           const display = extractDisplayFromValue(merged)
+          const blocks = typeof merged === 'string' ? undefined : merged
 
-          // Transcript bookkeeping — keep the run continuous (no idle flicker)
-          // while showing the steered message in the right place:
-          //   [assistant so far] → [user: steered] → [fresh assistant bubble]
-          // flushBufferedDeltas first so buffered tokens land in the bubble
-          // we're finalizing, not the new one. onDone/onError still finalize
-          // the FRESH bubble opened below at the real end of the run.
-          flushBufferedDeltas()
           const cs = useChatStore.getState()
-          cs.finalizeAssistantMessage()
-          cs.addUserMessage(display.text, display.attachments)
-          cs.startAssistantMessage(agentService.isThinkingRequestedForNextTurn())
+          cs.splitForQueuedMessage(display.text, display.attachments, blocks)
 
-          // Model-facing text. buildAugmentedPrompt resolves file/folder
-          // attachments to XML; images degrade to <attached_image> markers
-          // (steering is text-first — the transcript still shows the real
-          // attachment). @-mentions are intentionally not re-resolved here.
+          // Model-facing content. Keep the same native-vision vs sidecar split
+          // as the initial send path; otherwise a queued image sent mid-run is
+          // silently degraded to text even when the active BYOK model can see.
+          if (planAllowsImagePipeline && display.attachments.some(a => a.type === 'image')) {
+            const parts = await buildContentParts(merged, promptResolvers)
+            if (parts && activeModelSupportsImageParts) return withDeliveries(parts)
+            if (parts) {
+              const description = await describeImagesViaSidecar(parts)
+              if (description) {
+                const textOnly = await buildAugmentedPrompt(merged, promptResolvers)
+                return withDeliveries(`${textOnly}\n\n<image_description source="image-analysis">\n${description}\n</image_description>`)
+              }
+            }
+          }
+
+          // Text-only fallback. buildAugmentedPrompt resolves file/folder
+          // attachments to XML and image attachments to placeholders.
+          // @-mentions are intentionally not re-resolved here.
           const text = await buildAugmentedPrompt(merged, {
             resolveAttachmentXml: resolveAttachments,
             resolveImageDataUri: resolveImageToDataUri,
           })
-          return text && text.trim().length > 0 ? text : display.text
+          return withDeliveries(text && text.trim().length > 0 ? text : display.text)
         },
       })
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!bootstrapOnly) {
+        markOriginalTaskFailed(message)
+      }
       // Cleanup if anything fails before or during runAgentLoop setup.
       // Prevents isStreaming/agentStatus getting stuck.
       flushBufferedDeltas()
       useChatStore.getState().finalizeAssistantMessage()
       agentStore.setStatus('idle')
       logger.error('prompt', 'runAgentForPrompt failed:', error)
+      useChatStore.getState().addSystemMessage(`A tarefa não pôde continuar: ${message}`, 'error')
       hadError = true
+    }
+
+    if (!hadError && bootstrapOnly) {
+      const tms = getTmsTurnTelemetry()
+      if (tms.tmsCreated || tms.tmsAlreadyExists) {
+        appendTextDeltaBuffered(`\n\n${t(getTmsBootstrapCompleteMessageKey(tms.tmsCreated))}\n\n`)
+        flushBufferedDeltas()
+        return runAgentForPrompt(content, true, {
+          conversationHistoryOverride: historyBeforeCurrentUser,
+          reuseAssistantMessage: true,
+        })
+      }
     }
 
     return !hadError
@@ -1059,7 +1128,7 @@ export function usePromptBar() {
       clearDraftAttachments()
       try {
         const { executePlanRevision } = await import('../../services/agent/commands/planCommand')
-        await executePlanRevision(prompt, revisionTarget.projectPath, 'chat', revisionTarget.planPath)
+        await executePlanRevision(prompt, revisionTarget.projectPath, revisionTarget.planPath)
       } catch (err) {
         logger.error('prompt', 'executePlanRevision failed:', err)
         useChatStore.getState().addSystemMessage(
@@ -1072,11 +1141,11 @@ export function usePromptBar() {
     // === Slash commands: execute directly (never queued) ===
     // Slash commands take precedence over hashtag flows. A prompt that
     // STARTS with `/plan ...` is, by construction, asking the architect
-    // command to run — even if the user mentions `#auth-google` inside the
-    // idea ("a platform with #auth-google sign-in"). Without this order,
-    // preprocessHashtags would consume the tag, route to runAuthFlow, and
+    // command to run — even if the user mentions `#design` inside the
+    // idea ("a landing page with #design"). Without this order,
+    // preprocessHashtags would consume the tag, route to runDesignFlow, and
     // the /plan command never executes. The hashtag is part of the
-    // architectural description; the architect can address auth in PLAN.md.
+    // architectural description; the architect can address it in PLAN.md.
     if (slashCommandRegistry.isSlashCommand(prompt)) {
       const command = slashCommandRegistry.getCommand(prompt)
       if (!command) return
@@ -1113,22 +1182,6 @@ export function usePromptBar() {
         return
       }
 
-      // Smart router for /payments: if MoMenu Payments markers are already
-      // in the project, block the re-scaffold with explanatory message.
-      // Same rationale as the auth-hashtag router below — the slash command
-      // is for first-time integration; subsequent fixes go through verbal
-      // requests so the agent (which sees the appliedScaffolding system-
-      // prompt section) routes to fix-mode rather than re-running fetches.
-      if (command.name === '/payments') {
-        const { blocked } = await guardScaffoldReapply(
-          projectPath!,
-          ['payments.momenu'],
-          () => buildPaymentsReapplyMessage(),
-          () => { useChatStore.getState().setDraftInput(''); clearDraftAttachments() },
-        )
-        if (blocked) return
-      }
-
       useChatStore.getState().setDraftInput('')
       clearDraftAttachments()
 
@@ -1139,25 +1192,19 @@ export function usePromptBar() {
       }
 
       const args = slashCommandRegistry.getArgs(prompt)
-      // 'chat' = platform-bound surface. /plan branches on this to inject
-      // the data-layer / Dockerfile / APP_ID-fallback invariants into the
-      // architect's system prompt so the PLAN.md it produces is shaped
-      // for the TM Code Publish pipeline (no Prisma/SQLite, firebase-admin
-      // baseline, Dockerfile + backend in the same scaffold turn).
-      await command.execute(args, projectPath ?? '', 'chat')
+      await command.execute(args, projectPath ?? '')
       return
     }
 
-    // === Hashtag-driven flows: detect skill triggers (e.g. #auth-google,
-    // #design) and route to the specialised flow. Replaces the legacy /auth
-    // slash command. Free-form `#tags` not in the registry are ignored and
-    // pass through to the agent untouched.
+    // === Hashtag-driven flows: detect skill triggers (e.g. #design) and
+    // route to the specialised flow. Free-form `#tags` not in the registry
+    // are ignored and pass through to the agent untouched.
     //
     // Runs AFTER the slash-command check so a prompt like
-    // `/plan ... with #auth-google ...` doesn't have the hashtag stripped
+    // `/plan ... with #design ...` doesn't have the hashtag stripped
     // out from under /plan — slash commands own the dispatch in that case.
     const pre = preprocessHashtags(prompt)
-    if (pre.authProviders.length > 0 || pre.hasDesign) {
+    if (pre.hasDesign) {
       const projectPath = currentProject?.path
       if (!projectPath) {
         useChatStore.getState().setDraftInput('')
@@ -1174,46 +1221,44 @@ export function usePromptBar() {
         layout.setViewMode('chat')
       }
 
-      // Smart router: if any requested auth provider is already applied,
-      // block the re-scaffold flow with an explanatory system message. The
-      // hashtag is for FIRST-TIME provisioning; for fixing the existing
-      // implementation the user should phrase verbally ("Corrige o login
-      // com Google"). The agent then sees the `# Already-applied
-      // scaffolding` system-prompt section and routes to fix-mode.
-      if (pre.authProviders.length > 0) {
-        const requestedKeys: import('../../services/scaffoldingDetector').ScaffoldKey[] =
-          pre.authProviders.map(p => `auth.${p}` as const)
-        const { blocked } = await guardScaffoldReapply(
-          projectPath,
-          requestedKeys,
-          (applied) => buildAuthReapplyMessage(applied),
-          () => { useChatStore.getState().setDraftInput(''); clearDraftAttachments() },
-        )
-        if (blocked) return
-      }
-
       // Preserve hashtags in the visible message and the persisted history.
       // The hashtag is still useful AFTER it routes — it documents the user's
       // intent for anyone reading the session later (debug exports, sharing
       // a repro, scrolling back), and it's what they actually typed. The
-      // skill content is force-loaded via runAuthFlow regardless of what
+      // skill content is force-loaded via runDesignFlow regardless of what
       // appears in the bubble, so stripping the tag here used to delete
       // signal for no behavioural gain.
       const bubbleText = prompt
 
-      if (pre.authProviders.length > 0) {
-        // Auth flow handles design augmentation when both are requested.
-        await runAuthFlow(pre.authProviders, pre.cleanedText, bubbleText, pre.hasDesign)
-      } else {
-        // Design-only flow: lightweight skill injection, no execution sequence.
-        await runDesignFlow(pre.cleanedText, bubbleText)
-      }
+      // Design flow: lightweight skill injection, no execution sequence.
+      await runDesignFlow(pre.cleanedText, bubbleText)
       return
     }
 
     // === ALL other messages: ALWAYS enqueue first ===
     // The queue processor will dequeue when the agent is idle.
     // This matches Claude Code's behavior — no conditional gating on isAgentBusy.
+
+    // Billing gate at the door: the Chat dispatch path has no server-side
+    // pre-flight of its own, and the queue processor HOLDS (not drains) the
+    // queue while blocked — so accepting this message would just park it
+    // with no explanation. Refuse with the same message the agentRunner
+    // pre-flight uses, and keep the draft so nothing is lost.
+    {
+      const billing = useBillingStore.getState()
+      if (billing.noCredits || billing.status === 'rejected') {
+        useChatStore.getState().addSystemMessage(
+          `${t('chat.noCredits')}: ${t('chat.noCreditsRemaining')} ${t('chat.buyCredits')}.`,
+          'error',
+        )
+        return
+      }
+    }
+
+    // A manual send is an explicit "continue" — lift any queue pause left
+    // by Stop / budget stop / task rehydrate before this message queues.
+    setQueuePaused(false)
+
     const attachments = [...useChatStore.getState().draftAttachments]
 
     // Build the queued value. Plain text → string. With attachments →
@@ -1241,38 +1286,25 @@ export function usePromptBar() {
       mode: 'prompt',
       priority: 'next',
       uuid: generateId('queued'),
+      // Steer/Task toggle: tasks skip the per-turn steering drain and are
+      // dispatched as their own run by the idle drain (queueProcessor).
+      ...(queueAsTask ? { asTask: true } : {}),
     })
 
     // Clear input immediately — message is in the queue
     useChatStore.getState().setDraftInput('')
     clearDraftAttachments()
 
-    logger.info('queue', `Message enqueued: "${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}"`)
-  }, [currentProject, devCommand, runAgentForPrompt])
+    logger.info('queue', `Message enqueued${queueAsTask ? ' as task' : ''}: "${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}"`)
+  }, [currentProject, devCommand, runAgentForPrompt, queueAsTask])
 
+  // Shared implementation with the status-bar Stop (stopAgentRun): drops
+  // steering, PARKS queued tasks (paused, not destroyed — this handler used
+  // to clear the whole queue while the status bar cleared nothing), kills
+  // all live work.
   const handleStop = useCallback(() => {
-    // Clear the message queue BEFORE cancelling — prevents useQueueProcessor
-    // from firing when queryGuard transitions to idle.
-    clearMessageQueue()
-
-    // Check if there are pending permissions that will be cancelled
-    const pendingCount = usePermissionStore.getState().getQueuedCount()
-    if (pendingCount > 0) {
-      const confirmed = window.confirm(
-        `There are ${pendingCount} pending permission${pendingCount > 1 ? 's' : ''} in the queue. ` +
-        `Stopping will cancel all of them. Continue?`
-      )
-      if (!confirmed) return
-    }
-
-    // Clear any pending permission first — resolves the dangling Promise
-    usePermissionStore.getState().clearPending()
-    // Resolve any pending diff approval waits (rejects them)
-    resolveAllPendingDiffApprovals(false)
-    AgentService.getInstance().cancelLoop()
-    useAgentStore.getState().setStatus('idle')
-    useChatStore.getState().finalizeAssistantMessage()
-  }, [clearMessageQueue])
+    stopAgentRun()
+  }, [])
 
   // === Queue processor — runs queued commands when agent becomes idle ===
   //
@@ -1359,8 +1391,8 @@ export function usePromptBar() {
       // actually receives the message. Cancellation is owned by
       // AgentService.cancelLoop() (called from handleStop), which
       // propagates the abort down to the in-flight fetch.
-      // Route the dispatch through the SHARED `lastRun` serialization (same
-      // chain Terminal mode uses via runAgentWithCallbacks). This serializes the
+      // Route the dispatch through the SHARED `lastRun` serialization used by
+      // runAgentWithCallbacks. This serializes the
       // idle-drain dispatch against a pending auto-wake / background run: without
       // it, the chat queue ran `runAgentLoop` directly while those ran on the
       // chain, and both could clear `tryStart()` in the reserve→tryStart window,
@@ -1371,9 +1403,9 @@ export function usePromptBar() {
       // NOTE: this is NOT what makes a message queued MID-RUN drain per turn —
       // that is the query loop's steering collector (collectQueuedSteering),
       // which drains the queue at each turn boundary INSIDE the live run. Both
-      // dispatch paths now wire it: Terminal/CMD via agentRunner's
-      // collectSteeringMessages, and Chat via runAgentForPrompt's own
-      // collectSteeringMessages callback above. This path only handles items
+      // dispatch paths now wire it: serialized runs via agentRunner's
+      // collectSteeringMessages, and this direct path via runAgentForPrompt's
+      // own collectSteeringMessages callback above. This path only handles items
       // still queued once the run has gone idle.
       await enqueueSerializedRun(() => runAgentForPrompt(mergedValue, false))
     } finally {
@@ -1556,24 +1588,90 @@ export function usePromptBar() {
     await activatePreview(currentProject?.path ?? null)
   }, [currentProject?.path])
 
+  const handleImprovePrompt = useCallback(async () => {
+    const original = useChatStore.getState().draftInput
+    const current = original.trim()
+    if (!current || isImprovingPrompt) return
+
+    setIsImprovingPrompt(true)
+    try {
+      const improved = await improveUserPrompt(current)
+      if (improved) {
+        if (useChatStore.getState().draftInput !== original) return
+        setPromptImprovementBackup(original)
+        useChatStore.getState().setDraftInput(improved)
+        requestAnimationFrame(() => {
+          const textarea = textareaRef.current
+          if (!textarea) return
+          textarea.focus()
+          textarea.selectionStart = improved.length
+          textarea.selectionEnd = improved.length
+        })
+      }
+    } catch (err) {
+      logger.warn('prompt', 'Failed to improve prompt:', err)
+      useToastStore.getState().addToast('error', t('prompt.improvePromptFailed'))
+    } finally {
+      setIsImprovingPrompt(false)
+    }
+  }, [isImprovingPrompt])
+
+  const handleUndoImprovePrompt = useCallback(() => {
+    if (promptImprovementBackup === null) return
+    useChatStore.getState().setDraftInput(promptImprovementBackup)
+    const restoredLength = promptImprovementBackup.length
+    setPromptImprovementBackup(null)
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current
+      if (!textarea) return
+      textarea.focus()
+      textarea.selectionStart = restoredLength
+      textarea.selectionEnd = restoredLength
+    })
+  }, [promptImprovementBackup])
+
+  const toggleDevServer = useCallback(async () => {
+    const layout = useLayoutStore.getState()
+
+    if (selectIsPreviewServerRunning(layout) || devServerManager.isActive()) {
+      await devServerManager.stop()
+      textareaRef.current?.focus()
+      return
+    }
+
+    await ensureDevServerRunning(currentProject?.path ?? null, { openPreview: false })
+    textareaRef.current?.focus()
+  }, [currentProject?.path])
+
   return {
     hasInputContent,
     setInput: handleInputChange,
     textareaRef,
     isStreaming,
     isAgentBusy,
+    // Steer/Task toggle (composer, visible while the agent is busy)
+    queueAsTask,
+    setQueueAsTask,
     isScaffolding,
     isSendBlocked,
     isDisabled,
     hasPendingCredential,
     viewMode,
     hasPreview,
+    canToggleDevServer,
+    isDevServerActive,
+    isDevServerStarting,
+    isImprovingPrompt,
+    canUndoImprovePrompt: promptImprovementBackup !== null,
     handleSend,
     handleStop,
     handleKeyDown,
     handleBlur,
     toggleEditor,
+    handleImprovePrompt,
+    handleUndoImprovePrompt,
     togglePreview,
+    toggleDevServer,
     // Slash command menu
     showCommandMenu,
     filteredCommands,
@@ -1587,10 +1685,6 @@ export function usePromptBar() {
     handleMentionSelect,
     // #hashtag menu — shared hook (state + handlers)
     hashtagMenu,
-    // Already-applied scaffolding hints — drives the "já aplicado" badge in
-    // both the hashtag and slash menus. Map keyed by tag (`#auth-google`)
-    // or command name (`/payments`); value is the recommended fix phrasing.
-    appliedHints,
     // Attachments
     draftAttachments,
     handleAttachFiles,
@@ -1602,24 +1696,4 @@ export function usePromptBar() {
     handleRemoveAttachment,
     isDragging,
   }
-}
-
-// ── Scaffold-reapply system messages ──────────────────────────────────
-//
-// Pure builders. Kept module-scope (not inside the hook) so they don't
-// re-allocate per render. Wording is i18n-resolved at call time so the
-// developer's IDE language drives the output.
-
-function buildAuthReapplyMessage(applied: ScaffoldKey[]): string {
-  const labels = applied.map(scaffoldKeyLabel).join(' + ')
-  const fixHint = applied.includes('auth.google')
-    ? t('scaffold.message.authFixHintGoogle')
-    : t('scaffold.message.authFixHintEmail')
-  return t('scaffold.message.authReapply')
-    .replace('{labels}', labels)
-    .replace('{fixHint}', fixHint)
-}
-
-function buildPaymentsReapplyMessage(): string {
-  return t('scaffold.message.paymentsReapply')
 }

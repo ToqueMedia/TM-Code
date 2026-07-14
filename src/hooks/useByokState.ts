@@ -17,8 +17,8 @@
  * which is the OR of both — true the moment BYOK is configured, even
  * before the first response has come back to confirm it.
  *
- * Why a shared hook: this exact OR-of-two-states existed inline in 5
- * places (AgentStatusBar, TerminalTitleBar, ChatView, ModelIndicator,
+ * Why a shared hook: this exact OR-of-two-states existed inline in
+ * several places (AgentStatusBar, ChatView, ModelIndicator,
  * agentService.buildRequestBody). When the rule shifts — say, a future
  * "BYOK paused" state — without the shared selector we'd update 4 of 5
  * sites and silently regress the one we forgot.

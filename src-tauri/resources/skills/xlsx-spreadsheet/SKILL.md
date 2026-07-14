@@ -5,7 +5,7 @@ description: Generate Microsoft Excel (.xlsx) workbooks via openpyxl or pandas. 
 
 # Excel Spreadsheet Generation (.xlsx)
 
-Author Microsoft Excel workbooks. CMD-mode skill — applies when the user asks for "Excel", ".xlsx", "folha de cálculo", "spreadsheet", "relatório em Excel".
+Author Microsoft Excel workbooks when the user asks for "Excel", ".xlsx", "folha de cálculo", "spreadsheet", "relatório em Excel".
 
 ## Tooling — preference order
 

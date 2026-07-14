@@ -2,7 +2,12 @@ import { cachedBuildFileTree, cachedReadFile } from './agent/ipcCache'
 import { Attachment, AttachmentType } from '../types/chat'
 import type { FileTreeNode } from '../types/fileTree'
 
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024
+// 8MB raw: base64 inflates ~1.37×, and the old 5MB ceiling rejected ordinary
+// Retina screenshots — the attach then failed silently and the model received
+// the "image did not reach you" XML fallback instead of pixels.
+// PAIRED with promptValueHelpers MAX_PER_IMAGE_BYTES (base64-side, 12MB):
+// that one MUST stay ≥ this × 4/3 — change them together.
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 const MAX_FILE_CHARS = 20_000
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'])
 
@@ -124,7 +129,7 @@ export async function resolveAttachments(attachments: Attachment[]): Promise<str
         // NÃO afirmar "this model is text-only": este fallback dispara por
         // razões transitórias (gate de plano, cap de bytes, falha de
         // leitura) e o modelo PARAFRASEAVA a frase de volta ao utilizador
-        // como limitação permanente do produto — "o modo terminal do TM
+        // como limitação permanente do produto — "esta superfície do TM
         // Code não processa imagens" (visto em produção 2026-06-12, Gemini
         // multimodal a negar a própria visão). O texto agora diz só a
         // verdade local: ESTA imagem não chegou NESTE pedido.

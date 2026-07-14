@@ -86,6 +86,7 @@ export function humaniseToolName(toolName: string): string {
   const map: Record<string, string> = {
     write_file: 'edit a file',
     read_file: 'read a file',
+    read_around: 'read nearby file lines',
     create_file: 'create a file',
     delete_file_or_directory: 'delete a file or folder',
     rename_file_or_directory: 'rename a file or folder',
@@ -94,6 +95,7 @@ export function humaniseToolName(toolName: string): string {
     execute_command: 'run a shell command',
     run_streaming_command: 'run a shell command',
     start_dev_server: 'start the dev server',
+    stop_dev_server: 'stop the dev server',
     kill_process: 'stop a process',
     git_commit: 'commit changes',
     git_push: 'push to git remote',

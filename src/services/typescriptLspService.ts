@@ -4,6 +4,7 @@ import { FileTreeIndexer } from '../utils/fileTreeIndex';
 import { cachedBuildFileTree } from './agent/ipcCache';
 import { logger } from '../utils/logger';
 import type { FileTreeNode } from '../types/fileTree';
+import { registerReactTypeLibraries } from './monacoTypeLibraries';
 
 // Monaco v0.55+ marks languages.typescript as deprecated in types but it still works at runtime.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -172,6 +173,7 @@ class TypeScriptLspService {
 
     // Add default libraries
     this.addDefaultLibraries();
+    registerReactTypeLibraries(monaco);
   }
 
   private addDefaultLibraries() {
@@ -358,6 +360,160 @@ class TypeScriptLspService {
         code: d.code,
       };
     });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Agent-facing code intelligence (the `lsp` tool)
+  //
+  // Same Monaco TS worker the editor uses, exposed as plain-JSON operations
+  // so the agent gets precise symbol navigation instead of grep-and-guess.
+  // Models stay LAZY (bulk-loading a project freezes Monaco — see
+  // buildFileIndex); cross-file resolution is served by preloading the
+  // target file's DIRECT relative imports, which covers the common
+  // "symbol imported at the top of this file" case. findReferences is
+  // therefore scoped to files loaded so far — the tool description says so.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /** Ensure a file has a Monaco model (lazy-load from disk on miss). */
+  private async ensureFileLoaded(filePath: string): Promise<monaco.editor.ITextModel> {
+    const uri = monaco.Uri.file(filePath);
+    let model = monaco.editor.getModel(uri);
+    if (!model) {
+      await this.loadFileContent(filePath);
+      model = monaco.editor.getModel(uri);
+    }
+    if (!model) throw new Error(`Could not load file: ${filePath}`);
+    return model;
+  }
+
+  /** Best-effort preload of a file's direct RELATIVE imports so the worker
+   *  can resolve cross-file symbols. Bounded; bare specifiers (packages)
+   *  are skipped — Monaco resolves those from its default/extra libs. */
+  private async preloadDirectImports(filePath: string, content: string): Promise<void> {
+    const specs = new Set<string>();
+    const re = /(?:from\s+|import\s*\(\s*|require\s*\(\s*)['"](\.{1,2}\/[^'"]+)['"]/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(content)) !== null && specs.size < 24) specs.add(m[1]);
+    if (specs.size === 0) return;
+
+    const dir = filePath.slice(0, filePath.lastIndexOf('/'));
+    const candidatesFor = (spec: string): string[] => {
+      const base = this.resolveRelative(dir, spec);
+      if (/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(base)) return [base];
+      return [
+        `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.jsx`,
+        `${base}/index.ts`, `${base}/index.tsx`, `${base}/index.js`,
+      ];
+    };
+
+    await Promise.all(
+      [...specs].map(async (spec) => {
+        for (const candidate of candidatesFor(spec)) {
+          if (monaco.editor.getModel(monaco.Uri.file(candidate))) return;
+          try {
+            await this.loadFileContent(candidate);
+            if (monaco.editor.getModel(monaco.Uri.file(candidate))) return;
+          } catch {
+            /* try the next extension candidate */
+          }
+        }
+      }),
+    );
+  }
+
+  private async workerFor(filePath: string, uri: monaco.Uri) {
+    const isTs = /\.(ts|tsx)$/.test(filePath);
+    const getWorker = isTs
+      ? await monacoTs.getTypeScriptWorker()
+      : await monacoTs.getJavaScriptWorker();
+    return getWorker(uri);
+  }
+
+  private assertCodeIntelSupported(filePath: string): void {
+    if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(filePath)) {
+      throw new Error(
+        `lsp supports TypeScript/JavaScript files only (got: ${filePath.split('/').pop()}). Use grep for other languages.`,
+      );
+    }
+  }
+
+  /** A resolved code location, 1-based, with the target line's text. */
+  private spanToLocation(fileName: string, start: number): { path: string; line: number; column: number; preview: string } | null {
+    const model = monaco.editor.getModel(monaco.Uri.file(fileName)) ?? monaco.editor.getModel(monaco.Uri.parse(fileName));
+    if (!model) return null;
+    const pos = model.getPositionAt(start);
+    return {
+      path: model.uri.path,
+      line: pos.lineNumber,
+      column: pos.column,
+      preview: model.getLineContent(pos.lineNumber).trim().slice(0, 200),
+    };
+  }
+
+  async definitionAt(filePath: string, line: number, column: number) {
+    this.assertCodeIntelSupported(filePath);
+    const model = await this.ensureFileLoaded(filePath);
+    await this.preloadDirectImports(filePath, model.getValue());
+    const worker = await this.workerFor(filePath, model.uri);
+    const offset = model.getOffsetAt({ lineNumber: line, column });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const defs: any[] = (await worker.getDefinitionAtPosition(model.uri.toString(), offset)) ?? [];
+    return defs
+      .map((d) => this.spanToLocation(d.fileName, d.textSpan.start))
+      .filter((loc): loc is NonNullable<typeof loc> => loc !== null);
+  }
+
+  async referencesAt(filePath: string, line: number, column: number) {
+    this.assertCodeIntelSupported(filePath);
+    const model = await this.ensureFileLoaded(filePath);
+    await this.preloadDirectImports(filePath, model.getValue());
+    const worker = await this.workerFor(filePath, model.uri);
+    const offset = model.getOffsetAt({ lineNumber: line, column });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const refs: any[] = (await worker.getReferencesAtPosition(model.uri.toString(), offset)) ?? [];
+    return refs
+      .map((r) => this.spanToLocation(r.fileName, r.textSpan.start))
+      .filter((loc): loc is NonNullable<typeof loc> => loc !== null);
+  }
+
+  async hoverAt(filePath: string, line: number, column: number): Promise<string | null> {
+    this.assertCodeIntelSupported(filePath);
+    const model = await this.ensureFileLoaded(filePath);
+    await this.preloadDirectImports(filePath, model.getValue());
+    const worker = await this.workerFor(filePath, model.uri);
+    const offset = model.getOffsetAt({ lineNumber: line, column });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const info: any = await worker.getQuickInfoAtPosition(model.uri.toString(), offset);
+    if (!info) return null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const join = (parts?: any[]) => (parts ?? []).map((p) => p.text).join('');
+    const signature = join(info.displayParts);
+    const docs = join(info.documentation);
+    return [signature, docs].filter(Boolean).join('\n');
+  }
+
+  async documentSymbols(filePath: string) {
+    this.assertCodeIntelSupported(filePath);
+    const model = await this.ensureFileLoaded(filePath);
+    const worker = await this.workerFor(filePath, model.uri);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tree: any = await worker.getNavigationTree(model.uri.toString());
+    const out: Array<{ name: string; kind: string; line: number; depth: number }> = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const walk = (node: any, depth: number) => {
+      const span = node.nameSpan ?? node.spans?.[0];
+      if (node.text && node.text !== '<global>' && span) {
+        out.push({
+          name: node.text,
+          kind: node.kind,
+          line: model.getPositionAt(span.start).lineNumber,
+          depth,
+        });
+      }
+      for (const child of node.childItems ?? []) walk(child, node.text === '<global>' ? depth : depth + 1);
+    };
+    if (tree) walk(tree, 0);
+    return out;
   }
 
   /** Whether the service has been initialized with a project root. */

@@ -29,6 +29,7 @@ interface TerminalPanelProps {
   projectPath: string
   widthPx: number
   onReady?: () => void
+  showBorder?: boolean
 }
 
 interface PtyOutputEvent {
@@ -500,8 +501,8 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
   }, [sessionId, projectPath])
 
   return (
-    // data-pty-terminal: marcador que os handlers globais de teclado do
-    // TerminalView usam para NÃO interceptar teclas destinadas ao shell
+    // data-pty-terminal: marcador para handlers globais de teclado NÃO
+    // interceptarem teclas destinadas ao shell
     // (^C/^L/^K/^U/Esc) — o helper-textarea do xterm vive dentro deste Box.
     <Box ref={containerRef} flex="1" minH={0} px="6px" py="4px" position="relative" data-pty-terminal>
       {(completions.length > 0 || isLoading) && menuPosition && (
@@ -523,7 +524,7 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
 
 // ─── Terminal Panel ─────────────────────────────────────────────────────────
 
-export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx, onReady }: TerminalPanelProps) {
+export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx, onReady, showBorder = true }: TerminalPanelProps) {
   const instances = useTerminalPanelStore(s => s.instances)
   const activeInstanceId = useTerminalPanelStore(s => s.activeInstanceId)
   const addTerminal = useTerminalPanelStore(s => s.addTerminal)
@@ -636,7 +637,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
       flexShrink={0}
       height="100%"
       bg={tokens.colors.terminal.background}
-      borderLeft="1px solid rgba(255,255,255,0.08)"
+      borderLeft={showBorder ? '1px solid rgba(255,255,255,0.08)' : 'none'}
       minH={0}
     >
       {/* Tab bar */}

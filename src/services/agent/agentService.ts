@@ -40,7 +40,29 @@ import { useByokStore } from "../../stores/byokStore";
 import { buildByokClientFromSnapshot, buildByokThinkingConfig } from "./byokRouting";
 import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
+import { ToolsetSelector, REQUEST_TOOLS_NAME, REQUEST_CONTEXT_NAME } from "./toolsetSelector";
+import type { ToolsetGroupName } from "./toolsetSelector";
+import type { PromptProfile } from "./contextBuilder/auxiliaryRegistry";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
+import { classifyExecuteCommandPurpose, convertShellReadCommand } from "./commandPurpose";
+import { EDIT_FILE, canonicalToolName } from "./toolNames";
+import { formatShellReadRedirect } from "./shellReadRedirect";
+import {
+  decorateTmsRequestUsage,
+  getTmsTurnTelemetry,
+  markExecuteCommandPurpose,
+  markNoEditGuard,
+  markOriginalTaskCompleted,
+  markOriginalTaskFailed,
+  markOriginalTaskStarted,
+  markOriginalTaskWriteStats,
+  markShellReadBlocked,
+  markTmsBootstrapFailed,
+  markTmsCreated,
+  markTmsFullContextSent,
+  markTmsWriteAttempt,
+  setTmsTurnTelemetry,
+} from "./tmsContext";
 
 // ── Extracted services ──
 
@@ -89,6 +111,16 @@ class AgentService {
 
   private lightweightOptions: LightweightAgentOptions | null = null;
   private queryEngine: QueryEngine | null = null;
+  // Dynamic toolset selector for the current run. Null for sub-agents
+  // (lightweight) which use their own restricted tool set. Set per run in
+  // runQueryEngineLoop; the createToolExecutorBridge reads it to intercept
+  // the request_tools meta-tool.
+  private currentToolsetSelector: ToolsetSelector | null = null;
+  private postTmsBootstrapToolProfile: {
+    profile: PromptProfile;
+    readOnly: boolean;
+    enforceReadOnly: boolean;
+  } | null = null;
 
   // Última resposta HTTP confirmou TM Speed (`X-TM-Speed-Applied: true`)?
   // Os headers chegam no início de cada resposta e o `message_stop` desse
@@ -140,6 +172,12 @@ class AgentService {
   setSystemPrompt(prompt: string) {
     this.systemPrompt = prompt;
   }
+  setPostTmsBootstrapToolProfile(profile: PromptProfile, readOnly: boolean, enforceReadOnly = false): void {
+    this.postTmsBootstrapToolProfile = { profile, readOnly, enforceReadOnly };
+  }
+  clearPostTmsBootstrapToolProfile(): void {
+    this.postTmsBootstrapToolProfile = null;
+  }
   getAgentType(): string | null {
     return this.agentType;
   }
@@ -153,6 +191,7 @@ class AgentService {
    */
   setRequestType(type: string | null) {
     this.requestType = type;
+    this.toolExecutor.setRequestType(type);
   }
   getRequestType(): string | null {
     return this.requestType;
@@ -209,11 +248,10 @@ class AgentService {
     import("../../stores/permissionStore")
       .then((m) => {
         // RACE FIX (2026-06-11): cancelar o loop tem de resolver + limpar o
-        // prompt de permissão pendente E a fila. Sem isto, o stop do CMD
-        // mode (stopAgent → cancelLoop) deixava o diálogo no ecrã; um
+        // prompt de permissão pendente E a fila. Sem isto, stopAgent →
+        // cancelLoop deixava o diálogo no ecrã; um
         // "Aprovar" tardio resolvia a Promise e a tool EXECUTAVA num run já
-        // morto (escrita de ficheiro/comando com a UI em idle). O chat mode
-        // já chamava clearPending no seu handleStop — isto centraliza para
+        // morto (escrita de ficheiro/comando com a UI em idle). Isto centraliza para
         // todos os caminhos de cancelamento (stop, switch de projeto, erro).
         m.usePermissionStore.getState().clearPending();
         m.usePermissionStore.getState().resetAutoApprove();
@@ -473,8 +511,63 @@ class AgentService {
     // 4. Build thinking config
     const thinkingConfig = this.buildThinkingConfig();
 
+    // 4.5. Dynamic toolset selector — starts with the model-selected profile
+    // base plus model-planned groups, then expands on demand through the
+    // request_tools meta-tool. Reduces tool-schema overhead (~10K tokens for
+    // 36 tools) to the few the current task needs. Sub-agents skip selection.
+    // Wire auxiliary-context omissions + the Intent Router's profile/readOnly
+    // into the selector. The selection was computed during buildSystemPrompt
+    // (stored on the ContextBuilder singleton) — the profile + readOnly come
+    // from the Intent Router (qwen3.7-plus) via the agentRunner call. We read
+    // it BEFORE constructing the selector so the constructor can seed the
+    // active set with the profile's base toolset (bugfix_local/analysis_readonly/…).
+    // Profiles are starters, not authorization ceilings. Sub-agents skip this
+    // (they already receive a restricted tool set from the subAgentRunner).
+    let auxiliarySelection: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection | null = null;
+    if (!this.lightweightOptions) {
+      const ContextBuilder = (await import('./contextBuilder')).default;
+      auxiliarySelection = ContextBuilder.getInstance().getLastAuxiliarySelection();
+    }
+
+    const executionPhase = auxiliarySelection?.profile === "project_bootstrap"
+      ? "project_bootstrap"
+      : "original_task";
+    const enforceReadOnly = auxiliarySelection?.readOnly === true &&
+      auxiliarySelection.routerSource === "keyword";
+    const mutableTask = executionPhase === "original_task" &&
+      !this.lightweightOptions &&
+      !enforceReadOnly &&
+      auxiliarySelection?.requiresMutation === true;
+
+    const toolsetSelector = this.lightweightOptions
+      ? null
+      : new ToolsetSelector(
+        openaiTools.map((t) => t.function.name),
+        auxiliarySelection?.profile ?? 'bugfix_local',
+        auxiliarySelection?.readOnly ?? false,
+        (auxiliarySelection?.contextPlan.toolGroups ?? []) as ToolsetGroupName[],
+        enforceReadOnly,
+      );
+    this.currentToolsetSelector = toolsetSelector;
+
+    if (toolsetSelector && auxiliarySelection) {
+      toolsetSelector.setOmittedAuxiliaries(auxiliarySelection.omitted.length);
+      toolsetSelector.setOmittedAuxiliaryIds(auxiliarySelection.omitted.map((o) => o.id));
+    }
+    if (!this.lightweightOptions) {
+      if (executionPhase === "original_task") {
+        markOriginalTaskStarted(mutableTask);
+      } else {
+        setTmsTurnTelemetry({ executionPhase: "project_bootstrap" });
+      }
+    }
+    if (mutableTask && toolsetSelector && !toolsetSelector.isActive(EDIT_FILE)) {
+      toolsetSelector.requestTools([EDIT_FILE]);
+    }
+
     // 5. Create tool executor bridge
     const executeTool = this.createToolExecutorBridge(callbacks);
+    this.toolExecutor.clearDelegateTelemetry();
 
     // 6. Build extra headers — X-Request-Type is sticky across turns
     const extraHeaders = this.buildExtraHeaders();
@@ -482,6 +575,17 @@ class AgentService {
     // Reset por run: evita que um run anterior servido em speed "vaze" o
     // multiplicador para o primeiro turno deste run antes dos headers chegarem.
     this.lastResponseSpeedApplied = false;
+
+    // GUARDA DE CANCELAMENTO PRÉ-VOO: o Stop durante a preparação (token,
+    // system prompt, router de perfil, planner de contexto — facilmente
+    // vários segundos) abortava this.abortController mas NADA aqui o lia; o
+    // run continuava, criava o engine (com AbortController PRÓPRIO, novo) e
+    // fazia streaming até ao diálogo de permissão num run já morto — o
+    // "cancelei e segundos depois veio o pedido de autorização" do developer.
+    if (this.abortController?.signal.aborted) {
+      logger.info("agent", "Run cancelled during prep — skipping engine start");
+      return;
+    }
 
     // 7. Create QueryEngine
     const engine = new QueryEngine({
@@ -491,6 +595,14 @@ class AgentService {
       systemPrompt: this.systemPrompt,
       tools: openaiTools,
       executeTool,
+      // Execução em streaming (query.ts): só tools concurrencySafe (read-only
+      // por definição do flag) podem começar durante o SSE. Canonicaliza
+      // porque o modelo chama aliases (Read/Grep/...) e o registry pode ter
+      // o flag na entrada canónica. Meta-tools (request_tools/context) não
+      // estão no registry → false → nunca pre-despacham.
+      isStreamSafeTool: (name) =>
+        this.toolExecutor.isConcurrencySafe(name) ||
+        this.toolExecutor.isConcurrencySafe(canonicalToolName(name)),
       thinkingConfig,
       maxTurns: this.lightweightOptions?.maxTurns,
       extraHeaders,
@@ -524,8 +636,8 @@ class AgentService {
       // and only known after the first response.
       getContextLimits: () => {
         const { modelContextWindow, modelName } = useAgentStore.getState();
-        // Resolve the window EXACTLY like the UI pill (ContextWindowIndicator /
-        // TerminalStatusLine): server header → known profile → conservative
+        // Resolve the window EXACTLY like the UI pill (ContextWindowIndicator):
+        // server header → known profile → conservative
         // FALLBACK_CONTEXT_WINDOW (200K). Unknown model (no header, not in
         // MODEL_PROFILES) assumes 200K — NOT the plan profile's 1M — so a small
         // or unknown model compacts early instead of overflowing; the admin
@@ -544,8 +656,28 @@ class AgentService {
       },
       // Usage is reported via message_stop events — do NOT add onUsage
       // callback here or output tokens will be double-counted (SUM semantics).
+      // onRequestUsage is distinct: it carries the payloadInspector breakdown
+      // (not in message_stop) — pure observability, no double-counting.
+      onRequestUsage: (entry) => callbacks.onRequestUsage?.(decorateTmsRequestUsage(entry, this.systemPrompt)),
+      // Dynamic toolset selector (null for sub-agents).
+      toolsetSelector: toolsetSelector ?? undefined,
+      // Auxiliary-context selection (core/auxiliary breakdown for the
+      // payloadInspector; null for sub-agents).
+      auxiliarySelection: auxiliarySelection ?? undefined,
+      executionPhase,
+      mutableTask,
+      // Delegate telemetry — read from the toolExecutor's last delegate call.
+      getDelegateTelemetry: () => this.toolExecutor.consumeDelegateTelemetry(),
     });
     this.queryEngine = engine;
+
+    // Fecha a race restante: Stop entre a guarda acima e esta atribuição
+    // (cancelLoop viu queryEngine=null e não teve nada para cancelar).
+    if (this.abortController?.signal.aborted) {
+      this.queryEngine = null;
+      logger.info("agent", "Run cancelled between prep and engine start");
+      return;
+    }
 
     // 7. Convert conversation history
     const history = toQueryMessages(conversationHistory);
@@ -681,6 +813,97 @@ class AgentService {
 
     // 9. Terminal result
     const terminal = result.value as QueryTerminal;
+
+    // Stamp guardrail telemetry onto the last requestUsageLog entry so the
+    // session export shows the final decision explicitly (not just inferrable
+    // from expandedToolNames / toolCalls). Best-effort — never blocks.
+    if (terminal.completionGuardDecision !== undefined) {
+      try {
+        if (!this.lightweightOptions && executionPhase === "original_task") {
+          markOriginalTaskWriteStats(
+            terminal.originalTaskWriteActionCount ?? terminal.writeActionCount ?? 0,
+            terminal.originalTaskFirstWriteTurn ?? terminal.firstWriteTurn,
+          );
+          if (terminal.noEditGuardReason) {
+            markNoEditGuard(
+              terminal.noEditGuardReason,
+              terminal.noEditRecoveryAction ?? "unknown",
+            );
+          }
+          if (terminal.reason === "completed") {
+            markOriginalTaskCompleted();
+          } else {
+            markOriginalTaskFailed(terminal.reason);
+          }
+        }
+        useChatStore.getState().updateLastRequestUsage({
+          ...getTmsTurnTelemetry(),
+          executionPhase,
+          mutableTask,
+          runHasEdited: terminal.runHasEdited,
+          noEditRecoveryCount: terminal.noEditRecoveryCount,
+          noEditGuardTriggered: terminal.noEditGuardTriggered,
+          noEditGuardReason: terminal.noEditGuardReason,
+          noEditRecoveryAction: terminal.noEditRecoveryAction,
+          firstWriteTurn: terminal.firstWriteTurn,
+          writeActionCount: terminal.writeActionCount,
+          originalTaskWriteActionCount: terminal.originalTaskWriteActionCount ?? terminal.writeActionCount,
+          originalTaskFirstWriteTurn: terminal.originalTaskFirstWriteTurn ?? terminal.firstWriteTurn,
+          completionGuardDecision: terminal.completionGuardDecision,
+          completionGuardReason: terminal.completionGuardReason,
+        });
+      } catch { /* telemetry never blocks */ }
+    }
+    if (terminal.completionGuardDecision === undefined && !this.lightweightOptions && executionPhase === "original_task") {
+      try {
+        markOriginalTaskWriteStats(
+          terminal.originalTaskWriteActionCount ?? terminal.writeActionCount ?? 0,
+          terminal.originalTaskFirstWriteTurn ?? terminal.firstWriteTurn,
+        );
+        markOriginalTaskFailed(terminal.reason);
+        useChatStore.getState().updateLastRequestUsage({
+          ...getTmsTurnTelemetry(),
+          executionPhase,
+          mutableTask,
+          originalTaskFailedReason: terminal.reason,
+          originalTaskWriteActionCount: terminal.originalTaskWriteActionCount ?? terminal.writeActionCount ?? 0,
+          originalTaskFirstWriteTurn: terminal.originalTaskFirstWriteTurn ?? terminal.firstWriteTurn,
+        });
+      } catch { /* telemetry never blocks */ }
+    }
+
+    if (auxiliarySelection?.profile === "project_bootstrap") {
+      let bootstrapFailureText: string | null = null;
+      try {
+        const telemetryBefore = getTmsTurnTelemetry();
+        if (telemetryBefore.tmsBootstrapTriggered) {
+          setTmsTurnTelemetry({
+            tmsBootstrapOutputTokens: terminal.totalOutputTokens ?? 0,
+          });
+          const latest = getTmsTurnTelemetry();
+          if (!latest.tmsCreated && !latest.tmsAlreadyExists) {
+            const reason =
+              terminal.reason === "max_turns"
+                ? "project_bootstrap atingiu o limite de turnos antes de criar TMS.md"
+                : latest.tmsWriteAttempted
+                  ? "foi feita uma tentativa de escrita, mas TMS.md não foi confirmado como criado"
+                  : "o agente terminou o bootstrap antes de tentar escrever TMS.md";
+            markTmsBootstrapFailed(reason);
+            bootstrapFailureText = `Não consegui criar TMS.md: ${reason}.`;
+          }
+          useChatStore.getState().updateLastRequestUsage({
+            ...getTmsTurnTelemetry(),
+          });
+        }
+      } catch {
+        /* telemetry must never hide the model response */
+      }
+      if (bootstrapFailureText) {
+        finalText = finalText
+          ? `${finalText}\n\n${bootstrapFailureText}`
+          : bootstrapFailureText;
+      }
+    }
 
     // Loop detection on final text
     if (finalText && !this.lightweightOptions) {
@@ -901,6 +1124,42 @@ class AgentService {
     return buildByokThinkingConfig(this.byokSnapshot);
   }
 
+  private getToolInputPath(toolInput: Record<string, unknown>): string | null {
+    const value = toolInput.file_path ?? toolInput.path ?? toolInput.directory;
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  }
+
+  private async getCurrentProjectRootPath(): Promise<string | null> {
+    try {
+      const { useProjectStore } = await import("../../stores/projectStore");
+      return useProjectStore.getState().currentProject?.path ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async markProjectTmsPresent(): Promise<void> {
+    try {
+      const { useProjectStore } = await import("../../stores/projectStore");
+      useProjectStore.getState().setNoTmsFile(false);
+    } catch {
+      /* non-critical outside the full Tauri app */
+    }
+  }
+
+  private async isProjectRootTmsPath(rawPath: string | null): Promise<boolean> {
+    if (!rawPath) return false;
+    const normalizedPath = rawPath.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (normalizedPath === "TMS.md" || normalizedPath === "./TMS.md") return true;
+
+    const projectRoot = (await this.getCurrentProjectRootPath())
+      ?.replace(/\\/g, "/")
+      .replace(/\/+$/, "");
+    if (!projectRoot) return /(^|\/)TMS\.md$/i.test(normalizedPath);
+
+    return normalizedPath.toLowerCase() === `${projectRoot}/TMS.md`.toLowerCase();
+  }
+
   /**
    * Create the ToolExecutorFn bridge that connects the query loop's tool
    * execution to TM Code's ToolExecutor with diff approval support.
@@ -914,32 +1173,135 @@ class AgentService {
       toolUseId: string,
       signal?: AbortSignal,
     ): Promise<{ content: string; isError: boolean }> => {
-      // Announce + start the tool AT EXECUTION TIME (claude-vaz parity). The
-      // query loop runs tools serially, so doing the announcement here — rather
-      // than eagerly for every streamed tool call — means that while one tool
-      // is blocked on a permission / diff / credential decision, the tools
-      // queued behind it are NOT rendered yet. That stops a multi-tool turn
-      // from stacking "Em fila" cards that shove the pending authorization
-      // prompt off-screen. onToolCallPending creates the card; onToolCallStart
-      // immediately flips it to "running". (Execution was already gated by the
-      // serial loop + waitForUserGates — this only fixes the visual pile-up.)
-      callbacks.onToolCallPending(toolUseId, toolName);
-      callbacks.onToolCallStart(toolUseId, toolName, toolInput);
+      // Intercept the request_tools meta-tool — it's not in the toolExecutor
+      // registry. The agent calls it to ask for capabilities that aren't in the
+      // current active toolset; we expand the selector so they're available on
+      // the next turn. Never reaches the toolExecutor.
+      if (toolName === REQUEST_TOOLS_NAME) {
+        const requested = Array.isArray(toolInput.tools) ? (toolInput.tools as string[]) : [];
+        const selector = this.currentToolsetSelector;
+        if (!selector) {
+          return {
+            content: 'All tools are already available (no dynamic selection active).',
+            isError: false,
+          };
+        }
+        const result = selector.requestTools(requested);
+        const parts: string[] = [];
+        if (result.added.length) parts.push(`Activated for next model step: ${result.added.join(', ')}.`);
+        if (result.alreadyActive.length) parts.push(`Already active: ${result.alreadyActive.join(', ')}.`);
+        if (result.unknown.length) parts.push(`Unknown (not in registry): ${result.unknown.join(', ')}.`);
+        if (result.denied.length) parts.push(`Denied by explicit read-only/no-edit policy: ${result.denied.join(', ')}.`);
+        if (parts.length === 0) parts.push('No tools requested.');
+        return { content: parts.join(' '), isError: false };
+      }
+
+      // Intercept the request_context meta-tool — fetches an auxiliary context
+      // block that was omitted from the system prompt (publishing, scaffolding,
+      // vision, auth/db — see auxiliaryRegistry). The content is returned as a
+      // tool_result so the agent can use it this turn. Never reaches the
+      // toolExecutor.
+      if (toolName === REQUEST_CONTEXT_NAME) {
+        const auxiliaryId = typeof toolInput.auxiliary === 'string' ? toolInput.auxiliary : '';
+        if (!auxiliaryId) {
+          return { content: 'No auxiliary id provided. Call request_context with an auxiliary id from the on-demand index.', isError: false };
+        }
+        const ContextBuilder = (await import('./contextBuilder')).default;
+        const { content, name } = await ContextBuilder.getInstance().loadAuxiliaryOnDemand(auxiliaryId);
+        if (content === null) {
+          const sel = ContextBuilder.getInstance().getLastAuxiliarySelection();
+          const available = sel ? sel.omitted.map(o => o.id).join(', ') : '(none)';
+          return {
+            content: `Auxiliary "${auxiliaryId}" is not available on-demand. It may already be loaded inline, or be a phase-2 entry without a loader yet. Available: ${available}.`,
+            isError: false,
+          };
+        }
+        if (
+          auxiliaryId === 'project.docs_full' ||
+          auxiliaryId === 'project_docs_full' ||
+          auxiliaryId.startsWith('tms.') ||
+          auxiliaryId.startsWith('tms_') ||
+          auxiliaryId.startsWith('project.tms_')
+        ) {
+          markTmsFullContextSent(auxiliaryId);
+        }
+        return {
+          content: `# Auxiliary context: ${name}\n\n${content}`,
+          isError: false,
+        };
+      }
+
+      let effectiveToolName = toolName;
+      let effectiveToolInput = toolInput;
+
+      if (toolName === "execute_command") {
+        const command = typeof toolInput.command === "string" ? toolInput.command : "";
+        const converted = convertShellReadCommand(command);
+        const purpose = converted ? "file_read" : classifyExecuteCommandPurpose(command);
+        markExecuteCommandPurpose(purpose);
+        if (converted) {
+          markShellReadBlocked(false);
+          return {
+            content: formatShellReadRedirect(command, converted),
+            isError: true,
+          };
+        } else if (purpose === "file_read") {
+          markShellReadBlocked(false);
+          return {
+            content: formatShellReadRedirect(command, null),
+            isError: true,
+          };
+        }
+      }
+
+      const selector = this.currentToolsetSelector;
+      const isTmsBootstrap = selector?.getProfile() === "project_bootstrap";
+      if (isTmsBootstrap && WRITE_TOOLS.has(effectiveToolName)) {
+        const targetPath = this.getToolInputPath(effectiveToolInput);
+        if (!(await this.isProjectRootTmsPath(targetPath))) {
+          return {
+            content: `Tool blocked: project_bootstrap may only write the root TMS.md file. Requested path: ${targetPath ?? "(missing)"}.`,
+            isError: true,
+          };
+        }
+        markTmsWriteAttempt(toolUseId, targetPath ?? undefined);
+      }
+
+      if (selector && !selector.isActive(effectiveToolName)) {
+        const activated = selector.expandForToolName(effectiveToolName);
+        if (!activated) {
+          selector.noteDeniedToolName(effectiveToolName);
+          return {
+            content: `Tool blocked: ${effectiveToolName} is not available for the current explicit policy or registry.`,
+            isError: true,
+          };
+        }
+      }
+
+      // Announce + start the tool at execution time. The query loop runs tools
+      // serially, so doing the announcement here keeps later write calls out of
+      // the UI while an earlier permission / diff / credential decision is
+      // pending. onToolCallPending creates the card; onToolCallStart immediately
+      // flips it to "running". Execution was already gated by the serial loop +
+      // waitForUserGates; this only fixes the visual pile-up.
+      callbacks.onToolCallPending(toolUseId, effectiveToolName);
+      callbacks.onToolCallStart(toolUseId, effectiveToolName, effectiveToolInput);
 
       try {
         const raw = await this.toolExecutor.execute(
-          toolName,
-          toolInput,
+          effectiveToolName,
+          effectiveToolInput,
           toolUseId,
           signal ?? undefined,
           this.agentType,
         );
+        const content = raw;
 
         // Track file access
-        this.sessionState.trackFileAccess(toolName, toolInput);
+        this.sessionState.trackFileAccess(effectiveToolName, effectiveToolInput);
 
         // Diff approval for write/edit/create tools
-        if (WRITE_TOOLS.has(toolName) && !this.lightweightOptions?.readOnly) {
+        if (WRITE_TOOLS.has(effectiveToolName) && !this.lightweightOptions?.readOnly) {
           let parsedDiff: {
             type: string;
             path: string;
@@ -947,7 +1309,7 @@ class AgentService {
             newContent?: string;
           } | null = null;
           try {
-            const parsed = JSON.parse(raw);
+            const parsed = JSON.parse(content);
             if (parsed?.type === "diff") {
               parsedDiff = {
                 type: parsed.type,
@@ -961,16 +1323,57 @@ class AgentService {
           }
 
           if (parsedDiff) {
+            const autoApplyTmsBootstrap =
+              this.currentToolsetSelector?.getProfile() === "project_bootstrap" &&
+              /[\\/]TMS\.md$/i.test(parsedDiff.path) &&
+              parsedDiff.newContent !== undefined;
+            if (autoApplyTmsBootstrap) {
+              const newContent = parsedDiff.newContent as string;
+              await invoke("write_file", {
+                path: parsedDiff.path,
+                content: newContent,
+              });
+              const appliedRaw = JSON.stringify({
+                ...JSON.parse(content),
+                alreadyApplied: true,
+              });
+              callbacks.onToolResult(toolUseId, effectiveToolName, appliedRaw, false);
+              this.sessionState.trackFileEdit(parsedDiff.path);
+              markTmsCreated(parsedDiff.path);
+              await this.markProjectTmsPresent();
+              this.toolExecutor.updateReadStateAfterWrite(
+                parsedDiff.path,
+                newContent,
+              );
+              if (this.postTmsBootstrapToolProfile && this.currentToolsetSelector) {
+                this.currentToolsetSelector.switchProfile(
+                  this.postTmsBootstrapToolProfile.profile,
+                  this.postTmsBootstrapToolProfile.readOnly,
+                  [],
+                  this.postTmsBootstrapToolProfile.enforceReadOnly,
+                );
+                this.postTmsBootstrapToolProfile = null;
+              }
+              return {
+                content: `File ${parsedDiff.isNewFile ? "created" : "updated"}: ${parsedDiff.path}\nProject bootstrap is complete. Stop this phase; the host will resume the original user request.`,
+                isError: false,
+              };
+            }
+
             // Publish the diff before waiting. updateToolCallWithResult is the
             // code path that registers pendingDiffs, so waiting first deadlocks:
             // no approval UI exists yet to resolve createDiffApprovalPromise.
-            callbacks.onToolResult(toolUseId, toolName, raw, false);
+            callbacks.onToolResult(toolUseId, effectiveToolName, content, false);
             const approved = await createDiffApprovalPromise(toolUseId);
             if (signal?.aborted) {
               return { content: "Aborted", isError: true };
             }
             if (approved) {
               this.sessionState.trackFileEdit(parsedDiff.path);
+              if (/[\\/]TMS\.md$/i.test(parsedDiff.path)) {
+                markTmsCreated(parsedDiff.path);
+                await this.markProjectTmsPresent();
+              }
               if (parsedDiff.newContent !== undefined) {
                 this.toolExecutor.updateReadStateAfterWrite(
                   parsedDiff.path,
@@ -989,14 +1392,14 @@ class AgentService {
           }
         }
 
-        return { content: raw, isError: false };
+        return { content, isError: false };
       } catch (err) {
         // formatError (not String(err)): a Tauri reject is usually a plain
         // object or serde-tagged enum — e.g. list_directory's build_file_tree
         // rejecting with {"PathNotFound":"…"} — which String() turns into the
         // literal "Error: [object Object]" the model (and the chat row) showed.
         const errorMsg = formatError(err);
-        const failKey = `${toolName}:${String(toolInput.file_path || toolInput.command || "").slice(0, 80)}`;
+        const failKey = `${effectiveToolName}:${String(effectiveToolInput.file_path || effectiveToolInput.command || "").slice(0, 80)}`;
         const count = this.sessionState.recordToolFailure(failKey, errorMsg);
         let content = `Error: ${errorMsg}`;
         if (count > 1)

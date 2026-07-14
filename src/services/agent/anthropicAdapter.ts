@@ -13,11 +13,55 @@
  *
  * Pure functions / standard web streams only (no Tauri / React / store
  * imports) so the translation is unit-testable in isolation.
+ *
+ * Prompt caching: the contextBuilder marks a literal boundary between the
+ * cross-session-stable system sections (~47K tokens) and the per-session
+ * suffix. `toAnthropicRequest` splits on that boundary and tags the static
+ * prefix + the tool catalog with `cache_control: { type: 'ephemeral' }` so
+ * the first request creates the cache and subsequent turns read it. The
+ * real `cache_creation_input_tokens` / `cache_read_input_tokens` reported
+ * by Anthropic are propagated through the usage object so query.ts can
+ * log hit/miss and the session export can show cached vs non-cached tokens.
  */
+
+import { splitOnBoundary } from './contextBuilder/helpers'
 
 const ANTHROPIC_VERSION = '2023-06-01'
 
 // ── Request translation ──
+
+/**
+ * Build the Anthropic `system` field with a prompt-cache breakpoint on the
+ * static prefix.
+ *
+ * The contextBuilder inserts a literal boundary marker
+ * (`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`) between the cross-session-stable
+ * sections (role, tools rules, doing-tasks, constraints …) and the
+ * per-session/per-turn sections (memory, git status, file tree …). When the
+ * marker is present we emit TWO system blocks and mark the static prefix with
+ * `cache_control: { type: 'ephemeral' }` so the ~47K-token stable prefix is
+ * cached across turns — the first request creates the cache
+ * (cache_creation_input_tokens), subsequent turns read it
+ * (cache_read_input_tokens).
+ *
+ * Without the marker (compact/title one-shots with a plain system string) the
+ * system stays a plain string — no cache breakpoint, matching pre-existing
+ * behaviour.
+ */
+function buildCacheableSystem(fullSystem: string): unknown {
+  const { staticPrefix, dynamicSuffix, stats } = splitOnBoundary(fullSystem)
+  if (!stats.found) {
+    return fullSystem
+  }
+  const blocks: AnthropicBlock[] = []
+  if (staticPrefix) {
+    blocks.push({ type: 'text', text: staticPrefix, cache_control: { type: 'ephemeral' } })
+  }
+  if (dynamicSuffix) {
+    blocks.push({ type: 'text', text: dynamicSuffix })
+  }
+  return blocks.length ? blocks : fullSystem
+}
 
 interface OpenAIToolCall {
   id?: string
@@ -152,9 +196,16 @@ export function toAnthropicRequest(openai: Record<string, unknown>): Record<stri
     messages,
     stream: openai.stream === true,
   }
-  if (systemParts.length) out.system = systemParts.join('\n\n')
-  if (tools.length) out.tools = tools
+  if (systemParts.length) out.system = buildCacheableSystem(systemParts.join('\n\n'))
+  if (tools.length) {
+    // Tool definitions are stable across turns (the agent doesn't add/remove
+    // tools mid-session). Mark the last one with an ephemeral cache breakpoint
+    // so the full tool catalog is cached alongside the static system prefix.
+    tools[tools.length - 1].cache_control = { type: 'ephemeral' }
+    out.tools = tools
+  }
   if (thinking) out.thinking = thinking
+  if (openai.output_config && typeof openai.output_config === 'object') out.output_config = openai.output_config
   return out
 }
 
@@ -189,15 +240,26 @@ export function anthropicResponseToOpenAI(resp: Record<string, unknown>): Record
   const usage = resp.usage as Record<string, unknown> | undefined
   const inputTokens = usage && typeof usage.input_tokens === 'number' ? usage.input_tokens : 0
   const outputTokens = usage && typeof usage.output_tokens === 'number' ? usage.output_tokens : 0
+  const cacheCreation = usage && typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : undefined
+  const cacheRead = usage && typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : undefined
   const message: Record<string, unknown> = { role: 'assistant', content: text }
   if (toolCalls.length) message.tool_calls = toolCalls
+  // Propagate Anthropic prompt-cache usage fields when present so query.ts
+  // can log cache hit/miss and the session export shows cached vs non-cached.
+  const outUsage: Record<string, number> = {
+    prompt_tokens: inputTokens,
+    completion_tokens: outputTokens,
+    total_tokens: inputTokens + outputTokens,
+  }
+  if (cacheCreation !== undefined) outUsage.cache_creation_input_tokens = cacheCreation
+  if (cacheRead !== undefined) outUsage.cache_read_input_tokens = cacheRead
   return {
     id: resp.id ?? 'byok-anthropic',
     object: 'chat.completion',
     created: 0,
     model: resp.model ?? 'byok',
     choices: [{ index: 0, message, finish_reason: mapStopReason(resp.stop_reason as string | undefined) ?? 'stop' }],
-    usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens, total_tokens: inputTokens + outputTokens },
+    usage: outUsage,
   }
 }
 
@@ -238,6 +300,10 @@ export function anthropicSSEToOpenAISSE(): TransformStream<Uint8Array, Uint8Arra
   let nextToolIndex = 0
   let inputTokens = 0
   let outputTokens = 0
+  // Anthropic prompt-cache usage — captured from message_start and surfaced
+  // on the final chunk so query.ts can log cache hit/miss per request.
+  let cacheCreationInputTokens: number | undefined
+  let cacheReadInputTokens: number | undefined
   let finishReason: string | null = null
 
   const created = Math.floor(0) // deterministic; not used by the loop
@@ -271,6 +337,8 @@ export function anthropicSSEToOpenAISSE(): TransformStream<Uint8Array, Uint8Arra
     if (type === 'message_start') {
       const usage = (evt.message as Record<string, unknown> | undefined)?.usage as Record<string, unknown> | undefined
       if (usage && typeof usage.input_tokens === 'number') inputTokens = usage.input_tokens
+      if (usage && typeof usage.cache_creation_input_tokens === 'number') cacheCreationInputTokens = usage.cache_creation_input_tokens
+      if (usage && typeof usage.cache_read_input_tokens === 'number') cacheReadInputTokens = usage.cache_read_input_tokens
       emit(controller, baseChunk({ role: 'assistant' }))
       return
     }
@@ -325,15 +393,19 @@ export function anthropicSSEToOpenAISSE(): TransformStream<Uint8Array, Uint8Arra
     }
 
     if (type === 'message_stop') {
+      // Build the final usage chunk, propagating Anthropic prompt-cache
+      // fields when the provider reported them so query.ts can distinguish
+      // cache reads (hit) from cache creates (miss → write).
+      const finalUsage: Record<string, number> = {
+        prompt_tokens: inputTokens,
+        completion_tokens: outputTokens,
+        total_tokens: inputTokens + outputTokens,
+      }
+      if (cacheCreationInputTokens !== undefined) finalUsage.cache_creation_input_tokens = cacheCreationInputTokens
+      if (cacheReadInputTokens !== undefined) finalUsage.cache_read_input_tokens = cacheReadInputTokens
       emit(
         controller,
-        baseChunk({}, finishReason ?? 'stop', {
-          usage: {
-            prompt_tokens: inputTokens,
-            completion_tokens: outputTokens,
-            total_tokens: inputTokens + outputTokens,
-          },
-        }),
+        baseChunk({}, finishReason ?? 'stop', { usage: finalUsage }),
       )
       emitDone(controller)
       return

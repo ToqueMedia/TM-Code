@@ -48,3 +48,22 @@ export function shortenPath(path: string, keep = 3): string {
   if (parts.length <= keep) return normalizePath(path)
   return `…/${parts.slice(-keep).join('/')}`
 }
+
+/**
+ * Render a path relative to the active project root when possible.
+ * Falls back to the normalized input path when the value points outside
+ * the project or no project root is known.
+ */
+export function relativeToProjectPath(path: string, projectPath?: string | null): string {
+  const normalizedPath = normalizePath(path)
+  const normalizedRoot = projectPath ? normalizePath(projectPath).replace(/\/+$/, '') : ''
+  if (!normalizedPath || !normalizedRoot) return normalizedPath
+
+  const isWindowsPath = /^[A-Za-z]:\//.test(normalizedPath) || /^[A-Za-z]:\//.test(normalizedRoot)
+  const pathForCompare = isWindowsPath ? normalizedPath.toLowerCase() : normalizedPath
+  const rootForCompare = isWindowsPath ? normalizedRoot.toLowerCase() : normalizedRoot
+
+  if (pathForCompare === rootForCompare) return '.'
+  if (!pathForCompare.startsWith(`${rootForCompare}/`)) return normalizedPath
+  return normalizedPath.slice(normalizedRoot.length + 1) || '.'
+}

@@ -60,6 +60,31 @@ const commandQueue: QueuedCommand[] = []
 let snapshot: readonly QueuedCommand[] = Object.freeze([])
 const queueChanged = createSignal()
 
+// === Queue pause ===
+//
+// True while the idle drain must NOT dispatch anything. Set by Stop (queued
+// tasks survive the stop, parked instead of firing the instant the guard
+// goes idle — "Stop doesn't stop" bug), by the budget-stop watcher (parked
+// work must not burn 402s and must survive until credits return), and on
+// snapshot rehydrate when tasks are present (auto-firing agent runs at app
+// boot without a user action would be a surprise). Cleared by the strip's
+// "Resume" button, by any manual send (pressing Enter IS the intent to
+// continue), and automatically when the queue empties.
+let queuePaused = false
+const pauseChanged = createSignal()
+
+export const subscribeToQueuePause = pauseChanged.subscribe
+
+export function isQueuePaused(): boolean {
+  return queuePaused
+}
+
+export function setQueuePaused(paused: boolean): void {
+  if (queuePaused === paused) return
+  queuePaused = paused
+  pauseChanged.emit()
+}
+
 // === Snapshot persistence ===
 //
 // Every queue mutation triggers a debounced write to
@@ -112,6 +137,9 @@ function notifySubscribers(): void {
   snapshot = Object.freeze([...commandQueue])
   queueChanged.emit()
   scheduleSnapshotPersist()
+  // Nothing left to resume — a lingering pause would silently freeze the
+  // NEXT thing the user queues.
+  if (commandQueue.length === 0) setQueuePaused(false)
 }
 
 /**
@@ -130,6 +158,13 @@ export function hydrateCommandQueue(items: QueuedCommand[]): void {
   snapshot = Object.freeze([...commandQueue])
   queueChanged.emit()
   // Don't trigger a write here — the items came FROM disk, no new state.
+  //
+  // Rehydrated TASKS start paused: a task is a full agent run, and firing
+  // one at app boot with zero user action (possibly hours after it was
+  // queued) is a surprise — and, post budget-stop, a token burn. Steer-only
+  // snapshots keep the historical auto-restore behaviour. The strip shows
+  // the paused banner with a Resume button.
+  setQueuePaused(items.some(c => c.asTask === true))
 }
 
 // ============================================================================
@@ -278,6 +313,23 @@ export function remove(commandsToRemove: QueuedCommand[]): void {
 }
 
 /**
+ * Move a queued command one position up (-1) or down (+1). Queue order is
+ * what the queue strip displays AND what the idle drain respects, so this
+ * is the user's "run this one first" control. No-op at the edges or for
+ * unknown uuids.
+ */
+export function moveInQueue(uuid: string, direction: -1 | 1): void {
+  const idx = commandQueue.findIndex(c => c.uuid === uuid)
+  if (idx === -1) return
+  const target = idx + direction
+  if (target < 0 || target >= commandQueue.length) return
+  const [item] = commandQueue.splice(idx, 1)
+  commandQueue.splice(target, 0, item!)
+  notifySubscribers()
+  logOperation('reorder')
+}
+
+/**
  * Clear all commands from the queue.
  * Used by Stop and by session-switch paths.
  */
@@ -287,10 +339,11 @@ export function clearCommandQueue(): void {
   notifySubscribers()
 }
 
-/** Test helper — clear queue and reset snapshot to a fresh frozen array. */
+/** Test helper — clear queue, pause flag, and snapshot. */
 export function resetCommandQueue(): void {
   commandQueue.length = 0
   snapshot = Object.freeze([])
+  queuePaused = false
 }
 
 // ============================================================================
@@ -314,6 +367,47 @@ export function isSlashCommand(cmd: QueuedCommand): boolean {
   const first = cmd.value[0]
   if (!first || first.type !== 'text') return false
   return first.text.trim().startsWith('/')
+}
+
+/**
+ * True when a queued command may be DRAINED AS STEERING into the live run
+ * (ridden onto its next turn). Slash/bash commands need executeInput's
+ * per-command handling, and TASK commands (`asTask`) are the opposite of
+ * steering by contract: they wait for the current run to END and then start
+ * as their own run. This predicate is the single source of truth shared by
+ * BOTH steering collectors (agentRunner.ts and usePromptBar.ts — they must
+ * stay in lockstep, see the 06-16 "queued messages only after the run" bug)
+ * and mirrored by the idle-drain batching in queueProcessor.ts.
+ */
+export function isSteerable(cmd: QueuedCommand): boolean {
+  return !isSlashCommand(cmd) && cmd.mode === 'prompt' && cmd.asTask !== true
+}
+
+/**
+ * Drain the steerable messages the live run may absorb NOW: only those
+ * enqueued BEFORE the first task in queue order. A steer message the user
+ * placed (or reordered) BELOW a task belongs to the run that task will
+ * start, not to the current one — draining it here would make the strip's
+ * order a lie. This is the steering-collector counterpart of the batch
+ * window in queueProcessor; both enforce "queue order is execution order".
+ */
+export function drainSteerableMessages(): QueuedCommand[] {
+  const firstTaskIdx = commandQueue.findIndex(c => c.asTask === true)
+  const window = firstTaskIdx === -1 ? commandQueue : commandQueue.slice(0, firstTaskIdx)
+  const eligible = new Set(window.filter(isSteerable))
+  if (eligible.size === 0) return []
+  return dequeueAllMatching(c => eligible.has(c))
+}
+
+/**
+ * Drop every steerable message, keeping tasks (and slash/bash) in place.
+ * Used by Stop: a steer message is a course correction for the run being
+ * killed — meaningless afterwards — while queued TASKS are independent
+ * units of work the user queued deliberately; they get parked (paused),
+ * not destroyed.
+ */
+export function removeSteerableMessages(): void {
+  dequeueAllMatching(isSteerable)
 }
 
 /**

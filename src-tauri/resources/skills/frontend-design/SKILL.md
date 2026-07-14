@@ -33,7 +33,7 @@ Pick from (or invent your own):
 1. Read the project root for `tokens.ts`, `tailwind.config.js`, `theme.ts`, or a CSS variables file.
 2. Read `package.json` to identify the UI stack: **Chakra UI**, **Tailwind + shadcn/Radix**, **Material**, **Mantine**, **plain CSS**, **vanilla HTML**.
 3. Inherit the existing design system exactly — colors, fonts, spacing, components — when one exists. Do not introduce new tokens.
-4. When no design system exists (greenfield component, CMD-mode HTML deliverable, prototype), invent one and document it inline as CSS variables.
+4. When no design system exists (greenfield component, standalone HTML deliverable, prototype), invent one and document it inline as CSS variables.
 
 ## Stack-specific defaults (when no project tokens are found)
 
@@ -49,7 +49,7 @@ Pick from (or invent your own):
 - Inputs: `border border-input rounded-lg px-3 py-2 focus:ring-2 focus:ring-ring focus:border-ring`.
 - Nav: `bg-background/80 backdrop-blur-md border-b sticky top-0 z-50`.
 
-### Plain HTML/CSS (CMD-mode prototypes, single-file deliverables)
+### Plain HTML/CSS (standalone prototypes, single-file deliverables)
 - One `<style>` block. CSS variables on `:root`. Phosphor Icons CDN or inline SVG.
 - Mobile-first media queries. `position: sticky` over `fixed` for sandboxed previews.
 - Real images via Unsplash / Picsum URLs — never `placeholder.com`, never empty `src`.

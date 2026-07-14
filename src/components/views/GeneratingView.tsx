@@ -40,7 +40,7 @@ function GeneratingView() {
   const activeDiffs = pendingDiffs.filter(d => d.status === 'pending')
 
   // Pagination — match the other chat surfaces (ChatView / ChatPanel /
-  // PreviewView's sidebar / TerminalView). Render the last 30 messages,
+  // PreviewView's sidebar). Render the last 30 messages,
   // expand on scroll up. Less critical here since GeneratingView is
   // transient (visible only while the scaffold is in flight), but a single
   // long scaffold can still produce hundreds of tool-call cards by the end,
@@ -103,9 +103,16 @@ function GeneratingView() {
       if (remaining.length === 0 && !useChatStore.getState().isStreaming) {
         const ls = useLayoutStore.getState()
         if (ls.viewMode === 'generating') {
-          if (selectIsPreviewServerRunning(ls)) ls.setViewMode('preview')
-          else if (acceptedPathsRef.current.length > 0) { await tryStaticPreview(acceptedPathsRef.current); acceptedPathsRef.current = [] }
-          else ls.setViewMode('chat')
+          if (selectIsPreviewServerRunning(ls)) {
+            ls.reloadPreview()
+            ls.setViewMode('chat')
+          } else if (acceptedPathsRef.current.length > 0) {
+            await tryStaticPreview(acceptedPathsRef.current)
+            acceptedPathsRef.current = []
+            useLayoutStore.getState().setViewMode('chat')
+          } else {
+            ls.setViewMode('chat')
+          }
         }
       }
     }, 50)

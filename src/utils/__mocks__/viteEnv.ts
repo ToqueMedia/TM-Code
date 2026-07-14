@@ -15,6 +15,5 @@ export const VITE_OLLAMA_URL: string | undefined = undefined
 export const VITE_WORKER_URL: string | undefined = undefined
 export const VITE_AI_WORKER_URL: string | undefined = undefined
 export const VITE_COLLAB_SIGNALING_URL: string | undefined = undefined
-export const VITE_DEPLOY_URL: string | undefined = undefined
 export const IS_VITE_DEV = false
 export const VITE_GITHUB_CLIENT_ID: string | undefined = undefined

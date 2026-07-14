@@ -18,29 +18,35 @@ import PreviewView from './views/PreviewView'
 import EditorView from './views/EditorView'
 import PermissionDialog from './chat/PermissionDialog'
 import PlanViewerPanel from './chat/PlanViewerPanel'
+import CheckpointDrawerPanel from './chat/CheckpointDrawerPanel'
+import TerminalDrawerPanel from './cmd-mode/TerminalDrawerPanel'
 import { useTranslation } from '@/i18n'
-import ProjectsSidebar from './chat/ProjectsSidebar'
 import { ErrorBoundary } from './ErrorBoundary'
 
 import SettingsView from './views/SettingsView'
-import DataViewerView from './views/DataViewerView'
 import { useCodeEditorState } from '../hooks/useEditorState'
 import { usePermissionStore } from '../stores/permissionStore'
 import { devServerManager } from '../services/devServerManager'
 import DevServerStatus from './chat/DevServerStatus'
-import PublishModal from './dialogs/PublishModal'
 import { TeamChatPanel } from './collab/TeamChatPanel'
+import { ScreenShareViewer } from './collab/ScreenShareViewer'
 import { useCollabSession } from '@/hooks/useCollabSession'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
+import { GoalCelebration } from './celebration/GoalCelebration'
+import MonacoBridge from '../utils/monacoBridge'
 
-function MainLayout() {
+interface MainLayoutProps {
+  embedded?: boolean
+}
+
+function MainLayout({ embedded = false }: MainLayoutProps) {
   const t = useTranslation()
   useCollabSession()
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewFullscreen = useLayoutStore(s => s.isPreviewFullscreen)
   const isSidebarVisible = useLayoutStore(s => s.isSidebarVisible)
-  const isProjectsSidebarVisible = useLayoutStore(s => s.isProjectsSidebarVisible)
+  const previewFillsWorkspace = embedded && viewMode === 'preview'
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
   const approve = usePermissionStore(s => s.approve)
   const approveAlwaysInProject = usePermissionStore(s => s.approveAlwaysInProject)
@@ -189,6 +195,12 @@ function MainLayout() {
       // 3. Save page: Cmd+S, Ctrl+S (avoid native browser html saving)
       if (isMeta && key === 's' && !isShift && !isAlt) {
         e.preventDefault()
+        const currentEditor = MonacoBridge.getInstance().getCurrentEditor()
+        const saveAction = currentEditor?.getAction('tmcode.save')
+        if (saveAction) {
+          saveAction.run().catch(() => {})
+          return
+        }
         const editorRepo = useEditorRepository.getState()
         if (editorRepo.activeFile) {
           editorRepo.saveFile(editorRepo.activeFile).catch(() => {})
@@ -270,19 +282,6 @@ function MainLayout() {
         }
       }
 
-      // Cmd+Shift+B: Toggle Data Viewer ("B for Browse"). Mirrors the
-      // editor toggle's shape — entering when not in `data`, going back
-      // when already there. Keeps the existing chat-header FiDatabase
-      // button as the discoverable entry; this is the power-user path.
-      if (isMeta && e.shiftKey && e.key === 'B') {
-        e.preventDefault()
-        const layout = useLayoutStore.getState()
-        if (layout.viewMode === 'data') {
-          layout.goBack()
-        } else {
-          layout.setViewMode('data')
-        }
-      }
     }
 
     window.addEventListener('keydown', handleKeyDown)
@@ -334,36 +333,43 @@ function MainLayout() {
     return () => unlisten?.()
   }, [])
 
-  if (!currentProject) return null
+  if (!currentProject) {
+    if (!embedded) return null
+    return (
+      <Flex
+        direction="column"
+        flex="1"
+        width="100%"
+        height="100%"
+        bg="transparent"
+        color={tokens.colors.text.primary}
+        overflow="hidden"
+        fontFamily={tokens.fontFamily.ui}
+        position="relative"
+      >
+        <GoalCelebration />
+        <ChatView />
+      </Flex>
+    )
+  }
 
   return (
     <Flex
       direction="column"
-      height="100vh"
+      flex={embedded ? '1' : undefined}
+      width="100%"
+      height={embedded ? '100%' : '100vh'}
       bg="transparent"
       color={tokens.colors.text.primary}
       overflow="hidden"
       fontFamily={tokens.fontFamily.ui}
+      position="relative"
     >
-      <MinimalTitleBar />
+      <GoalCelebration />
+      {!embedded && <MinimalTitleBar />}
 
-      {/* Main area below title bar: optional projects sidebar + content column */}
+      {/* Main area below title bar */}
       <Flex flex="1" overflow="hidden">
-        {/* Projects sidebar — full height from title bar to bottom */}
-        <AnimatePresence>
-          {isProjectsSidebarVisible && viewMode !== 'editor' && (
-            <motion.div
-              key="projects-sidebar"
-              initial={{ width: 0, opacity: 0 }}
-              animate={{ width: 240, opacity: 1 }}
-              exit={{ width: 0, opacity: 0 }}
-              transition={{ duration: 0.18, ease: 'easeOut' }}
-              style={{ overflow: 'hidden', flexShrink: 0, height: '100%' }}
-            >
-              <ProjectsSidebar />
-            </motion.div>
-          )}
-        </AnimatePresence>
 
         {/* Content + prompt area — row flex with PlanViewerPanel on the right.
             The column wrapper holds content + prompt; the plan panel is a
@@ -423,10 +429,6 @@ function MainLayout() {
                   <ErrorBoundary>
                     <SettingsView />
                   </ErrorBoundary>
-                ) : viewMode === 'data' ? (
-                  <ErrorBoundary>
-                    <DataViewerView />
-                  </ErrorBoundary>
                 ) : viewMode === 'generating' && !previewMounted ? (
                   <ErrorBoundary>
                     <GeneratingView />
@@ -434,15 +436,17 @@ function MainLayout() {
                 ) : (
                   <Flex flex="1" overflow="hidden">
                     <Box
-                      w={viewMode === 'preview'
+                      w={previewFillsWorkspace ? '0px' : viewMode === 'preview'
                         ? (isPreviewFullscreen ? '0px' : `${previewChatWidth}px`)
                         : '100%'}
                       h="100%"
                       flexShrink={0}
                       overflow="hidden"
-                      display="flex"
+                      display={previewFillsWorkspace ? 'none' : 'flex'}
                       flexDirection="column"
-                      transition={isResizing ? 'none' : 'width 0.3s ease'}
+                      // Width snaps (no transition) — same policy as the side
+                      // drawers: animating this column's width re-wraps the
+                      // agent transcript on every frame (text wobble).
                     >
                       <ErrorBoundary>
                         <ChatView />
@@ -465,7 +469,7 @@ function MainLayout() {
                         )
                       )}
                     </Box>
-                    {viewMode === 'preview' && !isPreviewFullscreen && (
+                    {viewMode === 'preview' && !isPreviewFullscreen && !previewFillsWorkspace && (
                       <Box
                         ref={resizeHandleRef}
                         role="separator"
@@ -504,7 +508,7 @@ function MainLayout() {
             </Flex>
 
             {/* Permission dialog / PromptBar — in preview mode, rendered inside the chat sidebar wrapper */}
-            {viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && viewMode !== 'data' && (
+            {viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && (
               pendingPermission ? (
                 <PermissionDialog
                   toolName={pendingPermission.toolName}
@@ -525,6 +529,11 @@ function MainLayout() {
 
           {/* Plan Viewer side panel — 600px, full height, pushes everything left */}
           <PlanViewerPanel />
+          <CheckpointDrawerPanel />
+          <TerminalDrawerPanel />
+          {/* Ephemeral team chat (P2P) — drawer like the terminal, toggled
+              from the Source Control header */}
+          <TeamChatPanel />
         </Flex>
       </Flex>
 
@@ -533,25 +542,13 @@ function MainLayout() {
       {/* Floating dev server status panel */}
       <DevServerStatus />
 
-      {/* Publish modal — single mount; trigger via layoutStore.setPublishModalOpen */}
-      <PublishModalMount />
-
-      {/* Ephemeral team chat (P2P) — toggled from the Source Control header */}
-      <TeamChatPanel />
+      {/* Teammate screen-share viewer (P2P video) — shows while watching;
+          stays floating/draggable on purpose (it is a video window). */}
+      <ScreenShareViewer />
 
       {/* Requirements check dialog removed — templates disabled */}
     </Flex>
   )
-}
-
-/**
- * Thin wrapper so MainLayout doesn't re-render when only the modal-open
- * flag flips. Subscribes to just the boolean and the close action.
- */
-function PublishModalMount() {
-  const isOpen = useLayoutStore((s) => s.isPublishModalOpen)
-  const setOpen = useLayoutStore((s) => s.setPublishModalOpen)
-  return <PublishModal isOpen={isOpen} onClose={() => setOpen(false)} />
 }
 
 export default memo(MainLayout)

@@ -1,5 +1,5 @@
 // Shared @mention parser. Single source of truth for detection and extraction
-// across CMD mode, chat prompt, and the server-side resolver. Unicode-safe.
+// across prompt surfaces and the server-side resolver. Unicode-safe.
 
 // A mention token accepts:
 //   - Unicode letters and numbers (\p{L}\p{N})

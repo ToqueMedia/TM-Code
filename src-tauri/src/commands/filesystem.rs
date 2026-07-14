@@ -8,9 +8,6 @@ use tauri::Manager;
 use super::project_state::{legacy_project_state_dir, project_state_root};
 use super::{canonicalize_path, normalize_path_for_frontend};
 
-// Deploy-pipeline ops (collect_deploy_bundle, collect_backend_tarball,
-// validate_backend_for_cloud_run) live in `super::deploy`.
-
 /// Validates that a template ID contains only safe characters (alphanumeric, hyphens).
 /// Prevents path traversal via crafted IDs like "../../../etc".
 fn validate_template_id(id: &str) -> Result<(), String> {

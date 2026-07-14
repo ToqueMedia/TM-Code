@@ -20,6 +20,7 @@ jest.mock('@tauri-apps/api/event', () => ({ listen: jest.fn() }))
 import { invoke } from '@/utils/invokeMetrics'
 import { listen } from '@tauri-apps/api/event'
 import { createByokFetch } from '../byokTransport'
+import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../dashscopePromptCache'
 
 const mockInvoke = invoke as jest.Mock
 const mockListen = listen as jest.Mock
@@ -94,6 +95,41 @@ describe('BYOK direct routing — OpenAI-compatible (Gemini)', () => {
   })
 })
 
+describe('BYOK direct routing — DashScope prompt cache', () => {
+  it('adds cache_control to the stable system prefix for Kimi K2.7 Code', async () => {
+    const byokFetch = createByokFetch({
+      expectedHost: 'dashscope-intl.aliyuncs.com',
+      apiShape: 'openai_compat',
+    })
+    const staticPart = 'S'.repeat(5000)
+    const dynamicPart = 'project context'
+
+    await byokFetch('https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer DASHSCOPE_USER_KEY', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'kimi-k2.7-code',
+        max_tokens: 100,
+        stream: true,
+        messages: [
+          {
+            role: 'system',
+            content: `${staticPart}\n\n${SYSTEM_PROMPT_DYNAMIC_BOUNDARY}\n\n${dynamicPart}`,
+          },
+          { role: 'user', content: 'hi' },
+        ],
+      }),
+    })
+
+    const sent = capturedStreams()[0]
+    const body = JSON.parse(sent.body)
+    expect(sent.url).not.toContain(TM_WORKER_HOST)
+    expect(body.messages[0].content[0].cache_control).toEqual({ type: 'ephemeral' })
+    expect(body.messages[0].content[0].text).toBe(staticPart)
+    expect(body.messages[0].content[1].text).toBe(dynamicPart)
+  })
+})
+
 describe('BYOK direct routing — Anthropic (native Messages API)', () => {
   it('rewrites to /v1/messages, sends x-api-key (user key), drops Authorization, never the worker', async () => {
     const byokFetch = createByokFetch({ expectedHost: 'api.anthropic.com', apiShape: 'anthropic' })
@@ -101,7 +137,11 @@ describe('BYOK direct routing — Anthropic (native Messages API)', () => {
     // The SDK would POST to {baseURL}/chat/completions with Authorization: Bearer.
     await byokFetch('https://api.anthropic.com/chat/completions', {
       method: 'POST',
-      headers: { Authorization: 'Bearer sk-ant-USER_KEY', 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: 'Bearer sk-ant-USER_KEY',
+        'Content-Type': 'application/json',
+        'Content-Length': '999999',
+      },
       body: JSON.stringify({ model: 'claude-opus-4-8', max_tokens: 100, stream: true, messages: [{ role: 'user', content: 'hi' }] }),
     })
 
@@ -114,6 +154,7 @@ describe('BYOK direct routing — Anthropic (native Messages API)', () => {
     expect(sent.expectedHost).toBe('api.anthropic.com')
     expect(sent.headers['x-api-key']).toBe('sk-ant-USER_KEY')
     expect(sent.headers.Authorization).toBeUndefined()
+    expect(sent.headers['Content-Length']).toBeUndefined()
     expect(sent.headers['anthropic-version']).toBe('2023-06-01')
 
     // → body translated to Anthropic shape (proves it's the provider's own API).

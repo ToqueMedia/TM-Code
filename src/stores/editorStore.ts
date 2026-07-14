@@ -47,6 +47,8 @@ interface EditorActions {
   closeFile: (path: string) => void;
   setActiveFile: (path: string | null) => void;
   updateFileContent: (path: string, content: string) => void;
+  markFileDirty: (path: string) => void;
+  markFileSaved: (path: string, savedContent?: string) => void;
   setCursorPosition: (path: string, line: number, column: number) => void;
   updateEditorState: (path: string, state: Partial<EditorFile>) => void;
   getEditorState: (path: string) => Partial<EditorFile> | undefined;
@@ -500,9 +502,10 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           
           // Mark file as dirty
           getUnsavedChangesService().markFileAsDirty(path);
-          
-          // Adiciona à queue de auto-save (apenas se realmente mudou)
-          getAutoSaveQueue().addToQueue(path, content);
+
+          // File auto-save itself lives in MonacoEditor (VS Code-style
+          // afterDelay/onFocusChange, driven by settingsStore.autoSave);
+          // this store only tracks the buffer + dirty flag.
 
           // Persist dirty buffer to disk — protects against data loss on
           // crash/reload when autosave is off or hasn't fired yet. The
@@ -515,6 +518,53 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
             undoStack,
             redoStack
           };
+        });
+      },
+
+      // Lightweight per-keystroke path: flips the dirty flag (and unpins a
+      // preview tab) WITHOUT copying content or touching undo stacks. The
+      // full content sync arrives via the editor's debounced
+      // updateFileContent — pushing getValue() on every keystroke copied
+      // the whole file twice per key and re-rendered all subscribers.
+      markFileDirty: (path: string) => {
+        set(state => {
+          const fileIndex = state.openFiles.findIndex(f => f.path === path);
+          if (fileIndex === -1) return state;
+          const file = state.openFiles[fileIndex];
+          if (file.isDirty && !file.isPreview) return state;
+
+          const updatedFiles = [...state.openFiles];
+          updatedFiles[fileIndex] = { ...file, isDirty: true, isPreview: false };
+
+          getUnsavedChangesService().markFileAsDirty(path);
+          scheduleEditorStatePersist();
+
+          return { openFiles: updatedFiles };
+        });
+      },
+
+      markFileSaved: (path: string, savedContent?: string) => {
+        set(state => {
+          const fileIndex = state.openFiles.findIndex(f => f.path === path);
+          if (fileIndex === -1) return state;
+
+          const file = state.openFiles[fileIndex];
+          if (typeof savedContent === 'string' && file.content !== savedContent) {
+            return state;
+          }
+
+          if (!file.isDirty) return state;
+
+          const updatedFiles = [...state.openFiles];
+          updatedFiles[fileIndex] = {
+            ...file,
+            isDirty: false,
+          };
+
+          getUnsavedChangesService().markFileAsClean(path);
+          scheduleEditorStatePersist();
+
+          return { openFiles: updatedFiles };
         });
       },
 
@@ -644,6 +694,7 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
           set(state => {
             const fileIndex = state.openFiles.findIndex(f => f.path === path);
             if (fileIndex === -1) return state;
+            if (state.openFiles[fileIndex].content !== file.content) return state;
 
             const updatedFiles = [...state.openFiles];
             updatedFiles[fileIndex] = {
@@ -654,8 +705,10 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
             return { openFiles: updatedFiles };
           });
 
-          // Mark file as clean
-          getUnsavedChangesService().markFileAsClean(path);
+          const current = get().openFiles.find(f => f.path === path);
+          if (current && !current.isDirty) {
+            getUnsavedChangesService().markFileAsClean(path);
+          }
 
           // The dirty-buffer file on disk should drop this path now that
           // the real file has been saved. Schedule a persist — the writer
@@ -735,12 +788,21 @@ export const useEditorRepository = create<EditorState & EditorActions>()(
       refreshFileContent: async (path: string) => {
         try {
           logger.debug('editor', 'Refreshing file content for:', path);
+          const current = get().openFiles.find(f => f.path === path);
+          if (current?.isDirty) {
+            logger.warn('editor', `Skipped refresh for dirty file: ${path}`);
+            return;
+          }
           const content = await FileService.readFile(path);
-          
+
           set(state => {
             const fileIndex = state.openFiles.findIndex(f => f.path === path);
             if (fileIndex === -1) return state;
-            
+            // Disk matches the buffer — nothing to refresh, skip the state
+            // churn (this runs after every auto-applied agent write).
+            const existing = state.openFiles[fileIndex];
+            if (existing.content === content && !existing.isDirty) return state;
+
             const updatedFiles = [...state.openFiles];
             updatedFiles[fileIndex] = {
               ...updatedFiles[fileIndex],

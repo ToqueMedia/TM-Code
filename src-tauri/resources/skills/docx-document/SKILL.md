@@ -5,7 +5,7 @@ description: Generate Microsoft Word (.docx) files via pandoc or python-docx. Ca
 
 # Word Document Generation (.docx)
 
-Author Microsoft Word documents. CMD-mode skill — applies when the user asks for "Word", ".docx", "documento Word", "ata em Word", etc.
+Author Microsoft Word documents when the user asks for "Word", ".docx", "documento Word", "ata em Word", etc.
 
 ## Tooling — preference order
 

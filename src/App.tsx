@@ -2,7 +2,6 @@
 import './utils/platformPatches'
 import './utils/monacoEnv'
 import WelcomeScreen from './components/WelcomeScreen';
-import MainLayout from './components/MainLayout';
 import FileViewer from './components/FileViewer';
 import LoginScreen from './components/auth/LoginScreen';
 import OnboardingFlow from './components/onboarding/OnboardingFlow';
@@ -30,7 +29,6 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useNativeMenu } from './hooks/useNativeMenu';
 import { useBillingRefresh } from './hooks/useBillingRefresh';
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { flushSync } from 'react-dom';
 import { Box, Flex } from '@chakra-ui/react';
 import { LoadingSpinner } from './components/ui/LoadingSpinner';
 import { RequirementsErrorScreen } from './components/ui/RequirementsErrorScreen';
@@ -62,6 +60,7 @@ function StandaloneEditorApp({ files }: { files: string[] }) {
 			overflow="hidden"
 		>
 			<FileViewer
+				standalone
 				filePath={files[0]}
 				onClose={() => {
 					import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
@@ -90,7 +89,6 @@ function App() {
 	// True while openProject is in-flight. Keeps the spinner visible even after
 	// setInitializing(false) fires — prevents WelcomeScreen from showing while a
 	// project is actively loading (both on startup auto-open and manual opens).
-	const [isOpeningProject, setIsOpeningProject] = useState(false);
 	const prevProjectRef = useRef<string | null>(null);
 	// Guards against concurrent initializeApp invocations (dependency re-runs while async in progress,
 	// or React StrictMode double-fire). Without this, openProject can be called twice in parallel.
@@ -123,10 +121,24 @@ function App() {
 		return () => { active = false }
 	}, []);
 
+	// Keep open editor buffers in sync with the filesystem — shell edits by
+	// the agent (execute_command), Source Control discard/stage, and files
+	// changed externally while the window was unfocused. The direct agent
+	// write tools refresh their own target; this is the catch-all sweep.
+	useEffect(() => {
+		let stop: (() => void) | null = null
+		let active = true
+		import('./services/bufferReconciler').then(({ startBufferReconciler }) => {
+			if (!active) return
+			stop = startBufferReconciler()
+		})
+		return () => { active = false; stop?.() }
+	}, []);
+
 	// Detect the mandatory external tools (git/node/python) once the app is up,
 	// and re-check on window focus. Prompt sending is blocked while any is
 	// missing (see requiredToolsStore + the handleSend gates). Best-effort;
-	// covers every view (cmd + chat), not just Terminal mode.
+	// covers every view, not just the shell-styled surface.
 	useEffect(() => {
 		const refresh = () => {
 			import('./stores/requiredToolsStore').then(({ useRequiredToolsStore }) => {
@@ -358,6 +370,50 @@ function App() {
 		return () => { active = false; unlisten?.() }
 	}, []);
 
+	// Multi-window parallel work: mirror this window's agent-run state to the
+	// project's on-disk status file so OTHER windows can badge it in their
+	// recents lists (each window is a separate OS process — disk is the only
+	// shared channel). Reader side: useProjectAgentStatuses.
+	useEffect(() => {
+		void import('./services/projectAgentStatusService')
+			.then(m => m.initProjectAgentStatusWriter())
+			.catch(() => { /* Tauri not present (jsdom tests) */ })
+		// Budget exhausted → stop EVERYTHING in this window (main run +
+		// sub-agents) with a descriptive system message, instead of letting
+		// each parallel run burn one more turn until its own 402.
+		void import('./services/budgetStopService')
+			.then(m => m.initBudgetStopWatcher())
+			.catch(() => { /* Tauri not present (jsdom tests) */ })
+		// Double-open guard: heartbeat this window's presence on its open
+		// project so other windows can warn before opening it too.
+		void import('./services/projectWindowLockService')
+			.then(m => m.initProjectWindowLock())
+			.catch(() => { /* Tauri not present (jsdom tests) */ })
+	}, []);
+
+	// Backstop drain for `--open-project`: initializeApp only drains it on
+	// the AUTHENTICATED boot path — a window that boots signed-out returned
+	// early there and the queued target survived login with nobody left to
+	// read it (the init effect is one-shot). Fires once when both auth and
+	// init have settled; on the normal boot the slot is already empty.
+	const pendingProjectDrainedRef = useRef(false);
+	useEffect(() => {
+		if (!isAuthenticated || initializing) return;
+		if (pendingProjectDrainedRef.current) return;
+		pendingProjectDrainedRef.current = true;
+		void (async () => {
+			try {
+				const { invoke } = await import('@tauri-apps/api/core');
+				const pendingProject = await invoke<string | null>('take_pending_open_project');
+				if (pendingProject && !useProjectStore.getState().currentProject) {
+					await openProject(pendingProject);
+				}
+			} catch {
+				/* Tauri not present (jsdom tests) */
+			}
+		})();
+	}, [isAuthenticated, initializing, openProject]);
+
 	// Native file drop — drag a folder from Finder/Explorer onto the window
 	// to open it as a project. Uses Tauri's window-level drag-drop event
 	// (which gives real filesystem paths), distinct from the HTML5 drop in
@@ -469,25 +525,42 @@ function App() {
 				return;
 			}
 
+			// Window launched with `--open-project <dir>` ("Open in New Window"
+			// on another instance): that explicit target beats BOTH the
+			// persisted welcomeScreen preference and the auto-open-last-project
+			// fallback — the user asked for THIS project in THIS window.
+			try {
+				const { invoke } = await import('@tauri-apps/api/core');
+				const pendingProject = await invoke<string | null>('take_pending_open_project');
+				if (pendingProject) {
+					try {
+						await openProject(pendingProject);
+					} catch (error) {
+						logger.error('app', 'Failed to open --open-project target:', error);
+					}
+					setInitializing(false);
+					return;
+				}
+			} catch {
+				// Tauri not present (jsdom tests, etc.)
+			}
+
 			// Read directly from the store — not from the effect closure — to avoid
 			// stale values if the store updated between renders and the effect firing.
-			const { currentProject: proj, cmdModeProjectPath: cmd, recentProjects: recent, welcomeScreen } = useProjectStore.getState();
+			const { currentProject: proj, recentProjects: recent, welcomeScreen } = useProjectStore.getState();
 
 			// If the user was explicitly on the Welcome screen last time the app
 			// closed, honour that on restart — do NOT auto-open the most recent
 			// project. `welcomeScreen === null` means "no Welcome preference yet"
 			// (first-ever launch or pre-0.3.0 persisted state), in which case the
 			// legacy auto-open-last-project behaviour still applies.
-			if (!proj && !cmd && !welcomeScreen && recent.length > 0) {
+			if (!proj && !welcomeScreen && recent.length > 0) {
 				const lastProject = recent[0];
 				if (lastProject.path) {
-					setIsOpeningProject(true);
 					try {
 						await openProject(lastProject.path);
 					} catch (error) {
 						logger.error('app', 'Failed to open last project:', error);
-					} finally {
-						setIsOpeningProject(false);
 					}
 				}
 			}
@@ -535,7 +608,7 @@ function App() {
 		useChatStore.getState().clearAllSessions();
 		// Reset transient agent state so last-response model/provider and BYOK
 		// confirmation don't leak from the previous project. Keep the task
-		// tracker intact here: projectStore / TerminalView hydrate it from the
+		// tracker intact here: projectStore hydrates it from the
 		// new project's app-managed state, and clearing in this effect can
 		// race after hydration and make the task panel disappear.
 		useAgentStore.getState().resetTransientState();
@@ -552,7 +625,7 @@ function App() {
 	}, [currentProject]);
 
 	// Frontend-design discoverability now lives in the rotating command tips
-	// (ChatWorkingTips / TerminalWorkingTips) instead of a toast on project
+	// (ChatWorkingTips) instead of a toast on project
 	// open — the toast nagged on every frontend project even before the user
 	// did anything. Removed per user request (2026-06-20).
 
@@ -798,28 +871,19 @@ function App() {
 
 	const handleOpenProject = async (path?: string, options?: { initGit?: boolean }) => {
 		if (!path) return;
-		// flushSync forces React to paint the spinner BEFORE openProject starts.
-		// Without it, React 18 automatic batching groups setIsOpeningProject(true)
-		// and setIsOpeningProject(false) into one render — the intermediate spinner
-		// state never paints and WelcomeScreen appears frozen.
-		flushSync(() => setIsOpeningProject(true));
 		try {
 			await openProject(path, options);
 		} catch (error) {
 			logger.error('app', 'Failed to open project:', error);
 			const { useToastStore } = await import('./stores/toastStore');
 			useToastStore.getState().addToast('error', t('app.failedOpenProject').replace('{message}', (error as Error).message || t('error.unknown')));
-		} finally {
-			setIsOpeningProject(false);
 		}
 	};
 
 	// Show loading state while:
 	// - app is bootstrapping (initializing)
 	// - Firebase auth is still resolving and we have no persisted auth
-	// - a project is actively being opened (prevents WelcomeScreen flash while
-	//   openProject is in-flight — both on startup auto-open and manual opens)
-	if (initializing || (authLoading && !isAuthenticated) || isOpeningProject) {
+	if (initializing || (authLoading && !isAuthenticated)) {
 		return (
 			<Flex
 				justify="center"
@@ -898,18 +962,21 @@ function App() {
 			/>
 
 			<Box position="relative" zIndex={1}>
-				{/* Conta suspensa → só o Welcome (MainLayout, que hospeda
-				    Chat/Terminal, nunca renderiza enquanto bloqueado). */}
+				{/* Conta suspensa → só o Welcome, sem workspace activo. */}
 				{isBlocked ? (
 					<WelcomeScreen
 						onOpenProject={handleOpenProject}
 					/>
-				) : currentProject ? <MainLayout /> :
-					standaloneFiles.length > 0 ? (
-						<FileViewer
-							filePath={standaloneFiles[0]}
-							onClose={() => setStandaloneFiles([])}
-						/>
+				) : standaloneFiles.length > 0 && !currentProject ? (
+						// The viewer now sizes to its container (h=100%) instead of
+						// hardcoding 100vh — inline it must discount the 35px title
+						// bar or its status bar lands below the fold.
+						<Box h="calc(100vh - 35px)">
+							<FileViewer
+								filePath={standaloneFiles[0]}
+								onClose={() => setStandaloneFiles([])}
+							/>
+						</Box>
 					) : (
 						<WelcomeScreen
 							onOpenProject={handleOpenProject}

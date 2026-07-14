@@ -1,19 +1,24 @@
 /**
- * Shared memory guidance content used by both chat and CMD modes.
- * Single source of truth — update here, both modes pick it up.
+ * Shared memory guidance content used by all system-prompt builders.
+ * Single source of truth — update here and every prompt surface picks it up.
  */
 
 /**
  * Build the full memory tools guidance section. Used by:
  * - getMemoryToolsGuidanceSection() in chatSections.ts
- * - getCmdMemoryToolsGuidanceSection() in cmdSections.ts
  */
 export function buildMemoryGuidanceSection(): string {
-  return `# Persistent memory — \`save_memory\` / \`forget_memory\` / \`read_memory\`
+  return `# Memory — persistent + session
 
-You have a per-session AND cross-session memory system. The current entries are listed in the "Persistent memory" block below (user scope + project scope). Build this system up so future conversations have a complete picture of who the developer is, what to repeat or avoid, and the context behind the work.
+You have two memory layers:
+- Persistent memory: \`save_memory\` / \`forget_memory\` / \`read_memory\` for durable cross-session facts.
+- Session memory: \`update_session_memory\` / \`read_session_memory\` for in-progress work state that must survive compaction but should reset with the session.
+
+The current persistent entries are listed in the "Persistent memory" block below (user scope + project scope). Build this system up so future conversations have a complete picture of who the developer is, what to repeat or avoid, and the context behind the work.
 
 If the developer explicitly asks you to remember something, save it as the type that fits best. If they ask you to forget something, remove the entry.
+
+Use \`update_session_memory\` for temporary state: what you are working on, decisions made in this session, blockers, commands already tried, verification still pending, and the next concrete step. Do not put that state in visible chat text just to survive compaction.
 
 ## Types of memory
 
@@ -70,8 +75,8 @@ If the developer explicitly asks you to remember something, save it as the type 
 - Code patterns, conventions, architecture, file paths, project structure — derivable from the current state by reading.
 - Git history, recent changes, who-changed-what — \`git log\` / \`git blame\` are authoritative.
 - Debugging solutions or fix recipes — the fix is in the code; the commit message has the context.
-- Anything already documented in CLAUDE.md or TMS.md.
-- Ephemeral task details: in-progress work, current conversation context (the task tracker handles those).
+- Anything already documented in TMS.md.
+- Ephemeral task details: in-progress work, current conversation context, commands already tried this session, next steps after compaction. Use the task tracker and \`update_session_memory\` for those.
 
 These exclusions apply **even when the developer explicitly asks you to save.** If they ask you to save "the deploy log" or "the PR list", ask what was *surprising* or *non-obvious* about it — that's the part worth keeping.
 

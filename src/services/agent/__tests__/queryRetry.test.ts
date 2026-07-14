@@ -1,4 +1,11 @@
 import { query, type QueryParams, type QueryStreamEvent } from '../query'
+import { ToolsetSelector, REQUEST_TOOLS_NAME, BUGFIX_BASE } from '../toolsetSelector'
+import {
+  SEARCH_FILES, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EDIT_FILE, GLOB, LSP,
+  EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS, UPDATE_SESSION_MEMORY,
+  WRITE_FILE, START_DEV_SERVER, REQUEST_CREDENTIALS,
+  READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
+} from '../toolNames'
 import {
   resetContextCollapse,
   setContextCollapseEnabled,
@@ -10,6 +17,26 @@ function makeStream(chunks: unknown[]): AsyncIterable<unknown> {
     async *[Symbol.asyncIterator]() {
       for (const chunk of chunks) {
         yield chunk
+      }
+    },
+  }
+}
+
+function makeHeartbeatOnlyStream(onReturn: jest.Mock): AsyncIterable<unknown> {
+  return {
+    [Symbol.asyncIterator]() {
+      return {
+        async next() {
+          await new Promise(resolve => setTimeout(resolve, 2))
+          return {
+            done: false,
+            value: { choices: [{ delta: { role: 'assistant' } }] },
+          }
+        },
+        async return() {
+          onReturn()
+          return { done: true, value: undefined }
+        },
       }
     },
   }
@@ -32,6 +59,13 @@ function makeStreamingCreate(chunks: unknown[]) {
       response: { headers: new Headers() },
     }),
   }))
+}
+
+function makeTool(name: string) {
+  return {
+    type: 'function' as const,
+    function: { name, description: `tool ${name}`, parameters: { type: 'object' as const, properties: {} } },
+  }
 }
 
 function baseParams(overrides: Partial<QueryParams> = {}): QueryParams {
@@ -209,6 +243,94 @@ describe('query retry handling', () => {
     expect(secondMessages.length).toBeLessThan(firstMessages.length)
   })
 
+  it('captures usage-only streaming chunks with empty choices', async () => {
+    const onUsage = jest.fn()
+    const onRequestUsage = jest.fn()
+    const create = makeStreamingCreate([
+      { choices: [{ delta: { content: 'done' } }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      {
+        choices: [],
+        usage: {
+          prompt_tokens: 1234,
+          completion_tokens: 56,
+          total_tokens: 1290,
+          prompt_tokens_details: { cached_tokens: 789 },
+        },
+      },
+    ])
+
+    const generator = query(baseParams({
+      client: makeClient(create),
+      onUsage,
+      onRequestUsage,
+    }))
+
+    expect(await nextEvent(generator)).toEqual({ type: 'message_start' })
+    expect(await nextEvent(generator)).toEqual({ type: 'text_delta', text: 'done' })
+
+    const stop = await nextEvent(generator)
+    expect(stop).toMatchObject({
+      type: 'message_stop',
+      usage: {
+        prompt_tokens: 1234,
+        completion_tokens: 56,
+      },
+    })
+
+    expect(onUsage).toHaveBeenCalledWith(1234, 56)
+    expect(onRequestUsage).toHaveBeenCalledWith(expect.objectContaining({
+      inputTokens: 1234,
+      outputTokens: 56,
+      usageAvailable: true,
+      cacheReadInputTokens: 789,
+    }))
+  })
+
+  it('selects tools from human-authored text, not synthetic @mention/tool_result content', async () => {
+    const names = [
+      READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
+      SEARCH_FILES, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EDIT_FILE, GLOB, LSP,
+      EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS, UPDATE_SESSION_MEMORY,
+      WRITE_FILE, START_DEV_SERVER, REQUEST_CREDENTIALS,
+    ]
+    const create = makeStreamingCreate([
+      { choices: [{ delta: { content: 'done' } }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+    ])
+
+    const generator = query(baseParams({
+      client: makeClient(create),
+      tools: names.map(makeTool),
+      toolsetSelector: new ToolsetSelector(names),
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'fix a typo in this file' },
+            {
+              type: 'tool_result',
+              toolCallId: 'mention-read',
+              content: 'deploy auth create file dev server database',
+            },
+          ],
+        },
+      ],
+    }))
+
+    expect(await nextEvent(generator)).toEqual({ type: 'message_start' })
+    expect(await nextEvent(generator)).toEqual({ type: 'text_delta', text: 'done' })
+
+    const sentToolNames = (create.mock.calls as any)[0][0].tools.map((t: any) => t.function.name)
+    for (const core of BUGFIX_BASE) {
+      expect(sentToolNames).toContain(core)
+    }
+    expect(sentToolNames).toContain(REQUEST_TOOLS_NAME)
+    expect(sentToolNames).not.toContain(WRITE_FILE)
+    expect(sentToolNames).not.toContain(START_DEV_SERVER)
+    expect(sentToolNames).not.toContain(REQUEST_CREDENTIALS)
+  })
+
   it('retries provider credential/configuration errors 3 times with 30s backoff before failing', async () => {
     jest.useFakeTimers()
 
@@ -270,5 +392,50 @@ describe('query retry handling', () => {
     expect(terminal.done).toBe(true)
     expect(terminal.value).toMatchObject({ reason: 'error' })
     expect(create).toHaveBeenCalledTimes(4)
+  })
+
+  it('retries a stalled stream (withheld) and only surfaces the error after the limit', async () => {
+    // Contrato novo (withheld errors, 2026-07-13): um stream que nunca produz
+    // progresso útil é um corte TRANSITÓRIO — o watchdog aborta o pedido e o
+    // loop repete (nada foi emitido, retry é seguro), com status visível.
+    // O erro só chega ao user depois de STREAM_CUT_RECOVERY_LIMIT retries.
+    const streamReturn = jest.fn()
+    const create = jest.fn((_body, _opts) => ({
+      withResponse: async () => ({
+        data: makeHeartbeatOnlyStream(streamReturn),
+        response: { headers: new Headers() },
+      }),
+    }))
+
+    const generator = query(baseParams({
+      client: makeClient(create),
+      streamSemanticIdleTimeoutMs: 15,
+    }))
+
+    expect(await nextEvent(generator)).toEqual({ type: 'message_start' })
+    expect(await nextEvent(generator)).toMatchObject({
+      type: 'agent_status',
+      phase: 'retrying',
+      attempt: 1,
+    })
+    expect(await nextEvent(generator)).toMatchObject({
+      type: 'agent_status',
+      phase: 'retrying',
+      attempt: 2,
+    })
+    expect(await nextEvent(generator)).toMatchObject({
+      type: 'error',
+      message: expect.stringContaining('did not produce model output'),
+    })
+
+    // Cada tentativa abortou o SEU pedido via watchdog (1 inicial + 2 retries).
+    expect(create).toHaveBeenCalledTimes(3)
+    const requestSignal = create.mock.calls[0]?.[1]?.signal as AbortSignal
+    expect(requestSignal.aborted).toBe(true)
+    expect(streamReturn).toHaveBeenCalled()
+
+    const terminal = await generator.next()
+    expect(terminal.done).toBe(true)
+    expect(terminal.value).toMatchObject({ reason: 'error' })
   })
 })

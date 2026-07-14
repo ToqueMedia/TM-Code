@@ -7,8 +7,7 @@ import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n/useTranslation'
 
 /**
- * Persistent panel that mirrors the agent's `update_tasks` state — the same
- * data CMD mode renders above its status bar (`TerminalStatusLine`). Lives
+ * Persistent panel that mirrors the agent's `update_tasks` state. Lives
  * inside `PromptBar`, above the queued-messages strip, so the developer
  * always sees what the agent is currently working on without scrolling.
  *
@@ -21,7 +20,7 @@ import { useTranslation } from '@/i18n/useTranslation'
  *     tasks, so the developer can review the full plan without leaving
  *     the chat. The "· N more tasks" label is clickable and doubles as
  *     the expand affordance.
- *   - Status icons match CMD mode for visual consistency: spinner during
+ *   - Status icons match the shell-styled surface for visual consistency: spinner during
  *     in_progress, checkmark on done, dot for pending.
  *   - All user-facing strings use i18n via useTranslation().
  */
@@ -61,17 +60,18 @@ function AgentTasksPanel() {
   return (
     <Box
       mb={2}
-      bg="rgba(255, 255, 255, 0.025)"
-      border="1px solid rgba(255, 255, 255, 0.06)"
-      borderRadius="10px"
+      bg="rgba(255, 255, 255, 0.03)"
+      border="1px solid rgba(255, 255, 255, 0.07)"
+      borderRadius="9px"
       overflow="hidden"
+      boxShadow="0 10px 28px rgba(0, 0, 0, 0.18)"
     >
       {/* Header — click to collapse/expand row */}
       <Flex
         align="center"
         gap={2}
         px={3}
-        py={2}
+        py={2.25}
         cursor="pointer"
         onClick={() => setCollapsed(c => !c)}
         _hover={{ bg: 'rgba(255, 255, 255, 0.02)' }}
@@ -92,6 +92,22 @@ function AgentTasksPanel() {
         >
           {headerLabel}
         </Text>
+        <Box
+          w="72px"
+          h="4px"
+          borderRadius="999px"
+          bg="rgba(255, 255, 255, 0.07)"
+          overflow="hidden"
+          display={{ base: 'none', sm: 'block' }}
+          flexShrink={0}
+        >
+          <Box
+            h="100%"
+            w={`${Math.round((completed / Math.max(total, 1)) * 100)}%`}
+            bg={failed > 0 ? tokens.colors.accent.red : tokens.colors.accent.primary}
+            transition="width 0.2s ease"
+          />
+        </Box>
         {/* Expand/collapse toggle — only shown when tasks > 3 */}
         {tasks.length > 3 && !collapsed && (
           <button
@@ -139,7 +155,7 @@ function AgentTasksPanel() {
           return (
             <Box px={3} pb={2.5} maxH="240px" overflowY="auto">
               {tasks.map((task: AgentTask) => (
-                <Flex key={task.id} align="flex-start" gap={2} py="3px">
+                <Flex key={task.id} align="flex-start" gap={2} py="5px">
                   <Box mt="2px" flexShrink={0}>
                     <StatusIcon status={task.status} />
                   </Box>
@@ -177,7 +193,7 @@ function AgentTasksPanel() {
               </Text>
             )}
             {visible.map((task: AgentTask) => (
-              <Flex key={task.id} align="flex-start" gap={2} py="3px">
+              <Flex key={task.id} align="flex-start" gap={2} py="5px">
                 <Box mt="2px" flexShrink={0}>
                   <StatusIcon status={task.status} />
                 </Box>

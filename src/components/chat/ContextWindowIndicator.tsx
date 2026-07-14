@@ -78,16 +78,32 @@ function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIn
   })
   const headerContextWindow = useAgentStore((s) => s.modelContextWindow)
   const modelName = useAgentStore((s) => s.modelName)
+  const sessionByokContextWindow = useChatStore((s) => {
+    if (!s.activeSessionId) return undefined
+    const window = s.sessions.get(s.activeSessionId)?.byokSnapshot?.contextWindow
+    return window && window > 0 ? window : undefined
+  })
+  const sessionByokModelId = useChatStore((s) => {
+    if (!s.activeSessionId) return undefined
+    return s.sessions.get(s.activeSessionId)?.byokSnapshot?.modelId
+  })
   const [hovered, setHovered] = useState(false)
 
-  // Window resolution mirrors the auto-compact decision EXACTLY: server header
-  // (X-Model-Context-Window — the value the ADMIN publishes in Settings → Admin)
-  // → known MODEL_PROFILES entry → conservative 200K FALLBACK_CONTEXT_WINDOW.
-  // The admin's published window is authoritative; the IDE never caps it. If the
-  // bar feels flat on a huge window, the admin lowers the published window — the
-  // lever is the admin Select, not a hardcoded ceiling. An unknown model (no
-  // header, not in the profile table) reads against 200K, NOT a phantom 1M.
-  const rawContextWindow = headerContextWindow ?? (modelName ? MODEL_PROFILES[modelName]?.contextWindow : undefined) ?? FALLBACK_CONTEXT_WINDOW
+  // Window resolution mirrors the auto-compact decision:
+  // BYOK session snapshot (direct provider path has no worker header)
+  // → server header (X-Model-Context-Window, managed path)
+  // → known MODEL_PROFILES entry → conservative 200K fallback.
+  //
+  // BYOK must come first. The header is sticky in agentStore until another
+  // response updates it, and BYOK direct calls bypass the worker that would
+  // normally emit X-Model-Context-Window. The session snapshot is the frozen
+  // source of truth captured from Settings for the current BYOK conversation.
+  const profileModelName = sessionByokModelId ?? modelName
+  const rawContextWindow =
+    sessionByokContextWindow ??
+    headerContextWindow ??
+    (profileModelName ? MODEL_PROFILES[profileModelName]?.contextWindow : undefined) ??
+    FALLBACK_CONTEXT_WINDOW
 
   // Stay hidden only until the window is known. Show 0% as soon as it is —
   // gives the user continuity across resets (compact, new message) instead

@@ -82,6 +82,28 @@ const GLM_5_2: ModelProfile = {
 }
 
 // ─────────────────────────────────────────────────
+// DeepSeek V4 Pro — DeepSeek oficial. 1M contexto, até 384K de saída.
+// Thinking toggleable via config do data-plane (`thinking:{type}` +
+// `reasoning_effort`) e text-only; visão/pesquisa seguem por sidecars.
+// ─────────────────────────────────────────────────
+
+const DEEPSEEK_V4_PRO: ModelProfile = {
+  id: 'deepseek-v4-pro',
+  name: 'DeepSeek V4 Pro',
+  modelId: 'deepseek-v4-pro',
+  contextWindow: 1_000_000,
+  maxOutputTokens: 393_216,
+
+  thinkingMode: 'toggleable',
+  supportsThinking: true,
+  thinkingMandatory: false,
+
+  supportsAttachments: false,
+  supportsSearch: false,
+  counterweights: [],
+}
+
+// ─────────────────────────────────────────────────
 // Qwen 3.7 Max (snapshot 2026-06-08) — Alibaba China (DashScope)
 //
 // Flagship Alibaba Cloud. 1M contexto, Visual Understanding + web search
@@ -176,6 +198,31 @@ const GEMINI_3_1_PRO: ModelProfile = {
 }
 
 // ─────────────────────────────────────────────────
+// Kimi K2.7 Code — Moonshot/Kimi via Alibaba Cloud DashScope.
+//
+// A página oficial do DashScope lista Text Generation, Visual Understanding e
+// Deep Thinking. Capacidades: input text/image/video, function calling, cache,
+// structured output e web search. Esta tabela só expõe os campos que a IDE
+// entende hoje: anexos, thinking e search.
+// ─────────────────────────────────────────────────
+
+const KIMI_K2_7_CODE: ModelProfile = {
+  id: 'kimi-k2.7-code',
+  name: 'Kimi K2.7 Code',
+  modelId: 'kimi-k2.7-code',
+  contextWindow: 262_144,
+  maxOutputTokens: 32_768,
+
+  thinkingMode: 'toggleable',
+  supportsThinking: true,
+  thinkingMandatory: false,
+
+  supportsAttachments: true,
+  supportsSearch: true,
+  counterweights: [],
+}
+
+// ─────────────────────────────────────────────────
 // Registry
 // ─────────────────────────────────────────────────
 
@@ -184,6 +231,7 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   // DashScope/Alibaba Cloud (US) ainda pode reportar o id base 'glm-5' em
   // X-TM-Model — alias para o MESMO perfil, senão o lookup cairia no default.
   'glm-5': GLM_5_2,
+  'deepseek-v4-pro': DEEPSEEK_V4_PRO,
   'qwen3.7-max-2026-06-08': QWEN_3_7_MAX,
   // Alias do id antigo → mesmo perfil enquanto a config ativa não republicar
   // o snapshot datado.
@@ -196,6 +244,7 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'google/gemini-3.5-flash': GEMINI_3_5_FLASH,
   'gemini-3.1-pro-preview': GEMINI_3_1_PRO,
   'google/gemini-3.1-pro-preview': GEMINI_3_1_PRO,
+  'kimi-k2.7-code': KIMI_K2_7_CODE,
 }
 
 export const DEFAULT_MODEL_ID = 'mimo-v2.5-pro-1m'

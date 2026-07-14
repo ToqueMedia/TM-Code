@@ -57,7 +57,10 @@ export class ProjectStatusMonitor {
       logger.warn('project', 'Project directory no longer exists')
       this.stopMonitoring()
       useToastStore.getState().addToast('error', t('project.directoryDeleted'))
-      useProjectStore.getState().closeProject()
+      // force: no confirms — the directory is GONE and monitoring already
+      // stopped, so a declined modal would strand the app on a nonexistent
+      // project with no re-check ever firing.
+      void useProjectStore.getState().closeProject({ force: true })
       return
     }
 

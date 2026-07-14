@@ -95,7 +95,37 @@ describe('templateService', () => {
       expect(mockInvoke).not.toHaveBeenCalled()
     })
 
-    it('reads frontendPort from .toquemedia-template manifest', async () => {
+    it('reads frontendPort from .toquemedia/project.json first', async () => {
+      mockInvoke.mockResolvedValueOnce(JSON.stringify({
+        schemaVersion: 1,
+        projectKind: 'tm-code-project',
+        source: 'template',
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+        stack: {
+          id: 'react-express-ts',
+          name: 'React + Express',
+          framework: 'react+express',
+          runtime: 'fullstack',
+          category: 'fullstack',
+          managedDefaults: true,
+        },
+        commands: { dev: 'npm run dev', build: 'npm run build' },
+        capabilities: {
+          edit: { supported: true },
+          preview: { supported: true, command: 'npm run dev', frontendPort: 7777 },
+          check: { supported: true, command: 'npm run build' },
+          deploy: { supported: true, target: 'tm-code-fullstack', command: 'npm run build' },
+        },
+        compatibility: { warnings: [], blockers: [] },
+      }))
+      const hint = await resolveFrontendPortHint('/proj', 'fullstack')
+      expect(hint).toBe(7777)
+      expect(mockInvoke).toHaveBeenCalledTimes(1)
+    })
+
+    it('falls back to .toquemedia-template manifest', async () => {
+      mockInvoke.mockRejectedValueOnce(new Error('ENOENT'))
       mockInvoke.mockResolvedValueOnce(JSON.stringify({
         templateId: 'react-express-ts',
         name: 'React + Express',
@@ -111,6 +141,7 @@ describe('templateService', () => {
 
     it('returns undefined when manifest is absent (user-imported repo)', async () => {
       mockInvoke.mockRejectedValueOnce(new Error('ENOENT'))
+      mockInvoke.mockRejectedValueOnce(new Error('ENOENT'))
       const hint = await resolveFrontendPortHint('/proj', 'fullstack')
       expect(hint).toBeUndefined()
     })
@@ -118,6 +149,7 @@ describe('templateService', () => {
     it('returns undefined when manifest exists but lacks frontendPort', async () => {
       // Pre-existing scaffolds (before this field was added) don't carry it —
       // hint absent, classifier falls back to probe-based logic. Not a bug.
+      mockInvoke.mockRejectedValueOnce(new Error('ENOENT'))
       mockInvoke.mockResolvedValueOnce(JSON.stringify({
         templateId: 'react-express-ts',
         name: 'React + Express',
@@ -131,6 +163,7 @@ describe('templateService', () => {
     })
 
     it('returns undefined when manifest JSON is malformed', async () => {
+      mockInvoke.mockResolvedValueOnce('not json at all')
       mockInvoke.mockResolvedValueOnce('not json at all')
       const hint = await resolveFrontendPortHint('/proj', 'fullstack')
       expect(hint).toBeUndefined()

@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type DependencyList } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiCheck, FiChevronDown, FiChevronRight, FiLoader, FiTerminal, FiX } from 'react-icons/fi'
 import type { ToolCallDisplay } from '../../types/chat'
@@ -245,9 +245,10 @@ function getLineColor(line: string, isError: boolean): string {
 // do disco nunca anima nem abre — só pedidos cuja execução foi testemunhada
 // neste mount.
 
-const REVEAL_TICK_MS = 40
-const REVEAL_MAX_DURATION_MS = 2500
-const AUTO_COLLAPSE_DELAY_MS = 700
+const REVEAL_TICK_MS = 48
+const REVEAL_MAX_DURATION_MS = 3200
+const AUTO_COLLAPSE_DELAY_MS = 1600
+const PINNED_SCROLL_THRESHOLD = 48
 
 function useProgressiveReveal(total: number, animate: boolean): number {
   const [visible, setVisible] = useState(() => (animate ? 0 : total))
@@ -278,13 +279,39 @@ function useProgressiveReveal(total: number, animate: boolean): number {
   return Math.min(visible, total)
 }
 
+function usePinnedScroll(deps: DependencyList, enabled: boolean) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  const pinnedRef = useRef(true)
+
+  useEffect(() => {
+    if (!enabled) return
+    const node = ref.current
+    if (!node || !pinnedRef.current) return
+    const frame = window.requestAnimationFrame(() => {
+      node.scrollTop = node.scrollHeight
+    })
+    return () => window.cancelAnimationFrame(frame)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps)
+
+  return {
+    ref,
+    onScroll: () => {
+      const node = ref.current
+      if (!node) return
+      const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight
+      pinnedRef.current = distanceFromBottom < PINNED_SCROLL_THRESHOLD
+    },
+  }
+}
+
 /**
  * Estado expandido com gestão automática: aberto enquanto corre/revela,
  * fecha sozinho `AUTO_COLLAPSE_DELAY_MS` depois de terminar. O clique do
  * user no header sobrepõe-se ao automatismo a partir desse momento.
  * `witnessed` = a execução começou neste mount (histórico fica fechado).
  */
-function useAutoExpand(isRunning: boolean, revealing: boolean): {
+function useAutoExpand(isRunning: boolean, revealing: boolean, keepOpen = false): {
   expanded: boolean
   witnessed: boolean
   toggle: () => void
@@ -298,13 +325,13 @@ function useAutoExpand(isRunning: boolean, revealing: boolean): {
 
   useEffect(() => {
     if (!witnessed) return
-    if (isRunning || revealing) {
+    if (isRunning || revealing || keepOpen) {
       setAutoCollapsed(false)
       return
     }
     const id = setTimeout(() => setAutoCollapsed(true), AUTO_COLLAPSE_DELAY_MS)
     return () => clearTimeout(id)
-  }, [witnessed, isRunning, revealing])
+  }, [witnessed, isRunning, revealing, keepOpen])
 
   const autoExpanded = witnessed && !autoCollapsed
   const expanded = userToggled ?? autoExpanded
@@ -348,6 +375,16 @@ function StatusIcon({ status }: { status: ToolCallDisplay['status'] }) {
   )
 }
 
+function NativeWindowDots() {
+  return (
+    <Flex align="center" gap="4px" flexShrink={0} aria-hidden="true">
+      <Box w="7px" h="7px" borderRadius="full" bg="rgba(255, 95, 87, 0.8)" />
+      <Box w="7px" h="7px" borderRadius="full" bg="rgba(255, 189, 46, 0.78)" />
+      <Box w="7px" h="7px" borderRadius="full" bg="rgba(40, 202, 66, 0.72)" />
+    </Flex>
+  )
+}
+
 export const ShellCommandBlock = memo(function ShellCommandBlock({
   toolCall,
   mode,
@@ -370,21 +407,19 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
   const animateReveal = witnessedRunRef.current
   const revealCount = useProgressiveReveal(resultLines.length, animateReveal)
   const revealing = animateReveal && revealCount < resultLines.length
-  const { expanded, toggle } = useAutoExpand(isRunning, revealing)
+  const { expanded, toggle } = useAutoExpand(isRunning, revealing, isError)
 
   const visibleResultLines = animateReveal ? resultLines.slice(0, revealCount) : resultLines
   const visibleLogLines = logLines
   const hasBody = isRunning || logLines.length > 0 || resultLines.length > 0 || !!toolCall.progressText
   const promptSymbol = mode === 'terminal' ? '%' : '$'
 
-  // Scroll interno acompanha o output enquanto corre/revela.
-  const outputScrollRef = useRef<HTMLDivElement | null>(null)
-  useEffect(() => {
-    if (!expanded) return
-    if (!isRunning && !revealing) return
-    const node = outputScrollRef.current
-    if (node) node.scrollTop = node.scrollHeight
-  }, [expanded, isRunning, revealing, revealCount, logLines.length])
+  // Scroll follows the live output only while the user is still pinned near
+  // the bottom. Manual upward scroll pauses the automatic pull.
+  const outputScroll = usePinnedScroll(
+    [expanded, isRunning, revealing, revealCount, logLines.length],
+    expanded && (isRunning || revealing),
+  )
 
   const borderColor = isRunning
     ? 'rgba(240, 192, 0, 0.16)'
@@ -395,11 +430,12 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
   return (
     <Box
       my={mode === 'terminal' ? 1.5 : 2}
-      borderRadius={mode === 'terminal' ? '5px' : '8px'}
+      borderRadius={mode === 'terminal' ? '10px' : '12px'}
       overflow="hidden"
       border={`1px solid ${borderColor}`}
-      bg={mode === 'terminal' ? 'rgba(0, 0, 0, 0.2)' : 'rgba(13, 17, 23, 0.68)'}
+      bg={mode === 'terminal' ? 'rgba(0, 0, 0, 0.28)' : 'rgba(10, 10, 10, 0.92)'}
       fontFamily={tokens.fontFamily.mono}
+      boxShadow={mode === 'terminal' ? 'none' : '0 16px 38px rgba(0,0,0,0.26)'}
       {...(nested
         ? {
             ml: 4,
@@ -411,23 +447,37 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
       <Flex
         align="center"
         gap={2}
-        px={mode === 'terminal' ? 2 : 3}
-        py={mode === 'terminal' ? '6px' : '8px'}
-        bg={mode === 'terminal' ? 'rgba(255,255,255,0.025)' : 'rgba(255,255,255,0.035)'}
-        borderBottom={hasBody ? '1px solid rgba(255,255,255,0.06)' : undefined}
+        px={mode === 'terminal' ? 2.5 : 3}
+        py={mode === 'terminal' ? '7px' : '9px'}
+        bg={mode === 'terminal'
+          ? 'linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.018))'
+          : 'linear-gradient(180deg, rgba(255,255,255,0.052), rgba(255,255,255,0.022))'}
+        borderBottom={hasBody ? '1px solid rgba(255,255,255,0.075)' : undefined}
         cursor={hasBody ? 'pointer' : 'default'}
+        _hover={hasBody ? { bg: 'rgba(255,255,255,0.045)' } : undefined}
         onClick={() => {
           if (hasBody) toggle()
         }}
       >
+        <NativeWindowDots />
         <StatusIcon status={toolCall.status} />
-        <Box color={tokens.colors.text.muted} flexShrink={0}>
+        <Flex
+          w="22px"
+          h="22px"
+          align="center"
+          justify="center"
+          borderRadius="6px"
+          color={tokens.colors.text.muted}
+          bg="rgba(255,255,255,0.045)"
+          border="1px solid rgba(255,255,255,0.065)"
+          flexShrink={0}
+        >
           <FiTerminal size={13} />
-        </Box>
+        </Flex>
         <Text
           fontSize="11px"
           color={tokens.colors.text.secondary}
-          fontWeight="600"
+          fontWeight="700"
           flexShrink={0}
         >
           shell
@@ -436,6 +486,11 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
           <Text
             fontSize="10px"
             color={tokens.colors.text.disabled}
+            bg="rgba(255,255,255,0.035)"
+            border="1px solid rgba(255,255,255,0.055)"
+            borderRadius="999px"
+            px="7px"
+            py="2px"
             overflow="hidden"
             textOverflow="ellipsis"
             whiteSpace="nowrap"
@@ -450,10 +505,13 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
             fontSize="10px"
             color={exitCode === 0 ? tokens.colors.accent.green : tokens.colors.accent.red}
             border={`1px solid ${exitCode === 0 ? 'rgba(46,160,67,0.28)' : 'rgba(248,81,73,0.28)'}`}
-            borderRadius="4px"
-            px="6px"
-            py="1px"
+            bg={exitCode === 0 ? 'rgba(46,160,67,0.1)' : 'rgba(248,81,73,0.1)'}
+            borderRadius="999px"
+            px="7px"
+            py="2px"
             flexShrink={0}
+            fontWeight="700"
+            lineHeight="1"
           >
             exit {exitCode}
           </Text>
@@ -465,9 +523,18 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
         )}
       </Flex>
 
-      <Box px={mode === 'terminal' ? 2 : 3} py={mode === 'terminal' ? '6px' : '9px'}>
-        <Flex align="flex-start" gap={2} minW={0}>
-          <Text color={tokens.colors.accent.primary} flexShrink={0} fontSize="12px" lineHeight="20px">
+      <Box px={mode === 'terminal' ? 2.5 : 3} py={mode === 'terminal' ? '8px' : '10px'} bg="rgba(0,0,0,0.14)">
+        <Flex
+          align="flex-start"
+          gap={2}
+          minW={0}
+          px={2}
+          py="6px"
+          borderRadius="8px"
+          bg="rgba(255,255,255,0.026)"
+          border="1px solid rgba(255,255,255,0.05)"
+        >
+          <Text color={tokens.colors.accent.primary} flexShrink={0} fontSize="12px" lineHeight="20px" fontWeight="700">
             {promptSymbol}
           </Text>
           <Text
@@ -475,7 +542,8 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
             fontSize="12px"
             lineHeight="20px"
             whiteSpace="pre-wrap"
-            overflowWrap="anywhere"
+            overflowWrap="break-word"
+            wordBreak="normal"
             userSelect="text"
             data-selectable="true"
           >
@@ -485,14 +553,20 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
 
         {hasBody && expanded && (
           <Box
-            ref={outputScrollRef}
-            mt="6px"
-            maxH={mode === 'terminal' ? '360px' : '280px'}
+            ref={outputScroll.ref}
+            onScroll={outputScroll.onScroll}
+            mt="8px"
+            maxH={mode === 'terminal' ? '420px' : '320px'}
             overflowY="auto"
             overflowX="hidden"
+            px={2}
+            py="7px"
+            borderRadius="8px"
+            bg="rgba(0,0,0,0.24)"
+            border="1px solid rgba(255,255,255,0.045)"
             css={{
               '&::-webkit-scrollbar': { width: '4px', height: '4px' },
-              '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.12)', borderRadius: '2px' },
+              '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.14)', borderRadius: '2px' },
               '&::-webkit-scrollbar-track': { background: 'transparent' },
             }}
           >
@@ -500,10 +574,11 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
               <Text
                 key={`log-${i}-${line.slice(0, 18)}`}
                 fontSize="12px"
-                lineHeight="19px"
+                lineHeight="20px"
                 color={getLineColor(line, false)}
                 whiteSpace="pre-wrap"
-                overflowWrap="anywhere"
+                overflowWrap="break-word"
+                wordBreak="normal"
                 userSelect="text"
                 data-selectable="true"
               >
@@ -514,10 +589,11 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
             {toolCall.progressText && isRunning && logLines.length === 0 && (
               <Text
                 fontSize="12px"
-                lineHeight="19px"
+                lineHeight="20px"
                 color={tokens.colors.toolCall.runningText}
                 whiteSpace="pre-wrap"
-                overflowWrap="anywhere"
+                overflowWrap="break-word"
+                wordBreak="normal"
               >
                 {toolCall.progressText}
               </Text>
@@ -527,10 +603,11 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
               <Text
                 key={`result-${i}-${line.slice(0, 18)}`}
                 fontSize="12px"
-                lineHeight="19px"
+                lineHeight="20px"
                 color={getLineColor(line, isError)}
                 whiteSpace="pre-wrap"
-                overflowWrap="anywhere"
+                overflowWrap="break-word"
+                wordBreak="normal"
                 userSelect="text"
                 data-selectable="true"
               >
@@ -569,7 +646,6 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
   mode,
   nested = false,
 }: ShellSessionBlockProps) {
-  const scrollRef = useRef<HTMLDivElement | null>(null)
   const isRunning = toolCalls.some(tc => tc.status === 'running')
   const last = toolCalls[toolCalls.length - 1]
   const isCurrentError = !isRunning && !!last && (last.isError || last.status === 'failed')
@@ -625,13 +701,13 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
   const animateReveal = witnessedRunRef.current
   const revealCount = useProgressiveReveal(transcript.length, animateReveal)
   const revealing = animateReveal && revealCount < transcript.length
-  const { expanded, toggle } = useAutoExpand(isRunning, revealing)
+  const { expanded, toggle } = useAutoExpand(isRunning, revealing, isCurrentError)
   const visibleTranscript = animateReveal ? transcript.slice(0, revealCount) : transcript
 
-  useEffect(() => {
-    if (!expanded || !scrollRef.current) return
-    scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-  }, [expanded, shellOutputKey, transcript.length, revealCount])
+  const sessionScroll = usePinnedScroll(
+    [expanded, shellOutputKey, transcript.length, revealCount],
+    expanded && (isRunning || revealing),
+  )
 
   const borderColor = isRunning
     ? 'rgba(240, 192, 0, 0.16)'
@@ -642,11 +718,12 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
   return (
     <Box
       my={mode === 'terminal' ? 1.5 : 2}
-      borderRadius={mode === 'terminal' ? '5px' : '8px'}
+      borderRadius={mode === 'terminal' ? '10px' : '12px'}
       overflow="hidden"
       border={`1px solid ${borderColor}`}
-      bg={mode === 'terminal' ? 'rgba(0, 0, 0, 0.2)' : 'rgba(13, 17, 23, 0.68)'}
+      bg={mode === 'terminal' ? 'rgba(0, 0, 0, 0.28)' : 'rgba(10, 10, 10, 0.92)'}
       fontFamily={tokens.fontFamily.mono}
+      boxShadow={mode === 'terminal' ? 'none' : '0 16px 38px rgba(0,0,0,0.26)'}
       {...(nested
         ? {
             ml: 4,
@@ -658,24 +735,43 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
       <Flex
         align="center"
         gap={2}
-        px={mode === 'terminal' ? 2 : 3}
-        py={mode === 'terminal' ? '6px' : '8px'}
-        bg={mode === 'terminal' ? 'rgba(255,255,255,0.025)' : 'rgba(255,255,255,0.035)'}
-        borderBottom={expanded ? '1px solid rgba(255,255,255,0.06)' : undefined}
+        px={mode === 'terminal' ? 2.5 : 3}
+        py={mode === 'terminal' ? '7px' : '9px'}
+        bg={mode === 'terminal'
+          ? 'linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.018))'
+          : 'linear-gradient(180deg, rgba(255,255,255,0.052), rgba(255,255,255,0.022))'}
+        borderBottom={expanded ? '1px solid rgba(255,255,255,0.075)' : undefined}
         cursor="pointer"
+        _hover={{ bg: 'rgba(255,255,255,0.045)' }}
         onClick={toggle}
       >
+        <NativeWindowDots />
         <StatusIcon status={isCurrentError ? 'failed' : isRunning ? 'running' : 'completed'} />
-        <Box color={tokens.colors.text.muted} flexShrink={0}>
+        <Flex
+          w="22px"
+          h="22px"
+          align="center"
+          justify="center"
+          borderRadius="6px"
+          color={tokens.colors.text.muted}
+          bg="rgba(255,255,255,0.045)"
+          border="1px solid rgba(255,255,255,0.065)"
+          flexShrink={0}
+        >
           <FiTerminal size={13} />
-        </Box>
-        <Text fontSize="11px" color={tokens.colors.text.secondary} fontWeight="600" flexShrink={0}>
+        </Flex>
+        <Text fontSize="11px" color={tokens.colors.text.secondary} fontWeight="700" flexShrink={0}>
           agent shell
         </Text>
         {cwd && (
           <Text
             fontSize="10px"
             color={tokens.colors.text.disabled}
+            bg="rgba(255,255,255,0.035)"
+            border="1px solid rgba(255,255,255,0.055)"
+            borderRadius="999px"
+            px="7px"
+            py="2px"
             overflow="hidden"
             textOverflow="ellipsis"
             whiteSpace="nowrap"
@@ -685,7 +781,18 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
           </Text>
         )}
         <Box flex="1" />
-        <Text fontSize="10px" color={tokens.colors.text.disabled} flexShrink={0}>
+        <Text
+          fontSize="10px"
+          color={tokens.colors.text.disabled}
+          bg="rgba(255,255,255,0.035)"
+          border="1px solid rgba(255,255,255,0.055)"
+          borderRadius="999px"
+          px="7px"
+          py="2px"
+          flexShrink={0}
+          lineHeight="1"
+          fontWeight="700"
+        >
           {toolCalls.length} step{toolCalls.length === 1 ? '' : 's'}
         </Text>
         {last?.toolName === 'agent_shell_stop' && (
@@ -693,10 +800,13 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
             fontSize="10px"
             color={tokens.colors.accent.green}
             border="1px solid rgba(46,160,67,0.28)"
-            borderRadius="4px"
-            px="6px"
-            py="1px"
+            bg="rgba(46,160,67,0.1)"
+            borderRadius="999px"
+            px="7px"
+            py="2px"
             flexShrink={0}
+            lineHeight="1"
+            fontWeight="700"
           >
             closed
           </Text>
@@ -708,26 +818,41 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
 
       {expanded && (
       <Box
-        ref={scrollRef}
-        px={mode === 'terminal' ? 2 : 3}
-        py={mode === 'terminal' ? '8px' : '10px'}
-        maxH={mode === 'terminal' ? '520px' : '420px'}
+        ref={sessionScroll.ref}
+        onScroll={sessionScroll.onScroll}
+        px={mode === 'terminal' ? 2.5 : 3}
+        py={mode === 'terminal' ? '9px' : '11px'}
+        maxH={mode === 'terminal' ? '560px' : '460px'}
         overflowY="auto"
         overflowX="hidden"
+        bg="rgba(0,0,0,0.14)"
         css={{
           '&::-webkit-scrollbar': { width: '4px', height: '4px' },
-          '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.12)', borderRadius: '2px' },
+          '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.14)', borderRadius: '2px' },
           '&::-webkit-scrollbar-track': { background: 'transparent' },
         }}
       >
         {visibleTranscript.map((entry) => (
           entry.type === 'command' ? (
-            <Flex key={entry.id} align="flex-start" gap={2} minW={0} mb="2px">
+            <Flex
+              key={entry.id}
+              align="flex-start"
+              gap={2}
+              minW={0}
+              mt={entry.id.endsWith('-cmd') ? 1 : 0}
+              mb="3px"
+              px={2}
+              py="5px"
+              borderRadius="8px"
+              bg="rgba(255,255,255,0.026)"
+              border="1px solid rgba(255,255,255,0.05)"
+            >
               <Text
                 color={tokens.colors.accent.primary}
                 flexShrink={0}
                 fontSize="12px"
                 lineHeight="20px"
+                fontWeight="700"
               >
                 {promptSymbol}
               </Text>
@@ -747,9 +872,10 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
           ) : (
             <Text
               key={entry.id}
-              pl="22px"
+              pl="30px"
+              pr={2}
               fontSize="12px"
-              lineHeight="19px"
+              lineHeight="20px"
               color={getLineColor(entry.text, !!entry.isError)}
               whiteSpace="pre-wrap"
               overflowWrap="break-word"
@@ -763,7 +889,7 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
         ))}
 
         {transcript.length === 0 && !isRunning && (
-          <Text fontSize="12px" lineHeight="19px" color={tokens.colors.text.disabled}>
+          <Text fontSize="12px" lineHeight="20px" color={tokens.colors.text.disabled}>
             shell session opened
           </Text>
         )}
@@ -771,12 +897,13 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
         {isRunning && (
           <>
             {last?.toolName !== 'agent_shell_write' && (
-              <Flex align="flex-start" gap={2} minW={0}>
+              <Flex align="flex-start" gap={2} minW={0} px={2} py="5px" borderRadius="8px" bg="rgba(255,255,255,0.026)" border="1px solid rgba(255,255,255,0.05)">
                 <Text
                   color={tokens.colors.accent.primary}
                   flexShrink={0}
                   fontSize="12px"
                   lineHeight="20px"
+                  fontWeight="700"
                 >
                   {promptSymbol}
                 </Text>

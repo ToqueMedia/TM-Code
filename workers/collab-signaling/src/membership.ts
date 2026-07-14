@@ -32,10 +32,20 @@ function firestoreBase(env: Env): string {
     : DEFAULT_FIRESTORE_BASE
 }
 
+/** Membership verdict + the team's plan tier (null = unknown/inactive → the
+ *  caller applies the conservative media policy). */
+export interface MembershipResult {
+  member: boolean
+  plan: string | null
+}
+
+const NOT_MEMBER: MembershipResult = { member: false, plan: null }
+
 /** Shape of the slice of a `teams/{id}` doc we care about (Firestore REST). */
 interface TeamDoc {
   fields?: {
     members?: { mapValue?: { fields?: Record<string, unknown> } }
+    planTier?: { stringValue?: string }
   }
 }
 
@@ -44,6 +54,15 @@ export function isMemberInDoc(doc: TeamDoc | null | undefined, uid: string): boo
   const members = doc?.fields?.members?.mapValue?.fields
   if (!members || typeof members !== 'object') return false
   return Object.prototype.hasOwnProperty.call(members, uid)
+}
+
+/** Pure: membership + plan from a team doc (emulator-direct path — no
+ *  subscription validation there; production gets it from the control-plane,
+ *  which only returns a plan for ACTIVE subscriptions). */
+export function membershipFromDoc(doc: TeamDoc | null | undefined, uid: string): MembershipResult {
+  if (!isMemberInDoc(doc, uid)) return NOT_MEMBER
+  const plan = doc?.fields?.planTier?.stringValue
+  return { member: true, plan: typeof plan === 'string' && plan ? plan : null }
 }
 
 /**
@@ -55,24 +74,24 @@ async function checkMembershipDirect(
   uid: string,
   env: Env,
   fetcher: typeof fetch,
-): Promise<boolean> {
+): Promise<MembershipResult> {
   const projectId = typeof env.FIREBASE_PROJECT_ID === 'string' ? env.FIREBASE_PROJECT_ID : ''
-  if (!projectId) return false
+  if (!projectId) return NOT_MEMBER
 
   const url =
     `${firestoreBase(env)}/v1/projects/${projectId}/databases/(default)/documents/` +
-    `teams/${encodeURIComponent(room)}?mask.fieldPaths=members`
+    `teams/${encodeURIComponent(room)}?mask.fieldPaths=members&mask.fieldPaths=planTier`
 
   try {
     const response = await fetcher(url, {
       headers: { authorization: `Bearer owner` },
       signal: AbortSignal.timeout(FIRESTORE_READ_TIMEOUT_MS),
     })
-    if (!response.ok) return false
+    if (!response.ok) return NOT_MEMBER
     const doc = (await response.json()) as TeamDoc
-    return isMemberInDoc(doc, uid)
+    return membershipFromDoc(doc, uid)
   } catch {
-    return false
+    return NOT_MEMBER
   }
 }
 
@@ -86,9 +105,9 @@ async function checkMembershipViaControlPlane(
   idToken: string,
   env: Env,
   fetcher: typeof fetch,
-): Promise<boolean> {
+): Promise<MembershipResult> {
   const base = typeof env.CONTROL_PLANE_URL === 'string' ? env.CONTROL_PLANE_URL.replace(/\/+$/, '') : ''
-  if (!base) return false
+  if (!base) return NOT_MEMBER
 
   try {
     const response = await fetcher(`${base}/v1/collab/membership`, {
@@ -100,18 +119,22 @@ async function checkMembershipViaControlPlane(
       body: JSON.stringify({ teamId: room }),
       signal: AbortSignal.timeout(MEMBERSHIP_PROXY_TIMEOUT_MS),
     })
-    if (!response.ok) return false
-    const data = (await response.json()) as { member?: boolean }
-    return data.member === true
+    if (!response.ok) return NOT_MEMBER
+    // `plan` is absent from OLD control-plane deploys → null → conservative
+    // media policy. Membership semantics are unchanged either way.
+    const data = (await response.json()) as { member?: boolean; plan?: unknown }
+    if (data.member !== true) return NOT_MEMBER
+    return { member: true, plan: typeof data.plan === 'string' && data.plan ? data.plan : null }
   } catch {
-    return false
+    return NOT_MEMBER
   }
 }
 
 /**
- * Confirm `uid` is a member of team `room`. Fails CLOSED: any read error /
- * denied / missing doc → not a member. Routes to the emulator-direct path when
- * `FIRESTORE_REST_BASE` is set, otherwise to the control-plane proxy.
+ * Confirm `uid` is a member of team `room` and resolve the team's plan tier.
+ * Fails CLOSED: any read error / denied / missing doc → not a member. Routes
+ * to the emulator-direct path when `FIRESTORE_REST_BASE` is set, otherwise to
+ * the control-plane proxy.
  */
 export async function checkMembership(
   room: string,
@@ -119,7 +142,7 @@ export async function checkMembership(
   idToken: string,
   env: Env,
   fetcher: typeof fetch = fetch,
-): Promise<boolean> {
+): Promise<MembershipResult> {
   if (typeof env.FIRESTORE_REST_BASE === 'string' && env.FIRESTORE_REST_BASE !== '') {
     return checkMembershipDirect(room, uid, env, fetcher)
   }

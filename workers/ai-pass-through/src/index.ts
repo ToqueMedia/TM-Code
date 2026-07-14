@@ -9,6 +9,7 @@ import {
   resolveEnforcementMode,
   resolvePlanBudgetFor,
   resolveSpeedMultiplier,
+  shortenBudgetStateCacheTtl,
   type CostBudgetCheck,
   type UserBudgetState,
 } from './billing'
@@ -19,6 +20,7 @@ import { createRequestId, logRequest } from './logging'
 import { injectStreamOptions, observeUsage } from './usage'
 import { withStreamIdleTimeout } from './streamWatchdog'
 import { ensureGeminiThoughtSummaries, ensureVertexPublisher } from './geminiThinking'
+import { applyDashScopePromptCache } from './dashscopePromptCache'
 import type { Env, Fetcher, WaitUntilContext } from './types'
 
 export interface HandlerOptions {
@@ -119,6 +121,8 @@ interface PreparedBody {
 async function bodyWithActiveModel(
   request: Request,
   model: string,
+  provider: string,
+  baseUrl: string,
   extraBody?: Record<string, unknown>,
   isGoogleOAuth = false,
 ): Promise<PreparedBody> {
@@ -157,6 +161,14 @@ async function bodyWithActiveModel(
   // devolvem o objeto `usage` no chunk final — é a fonte autoritativa da
   // contabilidade de billing (usage.ts / billing.ts).
   const withUsage = injectStreamOptions(merged)
+  const cacheStats = applyDashScopePromptCache(withUsage, { provider, baseUrl, model })
+  if (cacheStats.found) {
+    const tag = cacheStats.cacheControlApplied ? 'explicit' : 'implicit'
+    console.info(
+      `[ai-pass-through] dashscope prompt cache ${tag} ` +
+        `model=${model} static=${cacheStats.staticBytes}B dynamic=${cacheStats.dynamicBytes}B`,
+    )
+  }
 
   const body = JSON.stringify(withUsage)
   return { body, chars: body.length, streamRequested: merged.stream === true }
@@ -172,9 +184,10 @@ async function handleChatCompletions(
   const requestId = createRequestId(request)
   const startedAt = Date.now()
   const user = await authenticateUser(request, env)
-  // Sidecars (X-Request-Type → KV `sidecar:*`): web_search, vision, fim e a
-  // família memory-*/summarize correm em modelos baratos/especializados
-  // publicados pelo admin; sem sidecar publicado, segue a config ativa.
+  // Sidecars (X-Request-Type → KV `sidecar:*`): web_search, vision, fim,
+  // context-planner e a família memory-*/summarize correm em modelos baratos/
+  // especializados publicados pelo admin; alguns tipos podem degradar para a
+  // config ativa, outros têm contrato próprio e falham rápido.
   // O header NUNCA segue upstream (filtro em headers.ts) e a resposta leva
   // X-TM-Config-Key para o cliente saber quem serviu.
   const requestType = request.headers.get('x-request-type')
@@ -192,10 +205,15 @@ async function handleChatCompletions(
   // por isso o 503 dá o MESMO desfecho — só mais limpo, rápido e barato. O tipo
   // `vision` só é enviado quando o modelo ativo é cego (cliente verifica o
   // perfil antes), logo nunca há um modelo ativo com visão a ser bloqueado aqui.
-  // `utility`/`summarize` ficam de fora — o modelo ativo sabe resumir, degradam
-  // como desenhado.
+  // `context-planner` também não pode degradar silenciosamente: ele tem contrato
+  // JSON e o cliente já tem fallback explícito para o modelo de código quando o
+  // sidecar utilitário falha. `summarize`/memory ficam de fora — o modelo ativo
+  // sabe resumir/extrair, degradam como desenhado.
   const requestedSidecar = sidecarKeyForRequestType(requestType)
-  if (requestedSidecar && requestedSidecar !== 'sidecar:utility' && active.key !== requestedSidecar) {
+  const strictSidecarRequestType = ['vision', 'web_search', 'fim', 'context-planner'].includes(
+    requestType?.trim().toLowerCase() ?? '',
+  )
+  if (requestedSidecar && strictSidecarRequestType && active.key !== requestedSidecar) {
     return jsonError(
       503,
       'tm_sidecar_unavailable',
@@ -262,6 +280,22 @@ async function handleChatCompletions(
       // gate 402 e o consumedPct dos headers divergem da web/control-plane.
       planBudget = await resolvePlanBudgetFor(env, budgetState.plan, idToken, fetcher)
       budgetCheck = checkCostBudget(budgetState, { [budgetState.plan]: planBudget })
+      // Perto do limite (≥95% / em overage) ou já rejeitado: encurta o TTL
+      // da cache de estado (60s → ≤10s). Ver shortenBudgetStateCacheTtl —
+      // trava o overshoot de runs paralelos e desbloqueia compras de extra
+      // sem esperar o minuto inteiro. O guard `tokenBudget > 0` exclui os
+      // planos SEM orçamento (byok-only / plano desconhecido): esses são
+      // `rejected` permanentemente por construção e em shadow continuam a
+      // conversar — sem o guard ficavam com TTL de 10s para sempre (6x
+      // leituras Firestore sem estarem perto de limite nenhum).
+      if (
+        budgetCheck.tokenBudget > 0 &&
+        (!budgetCheck.allowed ||
+          budgetCheck.status === 'allowed_critical' ||
+          budgetCheck.status === 'allowed_overage')
+      ) {
+        shortenBudgetStateCacheTtl(user.userId)
+      }
     }
     if (budgetCheck && !budgetCheck.allowed) {
       // EQUIPA: o hard cap da fatia é o CONTRATO da feature e não há
@@ -288,22 +322,24 @@ async function handleChatCompletions(
 
   // ── Team BYOK: orçamento VIRTUAL opcional (opt-in pelo admin) ───────────────
   // Quando a config da equipa define um `pool` (> 0), medimos o uso BYOK contra
-  // essa pool + a fatia do membro (a MESMA percentAllocation do Plano de
-  // Equipas) e bloqueamos quando qualquer um esgota — hard cap estrito. Sem
-  // pool → pass-through puro (sem gate, sem commit), como antes. A pool é uma
-  // ESTIMATIVA do que o admin pagou ao provedor, NÃO o saldo real.
+  // a pool bruta da equipa. Não há fatia por membro em BYOK: percentAllocation
+  // só controla o plano TM gerido. Sem pool → pass-through puro (sem gate, sem
+  // commit), como antes. A pool é uma ESTIMATIVA do que o admin pagou ao
+  // provedor, NÃO o saldo real.
   let teamByokMetered = false
   if (teamByok && config.pool && config.pool > 0 && budgetState?.team) {
     teamByokMetered = true
     if (enforcement !== 'off') {
       const gate = checkTeamByokBudget(config.pool, budgetState.team)
       if (!gate.allowed) {
+        // Mesma razão do gate principal: o consumo BYOK da equipa vive na
+        // MESMA entrada de cache de 60s — sem encurtar, um top-up do admin
+        // ficava "colado" em 402 até um minuto.
+        shortenBudgetStateCacheTtl(user.userId)
         return jsonError(
           402,
           'tm_team_byok_exhausted',
-          gate.reason === 'team'
-            ? 'The team BYOK budget is exhausted. Ask your team admin to top it up.'
-            : 'Your team BYOK slice is exhausted. Ask your team admin to increase your allocation.',
+          'The team BYOK budget is exhausted. Ask your team admin to top it up.',
         )
       }
     }
@@ -332,7 +368,14 @@ async function handleChatCompletions(
   const model = speedApplied && config.speedModel ? config.speedModel : config.model
 
   const upstreamUrl = buildUpstreamUrl(config)
-  const prepared = await bodyWithActiveModel(request, model, config.extraBody, config.authScheme === 'google_oauth')
+  const prepared = await bodyWithActiveModel(
+    request,
+    model,
+    config.provider,
+    config.baseUrl,
+    config.extraBody,
+    config.authScheme === 'google_oauth',
+  )
   const { headers: upstreamHeaders, providerKey } = await buildUpstreamHeaders(request, config, env, fetcher)
 
   // O signal do upstream é um controller próprio em vez de request.signal

@@ -203,8 +203,8 @@ export const tokens = {
       brightCyan: '#29b8db',
       brightWhite: '#e5e5e5',
 
-      // --- Refined-terminal chrome (Terminal Mode) ---
-      // Centralizes values that cmd-mode previously hard-coded inline so the
+      // --- Refined shell chrome ---
+      // Centralizes values that the shell-styled surface previously hard-coded inline so the
       // surface stays a single source of truth (and unblocks multi-theme).
       // Values intentionally preserve the prior low-alpha look exactly.
       titlebarBg: 'rgba(0, 0, 0, 0.45)',

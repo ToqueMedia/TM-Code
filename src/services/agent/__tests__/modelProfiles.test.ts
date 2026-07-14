@@ -15,6 +15,7 @@ describe('modelProfiles', () => {
       // perfil do glm-5.2, senão o lookup cai no default ao rotear por DashScope.
       expect(ids).toContain('glm-5')
       expect(MODEL_PROFILES['glm-5']).toBe(MODEL_PROFILES['glm-5.2'])
+      expect(ids).toContain('deepseek-v4-pro')
       expect(ids).toContain('qwen3.7-max-2026-06-08')
       // Alias do id antigo → mesmo perfil do snapshot datado.
       expect(MODEL_PROFILES['qwen3.7-max']).toBe(MODEL_PROFILES['qwen3.7-max-2026-06-08'])
@@ -22,6 +23,7 @@ describe('modelProfiles', () => {
       // Gemini: id do preset + id raw com prefixo de publisher → mesmo perfil.
       expect(MODEL_PROFILES['google/gemini-3.5-flash']).toBe(MODEL_PROFILES['gemini-3.5-flash'])
       expect(MODEL_PROFILES['google/gemini-3.1-pro-preview']).toBe(MODEL_PROFILES['gemini-3.1-pro-preview'])
+      expect(ids).toContain('kimi-k2.7-code')
     })
 
     it('glm-5.2 has 1M context, 128K output, toggleable thinking, no native vision', () => {
@@ -35,6 +37,17 @@ describe('modelProfiles', () => {
       expect(glm.supportsAttachments).toBe(false)
     })
 
+    it('deepseek-v4-pro has 1M context, 384K output, toggleable thinking, text-only', () => {
+      const deepseek = MODEL_PROFILES['deepseek-v4-pro']
+      expect(deepseek.modelId).toBe('deepseek-v4-pro')
+      expect(deepseek.contextWindow).toBe(1_000_000)
+      expect(deepseek.maxOutputTokens).toBe(393_216)
+      expect(deepseek.thinkingMode).toBe('toggleable')
+      expect(deepseek.supportsThinking).toBe(true)
+      expect(deepseek.supportsAttachments).toBe(false)
+      expect(deepseek.supportsSearch).toBe(false)
+    })
+
     it('gemini profiles have native vision and mandatory thinking', () => {
       const gemini = MODEL_PROFILES['gemini-3.5-flash']
       expect(gemini.supportsAttachments).toBe(true)
@@ -46,6 +59,17 @@ describe('modelProfiles', () => {
       expect(qwen.modelId).toBe('qwen3.7-max-2026-06-08')
       expect(qwen.supportsAttachments).toBe(true)
       expect(qwen.supportsSearch).toBe(true)
+    })
+
+    it('kimi-k2.7-code has 256K context, native vision/search and toggleable thinking', () => {
+      const kimi = MODEL_PROFILES['kimi-k2.7-code']
+      expect(kimi.modelId).toBe('kimi-k2.7-code')
+      expect(kimi.contextWindow).toBe(262_144)
+      expect(kimi.maxOutputTokens).toBe(32_768)
+      expect(kimi.supportsAttachments).toBe(true)
+      expect(kimi.supportsSearch).toBe(true)
+      expect(kimi.thinkingMode).toBe('toggleable')
+      expect(kimi.supportsThinking).toBe(true)
     })
 
     it('mimo-v2.5-pro-1m has correct specs', () => {

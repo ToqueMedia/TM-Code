@@ -35,7 +35,12 @@ const operationColors: Record<string, string> = {
   rename: tokens.colors.accent.purple,
 }
 
-function CheckpointPanel() {
+interface CheckpointPanelProps {
+  surface?: 'inline' | 'drawer'
+}
+
+function CheckpointPanel({ surface = 'inline' }: CheckpointPanelProps) {
+  const isDrawer = surface === 'drawer'
   const checkpoints = useCheckpointStore(s => s.checkpoints)
   const isReverting = useCheckpointStore(s => s.isReverting)
   const revertToCheckpoint = useCheckpointStore(s => s.revertToCheckpoint)
@@ -48,8 +53,9 @@ function CheckpointPanel() {
   const isLoadingDiff = useCheckpointStore(s => s.isLoadingDiff)
   const loadSessionDiff = useCheckpointStore(s => s.loadSessionDiff)
   const isStreaming = useChatStore(s => s.isStreaming)
-  const isSidebarMode = useLayoutStore(s => s.viewMode) === 'preview'
-  const [isExpanded, setIsExpanded] = useState(false)
+  const viewMode = useLayoutStore(s => s.viewMode)
+  const isCompactMode = !isDrawer && viewMode === 'preview'
+  const [isExpanded, setIsExpanded] = useState(isDrawer)
   const [showSessionDiff, setShowSessionDiff] = useState(false)
   const [confirmRevertId, setConfirmRevertId] = useState<string | null>(null)
   const [showRevertAllConfirm, setShowRevertAllConfirm] = useState(false)
@@ -77,6 +83,10 @@ function CheckpointPanel() {
       setConfirmRevertId(null)
     }
   }, [checkpoints, confirmRevertId])
+
+  useEffect(() => {
+    if (isDrawer && checkpoints.length > 0) setIsExpanded(true)
+  }, [isDrawer, checkpoints.length])
 
   // Refresh timestamps every 30s
   useEffect(() => {
@@ -145,15 +155,27 @@ function CheckpointPanel() {
     if (next) loadSessionDiff()
   }, [showSessionDiff, loadSessionDiff])
 
-  if (checkpoints.length === 0) return null
+  if (checkpoints.length === 0) {
+    if (!isDrawer) return null
+    return (
+      <Flex h="100%" align="center" justify="center" px={6} textAlign="center">
+        <Text fontSize="12px" color={tokens.colors.text.disabled}>
+          {t('checkpoint.empty')}
+        </Text>
+      </Flex>
+    )
+  }
 
   const reversedCheckpoints = [...checkpoints].reverse()
 
   return (
     <Box
-      borderTop={`1px solid ${tokens.colors.border.glass}`}
-      bg={tokens.colors.bg.card}
-      borderRadius={tokens.radius.md}
+      h={isDrawer ? '100%' : undefined}
+      display={isDrawer ? 'flex' : undefined}
+      flexDirection={isDrawer ? 'column' : undefined}
+      borderTop={isDrawer ? 'none' : `1px solid ${tokens.colors.border.glass}`}
+      bg={isDrawer ? 'transparent' : tokens.colors.bg.card}
+      borderRadius={isDrawer ? '0' : tokens.radius.md}
       overflow="hidden"
     >
       {/* Header — compact strip so it stays out of the way of the workspace. */}
@@ -162,22 +184,26 @@ function CheckpointPanel() {
         justify="space-between"
         px={2.5}
         py="3px"
-        cursor="pointer"
+        cursor={isDrawer ? 'default' : 'pointer'}
         transition={`background ${tokens.transition.fast}`}
-        _hover={{ bg: tokens.colors.bg.hoverSubtle }}
-        onClick={() => setIsExpanded(!isExpanded)}
-        role="button"
+        _hover={isDrawer ? undefined : { bg: tokens.colors.bg.hoverSubtle }}
+        onClick={() => {
+          if (!isDrawer) setIsExpanded(!isExpanded)
+        }}
+        role={isDrawer ? undefined : 'button'}
         aria-expanded={isExpanded}
         aria-label={t("checkpoint.toggle")}
       >
         <Flex align="center" gap={1.5}>
-          <Box
-            color={tokens.colors.text.disabled}
-            transition={`transform ${tokens.transition.fast}`}
-            style={{ transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)' }}
-          >
-            <FiChevronDown size={11} />
-          </Box>
+          {!isDrawer && (
+            <Box
+              color={tokens.colors.text.disabled}
+              transition={`transform ${tokens.transition.fast}`}
+              style={{ transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)' }}
+            >
+              <FiChevronDown size={11} />
+            </Box>
+          )}
           <FiClock size={10} color={tokens.colors.text.muted} />
           <Text fontSize="10px" color={tokens.colors.text.muted} fontWeight="500" letterSpacing="0.02em">
             {t('checkpoint.count').replace('{count}', String(checkpoints.length))}
@@ -191,7 +217,7 @@ function CheckpointPanel() {
             display="flex"
             alignItems="center"
             gap="4px"
-            px={isSidebarMode ? "5px" : "7px"}
+            px={isCompactMode ? "5px" : "7px"}
             py="2px"
             borderRadius={tokens.radius.md}
             fontSize="10px"
@@ -208,7 +234,7 @@ function CheckpointPanel() {
             aria-label={t("checkpoint.viewDiff")}
           >
             <FiGitCommit size={10} />
-            {!isSidebarMode && t('checkpoint.viewDiff')}
+            {!isCompactMode && t('checkpoint.viewDiff')}
           </Box>
 
           {/* Undo button */}
@@ -217,7 +243,7 @@ function CheckpointPanel() {
             display="flex"
             alignItems="center"
             gap="4px"
-            px={isSidebarMode ? "5px" : "7px"}
+            px={isCompactMode ? "5px" : "7px"}
             py="2px"
             borderRadius={tokens.radius.md}
             fontSize="10px"
@@ -238,7 +264,7 @@ function CheckpointPanel() {
             aria-label={t("checkpoint.undoLast")}
           >
             <FiRotateCcw size={10} />
-            {!isSidebarMode && t("checkpoint.undoLast")}
+            {!isCompactMode && t("checkpoint.undoLast")}
           </Box>
 
           {/* Revert All button */}
@@ -247,7 +273,7 @@ function CheckpointPanel() {
             display="flex"
             alignItems="center"
             gap="4px"
-            px={isSidebarMode ? "5px" : "7px"}
+            px={isCompactMode ? "5px" : "7px"}
             py="2px"
             borderRadius={tokens.radius.md}
             fontSize="10px"
@@ -268,7 +294,7 @@ function CheckpointPanel() {
             aria-label={t("checkpoint.revertAll")}
           >
             <FiRotateCcw size={10} />
-            {!isSidebarMode && t("checkpoint.revertAll")}
+            {!isCompactMode && t("checkpoint.revertAll")}
           </Box>
         </Flex>
       </Flex>
@@ -414,7 +440,8 @@ function CheckpointPanel() {
             </Flex>
           ) : (
             <Box
-              maxH="150px"
+              maxH={isDrawer ? '220px' : '150px'}
+              h={isDrawer ? '220px' : undefined}
               overflowY="auto"
               borderRadius={tokens.radius.lg}
               bg={tokens.colors.bg.overlay}
@@ -492,7 +519,9 @@ function CheckpointPanel() {
       {/* Checkpoint list */}
       {isExpanded && (
         <Box
-          maxH="170px"
+          flex={isDrawer ? 1 : undefined}
+          minH={isDrawer ? 0 : undefined}
+          maxH={isDrawer ? 'none' : '170px'}
           overflowY="auto"
           px={2}
           pb={1.5}

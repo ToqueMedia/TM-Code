@@ -1,14 +1,14 @@
 import { invoke } from '@/utils/invokeMetrics'
 
 /**
- * Pre-flight availability check for CMD-mode toolkit dependencies.
+ * Pre-flight availability check for local artifact-generation toolkit dependencies.
  *
- * Runs once per process (or on explicit refresh) and caches the result. The CMD
- * status bar reads this to show a green/amber toolkit indicator so users know
+ * Runs once per process (or on explicit refresh) and caches the result. The
+ * workspace status bar reads this to show a green/amber toolkit indicator so users know
  * which artifact-generation skills will work out of the box vs need installs.
  *
  * Intentionally non-blocking — the checks are best-effort and must never delay
- * CMD mode startup. A failed probe maps to `found: false`, not an exception.
+ * workspace startup. A failed probe maps to `found: false`, not an exception.
  */
 
 export type PreflightChecks = {

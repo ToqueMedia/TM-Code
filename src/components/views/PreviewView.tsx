@@ -1,31 +1,24 @@
 import { memo, useRef, useEffect, useCallback, useMemo, useState } from 'react'
 import { invoke } from '@/utils/invokeMetrics'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { Flex, Box, Text, IconButton, HStack, Button } from '@chakra-ui/react'
+import { Flex, Box, Text, IconButton, HStack } from '@chakra-ui/react'
 import { IS_MAC } from '@/utils/platform'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiArrowLeft, FiArrowRight, FiRefreshCw, FiExternalLink, FiSquare, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiZap, FiSend, FiUpload, FiCamera, FiDatabase, FiMaximize2, FiMinimize2 } from 'react-icons/fi'
+import { FiArrowLeft, FiArrowRight, FiRefreshCw, FiExternalLink, FiX, FiTerminal, FiChevronDown, FiTrash2, FiLock, FiGlobe, FiZap, FiSend, FiCamera, FiMaximize2, FiMinimize2 } from 'react-icons/fi'
 import { useChatStore, generateId } from '../../stores/chatStore'
 import { enqueue as enqueueMessage } from '../../services/agent/messageQueue'
 import { useLayoutStore, selectFrontendUrl, selectBackendUrl, selectProjectKind, type DevServerLogEntry } from '../../stores/layoutStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { useToastStore } from '../../stores/toastStore'
 import { createImageAttachmentFromClipboard } from '../../services/attachmentService'
-import { devServerManager } from '../../services/devServerManager'
 import StaticPreviewBuilder from '../../services/agent/staticPreviewBuilder'
 import HttpClientPanel from '../http-client/HttpClientPanel'
-import DataViewerView from './DataViewerView'
 import TauriWebview, { closePreviewWebview, type TauriWebviewHandle } from '../ui/TauriWebview'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
 const CONSOLE_STORAGE_KEY = 'preview-console-height'
 const HTTP_DRAWER_OPEN_KEY = 'preview-http-drawer-open'
-const DATA_DRAWER_HEIGHT_KEY = 'preview-data-drawer-height'
-const DATA_DRAWER_OPEN_KEY = 'preview-data-drawer-open'
-const MIN_DATA_DRAWER_HEIGHT = 260
-const MAX_DATA_DRAWER_HEIGHT = 720
-const DEFAULT_DATA_DRAWER_HEIGHT = 420
 const MIN_CONSOLE_HEIGHT = 80
 const MAX_CONSOLE_HEIGHT = 400
 const DEFAULT_CONSOLE_HEIGHT = 180
@@ -100,6 +93,7 @@ function PreviewView() {
   const showIframe = projectKind === 'frontend' || projectKind === 'fullstack' || previewMode === 'static'
   const isFullstack = projectKind === 'fullstack'
   const previewUrl = showHttpClientMain ? backendUrl : frontendUrl
+  const [currentPreviewLocation, setCurrentPreviewLocation] = useState<string | null>(null)
 
   const consoleHandleRef = useRef<HTMLDivElement>(null)
   const consoleScrollRef = useRef<HTMLDivElement>(null)
@@ -116,28 +110,6 @@ function PreviewView() {
   })
   const [isResizingConsole, setIsResizingConsole] = useState(false)
 
-  // Data Viewer drawer — local state (not in layoutStore) because it's
-  // strictly a Preview-view affordance, unlike HTTP Client which is shared
-  // with the standalone backend layout. Persisted via localStorage so the
-  // user's "I want the data drawer open by default" preference survives reloads.
-  const [isDataDrawerOpen, setIsDataDrawerOpen] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(DATA_DRAWER_OPEN_KEY) === '1'
-    } catch { return false }
-  })
-  const [dataDrawerHeight, setDataDrawerHeight] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem(DATA_DRAWER_HEIGHT_KEY)
-      if (saved) {
-        const parsed = parseInt(saved, 10)
-        if (parsed >= MIN_DATA_DRAWER_HEIGHT && parsed <= MAX_DATA_DRAWER_HEIGHT) return parsed
-      }
-    } catch { /* ignore */ }
-    return DEFAULT_DATA_DRAWER_HEIGHT
-  })
-  const [isResizingDataDrawer, setIsResizingDataDrawer] = useState(false)
-  const dataDrawerHandleRef = useRef<HTMLDivElement>(null)
-
   // Restore drawer-open state on mount (fullstack only).
   useEffect(() => {
     if (projectKind !== 'fullstack') return
@@ -149,13 +121,6 @@ function PreviewView() {
     } catch { /* ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectKind])
-
-  // Persist Data Viewer drawer open state.
-  useEffect(() => {
-    try {
-      localStorage.setItem(DATA_DRAWER_OPEN_KEY, isDataDrawerOpen ? '1' : '0')
-    } catch { /* ignore */ }
-  }, [isDataDrawerOpen])
 
   // Persist drawer-open state whenever it changes.
   useEffect(() => {
@@ -245,25 +210,20 @@ function PreviewView() {
   }, [])
 
   const handleOpenExternal = async () => {
-    if (!previewUrl) return
+    const targetUrl = currentPreviewLocation || previewUrl
+    if (!targetUrl) return
     try {
       const { openUrl } = await import('@tauri-apps/plugin-opener')
-      await openUrl(previewUrl)
+      await openUrl(targetUrl)
     } catch {
       useToastStore.getState().addToast('error', t('preview.copyUrlManually'))
     }
   }
 
 
-  const handleStopServer = useCallback(async () => {
-    // Read previousViewMode BEFORE any state mutations — stop() calls
-    // clearDevServer() internally which resets store flags.
+  const handleClosePreview = useCallback(() => {
     const prev = useLayoutStore.getState().previousViewMode
     closePreviewWebview()
-    await devServerManager.stop()
-    // clearDevServer() already called by devServerManager.stop() — don't
-    // call it again (redundant set() triggers an extra MacWebview re-render
-    // that races with the native webview teardown).
     useLayoutStore.getState().setViewMode(prev && prev !== 'generating' && prev !== 'preview' ? prev : 'chat')
   }, [])
 
@@ -335,39 +295,34 @@ function PreviewView() {
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
         blob = new Blob([bytes], { type: 'image/png' })
       } else {
-        // Windows / Linux fallback — html2canvas. Iframe is in-DOM on
-        // these platforms so the capture works partially (iframe element
-        // bounds at minimum; content opaque if cross-origin). The Tauri
-        // webview on Win/Linux is also a regular iframe under the hood
-        // so this path covers both.
-        const html2canvas = (await import('html2canvas')).default
-        const canvas = await html2canvas(container, {
-          backgroundColor: '#ffffff',
-          scale: 1,
-          logging: false,
-          useCORS: true,
-          allowTaint: true,
+        // Windows / Linux native path. html2canvas can only see the wrapper
+        // around a cross-origin iframe/webview, which produced all-dark
+        // screenshots on Windows. The Rust command captures the actual
+        // framebuffer pixels for the preview rectangle.
+        const rect = container.getBoundingClientRect()
+        const scale = window.devicePixelRatio || await getCurrentWindow().scaleFactor()
+        const x = Math.round((window.screenX + rect.left) * scale)
+        const y = Math.round((window.screenY + rect.top) * scale)
+        const w = Math.round(rect.width * scale)
+        const h = Math.round(rect.height * scale)
+        const base64 = await invoke<string>('capture_screen_region', {
+          x, y, width: w, height: h,
         })
-        // Compress to JPEG ~0.8 quality, max-width 1280 — matches the
-        // feedback-dialog defaults (kept image payload under ~400 KB).
-        const MAX_W = 1280
-        let outCanvas: HTMLCanvasElement = canvas
-        if (canvas.width > MAX_W) {
-          const ratio = MAX_W / canvas.width
-          outCanvas = document.createElement('canvas')
-          outCanvas.width = MAX_W
-          outCanvas.height = Math.round(canvas.height * ratio)
-          const ctx = outCanvas.getContext('2d')
-          if (ctx) ctx.drawImage(canvas, 0, 0, outCanvas.width, outCanvas.height)
-        }
-        blob = await new Promise<Blob | null>(resolve =>
-          outCanvas.toBlob(b => resolve(b), 'image/jpeg', 0.8),
-        )
+        const binary = atob(base64)
+        const bytes = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+        blob = new Blob([bytes], { type: 'image/png' })
       }
 
       if (!blob) throw new Error('capture produced no image data')
+      if (await imageLooksUniformDark(blob)) {
+        throw new Error(t('preview.screenshotBlank'))
+      }
 
       const attachment = await createImageAttachmentFromClipboard(blob)
+      if (!attachment.base64?.startsWith('data:image/')) {
+        throw new Error('screenshot attachment did not include model-ready image data')
+      }
       const ext = blob.type === 'image/png' ? 'png' : 'jpg'
       attachment.name = `preview-screenshot-${Date.now()}.${ext}`
       useChatStore.getState().addDraftAttachment(attachment)
@@ -445,48 +400,11 @@ function PreviewView() {
     ? (previewSourcePath?.split('/').pop() || 'Static Preview')
     : showHttpClientMain
       ? (previewUrl || 'HTTP Client')
-      : (previewUrl || 'Loading...')
+      : (currentPreviewLocation || previewUrl || 'Loading...')
 
-  // Data Viewer drawer resize (vertical, drag up from the top of the drawer)
-  const handleDataDrawerResizeStart = useCallback((e: React.PointerEvent) => {
-    e.preventDefault()
-    const handleEl = dataDrawerHandleRef.current
-    if (!handleEl) return
-
-    const pid = e.pointerId
-    try { handleEl.setPointerCapture(pid) } catch { /* ignore */ }
-
-    const startY = e.clientY
-    const startH = dataDrawerHeight
-    let current = dataDrawerHeight
-    const body = document.body
-    const prevCursor = body.style.cursor
-    const prevUserSelect = body.style.userSelect
-    body.style.cursor = 'row-resize'
-    body.style.userSelect = 'none'
-    setIsResizingDataDrawer(true)
-
-    function onPointerMove(pe: PointerEvent) {
-      let next = startH + (startY - pe.clientY)
-      if (next < MIN_DATA_DRAWER_HEIGHT) next = MIN_DATA_DRAWER_HEIGHT
-      if (next > MAX_DATA_DRAWER_HEIGHT) next = MAX_DATA_DRAWER_HEIGHT
-      current = next
-      setDataDrawerHeight(next)
-    }
-
-    function onPointerUp() {
-      try { localStorage.setItem(DATA_DRAWER_HEIGHT_KEY, String(current)) } catch { /* ignore */ }
-      try { handleEl?.releasePointerCapture(pid) } catch { /* ignore */ }
-      handleEl?.removeEventListener('pointermove', onPointerMove)
-      handleEl?.removeEventListener('pointerup', onPointerUp)
-      body.style.cursor = prevCursor
-      body.style.userSelect = prevUserSelect
-      setIsResizingDataDrawer(false)
-    }
-
-    handleEl.addEventListener('pointermove', onPointerMove)
-    handleEl.addEventListener('pointerup', onPointerUp)
-  }, [dataDrawerHeight])
+  useEffect(() => {
+    setCurrentPreviewLocation(previewUrl)
+  }, [previewUrl])
 
   return (
     <Flex flex="1" overflow="hidden">
@@ -689,10 +607,8 @@ function PreviewView() {
               </IconButton>
             )}
 
-            {/* Stop server — always visible so users can close the preview
-                without searching for the action. Red accent on hover makes
-                the destructive intent clear. Stops the dev server and
-                navigates back, not just hides the view. */}
+            {/* Close preview — leaves the dev server running for continued
+                development. Manual server stop lives in the prompt toolbar. */}
             <Flex
               align="center"
               gap="4px"
@@ -700,61 +616,21 @@ function PreviewView() {
               h="24px"
               borderRadius="6px"
               cursor="pointer"
-              color="#fff"
+              color={tokens.colors.text.secondary}
               fontSize="11px"
               fontWeight="500"
-              bg="rgba(248, 81, 73, 0.15)"
-              border={`1px solid rgba(248, 81, 73, 0.25)`}
+              bg={tokens.colors.bg.whiteSubtle}
+              border={`1px solid ${tokens.colors.border.panel}`}
               transition={`all ${tokens.transition.fast}`}
-              _hover={{ bg: 'rgba(248, 81, 73, 0.25)', borderColor: 'rgba(248, 81, 73, 0.4)' }}
-              onClick={handleStopServer}
-              aria-label={t("misc.stopServer")}
+              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary, borderColor: tokens.colors.border.inputAlt }}
+              onClick={handleClosePreview}
+              aria-label={t("misc.closePreview")}
               role="button"
             >
-              <FiSquare size={10} color="#f85149" />
-              <Text fontSize="11px" fontWeight="500" color="#f85149">{t("misc.stopServer")}</Text>
+              <FiX size={11} />
+              <Text fontSize="11px" fontWeight="500" color="inherit">{t("misc.closePreview")}</Text>
             </Flex>
 
-            {/* Data Viewer — toggles a bottom slide-up drawer rather than
-                navigating to the standalone Data Viewer view, so the user
-                inspects tables without losing the preview iframe. The full
-                view is still reachable via Cmd/Ctrl+Shift+B or the chat-
-                header button. */}
-            <IconButton
-              aria-label={t('dataViewer.title')}
-              title={t('dataViewer.title')}
-              size="xs"
-              variant="ghost"
-              color={isDataDrawerOpen ? tokens.colors.accent.primary : tokens.colors.text.secondary}
-              _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
-              borderRadius="6px"
-              onClick={() => setIsDataDrawerOpen(v => !v)}
-            >
-              <FiDatabase size={13} />
-            </IconButton>
-
-            {/* Publish — opens the deploy modal. Free plan sees an upgrade
-                CTA inside the modal rather than the deploy flow. */}
-            <Button
-              aria-label={t('preview.publishProject')}
-              size="xs"
-              variant="solid"
-              bg={tokens.colors.accent.primary}
-              color="white"
-              _hover={{ bg: tokens.colors.accent.primaryDark, color: 'white' }}
-              _active={{ bg: tokens.colors.accent.primaryDark }}
-              borderRadius="6px"
-              fontSize="11px"
-              fontWeight="600"
-              h="22px"
-              px={2.5}
-              gap={1}
-              onClick={() => useLayoutStore.getState().setPublishModalOpen(true)}
-              ml={1.5}
-            >
-              <FiUpload size={11} />
-              Publish
-            </Button>
           </HStack>
         </Flex>
 
@@ -825,23 +701,13 @@ function PreviewView() {
                   // the DOM — z-index can't keep an absolute-positioned
                   // overlay above it. Whenever a drawer overlay is open we
                   // park the webview off-screen so the overlay is actually
-                  // visible. Trade-off: the Data drawer is a bottom slide,
-                  // so freezing hides the still-visible top half of the
-                  // preview. A future iteration could shrink the webview to
-                  // (height - drawerHeight) instead of parking, preserving
-                  // the upper iframe while the bottom shows the table viewer.
+                  // visible.
                   frozen={
                     !isPreviewActiveView
                     || isResizingConsole
                     || (isFullstack && isHttpDrawerOpen)
                   }
-                  // Data Viewer drawer takes the lower portion of the preview
-                  // region — shrink the native webview by the drawer height
-                  // instead of parking it off-screen. The user keeps seeing
-                  // the upper part of the preview while inspecting tables
-                  // below, which matches the original "preview + data
-                  // simultaneously visible" intent the drawer was added for.
-                  bottomReserveHeight={isDataDrawerOpen ? dataDrawerHeight + 4 : 0}
+                  onLocationChange={setCurrentPreviewLocation}
                 />
                 {isResizingConsole && (
                   <Box
@@ -934,86 +800,8 @@ function PreviewView() {
               </Flex>
             )}
 
-            {/* Data Viewer drawer — absolute overlay anchored to the bottom
-                of the preview region. Doesn't push the iframe upward when
-                opening/closing; the iframe stays still and the drawer
-                animates its own height. Iframe remains visible behind /
-                above the drawer area. */}
-            <AnimatePresence>
-              {isDataDrawerOpen && (
-                <motion.div
-                  key="data-drawer"
-                  initial={{ y: '100%', opacity: 0 }}
-                  animate={{ y: 0, opacity: 1 }}
-                  exit={{ y: '100%', opacity: 0 }}
-                  transition={isResizingDataDrawer
-                    ? { duration: 0 }
-                    : { type: 'spring', stiffness: 420, damping: 36, mass: 0.9 }
-                  }
-                  style={{
-                    position: 'absolute',
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    height: dataDrawerHeight + 4,
-                    zIndex: 10,
-                    overflow: 'hidden',
-                    display: 'flex',
-                    flexDirection: 'column',
-                  }}
-                >
-              <Box
-                ref={dataDrawerHandleRef}
-                role="separator"
-                aria-label={t('preview.resizeDataViewer')}
-                aria-orientation="horizontal"
-                h="4px"
-                cursor="row-resize"
-                flexShrink={0}
-                bg={isResizingDataDrawer ? tokens.colors.accent.primary : 'transparent'}
-                transition={isResizingDataDrawer ? 'none' : `background ${tokens.transition.fast}`}
-                _hover={{ bg: tokens.colors.accent.primary }}
-                onPointerDown={handleDataDrawerResizeStart}
-                zIndex={2}
-              />
-              <Flex
-                align="center"
-                justify="space-between"
-                px={3}
-                py="6px"
-                bg={tokens.colors.bg.panel}
-                borderTop={`1px solid ${tokens.colors.border.sidebarPanel}`}
-                borderBottom={`1px solid ${tokens.colors.border.glass}`}
-                flexShrink={0}
-              >
-                <HStack gap={2}>
-                  <FiDatabase size={11} color={tokens.colors.accent.primary} />
-                  <Text fontSize="11px" fontWeight={600} color={tokens.colors.text.secondary} textTransform="uppercase" letterSpacing="0.5px">
-                    {t('dataViewer.title')}
-                  </Text>
-                </HStack>
-                <IconButton
-                  aria-label={t('preview.closeDataViewer')}
-                  size="xs"
-                  variant="ghost"
-                  color={tokens.colors.text.disabled}
-                  _hover={{ color: tokens.colors.text.secondary, bg: tokens.colors.bg.hoverSubtle }}
-                  borderRadius="4px"
-                  onClick={() => setIsDataDrawerOpen(false)}
-                >
-                  <FiChevronDown size={12} />
-                </IconButton>
-              </Flex>
-              <Box flex="1" overflow="hidden" bg={tokens.colors.bg.mainLayout} display="flex" flexDirection="column">
-                <DataViewerView embedded />
-              </Box>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Fullstack HTTP Client — fullscreen overlay over the preview region
-            (z-index above the data drawer so opening HTTP while data is open
-            still wins). The iframe stays mounted behind. The macOS native
+        {/* Fullstack HTTP Client — fullscreen overlay over the preview region.
+            The iframe stays mounted behind. The macOS native
             wry webview is parked off-screen via `frozen={isHttpDrawerOpen}`
             because z-index can't move an NSView; without that the webview
             keeps painting on top. */}
@@ -1294,5 +1082,43 @@ const ConsoleLogLine = memo(function ConsoleLogLine({ entry }: { entry: DevServe
     </Flex>
   )
 })
+
+async function imageLooksUniformDark(blob: Blob): Promise<boolean> {
+  const url = URL.createObjectURL(blob)
+  try {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image()
+      img.onload = () => resolve(img)
+      img.onerror = () => reject(new Error('could not decode screenshot'))
+      img.src = url
+    })
+
+    const max = 48
+    const ratio = Math.min(1, max / Math.max(image.width, image.height))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(image.width * ratio))
+    canvas.height = Math.max(1, Math.round(image.height * ratio))
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) return false
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
+
+    const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+    let sum = 0
+    let sumSq = 0
+    let samples = 0
+    for (let i = 0; i < pixels.length; i += 4) {
+      const luminance = 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2]
+      sum += luminance
+      sumSq += luminance * luminance
+      samples += 1
+    }
+    if (samples === 0) return false
+    const mean = sum / samples
+    const variance = Math.max(0, sumSq / samples - mean * mean)
+    return mean < 10 && Math.sqrt(variance) < 6
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
 
 export default memo(PreviewView)
