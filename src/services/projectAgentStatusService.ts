@@ -35,6 +35,8 @@ export type ProjectAgentRunState = 'running' | 'done' | 'error' | 'idle'
 export interface ProjectAgentStatus {
   state: ProjectAgentRunState
   label?: string | null
+  /** Descrição escrita pelo user na sessão — tooltip da row nas outras janelas. */
+  description?: string | null
   updatedAt: number
   /**
    * Epoch ms when the run started. Set on the first `running` write and
@@ -74,6 +76,7 @@ let attendedClearTimer: ReturnType<typeof setTimeout> | null = null
  */
 let runningPath: string | null = null
 let runningLabel: string | null = null
+let runningDescription: string | null = null
 /** Epoch ms of the current run's first `running` write — preserved on heartbeats. */
 let runningStartedAt: number | null = null
 /** Last terminal (`done`/`error`) write — cleared on user acknowledgement. */
@@ -107,7 +110,7 @@ function writeStatus(
   projectPath: string,
   state: ProjectAgentRunState,
   label?: string | null,
-  opts?: { onlyIfOwn?: boolean; startedAt?: number | null },
+  opts?: { onlyIfOwn?: boolean; startedAt?: number | null; description?: string | null },
 ): void {
   writeChain = writeChain.then(() =>
     invoke('set_project_agent_status', {
@@ -117,6 +120,7 @@ function writeStatus(
       onlyIfOwn: opts?.onlyIfOwn === true,
       // Only attach startedAt on `running` — terminal/idle clears drop it.
       startedAt: state === 'running' ? (opts?.startedAt ?? null) : null,
+      description: opts?.description ?? null,
     }).catch(err => {
       logger.warn('agent', 'set_project_agent_status failed:', err)
     }) as Promise<void>,
@@ -127,8 +131,16 @@ function startHeartbeat(): void {
   stopHeartbeat()
   heartbeatTimer = setInterval(() => {
     if (runningPath) {
+      // Re-lê os metadados da sessão a cada beat: se o user renomear a
+      // tarefa ou editar a descrição A MEIO do run, as outras janelas veem
+      // a edição no próximo heartbeat (≤30s) em vez de só no próximo run.
+      // O título continua estável por natureza — session.name não deriva.
+      const meta = extractTaskMeta()
+      if (meta.label) runningLabel = meta.label
+      runningDescription = meta.description
       writeStatus(runningPath, 'running', runningLabel, {
         startedAt: runningStartedAt,
+        description: runningDescription,
       })
     }
   }, PROJECT_AGENT_STATUS_HEARTBEAT_MS)
@@ -171,23 +183,43 @@ export function acknowledgeTerminalStatus(): void {
   terminalWrite = null
 }
 
-/** Short excerpt of the task for the badge tooltip in other windows. */
-function extractTaskLabel(): string | null {
+function truncateLabel(text: string): string {
+  const clean = text.replace(/\s+/g, ' ').trim()
+  return clean.length > 80 ? `${clean.slice(0, 77)}…` : clean
+}
+
+/**
+ * Título + descrição da tarefa para a árvore/badges nas outras janelas.
+ *
+ * REGRA (pedido do user 2026-07-14): o título é SEMPRE o primeiro texto da
+ * primeira mensagem do user — nunca deriva com mensagens posteriores. A
+ * fonte é session.name (fixado uma vez em addMessage com a primeira
+ * mensagem, ou editado manualmente pelo user via updateSessionMeta); o
+ * fallback para sessões legadas sem name percorre as mensagens do INÍCIO
+ * (a versão antiga percorria de trás para a frente e apanhava a última
+ * mensagem — steering/segunda tarefa reescrevia o título a cada run).
+ * A descrição é exclusivamente escrita pelo user.
+ */
+function extractTaskMeta(): { label: string | null; description: string | null } {
   try {
     const session = useChatStore.getState().getActiveSession()
-    if (!session) return null
-    for (let i = session.messages.length - 1; i >= 0; i--) {
-      const m = session.messages[i]
+    if (!session) return { label: null, description: null }
+    const description = session.description?.trim() || null
+    if (session.name?.trim()) {
+      return { label: truncateLabel(session.name), description }
+    }
+    for (const m of session.messages) {
       if (m.role === 'user' && typeof m.content === 'string') {
         const text = m.content.replace(/\s+/g, ' ').trim()
         if (!text) continue
-        return text.length > 80 ? `${text.slice(0, 77)}…` : text
+        return { label: truncateLabel(text), description }
       }
     }
+    return { label: null, description }
   } catch {
     /* non-critical */
   }
-  return null
+  return { label: null, description: null }
 }
 
 function onAgentStatusChange(status: AgentStatus, prevStatus: AgentStatus): void {
@@ -198,12 +230,17 @@ function onAgentStatusChange(status: AgentStatus, prevStatus: AgentStatus): void
     const path = useProjectStore.getState().currentProject?.path
     if (!path) return
     runningPath = path
-    runningLabel = extractTaskLabel()
+    const meta = extractTaskMeta()
+    runningLabel = meta.label
+    runningDescription = meta.description
     runningStartedAt = Date.now()
     terminalWrite = null
     budgetStopLabel = null
     cancelAttendedClear()
-    writeStatus(path, 'running', runningLabel, { startedAt: runningStartedAt })
+    writeStatus(path, 'running', runningLabel, {
+      startedAt: runningStartedAt,
+      description: runningDescription,
+    })
     startHeartbeat()
     return
   }
@@ -223,11 +260,11 @@ function onAgentStatusChange(status: AgentStatus, prevStatus: AgentStatus): void
       // as 'cancelled', 'error' or plain 'idle', and all of them mean the
       // same thing here: stopped because credits ran out.
       terminalWrite = { path, state: 'error' }
-      writeStatus(path, 'error', budgetStopLabel)
+      writeStatus(path, 'error', budgetStopLabel, { description: runningDescription })
       scheduleAttendedClear()
     } else if (status === 'error') {
       terminalWrite = { path, state: 'error' }
-      writeStatus(path, 'error', runningLabel)
+      writeStatus(path, 'error', runningLabel, { description: runningDescription })
       scheduleAttendedClear()
     } else if (status === 'cancelled') {
       // Explicit user stop — attended by definition, no badge to keep.
@@ -235,11 +272,12 @@ function onAgentStatusChange(status: AgentStatus, prevStatus: AgentStatus): void
       writeStatus(path, 'idle', null, { onlyIfOwn: true })
     } else {
       terminalWrite = { path, state: 'done' }
-      writeStatus(path, 'done', runningLabel)
+      writeStatus(path, 'done', runningLabel, { description: runningDescription })
       scheduleAttendedClear()
     }
     budgetStopLabel = null
     runningLabel = null
+    runningDescription = null
   }
 }
 
@@ -281,6 +319,7 @@ function onProjectChange(
     if (runningPath === prevPath) {
       runningPath = null
       runningStartedAt = null
+      runningDescription = null
     }
     if (terminalWrite?.path === prevPath) terminalWrite = null
     writeStatus(prevPath, 'idle', null, { onlyIfOwn: true })

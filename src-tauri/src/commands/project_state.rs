@@ -223,9 +223,16 @@ pub async fn migrate_project_state(project_path: String) -> Result<(), String> {
 pub struct ProjectAgentStatus {
     /// "running" | "done" | "error" | "idle"
     pub state: String,
-    /// Short excerpt of the task (last user message) for the badge tooltip.
+    /// Task title for the tree row. The frontend anchors this to the
+    /// session's FIRST user message (or the user's manual rename) — it must
+    /// stay stable for the whole run, never drift with later messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Optional user-written task description (session metadata) — shown as
+    /// the row tooltip in other windows. Absent on files written before
+    /// 2026-07-14.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Epoch ms of the last write — heartbeat for `running`.
     pub updated_at: u64,
     /// Epoch ms when the run STARTED (set on `running` writes, preserved by
@@ -256,6 +263,7 @@ pub async fn set_project_agent_status(
     label: Option<String>,
     only_if_own: Option<bool>,
     started_at: Option<u64>,
+    description: Option<String>,
 ) -> Result<(), String> {
     if !matches!(state.as_str(), "running" | "done" | "error" | "idle") {
         return Err(format!("Invalid agent status state: {}", state));
@@ -282,6 +290,7 @@ pub async fn set_project_agent_status(
     let status = ProjectAgentStatus {
         state,
         label,
+        description,
         updated_at: now_ms(),
         started_at,
         pid: std::process::id(),

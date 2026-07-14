@@ -26,15 +26,19 @@ jest.mock('@/stores/projectStore', () => {
   }
 })
 
+// Sessão ativa mutável por teste (prefixo "mock" — permitido em factories).
+// Default sem `name`: exercita o fallback de percorrer as mensagens.
+let mockActiveSession: Record<string, unknown> = {}
+const defaultMockSession = () => ({
+  messages: [
+    { role: 'assistant', content: 'ok' },
+    { role: 'user', content: '  Corrige   o bug do login  ' },
+  ],
+})
 jest.mock('@/stores/chatStore', () => ({
   useChatStore: {
     getState: () => ({
-      getActiveSession: () => ({
-        messages: [
-          { role: 'assistant', content: 'ok' },
-          { role: 'user', content: '  Corrige   o bug do login  ' },
-        ],
-      }),
+      getActiveSession: () => mockActiveSession,
     }),
   },
 }))
@@ -54,6 +58,7 @@ const mkProject = (path: string, name: string): ProjectInfo =>
 
 function setup() {
   jest.resetModules()
+  mockActiveSession = defaultMockSession()
   const { invoke } = require('@/utils/invokeMetrics') as { invoke: jest.Mock }
   const { useAgentStore } = require('@/stores/agentStore') as AgentStoreModule
   const { useProjectStore } = require('@/stores/projectStore') as ProjectStoreModule
@@ -211,6 +216,63 @@ describe('projectAgentStatusService (writer)', () => {
       onlyIfOwn: false,
       // Terminal writes drop startedAt (elapsed only matters while running).
       startedAt: null,
+    })
+  })
+
+  // ── Título estável + descrição (pedido 2026-07-14) ──
+
+  it('o título é a PRIMEIRA mensagem do user, não a última (fallback sem name)', async () => {
+    const { invoke, useAgentStore, useProjectStore } = setup()
+    mockActiveSession = {
+      messages: [
+        { role: 'user', content: 'Cria a feature de exportação' },
+        { role: 'assistant', content: 'ok' },
+        // A versão antiga percorria de trás p/ a frente e apanhava isto:
+        { role: 'user', content: 'agora muda a cor do botão' },
+      ],
+    }
+    useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
+    useAgentStore.getState().setStatus('generating')
+
+    const writes = await statusWrites(invoke)
+    expect(writes[0]).toMatchObject({ label: 'Cria a feature de exportação' })
+  })
+
+  it('session.name (primeira mensagem fixada ou rename manual) vence o fallback', async () => {
+    const { invoke, useAgentStore, useProjectStore } = setup()
+    mockActiveSession = {
+      name: 'Refactor do billing',
+      messages: [
+        { role: 'user', content: 'mensagem inicial qualquer' },
+        { role: 'user', content: 'mensagem posterior' },
+      ],
+    }
+    useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
+    useAgentStore.getState().setStatus('generating')
+
+    const writes = await statusWrites(invoke)
+    expect(writes[0]).toMatchObject({ label: 'Refactor do billing' })
+  })
+
+  it('a descrição escrita pelo user viaja no status file (running e terminal)', async () => {
+    const { invoke, useAgentStore, useProjectStore } = setup()
+    mockActiveSession = {
+      name: 'Tarefa X',
+      description: 'Contexto: cliente pediu até sexta',
+      messages: [{ role: 'user', content: 'faz X' }],
+    }
+    useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
+    useAgentStore.getState().setStatus('generating')
+    useAgentStore.getState().setStatus('idle')
+
+    const writes = await statusWrites(invoke)
+    expect(writes[0]).toMatchObject({
+      state: 'running',
+      description: 'Contexto: cliente pediu até sexta',
+    })
+    expect(writes[writes.length - 1]).toMatchObject({
+      state: 'done',
+      description: 'Contexto: cliente pediu até sexta',
     })
   })
 

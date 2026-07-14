@@ -664,6 +664,7 @@ class SessionService {
       const summary: SessionSummary = {
         id: session.id,
         name: session.name,
+        description: session.description,
         projectPath: session.projectPath,
         messageCount: session.messages.length,
         lastMessage: lastMsg?.content?.slice(0, 100) ?? '',
@@ -715,6 +716,26 @@ class SessionService {
   async renameSession(session: ChatSession, name: string): Promise<void> {
     session.name = name
     await this.updateIndex(session.projectPath, session)
+  }
+
+  /**
+   * Edita título/descrição de uma sessão que NÃO está carregada em memória:
+   * roundtrip disco → mutação → save + índice. Para a sessão ATIVA usa-se o
+   * caminho em memória (chatStore.updateSessionMeta) — carregar do disco aqui
+   * clobberaria mensagens ainda não persistidas pelo debounce.
+   */
+  async updateSessionMetaOnDisk(
+    projectPath: string,
+    sessionId: string,
+    meta: { name?: string; description?: string },
+  ): Promise<boolean> {
+    const session = await this.loadSession(projectPath, sessionId)
+    if (!session) return false
+    if (meta.name !== undefined) session.name = meta.name
+    if (meta.description !== undefined) session.description = meta.description
+    await this.saveSession(session)
+    await this.updateIndex(projectPath, session)
+    return true
   }
 
   async cleanupEmptySessions(projectPath: string): Promise<void> {

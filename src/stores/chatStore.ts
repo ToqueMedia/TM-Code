@@ -245,6 +245,18 @@ interface ChatActions {
   createNewSession: (projectPath: string) => Promise<string>
   switchSession: (projectPath: string, sessionId: string) => Promise<void>
   renameSession: (name: string) => void
+  /**
+   * Edita título e/ou descrição de QUALQUER sessão do projeto (não só a
+   * ativa). O título nasce da primeira mensagem do user e só muda por esta
+   * via — nunca automaticamente. Sessão em memória: mutação direta + índice;
+   * sessão só em disco: roundtrip via sessionService (nunca clobbera a
+   * ativa). Devolve false quando a sessão não existe.
+   */
+  updateSessionMeta: (
+    projectPath: string,
+    sessionId: string,
+    meta: { name?: string; description?: string },
+  ) => Promise<boolean>
   deleteSessionFromDisk: (projectPath: string, sessionId: string) => Promise<void>
   initPersistence: (projectPath: string) => Promise<void>
   cleanupOnExit: (projectPath: string) => Promise<void>
@@ -3542,6 +3554,21 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       if (!session) return
       session.name = name
       // Name is persisted on next saveSessionToDisk() call via updateIndex
+    },
+
+    updateSessionMeta: async (projectPath, sessionId, meta) => {
+      const inMemory = get().sessions.get(sessionId)
+      if (inMemory) {
+        if (meta.name !== undefined) inMemory.name = meta.name
+        if (meta.description !== undefined) inMemory.description = meta.description
+        // Índice atualizado JÁ (o dropdown relê o índice ao abrir); o ficheiro
+        // completo segue no próximo save debounced. updatedAt fica intocado —
+        // editar metadados não é atividade de conversa, não deve reordenar a
+        // lista de sessões.
+        await sessionService.updateIndex(projectPath, inMemory)
+        return true
+      }
+      return sessionService.updateSessionMetaOnDisk(projectPath, sessionId, meta)
     },
 
     deleteSessionFromDisk: async (projectPath: string, sessionId: string) => {

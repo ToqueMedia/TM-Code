@@ -484,6 +484,7 @@ function ProjectGroup({
           highlight={isActive}
           dot={{ color: tokens.colors.accent.primary, pulse: true }}
           label={agentStatus.label || t('welcome.agentWorking')}
+          description={agentStatus.description}
           // startedAt → "· 12m"; falls back to nothing on pre-field files.
           time={agentStatus.startedAt ? shortAgo(agentStatus.startedAt) : null}
           onClick={onOpen}
@@ -493,6 +494,7 @@ function ProjectGroup({
         <TaskRow
           icon={<Icon as={LuCheck} fontSize="12px" color={tokens.colors.status.running} />}
           label={agentStatus.label || t('welcome.agentDone')}
+          description={agentStatus.description}
           time={shortAgo(agentStatus.updatedAt)}
           onClick={onOpen}
         />
@@ -501,6 +503,7 @@ function ProjectGroup({
         <TaskRow
           dot={{ color: tokens.colors.status.error, pulse: false }}
           label={agentStatus.label || t('welcome.agentError')}
+          description={agentStatus.description}
           time={shortAgo(agentStatus.updatedAt)}
           onClick={onOpen}
         />
@@ -547,6 +550,7 @@ function ProjectGroup({
 
 function TaskRow({
   label,
+  description,
   time,
   dot,
   icon,
@@ -555,6 +559,8 @@ function TaskRow({
   onRemove,
 }: {
   label: string
+  /** Descrição escrita pelo user — junta-se ao título no tooltip nativo. */
+  description?: string | null
   time?: string | null
   dot?: { color: string; pulse: boolean }
   icon?: React.ReactNode
@@ -581,7 +587,7 @@ function TaskRow({
       }}
       _hover={{ bg: highlight ? 'rgba(255, 255, 255, 0.08)' : 'rgba(255, 255, 255, 0.04)' }}
       onClick={onClick}
-      title={label}
+      title={description ? `${label}\n\n${description}` : label}
     >
       {dot && (
         <Box

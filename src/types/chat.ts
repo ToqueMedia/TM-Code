@@ -402,7 +402,19 @@ export interface CodeBlock {
 
 export interface ChatSession {
   id: string
+  /**
+   * Título da tarefa/sessão. Fixado UMA vez com o primeiro texto da primeira
+   * mensagem do user (chatStore.addMessage) e nunca reescrito automaticamente
+   * — só o próprio user o muda (updateSessionMeta). É este o título que a
+   * árvore paralela da sidebar e o dropdown de sessões mostram.
+   */
   name?: string
+  /**
+   * Descrição opcional escrita pelo USER (updateSessionMeta) — nunca gerada
+   * automaticamente. Aparece como tooltip/linha secundária nas superfícies
+   * de tarefas e viaja para outras janelas via agent-status.json.
+   */
+  description?: string
   projectPath: string
   messages: ChatMessage[]
   status: 'idle' | 'running' | 'paused' | 'completed' | 'error'
@@ -508,6 +520,8 @@ export interface SessionContext {
 export interface SessionSummary {
   id: string
   name?: string
+  /** Descrição escrita pelo user — ver ChatSession.description. */
+  description?: string
   projectPath: string
   messageCount: number
   lastMessage: string
