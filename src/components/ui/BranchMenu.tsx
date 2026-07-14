@@ -24,17 +24,42 @@ interface GitBranchInfo {
   current: boolean
 }
 
-async function confirmIfAgentBusy(): Promise<boolean> {
+/**
+ * Com o agente ocupado, trocar de branch exige confirmar E PARAR o run —
+ * mesma doutrina do project switch (ARCHITECTURE.md): um run vivo continua
+ * a escrever edits calculados contra os ficheiros da branch ANTIGA; deixá-lo
+ * continuar depois do checkout misturava conteúdo entre branches (desastre
+ * silencioso no código do user). stopAgentRun também resolve os diffs
+ * pendentes — um diff aprovado pós-troca escreveria a versão antiga na
+ * branch nova.
+ */
+async function confirmAndStopIfAgentBusy(): Promise<boolean> {
   try {
     const agentService = (await import('@/services/agent/agentService')).default.getInstance()
     if (!agentService.isAgentRunning()) return true
   } catch {
     return true
   }
-  return tauriConfirm(t('branch.switchWhileRunning'), {
+  const confirmed = await tauriConfirm(t('branch.switchWhileRunning'), {
     title: t('project.agentBusyTitle'),
     kind: 'warning',
   })
+  if (!confirmed) return false
+  const { stopAgentRun } = await import('@/services/agent/stopAgentRun')
+  // false = o user desistiu no confirm de permissões pendentes do próprio
+  // stop — nada foi tocado, por isso a troca também não avança.
+  return stopAgentRun()
+}
+
+/**
+ * Um checkout muda os ficheiros por FORA do caminho de save do editor. O
+ * buffer reconciler + gutter do Monaco + git status poller ouvem este
+ * evento (o mesmo que o agente dispara após tools mutantes) — sem ele, as
+ * tabs abertas ficavam com o conteúdo da branch antiga e um save do user
+ * escrevia-o na branch nova.
+ */
+function notifyWorkingTreeChanged(): void {
+  window.dispatchEvent(new CustomEvent('git:refreshGutter', { detail: '' }))
 }
 
 function BranchMenu({ projectPath }: { projectPath: string }) {
@@ -88,11 +113,12 @@ function BranchMenu({ projectPath }: { projectPath: string }) {
         setMenuOpen(false)
         return
       }
-      if (!(await confirmIfAgentBusy())) return
+      if (!(await confirmAndStopIfAgentBusy())) return
       setBusy(true)
       try {
         await invoke('git_checkout_branch', { projectPath, branch })
         setCurrent(branch)
+        notifyWorkingTreeChanged()
         useToastStore.getState().addToast('success', t('branch.switched').replace('{name}', branch))
         setMenuOpen(false)
       } catch (err) {
@@ -107,11 +133,15 @@ function BranchMenu({ projectPath }: { projectPath: string }) {
   const createBranch = useCallback(async () => {
     const branch = newName.trim()
     if (!branch || busy) return
-    if (!(await confirmIfAgentBusy())) return
+    if (!(await confirmAndStopIfAgentBusy())) return
     setBusy(true)
     try {
       await invoke('git_create_branch', { projectPath, branch })
       setCurrent(branch)
+      // `checkout -b` carrega as alterações não commitadas para a branch
+      // nova (desejado: "começar uma branch com o meu trabalho atual"), mas
+      // o estado git mudou na mesma — gutter/status precisam do refresh.
+      notifyWorkingTreeChanged()
       useToastStore.getState().addToast('success', t('branch.created').replace('{name}', branch))
       setMenuOpen(false)
       setCreating(false)
