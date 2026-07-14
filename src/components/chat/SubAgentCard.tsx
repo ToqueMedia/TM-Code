@@ -42,7 +42,9 @@ function StatusIcon({ status }: { status: SubAgentRun['status'] }) {
     )
   }
   if (status === 'completed') return <Box as={FiCheck} boxSize="12px" color={tokens.colors.accent.greenBright} />
-  if (status === 'error' || status === 'timeout') return <Box as={FiX} boxSize="12px" color="#f85149" />
+  if (status === 'error') return <Box as={FiX} boxSize="12px" color="#f85149" />
+  // Timeout ≠ erro: houve trabalho e há resultado PARCIAL — laranja, não vermelho.
+  if (status === 'timeout') return <Box as={FiClock} boxSize="12px" color={tokens.colors.accent.orange} />
   return <Box as={FiClock} boxSize="12px" color={tokens.colors.text.disabled} />
 }
 
@@ -84,8 +86,10 @@ const SubAgentRunCard = memo(function SubAgentRunCard({ runId }: { runId: string
 
   const color = AGENT_COLORS[run.definition.agentType] || tokens.colors.text.secondary
   const duration = formatDuration((run.endedAt ?? Date.now()) - run.startedAt)
+  // ÚLTIMOS 8 — o card é um feed vivo: com slice(0,8) o user via os 8 calls
+  // mais ANTIGOS congelados e a atividade corrente ficava escondida no "+N".
   const maxVisible = 8
-  const visibleCalls = run.toolCalls.slice(0, maxVisible)
+  const visibleCalls = run.toolCalls.slice(-maxVisible)
   const hiddenCount = run.toolCalls.length - maxVisible
 
   return (
@@ -125,12 +129,33 @@ const SubAgentRunCard = memo(function SubAgentRunCard({ runId }: { runId: string
       {/* Expanded: tool calls + result */}
       {expanded && (
         <Box mt="4px" pl="4px">
+          {hiddenCount > 0 && (
+            <Text fontSize="10px" color={tokens.colors.text.disabled} py="1px">
+              +{hiddenCount} earlier
+            </Text>
+          )}
           {visibleCalls.map(tc => (
             <ToolCallLine key={tc.callId} tc={tc} />
           ))}
-          {hiddenCount > 0 && (
-            <Text fontSize="10px" color={tokens.colors.text.disabled} py="1px">
-              +{hiddenCount} more
+
+          {/* Timeout: houve trabalho — mostra o resultado PARCIAL (finalText,
+              escrito por timeoutRun), não só um erro. errorText fica para
+              erros reais; antes o timeout renderizava errorText (undefined)
+              e o user não via nada do que o sub-agente tinha conseguido. */}
+          {run.status === 'timeout' && run.finalText && (
+            <Text
+              fontSize="11px"
+              color={tokens.colors.text.secondary}
+              mt="4px"
+              p="6px"
+              bg="rgba(247, 127, 0, 0.06)"
+              borderRadius="4px"
+              whiteSpace="pre-wrap"
+              maxHeight="120px"
+              overflow="hidden"
+            >
+              {run.finalText.slice(0, 500)}
+              {run.finalText.length > 500 && '...'}
             </Text>
           )}
 

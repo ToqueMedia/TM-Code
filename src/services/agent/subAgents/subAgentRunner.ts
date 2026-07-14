@@ -23,6 +23,7 @@ import {
 import { QueryEngine } from '../queryEngine'
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from '../query'
 import ToolExecutor from '../toolExecutor'
+import { canonicalToolName } from '../toolNames'
 import { formatError } from '../../../utils/errors'
 import { useBillingStore } from '../../../stores/billingStore'
 import { useSubAgentStore } from '../../../stores/subAgentStore'
@@ -128,7 +129,18 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   const toolExecutor = ToolExecutor.getInstance().createIsolatedChild()
   const readOnlyContextId = toolExecutor.enterReadOnlyMode()
 
+  // Tools em voo: enquanto QUALQUER tool está a executar, o run NÃO está
+  // "stalled" — um build/install/teste de 3 minutos não produz eventos de
+  // stream nenhuns, e a versão antiga (lastActivityAt só em text/tool_use_start)
+  // matava runs saudáveis aos 60s a meio de um tool longo. O wall-clock
+  // timeout continua a limitar o total; a staleness volta a contar quando o
+  // tool devolve. Cobre também esperas em gates de permissão (o tool fica
+  // "em voo" dentro do execute() enquanto o user decide).
+  let toolsInFlight = 0
+  let lastActivityAt = Date.now()
+
   const executeTool: ToolExecutorFn = async (toolName, toolInput, toolUseId, signal) => {
+    toolsInFlight++
     try {
       const raw = await toolExecutor.execute(
         toolName,
@@ -143,6 +155,9 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
       // serde-tagged enums that otherwise render as "Error: [object Object]".
       const errorMsg = formatError(err)
       return { content: `Error: ${errorMsg}`, isError: true }
+    } finally {
+      toolsInFlight--
+      lastActivityAt = Date.now()
     }
   }
 
@@ -160,6 +175,13 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
     systemPrompt,
     tools: openaiTools,
     executeTool,
+    // Execução em streaming também para sub-agentes: reads começam durante o
+    // SSE (mesma regra do agente principal — só concurrencySafe; o executor
+    // isolado trata gates). Sub-agentes são exploração pesada multi-read, é
+    // onde o overlap mais rende.
+    isStreamSafeTool: (name) =>
+      toolExecutor.isConcurrencySafe(name) ||
+      toolExecutor.isConcurrencySafe(canonicalToolName(name)),
     thinkingConfig,
     extraHeaders: subAgentExtraHeaders,
     maxTurns: definition.maxTurns,
@@ -192,10 +214,15 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
     }
   }, definition.maxWallClockMs)
 
-  // Stale detection — abort if no tool call for 60s (likely stuck in model loop)
+  // Stale detection — abort if no PROGRESS for 60s (likely stuck in model
+  // loop). Progresso = eventos de stream OU um tool em execução: com um tool
+  // em voo o relógio de staleness fica congelado (ver toolsInFlight acima).
   const STALE_TIMEOUT_MS = 60_000
-  let lastActivityAt = Date.now()
   const staleTimer = setInterval(() => {
+    if (toolsInFlight > 0) {
+      lastActivityAt = Date.now()
+      return
+    }
     const elapsed = Date.now() - lastActivityAt
     if (elapsed > STALE_TIMEOUT_MS) {
       const run = useSubAgentStore.getState().runs.get(runId)
@@ -226,6 +253,20 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   let inputTokens = 0
   let outputTokens = 0
 
+  // Args por tool call (acumulados dos tool_use_delta) → argPreview no card.
+  // Antes o card mostrava só o nome do tool ("read_file" ×8, sem paths) —
+  // o argPreview era criado vazio e nunca preenchido.
+  const argsByCallId = new Map<string, string>()
+  const buildArgPreview = (argsJson: string): string => {
+    try {
+      const parsed = JSON.parse(argsJson) as Record<string, unknown>
+      const key = ['file_path', 'path', 'command', 'query', 'pattern', 'url']
+        .find(k => typeof parsed[k] === 'string' && (parsed[k] as string).trim())
+      if (key) return String(parsed[key]).slice(0, 60)
+    } catch { /* args parciais — usa o raw */ }
+    return argsJson.replace(/\s+/g, ' ').slice(0, 60)
+  }
+
   // ── Fire and forget — iterate the query engine ──
   void (async () => {
     try {
@@ -255,10 +296,27 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
             })
             break
 
-          case 'tool_use_stop':
+          case 'tool_use_delta':
+            if (event.input) {
+              argsByCallId.set(event.id, (argsByCallId.get(event.id) ?? '') + event.input)
+            }
             break
 
+          case 'tool_use_stop': {
+            const args = argsByCallId.get(event.id)
+            if (args) {
+              useSubAgentStore.getState().updateToolCall(runId, event.id, {
+                argPreview: buildArgPreview(args),
+              })
+              argsByCallId.delete(event.id)
+            }
+            break
+          }
+
           case 'tool_result':
+            // Um tool que devolve É progresso — sem isto, uma sequência de
+            // tools lentos podia acumular staleness entre eles.
+            lastActivityAt = Date.now()
             useSubAgentStore.getState().updateToolCall(runId, event.toolUseId, {
               status: event.isError ? 'errored' : 'completed',
               resultPreview: typeof event.content === 'string' ? event.content.slice(0, 80) : undefined,
