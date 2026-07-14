@@ -48,6 +48,10 @@ export interface MeResponse {
     cycleEnd: string
     extraUsageBalance: number
     status: CostBudgetStatus
+    /** Data de expiração da SUBSCRIÇÃO (ISO; ≠ cycleEnd, que é o reset mensal
+     *  de tokens). '' para explorer/desconhecida. Alimenta o aviso "o plano
+     *  expira em N dias". Ausente em workers antigos (pré-2026-07-14). */
+    planExpiresAt?: string
   }
   /** Bloco de equipa (control-plane TeamBillingSummary). Ausente = consumo NÃO
    *  está em modo equipa agora (modo pessoal ou sem equipa). */
@@ -98,6 +102,8 @@ interface BillingState {
   tokensConsumed: number     // raw tokens in current cycle
   tokenBudget: number        // plan budget (depends on plan)
   cycleEnd: string           // "YYYY-MM-DD"
+  /** Expiração da SUBSCRIÇÃO (ISO) — '' quando não aplicável. Ver MeResponse. */
+  planExpiresAt: string
   status: CostBudgetStatus
 
   // Overage credits (canonical: tokenBudget.extraUsageBalance on the backend)
@@ -143,6 +149,7 @@ const DEFAULT_STATE: BillingState = {
   tokensConsumed: 0,
   tokenBudget: 0,
   cycleEnd: '',
+  planExpiresAt: '',
   status: 'allowed',
   tmsRemaining: 0,
   lastTokensUsed: 0,
@@ -178,6 +185,7 @@ interface BillingCacheRecord {
   tokensConsumed: number
   tokenBudget: number
   cycleEnd: string
+  planExpiresAt?: string
   status: CostBudgetStatus
   tmsRemaining: number
   team?: TeamBillingContext | null
@@ -218,6 +226,7 @@ export function persistBillingCache(uid: string): void {
       tokensConsumed: s.tokensConsumed,
       tokenBudget: s.tokenBudget,
       cycleEnd: s.cycleEnd,
+      planExpiresAt: s.planExpiresAt,
       status: s.status,
       tmsRemaining: s.tmsRemaining,
       team: s.team,
@@ -247,6 +256,7 @@ function buildInitialState(): BillingState {
     tokensConsumed: cached.tokensConsumed,
     tokenBudget: cached.tokenBudget,
     cycleEnd: cached.cycleEnd,
+    planExpiresAt: cached.planExpiresAt ?? '',
     status: cached.status,
     tmsRemaining: cached.tmsRemaining,
     noCredits: cached.status === 'rejected',
@@ -379,6 +389,7 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
       tokensConsumed: data.billing.tokensConsumed,
       tokenBudget: data.billing.tokenBudget,
       cycleEnd: data.billing.cycleEnd,
+      planExpiresAt: data.billing.planExpiresAt ?? '',
       status: data.billing.status,
       tmsRemaining: data.billing.extraUsageBalance,
       noCredits: data.billing.status === 'rejected',

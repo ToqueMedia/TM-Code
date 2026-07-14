@@ -500,6 +500,12 @@ function ChatView() {
         )}
       </AnimatePresence>
 
+      {/* Aviso de expiração de plano (≤10 dias) — mesma janela do banner da
+          Web (PlanExpiryBanner). Fonte: billing.planExpiresAt do /v1/me
+          (subscription.expiresAt; para equipas, a expiração da subscrição da
+          equipa). Ausente em workers antigos → sem banner (degrada limpo). */}
+      <PlanExpiryNotice />
+
       {/* Agent error banner — surfaces 402/429/5xx/AUTH_EXPIRED messages
           from the agent loop. The shell-styled status line has its own
           error label; this keeps the main chat equally visible, so a "Sem créditos
@@ -940,6 +946,82 @@ function ToolbarMenuItem({
         {label}
       </Text>
     </Box>
+  )
+}
+
+// ─── Plan expiry notice ─────────────────────────────────────────────────────
+// Aviso "o plano expira em N dias" (pedido 2026-07-14). Janela partilhada com
+// o banner da Web — mudar aqui pede mudança em PlanExpiryBanner.tsx (web).
+const PLAN_EXPIRY_WARNING_DAYS = 10
+
+function PlanExpiryNotice() {
+  const plan = useBillingStore(s => s.plan)
+  const planExpiresAt = useBillingStore(s => s.planExpiresAt)
+  const [dismissed, setDismissed] = useState(false)
+
+  if (dismissed || plan === 'explorer' || !planExpiresAt) return null
+  const expiresMs = Date.parse(planExpiresAt)
+  if (!Number.isFinite(expiresMs)) return null
+  const msLeft = expiresMs - Date.now()
+  if (msLeft <= 0) return null
+  const daysLeft = Math.ceil(msLeft / 86_400_000)
+  if (daysLeft > PLAN_EXPIRY_WARNING_DAYS) return null
+
+  return (
+    <Flex
+      align="center"
+      gap={2}
+      px={4}
+      py="6px"
+      flexShrink={0}
+      bg="rgba(247, 127, 0, 0.08)"
+      borderBottom="1px solid rgba(247, 127, 0, 0.25)"
+    >
+      <Box flexShrink={0} color={tokens.colors.accent.orange}>
+        <FiAlertCircle size={14} />
+      </Box>
+      <Text fontSize="12px" color={tokens.colors.accent.orange} fontWeight={500} flex={1} lineClamp={2}>
+        {t('chat.planExpiresSoon').replace('{days}', String(daysLeft))}
+      </Text>
+      <Box
+        as="button"
+        px={2}
+        py="2px"
+        borderRadius="4px"
+        fontSize="11px"
+        fontWeight="600"
+        color={tokens.colors.accent.orange}
+        bg="rgba(247, 127, 0, 0.15)"
+        cursor="pointer"
+        transition={`opacity ${tokens.transition.fast}`}
+        _hover={{ opacity: 0.85 }}
+        onClick={() => {
+          import('@tauri-apps/plugin-opener').then(opener => {
+            opener.openUrl('https://code.toquemedia.net/account/billing').catch(() => {})
+          })
+        }}
+      >
+        {t('chat.planExpiresRenew')}
+      </Box>
+      <Box
+        as="button"
+        display="flex"
+        alignItems="center"
+        justifyContent="center"
+        w="20px"
+        h="20px"
+        borderRadius="4px"
+        color={tokens.colors.accent.orange}
+        opacity={0.7}
+        cursor="pointer"
+        transition={`all ${tokens.transition.fast}`}
+        _hover={{ opacity: 1, bg: 'rgba(247, 127, 0, 0.12)' }}
+        onClick={() => setDismissed(true)}
+        aria-label={t('chat.dismissError')}
+      >
+        <Text fontSize="14px" lineHeight="1">×</Text>
+      </Box>
+    </Flex>
   )
 }
 
