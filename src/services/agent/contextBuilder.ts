@@ -79,6 +79,7 @@ import {
   getCompletionContractSection,
   getConstraintsSection,
   getDoingTasksSection,
+  getIdeUiGuideSection,
   getScaffoldingInstallSection,
   getVisionSection,
   getDevServerRulesSection,
@@ -846,6 +847,9 @@ class ContextBuilder {
       getModelSpecificSection(ctx),
       getSystemSection(),
       getDoingTasksSection(ctx),
+      // A IDE à volta do agente — aponta o developer às affordances da UI
+      // (Preview vs "corre yarn dev", branch chip, fila de tarefas, …).
+      getIdeUiGuideSection(),
       getExecutingActionsSection(),
       sharedShellExecutionLoop('chat'),
       getClosedLoopSection(),
