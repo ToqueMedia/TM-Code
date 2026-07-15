@@ -82,6 +82,9 @@ export interface Env {
   PLAN_BUDGETS_JSON?: string
   /** Multiplicador de cobrança do TM Speed (default 3). */
   TM_SPEED_BILLING_MULTIPLIER?: string
+  /** Fração a que os tokens de prompt CACHEADOS são faturados (0..1; default
+   *  0.5). Ver resolveCacheBillingFactor. */
+  TM_CACHE_BILLING_FACTOR?: string
   /** Timeout (ms) até aos HEADERS do upstream em pedidos STREAMING — default
    *  120000. Só cobre o tempo até ao primeiro byte; o stream em si não tem
    *  limite. */

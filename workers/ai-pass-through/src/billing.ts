@@ -127,6 +127,34 @@ export function resolveSpeedMultiplier(env: Env): number {
   return Number.isFinite(raw) && raw >= 1 ? raw : 3
 }
 
+/**
+ * Fração a que os tokens de prompt CACHEADOS são faturados (2026-07-15,
+ * decisão de produto): 0.5 = metade do preço. Os tokens não-cacheados
+ * continuam a 100%. Num loop agentico o prefixo em cache é a maioria de
+ * cada turno, por isso este desconto estica muito a quota (vibe estourava
+ * rápido porque cada turno re-faturava o prefixo inteiro a 100%).
+ * Configurável por env TM_CACHE_BILLING_FACTOR (0..1); default 0.5.
+ */
+export function resolveCacheBillingFactor(env: Env): number {
+  const raw = typeof env.TM_CACHE_BILLING_FACTOR === 'string' ? Number(env.TM_CACHE_BILLING_FACTOR) : NaN
+  return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.5
+}
+
+/**
+ * Total de tokens FATURÁVEIS antes do multiplicador de velocidade:
+ *   (prompt não-cacheado)·1 + (prompt cacheado)·factor + completion·1
+ * = promptTokens − cached·(1 − factor) + completionTokens
+ * cached é subconjunto de promptTokens (o provider já o inclui no total).
+ */
+export function billableTokenTotal(
+  usage: { promptTokens: number; completionTokens: number; cachedTokens?: number },
+  cacheFactor: number,
+): number {
+  const cached = Math.max(0, Math.min(usage.promptTokens, usage.cachedTokens ?? 0))
+  const discount = Math.floor(cached * (1 - cacheFactor))
+  return Math.max(0, usage.promptTokens - discount) + usage.completionTokens
+}
+
 // ── User budget state (cached read) ──────────────────────────────────────
 
 /** Membro de uma equipa (Plano de Equipas). Presente em `UserBudgetState.team`

@@ -9,6 +9,8 @@ import {
   resolveEnforcementMode,
   resolvePlanBudgetFor,
   resolveSpeedMultiplier,
+  resolveCacheBillingFactor,
+  billableTokenTotal,
   shortenBudgetStateCacheTtl,
   type CostBudgetCheck,
   type UserBudgetState,
@@ -506,18 +508,30 @@ async function handleChatCompletions(
       }
       // Team BYOK: ledger virtual da equipa, tokens RAW (1x, sem multiplicador
       // da TM — é a despesa do admin no provedor, não inferência gerida).
+      // Desconto de cache: tokens de prompt cacheados faturam a
+      // resolveCacheBillingFactor (default 0.5). Vale para o billing gerido
+      // E para o ledger Team BYOK (o provider já descontou o cache na fatura
+      // real do admin — contá-lo a 100% no ledger virtual inflava a despesa).
+      const cacheFactor = resolveCacheBillingFactor(env)
+      const billableTotal = billableTokenTotal(usage, cacheFactor)
+      if (usage.cachedTokens > 0) {
+        console.log(
+          `[billing] cache discount user=${user.userId} prompt=${usage.promptTokens} ` +
+          `cached=${usage.cachedTokens}@${cacheFactor}x → billablePrompt=${billableTotal - usage.completionTokens} completion=${usage.completionTokens}`,
+        )
+      }
       if (teamByokMetered && teamId) {
         await commitTeamByokConsumption({
           env,
           userId: user.userId,
           idToken,
           teamId,
-          rawTokens: usage.promptTokens + usage.completionTokens,
+          rawTokens: billableTotal,
           fetcher,
         })
         return
       }
-      const rawTokens = Math.ceil((usage.promptTokens + usage.completionTokens) * multiplier)
+      const rawTokens = Math.ceil(billableTotal * multiplier)
       await commitTokenConsumption({
         env,
         userId: user.userId,

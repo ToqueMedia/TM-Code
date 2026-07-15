@@ -23,6 +23,13 @@
 export interface ObservedUsage {
   promptTokens: number
   completionTokens: number
+  /**
+   * Tokens de prompt servidos a partir do cache do provider (subconjunto de
+   * promptTokens — o provider já os inclui no total). Faturados a preço
+   * reduzido (ver CACHE_BILLING_FACTOR): num loop agentico o prefixo em cache
+   * é a maioria de cada turno, por isso descontá-lo estica muito a quota.
+   */
+  cachedTokens: number
   /** true quando veio do objeto `usage` do provider; false = estimativa. */
   authoritative: boolean
 }
@@ -52,12 +59,27 @@ export function injectStreamOptions(body: Record<string, unknown>): Record<strin
 }
 
 function parseUsageObject(value: unknown): ObservedUsage | null {
-  const usage = value as { prompt_tokens?: unknown; completion_tokens?: unknown } | null
+  const usage = value as {
+    prompt_tokens?: unknown
+    completion_tokens?: unknown
+    cached_tokens?: unknown
+    cache_read_input_tokens?: unknown
+    prompt_tokens_details?: { cached_tokens?: unknown } | null
+  } | null
   if (!usage || typeof usage !== 'object') return null
   const prompt = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : 0
   const completion = typeof usage.completion_tokens === 'number' ? usage.completion_tokens : 0
   if (prompt <= 0 && completion <= 0) return null
-  return { promptTokens: prompt, completionTokens: completion, authoritative: true }
+  // cached_tokens vive em prompt_tokens_details.cached_tokens (OpenAI-compat /
+  // DashScope) ou cache_read_input_tokens (Anthropic). É um subconjunto de
+  // prompt_tokens. Clampado a [0, prompt] por segurança.
+  const details = usage.prompt_tokens_details
+  const cachedRaw =
+    (details && typeof details.cached_tokens === 'number' ? details.cached_tokens : 0) ||
+    (typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : 0) ||
+    (typeof usage.cached_tokens === 'number' ? usage.cached_tokens : 0)
+  const cached = Math.max(0, Math.min(prompt, cachedRaw))
+  return { promptTokens: prompt, completionTokens: completion, cachedTokens: cached, authoritative: true }
 }
 
 /**
@@ -102,6 +124,8 @@ export function observeUsage(
       usage = {
         promptTokens: Math.ceil(requestBodyChars / 4),
         completionTokens: Math.ceil(totalBytes / (isSse ? 16 : 4)),
+        // A estimativa não sabe quanto foi cache — assume 0 (sem desconto).
+        cachedTokens: 0,
         authoritative: false,
       }
     }
