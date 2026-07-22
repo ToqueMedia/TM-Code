@@ -1,5 +1,6 @@
 import { memo } from 'react'
-import { Box, Flex, Text } from '@chakra-ui/react'
+import { Box, Flex, Text, IconButton } from '@chakra-ui/react'
+import { VscWand, VscLoading } from 'react-icons/vsc'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { useProjectStore } from '@/stores/projectStore'
@@ -12,6 +13,8 @@ import HashtagMenu from './prompt/HashtagMenu'
 import QueuedMessagesPreview from './prompt/QueuedMessagesPreview'
 import AgentTasksPanel from './chat/AgentTasksPanel'
 import SubAgentStatusBar from './chat/SubAgentStatusBar'
+// ParallelTasksDock: retirado do composer (tarefas paralelas → ProjectMenu).
+// O ficheiro do componente fica como referência caso o dock volte noutro sítio.
 import { usePromptBar } from './prompt/usePromptBar'
 import KeyBindingDisplay from './ui/KeyBindingDisplay'
 
@@ -22,6 +25,8 @@ function PromptBar() {
     textareaRef,
     isStreaming,
     isAgentBusy,
+    anyLiveTask,
+    viewedTaskBusy,
     queueAsTask,
     setQueueAsTask,
     isScaffolding,
@@ -115,6 +120,7 @@ function PromptBar() {
 
         {/* Main input container */}
         <Box
+          position="relative"
           bg="rgba(17, 17, 17, 0.96)"
           borderRadius="12px"
           border={`1px solid ${isDragging ? tokens.colors.accent.primary : tokens.colors.border.panel}`}
@@ -145,6 +151,33 @@ function PromptBar() {
             isAgentBusy={isAgentBusy}
           />
 
+          {/* Improve Prompt — icon-only, INSIDE the input at the right corner
+              (moved off the actions row: just the wand + tooltip now). */}
+          <Box position="absolute" top="8px" right="10px" zIndex={2} data-no-drag>
+            <IconButton
+              aria-label={t('prompt.improvePrompt')}
+              title={t('prompt.improvePromptTitle')}
+              size="2xs"
+              variant="ghost"
+              borderRadius="7px"
+              minW="24px"
+              h="24px"
+              color={tokens.colors.text.muted}
+              _hover={{ color: tokens.colors.accent.primary, bg: 'rgba(255,255,255,0.06)' }}
+              disabled={isImprovingPrompt || !hasInputContent}
+              onClick={(e) => { e.stopPropagation(); handleImprovePrompt() }}
+              css={{ '@keyframes tmImproveSpin': { to: { transform: 'rotate(360deg)' } } }}
+            >
+              <Box
+                as="span"
+                display="inline-flex"
+                css={isImprovingPrompt ? { animation: 'tmImproveSpin 0.8s linear infinite' } : undefined}
+              >
+                {isImprovingPrompt ? <VscLoading size={13} /> : <VscWand size={13} />}
+              </Box>
+            </IconButton>
+          </Box>
+
           {draftAttachments.length > 0 && (
             <AttachmentChips
               attachments={draftAttachments}
@@ -155,18 +188,17 @@ function PromptBar() {
           <PromptActions
             viewMode={viewMode}
             isStreaming={isStreaming}
-            isAgentBusy={isAgentBusy}
+            isAgentBusy={isAgentBusy || anyLiveTask}
+            viewedTaskBusy={viewedTaskBusy}
             queueAsTask={queueAsTask}
             onQueueModeChange={setQueueAsTask}
             hasInput={(hasInputContent || draftAttachments.length > 0) && !isSendBlocked}
             onToggleEditor={toggleEditor}
-            onImprovePrompt={handleImprovePrompt}
             onUndoImprovePrompt={handleUndoImprovePrompt}
             onToggleDevServer={toggleDevServer}
             canToggleDevServer={canToggleDevServer}
             isDevServerActive={isDevServerActive}
             isDevServerStarting={isDevServerStarting}
-            isImprovingPrompt={isImprovingPrompt}
             canUndoImprovePrompt={canUndoImprovePrompt}
             onSend={handleSend}
             onStop={handleStop}
@@ -203,6 +235,9 @@ function PromptBar() {
         </Flex>
 
         <SubAgentStatusBar />
+        {/* ParallelTasksDock REMOVIDO daqui (decisão do user 2026-07-16): as
+            tarefas paralelas vivem no dropdown do ProjectMenu (titlebar),
+            aninhadas no projecto, com clique → chat da tarefa. */}
       </Box>
     </Box>
   )

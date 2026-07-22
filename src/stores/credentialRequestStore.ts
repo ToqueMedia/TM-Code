@@ -13,6 +13,8 @@ interface PendingCredentialRequest {
   id: string
   serviceName: string
   fields: CredentialField[]
+  /** Tarefa paralela que pediu (badge "Credenciais" nas task rows). */
+  origin?: { taskId: string; label: string }
   resolve: (result: { submitted: boolean; keys?: string[] }) => void
 }
 
@@ -35,11 +37,14 @@ interface CredentialRequestActions {
   request: (input: {
     serviceName: string
     fields: CredentialField[]
+    origin?: { taskId: string; label: string }
   }) => { id: string; promise: Promise<{ submitted: boolean; keys?: string[] }> }
   submit: (id: string, projectPath: string, values: Record<string, string>) => Promise<void>
   cancel: (id: string) => void
-  /** Reject any in-flight requests — called when the agent loop is cancelled. */
+  /** Reject the MAIN run's in-flight requests (task-owned survive). */
   clearAll: () => void
+  /** Cancela os pedidos pendentes de UMA tarefa paralela parada. */
+  cancelByOrigin: (taskId: string) => void
 }
 
 let counter = 0
@@ -53,7 +58,7 @@ export const useCredentialRequestStore = create<
 >((set, get) => ({
   pending: new Map(),
 
-  request: ({ serviceName, fields }) => {
+  request: ({ serviceName, fields, origin }) => {
     const id = generateRequestId()
     let resolveFn: (r: { submitted: boolean; keys?: string[] }) => void = () => {}
     const promise = new Promise<{ submitted: boolean; keys?: string[] }>((resolve) => {
@@ -63,6 +68,7 @@ export const useCredentialRequestStore = create<
       id,
       serviceName,
       fields,
+      ...(origin ? { origin } : {}),
       resolve: resolveFn,
     }
     set((state) => {
@@ -105,10 +111,24 @@ export const useCredentialRequestStore = create<
   },
 
   clearAll: () => {
+    // Só os pedidos do RUN PRINCIPAL — os de tarefas paralelas (origin)
+    // sobrevivem ao stop do main e caem via cancelByOrigin.
     const { pending } = get()
-    for (const entry of pending.values()) {
-      entry.resolve({ submitted: false })
+    const keep = new Map<string, PendingCredentialRequest>()
+    for (const [id, entry] of pending) {
+      if (entry.origin) keep.set(id, entry)
+      else entry.resolve({ submitted: false })
     }
-    set({ pending: new Map() })
+    set({ pending: keep })
+  },
+
+  cancelByOrigin: (taskId) => {
+    const { pending } = get()
+    const keep = new Map<string, PendingCredentialRequest>()
+    for (const [id, entry] of pending) {
+      if (entry.origin?.taskId === taskId) entry.resolve({ submitted: false })
+      else keep.set(id, entry)
+    }
+    set({ pending: keep })
   },
 }))

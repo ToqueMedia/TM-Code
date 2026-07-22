@@ -6,11 +6,12 @@
  */
 
 import type { SubAgentDefinition, SubAgentParentContext } from './types'
+import { READ_FILE, READ_AROUND, LIST_DIRECTORY, SEARCH_FILES, GLOB, READ_LARGE_RESULT } from '../toolNames'
 
 export const EXPLORE_AGENT: SubAgentDefinition = {
   agentType: 'Explore',
   whenToUse: 'Find usages, definitions, file patterns, or code structure in the project',
-  tools: ['read_file', 'read_around', 'list_directory', 'search_files', 'glob', 'read_large_result'],
+  tools: [READ_FILE, READ_AROUND, LIST_DIRECTORY, SEARCH_FILES, GLOB, READ_LARGE_RESULT],
   maxTurns: 15,
   maxWallClockMs: 3 * 60 * 1000,
   color: '#3fb8af',
@@ -33,12 +34,12 @@ export const EXPLORE_AGENT: SubAgentDefinition = {
 ${depthGuide}
 
 ## Capabilities
-- **search_files** — ripgrep search across the codebase. Use for finding usages, references, patterns.
-- **glob** — file pattern matching. Use for finding files by name/extension.
-- **read_file** — read a file's contents. Use after search_files/glob to read the relevant code.
-- **read_around** — read a bounded window around a search match line.
-- **list_directory** — list files in a directory. Use for understanding project structure.
-- **read_large_result** — page through large search/read outputs when a result was truncated.
+- **${SEARCH_FILES}** — ripgrep search across the codebase. Use for finding usages, references, patterns.
+- **${GLOB}** — file pattern matching. Use for finding files by name/extension.
+- **${READ_FILE}** — read a file's contents. Use after search_files/glob to read the relevant code.
+- **${READ_AROUND}** — read a bounded window around a search match line.
+- **${LIST_DIRECTORY}** — list files in a directory. Use for understanding project structure.
+- **${READ_LARGE_RESULT}** — page through large search/read outputs when a result was truncated.
 ## Rules
 - You are READ-ONLY. You cannot write, edit, create, or delete files.
 - Be specific. Name the file path and line number when reporting findings.

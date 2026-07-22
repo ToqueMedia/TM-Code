@@ -227,9 +227,18 @@ pub async fn glob_files(pattern: String, directory: String) -> Result<Vec<String
     if pattern.contains("..") {
         return Err("Invalid glob pattern: '..' is not allowed".to_string());
     }
-    // Block absolute patterns
+    // Block absolute patterns — but STEER the model to the right call shape
+    // instead of a dead-end error (claude-vaz Glob splits base dir into a
+    // `path` param; ours is `directory`). Without the guidance the agent
+    // retried blind with another absolute pattern (fila1 incident 2026-07-18).
     if pattern.starts_with('/') || pattern.starts_with('\\') {
-        return Err("Invalid glob pattern: absolute paths are not allowed".to_string());
+        return Err(
+            "Invalid glob pattern: absolute paths are not allowed in `pattern`. \
+             Pass the base directory in the `directory` parameter and keep `pattern` \
+             relative — e.g. glob({ directory: \"/abs/path\", pattern: \"**/package.json\" }). \
+             Directories outside the project will ask the developer for permission."
+                .to_string(),
+        );
     }
 
     let pattern = normalize_glob_pattern(&pattern);

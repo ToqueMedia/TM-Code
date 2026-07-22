@@ -10,6 +10,7 @@ import { confirm as tauriConfirm } from '@tauri-apps/plugin-dialog'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { GitService, type GitFileStatus } from '@/services/gitService'
+import TaskBranchesSection from './TaskBranchesSection'
 import { acquireGitStatusPolling, refreshGitStatus } from '@/services/gitStatusPoller'
 import { useGitStatusStore } from '@/stores/gitStatusStore'
 import { useCurrentProject } from '@/hooks/useProjectState'
@@ -767,6 +768,9 @@ function SourceControlPanel() {
 
       {/* File list */}
       <Box flex={1} overflow="hidden">
+        {/* Branches worktree/* das tarefas paralelas — merge é a revisão. */}
+        <TaskBranchesSection projectPath={projectPath} currentBranch={branch} onFeedback={showFeedback} />
+
         {files.length === 0 && !loading && (
           <Flex direction="column" align="center" justify="center" py={10} gap={2.5}>
             <Flex

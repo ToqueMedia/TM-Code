@@ -35,6 +35,66 @@ fn validate_project_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Marker de RESTAURO de identidade (2026-07-17): o `.toquemedia-id` é um
+/// ficheiro untracked na raiz do projecto — `git clean -fd` (no PTY, ou de
+/// qualquer ferramenta externa), rsync ou eliminação manual apagam-no, e a
+/// versão antiga cunhava um id NOVO no arranque seguinte: todo o estado
+/// (sessões, permissões, memória, tarefas) bifurcava para uma pasta nova
+/// ("split-brain" — visto em produção com TRÊS identidades num só dia).
+/// Cada state dir guarda o caminho canónico do dono neste marker; quando o
+/// id falta no projecto, procuramos um state dir que reclame o caminho e
+/// RESTAURAMOS o id antigo em vez de cunhar um novo.
+const PROJECT_PATH_MARKER: &str = "project-path.txt";
+
+fn write_project_path_marker(id: &str, canonical: &Path) {
+    let Ok(base) = state_base_dir() else { return };
+    let dir = base.join(PROJECTS_DIR).join(id);
+    let marker = dir.join(PROJECT_PATH_MARKER);
+    let want = canonical.to_string_lossy().to_string();
+    // Idempotente e barato: só escreve quando falta ou mudou (o ensure corre
+    // em todas as resoluções de estado).
+    if std::fs::read_to_string(&marker)
+        .map(|s| s.trim() == want)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::write(&marker, want.as_bytes());
+    }
+}
+
+fn restore_project_id_from_markers(canonical: &Path) -> Option<String> {
+    let projects = state_base_dir().ok()?.join(PROJECTS_DIR);
+    let want = canonical.to_string_lossy().to_string();
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+    for entry in std::fs::read_dir(&projects).ok()?.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        if validate_project_id(&id).is_err() {
+            continue;
+        }
+        let Ok(stored) = std::fs::read_to_string(dir.join(PROJECT_PATH_MARKER)) else {
+            continue;
+        };
+        if stored.trim() != want {
+            continue;
+        }
+        // Vários candidatos (não devia acontecer, mas o passado provou que
+        // acontece): ganha o state dir com atividade mais recente.
+        let mtime = std::fs::metadata(&dir)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if best.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
+            best = Some((mtime, id));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
 pub(crate) fn ensure_project_id(project_path: &Path) -> Result<String, String> {
     let id_path = project_path.join(PROJECT_ID_FILE);
     if id_path.exists() {
@@ -42,11 +102,23 @@ pub(crate) fn ensure_project_id(project_path: &Path) -> Result<String, String> {
             .map_err(|e| format!("Failed to read .toquemedia-id: {}", e))?;
         let id = id.trim().to_string();
         validate_project_id(&id)?;
+        // Auto-heal: state dirs anteriores ao marker ganham-no na primeira
+        // resolução — a partir daí a identidade é restaurável.
+        write_project_path_marker(&id, project_path);
+        return Ok(id);
+    }
+
+    // Id em falta: RESTAURAR antes de cunhar — cunhar um novo com estado
+    // antigo em disco é perder sessões/permissões/memória do user.
+    if let Some(id) = restore_project_id_from_markers(project_path) {
+        std::fs::write(&id_path, &id)
+            .map_err(|e| format!("Failed to restore .toquemedia-id: {}", e))?;
         return Ok(id);
     }
 
     let id = Uuid::new_v4().to_string();
     std::fs::write(&id_path, &id).map_err(|e| format!("Failed to create .toquemedia-id: {}", e))?;
+    write_project_path_marker(&id, project_path);
     Ok(id)
 }
 
@@ -66,7 +138,21 @@ fn state_base_dir() -> Result<PathBuf, String> {
     }
 }
 
+/// Um caminho DENTRO de `.toquemedia/worktrees/<name>` (worktree de tarefa
+/// paralela) pertence ao PROJECTO dono — resolver identidade com a raiz do
+/// worktree cunhava um `.toquemedia-id` novo lá dentro e bifurcava o estado
+/// (sessões/permissões/memória iam para uma pasta paralela que a app nunca
+/// lê; visto em produção 2026-07-17). Normaliza ANTES de qualquer id.
+pub(crate) fn strip_worktree_suffix(project_path: &str) -> String {
+    let normalized = project_path.replace('\\', "/");
+    match normalized.find("/.toquemedia/worktrees/") {
+        Some(idx) => normalized[..idx].to_string(),
+        None => project_path.to_string(),
+    }
+}
+
 pub(crate) fn project_state_root(project_path: &str) -> Result<PathBuf, String> {
+    let project_path = &strip_worktree_suffix(project_path);
     let project = Path::new(project_path);
     if !project.exists() || !project.is_dir() {
         return Err(format!("Project path does not exist: {}", project_path));
@@ -82,6 +168,7 @@ pub(crate) fn project_state_root(project_path: &str) -> Result<PathBuf, String> 
 /// the state dir — listing recents (agent-status polling) must not leave
 /// side effects in projects the user merely has in the sidebar.
 pub(crate) fn project_state_root_readonly(project_path: &str) -> Option<PathBuf> {
+    let project_path = &strip_worktree_suffix(project_path);
     let project = Path::new(project_path);
     if !project.is_dir() {
         return None;

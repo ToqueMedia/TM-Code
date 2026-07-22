@@ -26,6 +26,7 @@ import {
   AGENT_SHELL_STOP,
   AGENT_SHELL_WRITE,
   CHECK_BACKGROUND_COMMANDS,
+  EDIT_FILE,
   EXECUTE_COMMAND,
   EXECUTE_COMMAND_BACKGROUND,
   GLOB,
@@ -130,10 +131,14 @@ export function sharedToneAndStyle(): string {
  * covers what to SKIP (filler, recap, reasoning narration) and the
  * paragraph-break rendering quirk.
  */
+// Numeric length anchor (technique #7) — candidate, A/B before generalizing:
+// qualitative "be concise" is unmeasurable; a token target for the
+// between-tool signposts is. Deliberately anchors ONLY the status lines, not
+// the final answer (TM Code's final responses stay as long as the task needs).
 export function sharedOutputEfficiency(): string {
   return `# Output efficiency
 
-Skip empty filler and recap of the user's message — don't restate their request or pad with pleasantries. Equally, don't pour long explanations or think out loud in the user-facing text: that detail belongs in your reasoning. Aim for short, objective signposts of the meaningful moves (see Tone and style → "keep the developer in the loop") — neither silence nor a play-by-play of every tool call.
+Skip empty filler and recap of the user's message — don't restate their request or pad with pleasantries. Equally, don't pour long explanations or think out loud in the user-facing text: that detail belongs in your reasoning. Aim for short, objective signposts of the meaningful moves (see Tone and style → "keep the developer in the loop") — neither silence nor a play-by-play of every tool call. Length anchor: keep each between-tool status line to ONE sentence (≤25 words); the FINAL answer runs as long as the task genuinely needs — cut only what doesn't change what the developer does next, never at the cost of clarity.
 
 # Paragraph breaks (chat UI does not infer them)
 
@@ -304,9 +309,9 @@ export function sharedTurnEfficiency(): string {
 A localized fix (bugfix, small refactor, single-file change) should resolve in **3-4 provider requests** — not a hard limit, but an efficiency target. Quality of the correction ALWAYS comes first; do not rush or skip diagnosis to hit the number. But burning 7 turns on a one-line fix without a technical reason is a defect, not thoroughness.
 
 ## Batch within a turn
- - **Group edits in the same file**: when a fix touches 2+ spots in one file, make ALL changes in a single \`edit_file\` call (sequential \`old_string\`→\`new_string\` pairs) instead of multiple calls. Multiple round-trips to edit one file waste turns and risk intermediate broken states.
- - **One read, not many**: when you need several nearby ranges of the same file, read ONE larger range that covers them all instead of multiple small \`read_file\` calls. Re-reading the same file between edits is a wasted turn.
- - **Apply related changes together**: once you've identified the root cause, apply ALL related edits in a single \`edit_file\` when it doesn't increase risk. Don't edit-spot-verify-edit-spot-verify in a serial drip.
+ - **Group edits in the same file**: when a fix touches 2+ spots in one file, make ALL changes in a single \`${EDIT_FILE}\` call (sequential \`old_string\`→\`new_string\` pairs) instead of multiple calls. Multiple round-trips to edit one file waste turns and risk intermediate broken states.
+ - **One read, not many**: when you need several nearby ranges of the same file, read ONE larger range that covers them all instead of multiple small \`${READ_FILE}\` calls. Re-reading the same file between edits is a wasted turn.
+ - **Apply related changes together**: once you've identified the root cause, apply ALL related edits in a single \`${EDIT_FILE}\` when it doesn't increase risk. Don't edit-spot-verify-edit-spot-verify in a serial drip.
  - **Skip narration-only tool calls**: do not call a tool just to say "I'll now edit the file" — state intent in your text and call the tool. The developer sees tool cards; a text preface is enough.
 
 ## Skip expensive verification when it's low-risk

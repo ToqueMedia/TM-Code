@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Box, Flex, Text, Textarea } from '@chakra-ui/react'
 import { FiAlertTriangle, FiLock } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { usePermissionStore } from '../../stores/permissionStore'
 import { t } from '@/i18n'
 
 /**
@@ -29,6 +30,9 @@ interface PermissionDialogProps {
   promptReason: string | null
   /** When promptReason is 'path_access', the directory being requested */
   pathAccessTarget?: string
+  /** Descrição da tarefa paralela que originou o pedido (permissionStore
+   *  origin) — o user tem de saber QUEM pergunta quando há multi-agentes. */
+  originLabel?: string
   approve: () => void
   approveAlwaysInProject: () => void
   approveAlwaysGlobal: () => void
@@ -43,12 +47,15 @@ export default function PermissionDialog({
   args,
   promptReason,
   pathAccessTarget,
+  originLabel,
   approve,
   approveAlwaysInProject,
   approveAlwaysGlobal,
   deny,
   denyWith,
 }: PermissionDialogProps) {
+  const autoModePermissions = usePermissionStore(st => st.autoModePermissions)
+  const setAutoModePermissions = usePermissionStore(st => st.setAutoModePermissions)
   const [selected, setSelected] = useState<OptionKey>('once')
   const [showReason, setShowReason] = useState(false)
   const [reason, setReason] = useState('')
@@ -168,6 +175,23 @@ export default function PermissionDialog({
           </Text>
         </Flex>
 
+        {/* Atribuição: com multi-agentes o user tem de saber QUEM pergunta —
+            pedidos de tarefas paralelas identificam a tarefa de origem. */}
+        {originLabel && (
+          <Flex align="center" gap={1.5} mb={2}>
+            <Box
+              w="6px"
+              h="6px"
+              borderRadius="full"
+              bg={tokens.colors.status.warning}
+              flexShrink={0}
+            />
+            <Text fontSize="11px" fontWeight={600} color={tokens.colors.status.warning} lineClamp={1}>
+              {t('parallel.dialogFromTask').replace('{label}', originLabel)}
+            </Text>
+          </Flex>
+        )}
+
         {/* Tool label */}
         <Flex align="center" gap={2} mb={3}>
           <Text
@@ -251,6 +275,24 @@ export default function PermissionDialog({
             <Text fontSize="10px" color={tokens.colors.text.disabled} mt={1}>
               {t('perm.reasonHint')}
             </Text>
+          </Box>
+        )}
+
+        {/* Descoberta do Modo Auto no ponto de fricção: quando OFF, um link
+            discreto liga-o (o pedido ATUAL continua manual — só os próximos
+            passam pelo classificador). */}
+        {!autoModePermissions && (
+          <Box
+            as="button"
+            alignSelf="flex-start"
+            fontSize="11px"
+            color={tokens.colors.text.disabled}
+            cursor="pointer"
+            textAlign="left"
+            _hover={{ color: tokens.colors.text.secondary }}
+            onClick={() => setAutoModePermissions(true)}
+          >
+            {'⏵⏵ '}{t('perm.enableAutoMode')}
           </Box>
         )}
 

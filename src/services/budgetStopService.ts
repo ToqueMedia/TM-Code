@@ -41,14 +41,16 @@ let handledExhaustion = false
 
 async function stopAllAgentWork(): Promise<void> {
   try {
-    const [{ default: agentServiceModule }, { useSubAgentStore }, statusService] =
+    const [{ default: agentServiceModule }, { useSubAgentStore }, { useParallelTaskStore }, statusService] =
       await Promise.all([
         import('@/services/agent/agentService'),
         import('@/stores/subAgentStore'),
+        import('@/stores/parallelTaskStore'),
         import('@/services/projectAgentStatusService'),
       ])
     const agentService = agentServiceModule.getInstance()
     const subAgents = useSubAgentStore.getState()
+    const parallelTasks = useParallelTaskStore.getState()
 
     // Fila primeiro e SEMPRE (mesmo sem run vivo — o 402 pode ter chegado
     // quando o run principal já ia a terminar): orientações fora, tarefas
@@ -57,7 +59,10 @@ async function stopAllAgentWork(): Promise<void> {
     removeSteerableMessages()
     if (hasCommandsInQueue()) setQueuePaused(true)
 
-    const busy = agentService.isAgentRunning() || subAgents.getPendingCount() > 0
+    const busy =
+      agentService.isAgentRunning() ||
+      subAgents.getPendingCount() > 0 ||
+      parallelTasks.runningCount() > 0
     if (!busy) return
 
     // Badge primeiro: o cancel abaixo dispara busy→not-busy no
@@ -67,7 +72,10 @@ async function stopAllAgentWork(): Promise<void> {
     statusService.markNextStopAsBudgetStop(t('billing.budgetStopBadge'))
 
     // Mesmo par do botão Stop (stopAgentRun): sub-agentes + loop principal.
+    // Budget esgotado pára TAMBÉM as tarefas paralelas do utilizador (sem
+    // créditos nada corre) — ao contrário do Stop interativo, que as deixa.
     subAgents.abortAll()
+    parallelTasks.abortAll()
     agentService.cancelLoop()
 
     useChatStore

@@ -118,11 +118,18 @@ describe('QueryGuard', () => {
       expect(g.generation).toBe(gen1 + 1)
     })
 
-    it('forceEnd from dispatching also resets', () => {
+    it('forceEnd from dispatching also resets and bumps generation', () => {
+      // Anti-ressurreição (Bloco A item 2, 2026-07-17): Stop durante a prep
+      // do agentRunner (status ainda `dispatching` — tryStart ainda não correu)
+      // TEM de avançar a generation. O runner captura generation no topo e
+      // recusa arrancar se mudou; sem o bump, o zombie passava a guarda e
+      // re-fazia tryStart (guard preso, fila eterna, tips a correr).
       const g = new QueryGuard()
+      const genBefore = g.generation
       g.reserve()
       g.forceEnd()
       expect(g.isActive).toBe(false)
+      expect(g.generation).toBe(genBefore + 1)
     })
 
     it('forceEnd from idle is a no-op', () => {
@@ -130,6 +137,22 @@ describe('QueryGuard', () => {
       g.forceEnd()
       expect(g.isActive).toBe(false)
       expect(g.generation).toBe(0)
+    })
+
+    it('dispatchGeneration epoch detects Stop during dispatching prep', () => {
+      // Modelo do contrato agentRunner + agentService: capturar generation no
+      // início do dispatch; se forceEnd intermédio a avançar, o loop NÃO arranca.
+      const g = new QueryGuard()
+      g.reserve() // chat path: executeQueuedInput
+      const dispatchGeneration = g.generation
+      g.forceEnd() // stopAgentRun → cancelLoop durante prep
+      expect(g.generation).not.toBe(dispatchGeneration)
+      expect(g.isActive).toBe(false)
+      // Novo envio pode reservar de imediato — fila não fica eterna
+      expect(g.reserve()).toBe(true)
+      const gen = g.tryStart()
+      expect(gen).not.toBeNull()
+      expect(g.isActive).toBe(true)
     })
   })
 

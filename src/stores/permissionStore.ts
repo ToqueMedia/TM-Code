@@ -38,6 +38,92 @@ async function logPermission(message: string, level: 'info' | 'warn' | 'error' |
   } catch { /* chatStore not ready — drop the log line silently */ }
 }
 
+// ── MODO AUTO: gate + contador de negações (porte claude-vaz) ──
+// Contador module-level (não persistido): 3 negações CONSECUTIVAS do
+// classificador escalam para o diálogo humano — port do denial-limit do
+// claude-vaz (deny-loop sem humano é só queima de tokens). Qualquer allow
+// ou decisão humana zera.
+let autoModeConsecutiveDenials = 0
+const AUTO_MODE_DENIAL_LIMIT = 3
+
+function isAutoModeEnabled(): boolean {
+  // POR PROJECTO (decisão do user 2026-07-18): o flag vive NESTE store e
+  // persiste em permissions.json com os restantes grants — autonomia no
+  // Projeto A não implica autonomia no B; hidrata no open do projecto.
+  return usePermissionStore.getState().autoModePermissions
+}
+
+/** Tools de escrita cujo checkpoint REAL é o DIFF (aprovação por alteração,
+ *  com o toggle autoApproveDiffs próprio). NÃO passam pelo classificador:
+ *  classificá-las era latência+custo por write e um veto redundante antes do
+ *  portão verdadeiro — paridade com o fast-path acceptEdits do claude-vaz
+ *  ("skipping classifier: would be allowed in acceptEdits mode"), transposto
+ *  para a lei TM. Exatamente os três produtores de diff do contrato
+ *  (CLAUDE.md: "File changes (write_file, edit_file, create_file) produce
+ *  diffs"). delete/rename/append ficam DE FORA — sem diff, o classificador
+ *  é o gate certo para eles. sensitive_file nunca chega aqui (forcePrompt).
+ */
+const DIFF_GATED_WRITE_TOOLS = new Set(['write_file', 'edit_file', 'create_file'])
+
+async function runAutoModeGate(
+  toolName: string,
+  args: Record<string, unknown>,
+  origin: PermissionOrigin | undefined,
+  fallbackToDialog: () => Promise<PermissionDecision>,
+): Promise<PermissionDecision> {
+  if (DIFF_GATED_WRITE_TOOLS.has(toolName)) {
+    // Silencioso (paridade claude-vaz: allows não fazem barulho) — o cartão
+    // de diff aprovado no transcript É o registo da alteração.
+    return { approved: true, prompted: false, source: 'auto_classifier' }
+  }
+  const { classifyPermissionAction } = await import('../services/agent/permissionClassifier')
+  // Transcript da sessão do PEDIDO: tarefas usam a sua própria sessão
+  // (origin.sessionId), o main usa a ativa — o classificador julga com o
+  // contexto certo, não com o da sessão que o user está a ver.
+  let messages: Array<{ role: string; content?: string | null; toolCalls?: Array<{ toolName: string; args?: Record<string, unknown> }> }> = []
+  try {
+    const { useChatStore } = await import('./chatStore')
+    const chat = useChatStore.getState()
+    const sid = origin?.sessionId ?? chat.streamingSessionId ?? chat.activeSessionId
+    const session = sid ? chat.sessions.get(sid) : null
+    messages = (session?.messages ?? []) as typeof messages
+  } catch { /* sem chat — transcript vazio, o classificador julga a ação isolada */ }
+
+  usePermissionStore.setState({ classifierChecking: toolName })
+  let verdict: Awaited<ReturnType<typeof classifyPermissionAction>>
+  try {
+    verdict = await classifyPermissionAction(
+      toolName, args, messages, usePermissionStore.getState().projectPath ?? undefined,
+    )
+  } finally {
+    usePermissionStore.setState({ classifierChecking: null })
+  }
+
+  if (verdict.decision === 'allow') {
+    autoModeConsecutiveDenials = 0
+    void logPermission(`⏵⏵ Auto: \`${toolName}\` permitido pelo classificador`, 'info')
+    return { approved: true, prompted: false, source: 'auto_classifier' }
+  }
+
+  if (verdict.decision === 'block') {
+    autoModeConsecutiveDenials += 1
+    if (autoModeConsecutiveDenials >= AUTO_MODE_DENIAL_LIMIT) {
+      // Escala para o humano COM a razão visível no transcript; zera para a
+      // próxima ronda não escalar imediatamente.
+      autoModeConsecutiveDenials = 0
+      void logPermission(`⏵⏵ Auto: ${AUTO_MODE_DENIAL_LIMIT} bloqueios seguidos — a pedir a tua revisão (\`${toolName}\`: ${verdict.reason})`, 'warn')
+      return fallbackToDialog()
+    }
+    void logPermission(`⏵⏵ Auto: \`${toolName}\` bloqueado pelo classificador — ${verdict.reason}`, 'warn')
+    // denyReason chega ao modelo via toolExecutor (mensagem de bloqueio) — o
+    // agente lê a razão e ajusta, sem interromper o developer.
+    return { approved: false, prompted: false, source: 'auto_classifier', denyReason: `Auto-mode classifier: ${verdict.reason}` }
+  }
+
+  // unavailable — fail-to-human (nunca deny silencioso numa IDE interativa).
+  return fallbackToDialog()
+}
+
 /** Persist/reload autoApproveDiffs from localStorage.
  *  This is a CROSS-PROJECT user preference (the toggle is in chat chrome),
  *  so it stays in localStorage. The per-project `approvedScopes` set is a
@@ -56,10 +142,10 @@ function saveAutoApproveDiffs(value: boolean) {
  *  `projectPath` so it works from either projectStore.openProject or the
  *  cwd-scoped workspace path without depending on projectStore. */
 function persistPermissions(): void {
-  const { projectPath, approvedScopes, projectToolAllowlist, additionalDirectories } = usePermissionStore.getState()
+  const { projectPath, approvedScopes, projectToolAllowlist, additionalDirectories, autoModePermissions } = usePermissionStore.getState()
   if (!projectPath) return
   void import('../services/agent/permissionPersistence')
-    .then(({ savePermissionsToDisk }) => savePermissionsToDisk(projectPath, approvedScopes, projectToolAllowlist, additionalDirectories))
+    .then(({ savePermissionsToDisk }) => savePermissionsToDisk(projectPath, approvedScopes, projectToolAllowlist, additionalDirectories, autoModePermissions))
     .catch(() => { /* persistence failure must not break the permission flow */ })
 }
 
@@ -101,10 +187,13 @@ export function hydrateApprovedScopes(
   projectPath?: string,
   tools?: Set<string>,
   directories?: Set<string>,
+  autoMode?: boolean,
 ): void {
   // Set directly — no persistence write here: this IS the load step. The
   // disk file is already canonical; writing back would be a no-op.
-  const patch: Partial<PermissionState> = { approvedScopes: scopes }
+  // autoMode default FALSE: trocar de projecto nunca herda o Modo Auto do
+  // anterior (grant por-projecto, como os scopes).
+  const patch: Partial<PermissionState> = { approvedScopes: scopes, autoModePermissions: autoMode === true }
   if (tools) patch.projectToolAllowlist = tools
   if (directories) patch.additionalDirectories = directories
   if (projectPath != null) patch.projectPath = projectPath
@@ -121,6 +210,14 @@ const SAFE_TOOLS = new Set([
   'read_large_result',
   'check_background_agents',
   'update_tasks',
+  // web_fetch is read-only and concurrencySafe (GET through the CORS-free Rust
+  // proxy, SSRF-guarded). Prompting per URL was hostile UX for research flows.
+  'web_fetch',
+  // capture_url_design boots a sandboxed Playwright Chrome profile (not the
+  // user's real browser) to screenshot a URL for design-copy. Prompting per
+  // paste would kill the "see this URL and copy it" flow; the profile is
+  // isolated under ~/.toquemedia-studio/browser-profile.
+  'capture_url_design',
   // read_skill loads bundled/global/project markdown — pure read, no
   // side effects. Without this, /review and any agent that consults
   // skills mid-session triggers a permission prompt per skill (the agent
@@ -168,7 +265,7 @@ export interface PermissionDecision {
    *  approval from an active user choice. */
   prompted: boolean
   /** Where the decision came from. */
-  source: 'safe_tool' | 'has_own_approval' | 'approved_scope' | 'user'
+  source: 'safe_tool' | 'has_own_approval' | 'approved_scope' | 'user' | 'auto_classifier'
   /** When source === 'user' and the user denied (or approved with a flagged
    *  prompt kind), this is the reason supplied via `denyWith` / promptReason. */
   denyReason?: string
@@ -176,10 +273,22 @@ export interface PermissionDecision {
   promptKind?: PromptReason
 }
 
+export interface PermissionOrigin {
+  /** parallelTaskStore run id — task rows match on this to badge "Autorização". */
+  taskId: string
+  /** Task description shown in the dialog ("Pedido pela tarefa: …"). */
+  label: string
+  /** Sessão de chat da tarefa — cards interativos (perguntas/credenciais)
+   *  são escritos NELA, não na sessão que o user está a ver. */
+  sessionId?: string
+}
+
 interface PendingPermission {
   id: string
   toolName: string
   args: Record<string, unknown>
+  /** Set when the request comes from a parallel-task agent (not the main run). */
+  origin?: PermissionOrigin
   /** Why this prompt was forced — null means normal permission flow */
   promptReason: PromptReason
   /** When promptReason is 'path_access', the directory being requested for access */
@@ -204,6 +313,10 @@ interface PermissionState {
   additionalDirectories: Set<string>
   /** When true, file diffs (write_file/edit_file/create_file) are auto-accepted without user confirmation */
   autoApproveDiffs: boolean
+  /** Modo Auto (classificador) — grant POR PROJECTO, persistido em permissions.json. */
+  autoModePermissions: boolean
+  /** Tool em classificação pelo Modo Auto (statusbar mostra '⏵⏵ a classificar…'). */
+  classifierChecking: string | null
   /** When true, user clicked "Deny All" — auto-deny all non-dangerous queued permissions */
   autoDenyAll: boolean
   /** Current permission being shown to the user */
@@ -213,7 +326,10 @@ interface PermissionState {
 }
 
 interface PermissionActions {
-  requestPermission: (toolName: string, args: Record<string, unknown>, forcePrompt?: boolean | PromptReason) => Promise<PermissionDecision>
+  requestPermission: (toolName: string, args: Record<string, unknown>, forcePrompt?: boolean | PromptReason, origin?: PermissionOrigin) => Promise<PermissionDecision>
+  /** Caminho interno: mostra/enfileira o diálogo humano. Extraído para o
+   *  Modo Auto poder cair para ele em block-escalado e falha do classificador. */
+  enqueuePermissionDialog: (toolName: string, args: Record<string, unknown>, promptReason: PromptReason, origin?: PermissionOrigin) => Promise<PermissionDecision>
   /** Prompt the user to allow agent access to a directory outside the project root.
    *  If approved, the directory is added to additionalDirectories. */
   requestPathAccess: (filePath: string, directoryToAdd: string) => Promise<PermissionDecision>
@@ -236,8 +352,11 @@ interface PermissionActions {
    *  "Permission denied" message isn't expressive enough. */
   denyWith: (reason: string) => void
   setAutoApproveDiffs: (value: boolean) => void
+  setAutoModePermissions: (enabled: boolean) => void
   resetAutoApprove: () => void
   clearPending: () => void
+  /** Cancela (nega) os pedidos pendentes de UMA tarefa paralela parada. */
+  cancelByOrigin: (taskId: string) => void
   /** Returns the number of permissions waiting in the queue (excluding the
    *  currently displayed one). Used by UI to show confirmation before
    *  approveAll when there are many pending requests. */
@@ -288,11 +407,13 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   globalToolAllowlist: loadGlobalToolAllowlist(),
   additionalDirectories: new Set(),
   autoApproveDiffs: loadAutoApproveDiffs(),
+  autoModePermissions: false,
+  classifierChecking: null,
   autoDenyAll: false,
   pendingPermission: null,
   permissionQueue: [],
 
-  requestPermission: (toolName, args, forcePrompt) => {
+  requestPermission: (toolName, args, forcePrompt, origin) => {
     // forcePrompt (sensitive files, flagged commands) ALWAYS shows the dialog.
     // It bypasses scope auto-approval — the user must approve every time.
     // Accepts boolean (legacy compat) or a PromptReason string.
@@ -327,14 +448,37 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       if (HAS_OWN_APPROVAL.has(toolName)) {
         return Promise.resolve({ approved: true, prompted: false, source: 'has_own_approval' })
       }
+
+      // ── MODO AUTO (porte do claude-vaz, 2026-07-18) ──
+      // Corre DEPOIS dos fast-paths acima (allowlists/scopes/safe-tools — o
+      // equivalente do allowlist-skip do claude-vaz que evita chamadas ao
+      // classificador) e SÓ para pedidos que mostrariam o diálogo. forcePrompt
+      // (dangerous_command / sensitive_file / browser_action / path_access
+      // forçado) NUNCA passa por aqui — humano sempre. Diffs de ficheiros nem
+      // sequer chegam a este store (caminho próprio de aprovação).
+      //   allow → corre sem perguntar (transcript regista);
+      //   block → NEGA ao agente com a razão (o modelo ajusta); 3 seguidas
+      //           escalam para o diálogo e o contador zera;
+      //   unavailable/erro/imparseável → diálogo (fail-to-human; ≠ headless
+      //           claude-vaz que faz fail-closed-deny).
+      if (isAutoModeEnabled()) {
+        return runAutoModeGate(toolName, args, origin, () =>
+          get().enqueuePermissionDialog(toolName, args, promptReason, origin),
+        )
+      }
     }
 
+    return get().enqueuePermissionDialog(toolName, args, promptReason, origin)
+  },
+
+  enqueuePermissionDialog: (toolName, args, promptReason, origin) => {
     return new Promise<PermissionDecision>((resolve) => {
       const entry: PendingPermission = {
         id: crypto.randomUUID(),
         toolName,
         args,
         promptReason,
+        ...(origin ? { origin } : {}),
         resolve,
       }
 
@@ -354,8 +498,9 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         promptReason === 'dangerous_command' ? ' · comando potencialmente destrutivo' :
         promptReason === 'browser_action' ? ' · ação no browser' :
         ''
+      const originTag = origin ? ` · tarefa "${origin.label}"` : ''
       void logPermission(
-        `🔒 O agente pediu autorização para usar \`${toolName}\`${summary ? `: ${summary}` : ''}${reasonTag}`,
+        `🔒 O agente pediu autorização para usar \`${toolName}\`${summary ? `: ${summary}` : ''}${reasonTag}${originTag}`,
         promptReason ? 'warn' : 'info',
       )
     })
@@ -573,6 +718,11 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
     set({ autoApproveDiffs: value })
   },
 
+  setAutoModePermissions: (enabled: boolean) => {
+    set({ autoModePermissions: enabled })
+    persistPermissions()
+  },
+
   resetAutoApprove: () => {
     saveAutoApproveDiffs(false)
     const empty = new Set<'core' | 'mcp'>()
@@ -628,18 +778,30 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   },
 
   clearPending: () => {
-    // Reject current + all queued permissions
+    // Reject current + queued permissions do RUN PRINCIPAL. Pedidos com
+    // origin pertencem a TAREFAS PARALELAS vivas — parar o main não as pára
+    // (Fase 1 do modelo foreground); os delas caem via cancelByOrigin quando
+    // a própria tarefa é parada.
     const { pendingPermission, permissionQueue } = get()
+    const keep: PendingPermission[] = []
     if (pendingPermission) {
-      pendingPermission.resolve({
-        approved: false,
-        prompted: true,
-        source: 'user',
-        promptKind: pendingPermission.promptReason,
-        denyReason: 'cancelled',
-      })
+      if (pendingPermission.origin) {
+        keep.push(pendingPermission)
+      } else {
+        pendingPermission.resolve({
+          approved: false,
+          prompted: true,
+          source: 'user',
+          promptKind: pendingPermission.promptReason,
+          denyReason: 'cancelled',
+        })
+      }
     }
     for (const queued of permissionQueue) {
+      if (queued.origin) {
+        keep.push(queued)
+        continue
+      }
       queued.resolve({
         approved: false,
         prompted: false,
@@ -648,7 +810,39 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         denyReason: 'cancelled',
       })
     }
-    set({ pendingPermission: null, permissionQueue: [] })
+    set({ pendingPermission: keep[0] ?? null, permissionQueue: keep.slice(1) })
+  },
+
+  cancelByOrigin: (taskId: string) => {
+    // Uma tarefa parada leva consigo os SEUS pedidos (e só os seus) — sem
+    // isto a promise do requestPermission ficava pendurada para sempre e o
+    // diálogo mostrava um pedido de um agente já morto.
+    const { pendingPermission, permissionQueue } = get()
+    const cancel = (entry: PendingPermission) =>
+      entry.resolve({
+        approved: false,
+        prompted: false,
+        source: 'user',
+        promptKind: entry.promptReason,
+        denyReason: 'task stopped',
+      })
+    let nextPending = pendingPermission
+    if (pendingPermission?.origin?.taskId === taskId) {
+      cancel(pendingPermission)
+      nextPending = null
+    }
+    const remaining: PendingPermission[] = []
+    for (const queued of permissionQueue) {
+      if (queued.origin?.taskId === taskId) cancel(queued)
+      else remaining.push(queued)
+    }
+    set({ pendingPermission: nextPending, permissionQueue: remaining })
+    // Promoção via advanceQueue — re-passa pelos allowlists/scopes para não
+    // mostrar um diálogo que o user já autorizou "sempre" (era a limitação
+    // conhecida #4; promover com shift() saltava a auto-aprovação).
+    if (nextPending === null && remaining.length > 0) {
+      advanceQueue(set, get)
+    }
   },
 
   getQueuedCount: () => {

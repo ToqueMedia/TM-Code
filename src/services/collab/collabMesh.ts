@@ -342,9 +342,13 @@ export class CollabMesh {
         const params = sender.getParameters()
         if (!params.encodings?.length) params.encodings = [{}]
         params.encodings[0].maxBitrate = maxBitrateBps ?? DEFAULT_SCREEN_MAX_BITRATE_BPS
-        // Text stays sharp under pressure: drop frames before resolution.
+        // 'balanced': under congestion the encoder trades BOTH resolution and
+        // frame rate. The old 'maintain-resolution' held pixels but let the
+        // frame rate collapse toward zero on a high-motion moment (scroll/video)
+        // — i.e. it FROZE rather than softened. A brief blur beats a freeze for a
+        // shared screen.
         ;(params as RTCRtpSendParameters & { degradationPreference?: string }).degradationPreference =
-          'maintain-resolution'
+          'balanced'
         return sender.setParameters(params)
       })
       .catch(() => {

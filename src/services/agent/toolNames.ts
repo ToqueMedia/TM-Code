@@ -57,6 +57,9 @@ export const STOP_DEV_SERVER = 'stop_dev_server'
 // Web / research
 export const WEB_SEARCH = 'web_search'
 export const WEB_FETCH = 'web_fetch'
+/** Navigate + screenshot a URL and return a vision design handoff. */
+export const CAPTURE_URL_DESIGN = 'capture_url_design'
+export const SEND_AGENT_MESSAGE = 'send_agent_message'
 
 // Sub-agent delegation (v0.7.0 — replaces research, verify, spawn_background_agent)
 export const DELEGATE = 'delegate'
@@ -103,7 +106,7 @@ export const TOOL_NAMES = [
   EXECUTE_COMMAND, EXECUTE_COMMAND_BACKGROUND, CHECK_BACKGROUND_COMMANDS,
   AGENT_SHELL_START, AGENT_SHELL_WRITE, AGENT_SHELL_READ, AGENT_SHELL_STOP,
   START_DEV_SERVER, STOP_DEV_SERVER,
-  WEB_SEARCH, WEB_FETCH,
+  WEB_SEARCH, WEB_FETCH, CAPTURE_URL_DESIGN,
   DELEGATE, COLLECT_RESULTS,
   ENTER_WORKTREE, EXIT_WORKTREE,
   UPDATE_TASKS,

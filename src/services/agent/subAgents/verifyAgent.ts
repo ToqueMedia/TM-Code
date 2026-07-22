@@ -7,16 +7,17 @@
  */
 
 import type { SubAgentDefinition, SubAgentParentContext } from './types'
+import { READ_FILE, READ_AROUND, LIST_DIRECTORY, SEARCH_FILES, GLOB, EXECUTE_COMMAND, START_DEV_SERVER, STOP_DEV_SERVER, READ_DEV_SERVER_LOGS, READ_LARGE_RESULT, WRITE_FILE, EDIT_FILE, CREATE_FILE, DELETE_FILE, RENAME_FILE } from '../toolNames'
 
 export const VERIFY_AGENT: SubAgentDefinition = {
   agentType: 'Verify',
   whenToUse: 'Verify implementation correctness by running tests, type checks, and diagnostics',
   tools: [
-    'read_file', 'read_around', 'list_directory', 'search_files', 'glob',
-    'execute_command', 'start_dev_server', 'stop_dev_server', 'read_dev_server_logs',
-    'read_large_result',
+    READ_FILE, READ_AROUND, LIST_DIRECTORY, SEARCH_FILES, GLOB,
+    EXECUTE_COMMAND, START_DEV_SERVER, STOP_DEV_SERVER, READ_DEV_SERVER_LOGS,
+    READ_LARGE_RESULT,
   ],
-  disallowedTools: ['write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'],
+  disallowedTools: [WRITE_FILE, EDIT_FILE, CREATE_FILE, DELETE_FILE, RENAME_FILE],
   maxTurns: 15,
   maxWallClockMs: 5 * 60 * 1000,
   color: '#f77f00',

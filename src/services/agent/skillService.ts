@@ -51,6 +51,19 @@ const CACHE_TTL_MS = 30_000 // 30 seconds
 // enough that no realistic project hits it — but kept as a safety rail.
 const MAX_SKILL_INDEX_CHARS = 6000
 
+// Project-level skill directories, scanned in priority order (first occurrence
+// of a given skill name wins). `.toquemedia-studio/skills` is canonical — it
+// mirrors the global `~/.toquemedia-studio/skills` so the project and global
+// names match. `.tms/skills` (the old hard-coded path) was REMOVED — project
+// skills live in `.toquemedia-studio/skills`, not `.tms`. `.toquemedia/skills`
+// stays only as a legacy fallback for the name older docs once used. Layout-
+// tolerant matching (nested SKILL.md or flat *.md, any case) is in
+// loadSkillsFromDirectory.
+const PROJECT_SKILL_DIRS = ['.toquemedia-studio/skills', '.toquemedia/skills'] as const
+
+// Canonical location for newly-created project skills (must be one of PROJECT_SKILL_DIRS).
+const CANONICAL_PROJECT_SKILL_DIR = PROJECT_SKILL_DIRS[0]
+
 // === Invoked-skills state (post-compaction recovery) ===
 //
 // Mirrors claude-vaz's `STATE.invokedSkills`: when the agent calls read_skill,
@@ -348,7 +361,7 @@ ${lines.join('\n')}`
    * Creates a new project-level skill.
    */
   async createProjectSkill(projectPath: string, name: string, content: string): Promise<void> {
-    const skillDir = `${projectPath}/.tms/skills`
+    const skillDir = `${projectPath}/${CANONICAL_PROJECT_SKILL_DIR}`
     await this.ensureDirectory(skillDir)
 
     const sanitized = this.sanitizeName(name)
@@ -424,6 +437,11 @@ ${lines.join('\n')}`
     try {
       const homeDir = await invoke<string>('get_home_directory')
       const skillsDir = `${homeDir}/.toquemedia-studio/skills`
+      // Ensure the global skills dir EXISTS so users always have a discoverable
+      // place to drop skills. It was only ever created lazily by createGlobalSkill
+      // (when a skill is made through the app), so a user who wants to add global
+      // skills by hand had no folder to put them in. ensureDirectory is idempotent.
+      await this.ensureDirectory(skillsDir)
       return await this.loadSkillsFromDirectory(skillsDir, 'global')
     } catch {
       return []
@@ -432,68 +450,146 @@ ${lines.join('\n')}`
 
   private async loadProjectSkills(projectPath: string): Promise<Skill[]> {
     try {
-      const skillsDir = `${projectPath}/.tms/skills`
-      return await this.loadSkillsFromDirectory(skillsDir, 'project')
+      // Scan every accepted project-skill dir and merge (first name wins).
+      const perDir = await Promise.all(
+        PROJECT_SKILL_DIRS.map(rel =>
+          this.loadSkillsFromDirectory(`${projectPath}/${rel}`, 'project'),
+        ),
+      )
+      return this.dedupeByName(perDir.flat())
     } catch {
       return []
     }
   }
 
+  /** First occurrence of each skill name wins. Scan/priority order is the
+   *  caller's responsibility (project dirs are ordered by PROJECT_SKILL_DIRS;
+   *  within one dir, a nested SKILL.md beats a flat `<name>.md` of the same name). */
+  private dedupeByName(skills: Skill[]): Skill[] {
+    const seen = new Set<string>()
+    const out: Skill[] = []
+    for (const s of skills) {
+      const key = s.name.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(s)
+    }
+    return out
+  }
+
+  /**
+   * Layout-tolerant skill discovery for a single directory.
+   *
+   * A user may legitimately lay a skill out as any of:
+   *   <dir>/<name>/SKILL.md   — canonical, nested (case-insensitive: SKILL.md or skill.md)
+   *   <dir>/<name>.md         — flat single-file skill (what older docs showed)
+   *
+   * The shared Rust glob is CASE-SENSITIVE and a star never crosses a slash, so an
+   * exact "star-slash-SKILL.md" pattern silently missed every non-canonical layout —
+   * that was the v1.0.1 "skills not found" bug. We instead glob the broad shapes
+   * (one-level "star/star.md" and flat "star.md") and derive names / filter in JS,
+   * which also avoids changing the shared glob's case sensitivity for every other caller.
+   */
   private async loadSkillsFromDirectory(
     directory: string,
     scope: 'global' | 'project'
   ): Promise<Skill[]> {
     try {
-      const entries = await invoke<string[]>('glob_files', {
-        pattern: '*/SKILL.md',
-        directory,
+      const [nestedMd, flatMd] = await Promise.all([
+        invoke<string[]>('glob_files', { pattern: '*/*.md', directory }).catch(() => [] as string[]),
+        invoke<string[]>('glob_files', { pattern: '*.md', directory }).catch(() => [] as string[]),
+      ])
+
+      const isSkillFile = (p: string) => /(^|\/)skill\.md$/i.test(p)
+
+      // Nested: keep only <name>/SKILL.md (any case). Its parent dir IS the skill
+      // (and may carry a references/ folder). `*/*.md` can never reach a nested
+      // references/*.md (that's two levels deep), so those aren't mistaken for skills.
+      const nested = nestedMd.filter(isSkillFile).map(skillFilePath => {
+        const skillDir = skillFilePath.replace(/\/[^/]+$/, '')
+        return {
+          skillFilePath,
+          skillPath: skillDir,
+          refsDir: skillDir as string | null,
+          name: skillDir.split('/').pop() || '',
+        }
       })
+      const nestedNames = new Set(nested.map(n => n.name.toLowerCase()))
 
-      // Read all skills in parallel (avoids N+1 sequential IPC)
+      // Flat: each `<name>.md` directly in the dir is a single-file skill. Skip a
+      // stray top-level SKILL.md and anything already covered by a nested skill dir.
+      const flat = flatMd
+        .filter(p => !isSkillFile(p))
+        .map(skillFilePath => ({
+          skillFilePath,
+          skillPath: skillFilePath, // a single file — Skill.path must be the file, not the dir
+          refsDir: null as string | null,
+          name: (skillFilePath.split('/').pop() || '').replace(/\.md$/i, ''),
+        }))
+        .filter(f => f.name && !nestedNames.has(f.name.toLowerCase()))
+
+      const candidates = [...nested, ...flat]
+      if (candidates.length === 0) return []
+
       const results = await Promise.all(
-        entries.map(async (skillFilePath): Promise<Skill | null> => {
-          const skillDir = skillFilePath.replace(/\/SKILL\.md$/, '')
-          const name = skillDir.split('/').pop() || ''
-
-          try {
-            const content = await invoke<string>('read_file', { path: skillFilePath })
-
-            // Try to read references in parallel too
-            let references: string[] = []
-            try {
-              const refFiles = await invoke<string[]>('glob_files', {
-                pattern: '*.md',
-                directory: `${skillDir}/references`,
-              })
-              const refContents = await Promise.all(
-                refFiles.map(refPath =>
-                  invoke<string>('read_file', { path: refPath }).catch(() => null)
-                )
-              )
-              references = refContents.filter((r): r is string => r !== null)
-            } catch {
-              // No references directory
-            }
-
-            const parsed = parseSkillFrontmatter(content, name)
-            return {
-              id: `${scope}:${name}`,
-              name: parsed.name,
-              description: parsed.description,
-              path: skillDir,
-              content: parsed.body,
-              references,
-              scope,
-            }
-          } catch {
-            return null
-          }
-        })
+        candidates.map(c =>
+          this.loadSkillFromFile(c.skillFilePath, c.skillPath, c.refsDir, c.name, scope),
+        ),
       )
-
-      return results.filter((s): s is Skill => s !== null)
+      const skills = this.dedupeByName(results.filter((s): s is Skill => s !== null))
+      if (skills.length > 0) {
+        console.info(`[skills] loaded ${skills.length} ${scope} skill(s) from ${directory}`)
+      }
+      return skills
     } catch {
       return []
+    }
+  }
+
+  /** Read + parse one skill file. `skillPath` is what lands in Skill.path (the
+   *  skill dir for nested skills, the file itself for flat ones — so deleteSkill
+   *  never nukes a whole directory for a single-file skill). `refsDir` is the
+   *  directory whose `references/*.md` are attached, or null for flat skills. */
+  private async loadSkillFromFile(
+    skillFilePath: string,
+    skillPath: string,
+    refsDir: string | null,
+    name: string,
+    scope: 'bundled' | 'global' | 'project',
+  ): Promise<Skill | null> {
+    try {
+      const content = await invoke<string>('read_file', { path: skillFilePath })
+
+      let references: string[] = []
+      if (refsDir) {
+        try {
+          const refFiles = await invoke<string[]>('glob_files', {
+            pattern: '*.md',
+            directory: `${refsDir}/references`,
+          })
+          const refContents = await Promise.all(
+            refFiles.map(refPath =>
+              invoke<string>('read_file', { path: refPath }).catch(() => null),
+            ),
+          )
+          references = refContents.filter((r): r is string => r !== null)
+        } catch {
+          // No references directory
+        }
+      }
+
+      const parsed = parseSkillFrontmatter(content, name)
+      return {
+        id: `${scope}:${name}`,
+        name: parsed.name,
+        description: parsed.description,
+        path: skillPath,
+        content: parsed.body,
+        references,
+        scope,
+      }
+    } catch {
+      return null
     }
   }
 

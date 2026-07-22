@@ -94,3 +94,37 @@ describe('normalizeAssistantText', () => {
     expect(normalizeAssistantText('teste.Ágora bora')).toBe('teste.\n\nÁgora bora')
   })
 })
+
+// ── Framing de tool-calls vazado (GLM, incidente 2026-07-18) ──
+import { stripProviderFramingTokens } from '../normalizeAssistantText'
+
+describe('stripProviderFramingTokens', () => {
+  it('remove a run exata do incidente (tokens + lixo curto entre eles)', () => {
+    const leaked = '</think><5e9c7f0d>{" ,"</arg_value><5b656597></tool_call><c4cf82b7>'
+    expect(stripProviderFramingTokens(leaked)).toBe('')
+  })
+
+  it('remove tokens soltos no meio de prosa', () => {
+    expect(stripProviderFramingTokens('antes </think> depois')).toBe('antes  depois')
+    expect(stripProviderFramingTokens('x <tool_call> y')).toBe('x  y')
+  })
+
+  it('não toca em prosa normal nem em tags HTML comuns', () => {
+    const s = 'Usa <div> e <span> no layout; a1b2c3d4 é um hash.'
+    expect(stripProviderFramingTokens(s)).toBe(s)
+  })
+
+  it('via normalizeAssistantText: código em fence fica INTACTO', () => {
+    const code = '```ts\nconst s = "</think><tool_call>"\n```'
+    const out = normalizeAssistantText(`ok.\n\n${code}`)
+    expect(out).toContain('</think><tool_call>')
+  })
+
+  it('via normalizeAssistantText: leak fora de fence desaparece', () => {
+    const out = normalizeAssistantText('Feito.\n</think><5e9c7f0d></tool_call>\nSegue.')
+    expect(out).not.toContain('think')
+    expect(out).not.toContain('tool_call')
+    expect(out).toContain('Feito.')
+    expect(out).toContain('Segue.')
+  })
+})

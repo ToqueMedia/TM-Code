@@ -610,6 +610,9 @@ describe('A: execute() orchestration', () => {
       'read_file',
       expect.objectContaining({ file_path: '/projects/test-app/app.tsx' }),
       false,
+      // origin: main agent has none — only parallel-task isolated children
+      // stamp it (setPermissionOrigin) so the dialog can name the task.
+      undefined,
     )
   })
 
@@ -2086,12 +2089,18 @@ describe('K: Command and Background Command Sandbox & Timeout Constraints', () =
 // ═══════════════════════════════════════════════════════════════════════
 
 describe('update_tasks evidence guard', () => {
+  // Tracker por-sessão: sem chat ativo, update_tasks resolve para o balde
+  // '__main__'. Focamo-lo para que setTasks/`.tasks` (espelho) e o tool
+  // escrevam/leiam o MESMO balde.
   const seed = (tasks: Array<{ id: string; description: string; status: string }>) =>
     useAgentStore.getState().setTasks(tasks as never)
   const statusOf = (id: string) =>
     useAgentStore.getState().tasks.find(t => t.id === id)?.status
 
-  beforeEach(() => useAgentStore.getState().setTasks([]))
+  beforeEach(() => {
+    useAgentStore.getState().focusTrackerSession('__main__')
+    useAgentStore.getState().setTasks([])
+  })
 
   it('reverts a completion sent without evidence to in_progress', async () => {
     const exec = freshExecutor()

@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { Attachment, ChatMessage, ChatMessageCard, ChatSession, CodeBlock, CompactMetadata, ContentBlock, ContentBlockAPI, ContentPart, ConversationMessage, PlanResumePending, ProviderState, PromptBlock, RequestUsageEntry, SessionSummary, SystemMessageLevel, ToolCallDisplay } from '../types/chat'
 import DiffService, { DiffResult } from '../services/agent/diffService'
 import { sessionService, captureByokSnapshot } from '../services/agent/sessionService'
+import { useParallelTaskStore } from './parallelTaskStore'
 import CheckpointService from '../services/agent/checkpointService'
 import { useCheckpointStore } from './checkpointStore'
 import { useAgentStore } from './agentStore'
@@ -20,6 +21,14 @@ interface ChatState {
   isStreaming: boolean
   isLoadingSession: boolean
   streamingMessageId: string | null
+  /**
+   * Session that owns the CURRENT streaming assistant message, captured at
+   * startAssistantMessage. Streaming writers resolve the session through
+   * THIS (not activeSessionId): the user can switch the VIEW to another
+   * session mid-run (e.g. a parallel task's chat) and the run keeps
+   * writing into its own transcript instead of dropping deltas.
+   */
+  streamingSessionId: string | null
   /** Incremented on each streaming flush — triggers re-renders for the active message */
   streamingVersion: number
   /** Incremented when a compact boundary is inserted — forces React key changes in message list */
@@ -96,6 +105,35 @@ interface ChatState {
 
 interface ChatActions {
   createSession: (projectPath: string) => string
+  /**
+   * Create a session WITHOUT activating it — the transcript home of a
+   * parallel-task agent (v1.0.1 multi-agent). createSession() switches
+   * activeSessionId and resets the composer state, which would hijack the
+   * user's live conversation every time they launch a background task.
+   */
+  createBackgroundSession: (projectPath: string, name: string) => string
+  /**
+   * Append a full message to a session BY ID, active or not. Parallel-task
+   * runners write their prompt/result/error into their own session through
+   * this (the streaming pipeline is active-session-bound by design).
+   */
+  appendMessageToSession: (
+    sessionId: string,
+    message: { role: 'user' | 'assistant' | 'system'; content: string; level?: SystemMessageLevel },
+  ) => void
+  /**
+   * Fase 4 (transcript unificado): bolha assistant AO VIVO numa sessão de
+   * fundo (tarefa paralela) — sem tocar no streaming global do main
+   * (isStreaming/streamingMessageId ficam intactos).
+   */
+  startAssistantMessageInSession: (sessionId: string) => string | null
+  /** Grava JÁ uma sessão de fundo (heartbeat/turn boundary do runner de
+   *  tarefas — um crash perde no máximo o turno em curso, não o transcript). */
+  persistSessionNow: (sessionId: string) => void
+  appendTextToMessageInSession: (sessionId: string, messageId: string, delta: string) => void
+  finalizeAssistantMessageInSession: (sessionId: string, messageId: string, finalText?: string) => void
+  /** Carimba o estado final de uma tarefa paralela na SUA sessão (persiste). */
+  setSessionTaskStatus: (sessionId: string, status: import('../types/chat').ParallelTaskSessionStatus) => void
   getActiveSession: () => ChatSession | null
   setActiveSession: (sessionId: string) => void
   addUserMessage: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => string
@@ -284,6 +322,8 @@ interface ChatActions {
     requestId: string,
     serviceName: string,
     fields: NonNullable<ChatMessageCard['fields']>,
+    /** Sessão-alvo (tarefas paralelas escrevem o card na SUA sessão). */
+    targetSessionId?: string,
   ) => string
   /** Mark a credential_request card as submitted and record which keys were saved (no values). */
   markCredentialRequestSubmitted: (messageId: string, submittedKeys: string[]) => void
@@ -293,6 +333,8 @@ interface ChatActions {
     projectPath: string,
     requestId: string,
     questions: import('../stores/askUserQuestionStore').Question[],
+    /** Sessão-alvo (tarefas paralelas escrevem o card na SUA sessão). */
+    targetSessionId?: string,
   ) => string
   /** Remove a message from the active session by id. Used by credential cards
    *  to delete themselves from the transcript after the user accepts or cancels —
@@ -404,6 +446,40 @@ function restoreAgentStartTime(): number | null {
 function clearAgentStartTime(): void {
   try { localStorage.removeItem(AGENT_START_TIME_KEY) } catch { /* ignore */ }
 }
+/**
+ * Localiza a sessão que contém uma mensagem. Cards interativos (perguntas,
+ * credenciais) podem viver em sessões de tarefas paralelas — os updates de
+ * estado do card não podem assumir a sessão ativa.
+ */
+function findSessionByMessageId(
+  sessions: Map<string, ChatSession>,
+  messageId: string,
+): { sessionId: string; session: ChatSession } | null {
+  for (const [sessionId, session] of sessions) {
+    if (session.messages.some(m => m.id === messageId)) return { sessionId, session }
+  }
+  return null
+}
+
+/**
+ * Persistência DIRETA de uma sessão (por id), encadeada para não intercalar
+ * escritas do índice de sumários. Necessária para sessões de FUNDO (tarefas
+ * paralelas): o debouncedSave/flushNow grava apenas a sessão ATIVA — as
+ * sessões de tarefa ficariam só em memória e desapareceriam no reload,
+ * quebrando a regra "uma tarefa nunca desaparece".
+ * Nunca chamar em caminhos por-delta (é uma escrita de disco por chamada).
+ */
+let backgroundSaveChain: Promise<void> = Promise.resolve()
+function persistSessionById(sessionId: string): void {
+  backgroundSaveChain = backgroundSaveChain
+    .then(async () => {
+      const session = useChatStore.getState().sessions.get(sessionId)
+      if (!session || session.messages.length === 0) return
+      await sessionService.saveSession(session)
+    })
+    .catch(() => { /* persistência é best-effort */ })
+}
+
 let saveTimeout: ReturnType<typeof setTimeout> | null = null
 function debouncedSave() {
   if (saveTimeout) clearTimeout(saveTimeout)
@@ -469,17 +545,30 @@ function scheduleDraftPersist(): void {
   }, DRAFT_PERSIST_DEBOUNCE_MS)
 }
 
-// Throttled save during streaming — persists partial content every 5s
-// so interrupted/crashed sessions don't lose the assistant's work.
+// Throttled save during streaming — persists partial content periodically so
+// interrupted/crashed sessions don't lose the assistant's work.
+// 15s + requestIdleCallback (freeze fix ronda 2, 2026-07-18): o flush faz
+// JSON.stringify da sessão INTEIRA (com tool results acumulados chega a MBs)
+// SÍNCRONO na main thread — a cada 5s isso era um pico de dezenas de ms que
+// "colava" o teclado e o stream. O idle callback alinha o stringify com as
+// janelas ociosas entre frames; o timeout garante que nunca adia mais de 5s
+// (crash-recovery honesta: pior caso ~20s de trabalho por salvar).
 let streamingSaveInterval: ReturnType<typeof setInterval> | null = null
 function startStreamingSave() {
   if (streamingSaveInterval) return // already running
   streamingSaveInterval = setInterval(() => {
-    sessionService.markDirty()
-    sessionService.flushNow().catch(err =>
-      logger.error('chat', 'Streaming auto-save failed:', err)
-    )
-  }, 5000)
+    const doFlush = () => {
+      sessionService.markDirty()
+      sessionService.flushNow().catch(err =>
+        logger.error('chat', 'Streaming auto-save failed:', err)
+      )
+    }
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => doFlush(), { timeout: 5000 })
+    } else {
+      doFlush()
+    }
+  }, 15000)
 }
 function stopStreamingSave() {
   if (streamingSaveInterval) {
@@ -522,9 +611,18 @@ export function resolveDiffApprovalByResultId(diffResultId: string, approved: bo
 }
 
 export async function createDiffApprovalPromise(toolCallId: string): Promise<boolean> {
-  // If auto-approve diffs is enabled (user clicked "Accept All" earlier),
-  // accept the diff immediately without blocking the agent.
-  if (usePermissionStore.getState().autoApproveDiffs) {
+  // Auto-aprovação de diffs por DOIS interruptores:
+  //  - autoApproveDiffs ("Accept All" no chrome do chat), como sempre;
+  //  - MODO AUTO (paridade 100% claude-vaz, decisão do user 2026-07-18):
+  //    com o auto mode ligado, escrever código NÃO pergunta — no claude-vaz
+  //    os edits passam pelo fast-path acceptEdits sem classificação nem
+  //    prompt. O diff é aplicado e fica REGISTADO no transcript como
+  //    aprovado (o caminho abaixo já faz isso). Desligar o Modo Auto
+  //    restaura o checkpoint sem tocar na preferência autoApproveDiffs.
+  //    Escritas perigosas continuam gated ANTES daqui (sensitive_file /
+  //    path_access são forcePrompt — nunca passam pelo Modo Auto).
+  const { autoApproveDiffs, autoModePermissions } = usePermissionStore.getState()
+  if (autoApproveDiffs || autoModePermissions) {
     // Primary path: search pendingDiffs for the diffResultId (race-safe —
     // pendingDiffs is populated before the approval promise is created).
     const pendingDiffs = useChatStore.getState().pendingDiffs
@@ -701,9 +799,10 @@ export function markReasoningBoundary(): void {
   // Flush any queued deltas first so the boundary closes the right block.
   flushBufferedDeltas()
   const state = useChatStore.getState()
-  const { activeSessionId, streamingMessageId, sessions } = state
-  if (!activeSessionId || !streamingMessageId) return
-  const session = sessions.get(activeSessionId)
+  const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = state
+      const targetSessionId = streamingSessionId ?? activeSessionId
+  if (!targetSessionId || !streamingMessageId) return
+  const session = sessions.get(targetSessionId)
   if (!session) return
   const msg = session.messages.find(m => m.id === streamingMessageId)
   if (!msg?.contentBlocks) return
@@ -734,9 +833,20 @@ let _credentialStore: typeof import('./credentialRequestStore').useCredentialReq
  */
 function isAnyUserWaitStateActive(): boolean {
   // Refs still null (first tick / tests) → don't block.
-  const hasPermission = !!_permissionStore?.getState().pendingPermission
+  // Pedidos com `origin` pertencem a TAREFAS PARALELAS — não pausam a
+  // exibição do streaming do run principal (o user não está bloqueado nele;
+  // congelar o texto do main por uma pergunta de outra tarefa era o bug
+  // latente da Fase 1).
+  const pendingPerm = _permissionStore?.getState().pendingPermission
+  const hasPermission = !!pendingPerm && !pendingPerm.origin
   const hasDiffs = useChatStore.getState().pendingDiffs.length > 0
-  const hasCredentials = (_credentialStore?.getState().pending.size ?? 0) > 0
+  const credPending = _credentialStore?.getState().pending
+  let hasCredentials = false
+  if (credPending) {
+    for (const entry of credPending.values()) {
+      if (!entry.origin) { hasCredentials = true; break }
+    }
+  }
   return hasPermission || hasDiffs || hasCredentials
 }
 
@@ -814,9 +924,10 @@ function scheduleFlush() {
  * not 'awaiting_response'. Returns null when nothing has completed yet.
  */
 export function selectLastCompletedToolName(state: ChatState): string | null {
-  const { activeSessionId, streamingMessageId, sessions } = state
-  if (!activeSessionId || !streamingMessageId) return null
-  const session = sessions.get(activeSessionId)
+  const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = state
+      const targetSessionId = streamingSessionId ?? activeSessionId
+  if (!targetSessionId || !streamingMessageId) return null
+  const session = sessions.get(targetSessionId)
   if (!session) return null
   const msg = session.messages.find(m => m.id === streamingMessageId)
   if (!msg?.toolCalls?.length) return null
@@ -1346,6 +1457,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     isStreaming: false,
     isLoadingSession: false,
     streamingMessageId: null,
+    streamingSessionId: null,
     streamingVersion: 0,
     conversationVersion: 0,
     postCompactSurveyPending: false,
@@ -1464,6 +1576,137 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       return sessionId
     },
 
+    createBackgroundSession: (projectPath: string, name: string) => {
+      const sessionId = generateId('session')
+      const now = Date.now()
+      const session: ChatSession = {
+        id: sessionId,
+        projectPath,
+        name: name.slice(0, 80),
+        messages: [],
+        status: 'idle',
+        createdAt: now,
+        updatedAt: now,
+        byokSnapshot: captureByokSnapshot(),
+        // Persistem com a sessão: as rows de tarefas derivam disto, por isso
+        // a tarefa nunca "desaparece" — o chat fica consultável pós-reload.
+        isParallelTask: true,
+        parallelTaskStatus: 'running',
+      }
+      // Insert into the map ONLY — no activeSessionId switch, no composer/
+      // history reset, no queue-log rescope. The user's live session is
+      // untouched; this transcript fills in from the background runner.
+      set(state => {
+        const sessions = new Map(state.sessions)
+        sessions.set(sessionId, session)
+        return { sessions }
+      })
+      debouncedSave()
+      return sessionId
+    },
+
+    appendMessageToSession: (sessionId, message) => {
+      set(state => {
+        const session = state.sessions.get(sessionId)
+        if (!session) return state
+        const chatMessage: ChatMessage = {
+          id: generateId('msg'),
+          role: message.role,
+          content: message.content,
+          timestamp: Date.now(),
+          ...(message.role === 'system' && message.level ? { level: message.level } : {}),
+        }
+        const sessions = new Map(state.sessions)
+        sessions.set(sessionId, {
+          ...session,
+          messages: [...session.messages, chatMessage],
+          updatedAt: Date.now(),
+        })
+        return { sessions }
+      })
+      debouncedSave()
+      persistSessionById(sessionId)
+    },
+
+    persistSessionNow: (sessionId) => {
+      persistSessionById(sessionId)
+    },
+
+    startAssistantMessageInSession: (sessionId) => {
+      const messageId = generateId('msg')
+      const message: ChatMessage = {
+        id: messageId,
+        role: 'assistant',
+        content: '',
+        timestamp: Date.now(),
+        codeBlocks: [],
+        toolCalls: [],
+        contentBlocks: [],
+        isStreaming: true,
+      }
+      let created = false
+      set(state => {
+        const session = state.sessions.get(sessionId)
+        if (!session) return state
+        created = true
+        const sessions = new Map(state.sessions)
+        sessions.set(sessionId, {
+          ...session,
+          messages: [...session.messages, message],
+          status: 'running',
+          updatedAt: Date.now(),
+        })
+        return { sessions }
+      })
+      return created ? messageId : null
+    },
+
+    appendTextToMessageInSession: (sessionId, messageId, delta) => {
+      // Mesmo padrão de mutação in-place do appendTextDelta (ver o aviso
+      // "INTENTIONAL MUTATION PATTERN" acima): streamingVersion é o gatilho.
+      const session = get().sessions.get(sessionId)
+      if (!session) return
+      const msg = session.messages.find(m => m.id === messageId)
+      if (!msg) return
+      appendTextToStreamingMessage(msg, delta)
+      session.updatedAt = Date.now()
+      set(s => ({ streamingVersion: s.streamingVersion + 1 }))
+    },
+
+    finalizeAssistantMessageInSession: (sessionId, messageId, finalText) => {
+      set(state => {
+        const session = state.sessions.get(sessionId)
+        if (!session) return state
+        const messages = session.messages.map(msg => {
+          if (msg.id !== messageId) return msg
+          return {
+            ...msg,
+            // Conteúdo final SÓ quando nada foi streamado (fallback) — o
+            // texto ao vivo já vive em content/contentBlocks.
+            ...(finalText && !msg.content ? { content: finalText } : {}),
+            isStreaming: false,
+          }
+        })
+        const sessions = new Map(state.sessions)
+        sessions.set(sessionId, { ...session, messages, status: 'idle', updatedAt: Date.now() })
+        return { sessions }
+      })
+      debouncedSave()
+      persistSessionById(sessionId)
+    },
+
+    setSessionTaskStatus: (sessionId, status) => {
+      set(state => {
+        const session = state.sessions.get(sessionId)
+        if (!session || !session.isParallelTask) return state
+        const sessions = new Map(state.sessions)
+        sessions.set(sessionId, { ...session, parallelTaskStatus: status, updatedAt: Date.now() })
+        return { sessions }
+      })
+      debouncedSave()
+      persistSessionById(sessionId)
+    },
+
     getActiveSession: () => {
       const { sessions, activeSessionId } = get()
       if (!activeSessionId) return null
@@ -1482,6 +1725,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       const hydrated = session ? hydrateTokenCountsFromSession(session) : null
       set({
         activeSessionId: sessionId,
+        // Keep the model-facing history in lock-step with the visible session.
+        // Historically switches only happened via disk loads (which rebuild)
+        // — with in-memory switches (parallel-task chats) skipping this would
+        // let a message typed here ride the PREVIOUS session's history.
+        conversationHistory: session ? rebuildConversationHistory(session.messages) : [],
         currentPromptTokens: hydrated?.promptTokens ?? 0,
         currentResponseTokens: hydrated?.responseTokens ?? 0,
         // Reset draft to empty before async load — prevents the previous
@@ -1728,10 +1976,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       }
 
       set(state => {
-        const { activeSessionId, streamingMessageId, sessions } = state
-        if (!activeSessionId) return state
+        const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = state
+      const targetSessionId = streamingSessionId ?? activeSessionId
+        if (!targetSessionId) return state
 
-        const session = sessions.get(activeSessionId)
+        const session = sessions.get(targetSessionId)
         if (!session) return state
 
         // Find the index of the streaming assistant message
@@ -1752,7 +2001,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
 
         const updatedSessions = new Map(sessions)
-        updatedSessions.set(activeSessionId, updatedSession)
+        updatedSessions.set(targetSessionId, updatedSession)
 
         return { sessions: updatedSessions }
       })
@@ -1790,10 +2039,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       }
 
       set(state => {
-        const { activeSessionId, streamingMessageId, sessions } = state
-        if (!activeSessionId) return state
+        const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = state
+      const targetSessionId = streamingSessionId ?? activeSessionId
+        if (!targetSessionId) return state
 
-        const session = sessions.get(activeSessionId)
+        const session = sessions.get(targetSessionId)
         if (!session) return state
 
         // Finalise the current streaming assistant in place — same shape
@@ -1823,7 +2073,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
 
         const updatedSessions = new Map(sessions)
-        updatedSessions.set(activeSessionId, updatedSession)
+        updatedSessions.set(targetSessionId, updatedSession)
 
         return {
           sessions: updatedSessions,
@@ -1932,14 +2182,15 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       }
 
       set(state => {
-        const { activeSessionId, sessions, streamingMessageId } = state
-        if (!activeSessionId) {
-          // No active session: still zero out the counter so the indicator
-          // doesn't stay pinned at the pre-compression peak in stray UI.
+        const { activeSessionId, streamingSessionId, sessions, streamingMessageId } = state
+        const targetSessionId = streamingSessionId ?? activeSessionId
+        if (!targetSessionId) {
+          // No session to write to: still zero out the counter so the
+          // indicator doesn't stay pinned at the pre-compression peak.
           return { totalTokensUsed: { input: 0, output: state.totalTokensUsed.output }, currentPromptTokens: 0, currentResponseTokens: 0 }
         }
 
-        const session = sessions.get(activeSessionId)
+        const session = sessions.get(targetSessionId)
         if (!session) {
           return { totalTokensUsed: { input: 0, output: state.totalTokensUsed.output }, currentPromptTokens: 0, currentResponseTokens: 0 }
         }
@@ -1994,7 +2245,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
 
         const updatedSessions = new Map(sessions)
-        updatedSessions.set(activeSessionId, updatedSession)
+        updatedSessions.set(targetSessionId, updatedSession)
 
         return {
           sessions: updatedSessions,
@@ -2073,6 +2324,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           sessions: updatedSessions,
           isStreaming: true,
           streamingMessageId: messageId,
+          // Bind the run to ITS session — every streaming writer resolves
+          // through this even if the user switches the view mid-run.
+          streamingSessionId: activeSessionId,
           agentStartTime: Date.now(),
         }
       })
@@ -2102,10 +2356,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     // Always use `streamingVersion` as the reactivity trigger for streaming data.
 
     appendTextDelta: (delta: string) => {
-      const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId || !streamingMessageId) return
+      const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = get()
+      const targetSessionId = streamingSessionId ?? activeSessionId
+      if (!targetSessionId || !streamingMessageId) return
 
-      const session = sessions.get(activeSessionId)
+      const session = sessions.get(targetSessionId)
       if (!session) return
 
       const msg = session.messages.find(m => m.id === streamingMessageId)
@@ -2118,10 +2373,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     appendUiTextDelta: (delta: string) => {
-      const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId || !streamingMessageId) return
+      const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = get()
+      const targetSessionId = streamingSessionId ?? activeSessionId
+      if (!targetSessionId || !streamingMessageId) return
 
-      const session = sessions.get(activeSessionId)
+      const session = sessions.get(targetSessionId)
       if (!session) return
 
       const msg = session.messages.find(m => m.id === streamingMessageId)
@@ -2134,10 +2390,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     appendReasoningDelta: (delta: string) => {
-      const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId || !streamingMessageId) return
+      const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = get()
+      const targetSessionId = streamingSessionId ?? activeSessionId
+      if (!targetSessionId || !streamingMessageId) return
 
-      const session = sessions.get(activeSessionId)
+      const session = sessions.get(targetSessionId)
       if (!session) return
 
       const msg = session.messages.find(m => m.id === streamingMessageId)
@@ -2230,17 +2487,25 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     addPendingToolCall: (toolId: string, toolName: string, spawnedBy?: string, targetMessageId?: string) => {
-      const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId) return
+      const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = get()
       // When `targetMessageId` is provided, write to that specific message —
-      // used by background sub-agents that keep running after the main turn
-      // finalizes (streamingMessageId becomes null but the message still exists
-      // in the session and must keep receiving events for full user visibility).
+      // background sub-agents after the main turn finalizes AND parallel-task
+      // runs (Fase 4: transcript unificado) both use it. The message's OWNING
+      // session wins: resolving via streaming/active dropped these writes the
+      // moment the user switched sessions (latent desde a Fase 2).
       const targetId = targetMessageId ?? streamingMessageId
       if (!targetId) return
 
-      const session = sessions.get(activeSessionId)
-      if (!session) return
+      let targetSessionId = streamingSessionId ?? activeSessionId
+      let session = targetSessionId ? sessions.get(targetSessionId) : undefined
+      if (targetMessageId && (!session || !session.messages.some(m => m.id === targetMessageId))) {
+        const owner = findSessionByMessageId(sessions, targetMessageId)
+        if (owner) {
+          targetSessionId = owner.sessionId
+          session = owner.session
+        }
+      }
+      if (!targetSessionId || !session) return
       // Guard against writes to a message that no longer exists (e.g. session was cleared).
       if (!session.messages.some(m => m.id === targetId)) return
 
@@ -2277,19 +2542,27 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
 
       const updatedSessions = new Map(sessions)
-      updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+      updatedSessions.set(targetSessionId, { ...session, messages, updatedAt: Date.now() })
 
       set({ sessions: updatedSessions })
     },
 
     updateToolCallWithArgs: (toolId: string, args: Record<string, unknown>, targetMessageId?: string) => {
-      const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId) return
+      const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = get()
       const targetId = targetMessageId ?? streamingMessageId
       if (!targetId) return
 
-      const session = sessions.get(activeSessionId)
-      if (!session) return
+      let targetSessionId = streamingSessionId ?? activeSessionId
+      let session = targetSessionId ? sessions.get(targetSessionId) : undefined
+      if (targetMessageId && (!session || !session.messages.some(m => m.id === targetMessageId))) {
+        // Sessão dona da mensagem manda (ver addPendingToolCall).
+        const owner = findSessionByMessageId(sessions, targetMessageId)
+        if (owner) {
+          targetSessionId = owner.sessionId
+          session = owner.session
+        }
+      }
+      if (!targetSessionId || !session) return
       if (!session.messages.some(m => m.id === targetId)) return
 
       const messages = session.messages.map(msg => {
@@ -2310,16 +2583,17 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
 
       const updatedSessions = new Map(sessions)
-      updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+      updatedSessions.set(targetSessionId, { ...session, messages, updatedAt: Date.now() })
 
       set({ sessions: updatedSessions })
     },
 
     updateToolCallProgress: (toolId: string, progressText: string) => {
-      const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId || !streamingMessageId) return
+      const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = get()
+      const targetSessionId = streamingSessionId ?? activeSessionId
+      if (!targetSessionId || !streamingMessageId) return
 
-      const session = sessions.get(activeSessionId)
+      const session = sessions.get(targetSessionId)
       if (!session) return
 
       const msg = session.messages.find(m => m.id === streamingMessageId)
@@ -2347,10 +2621,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       const chunks = logChunks.filter(chunk => chunk.length > 0)
       if (chunks.length === 0) return
 
-      const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId || !streamingMessageId) return
+      const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = get()
+      const targetSessionId = streamingSessionId ?? activeSessionId
+      if (!targetSessionId || !streamingMessageId) return
 
-      const session = sessions.get(activeSessionId)
+      const session = sessions.get(targetSessionId)
       if (!session) return
 
       const msg = session.messages.find(m => m.id === streamingMessageId)
@@ -2375,12 +2650,19 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     recordToolPermission: (toolId, permission, targetMessageId) => {
-      const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId) return
+      const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = get()
       const targetId = targetMessageId ?? streamingMessageId
       if (!targetId) return
-      const session = sessions.get(activeSessionId)
-      if (!session) return
+      let targetSessionId = streamingSessionId ?? activeSessionId
+      let session = targetSessionId ? sessions.get(targetSessionId) : undefined
+      if (targetMessageId && (!session || !session.messages.some(m => m.id === targetMessageId))) {
+        const owner = findSessionByMessageId(sessions, targetMessageId)
+        if (owner) {
+          targetSessionId = owner.sessionId
+          session = owner.session
+        }
+      }
+      if (!targetSessionId || !session) return
       const msg = session.messages.find(m => m.id === targetId)
       if (!msg || !msg.toolCalls) return
       const idx = msg.toolCalls.findIndex(t => t.id === toolId)
@@ -2393,13 +2675,21 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     updateToolCallWithResult: (toolId: string, result: string, isError: boolean, targetMessageId?: string) => {
-      const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId) return
+      const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = get()
       const targetId = targetMessageId ?? streamingMessageId
       if (!targetId) return
 
-      const session = sessions.get(activeSessionId)
-      if (!session) return
+      let targetSessionId = streamingSessionId ?? activeSessionId
+      let session = targetSessionId ? sessions.get(targetSessionId) : undefined
+      if (targetMessageId && (!session || !session.messages.some(m => m.id === targetMessageId))) {
+        // Sessão dona da mensagem manda (ver addPendingToolCall).
+        const owner = findSessionByMessageId(sessions, targetMessageId)
+        if (owner) {
+          targetSessionId = owner.sessionId
+          session = owner.session
+        }
+      }
+      if (!targetSessionId || !session) return
       if (!session.messages.some(m => m.id === targetId)) return
 
       let newDiff: DiffResult | null = null
@@ -2480,7 +2770,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
 
       const updatedSessions = new Map(sessions)
-      updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+      updatedSessions.set(targetSessionId, { ...session, messages, updatedAt: Date.now() })
 
       // If a diff was created, register with DiffService and add to pendingDiffs
       if (newDiff) {
@@ -2692,12 +2982,15 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
     finalizeAssistantMessage: () => {
       let finalMessages: ChatMessage[] | null = null
+      let finalizedSessionIsActive = true
 
       set(state => {
-        const { activeSessionId, streamingMessageId, sessions } = state
-        if (!activeSessionId || !streamingMessageId) return state
+        const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = state
+        const targetSessionId = streamingSessionId ?? activeSessionId
+        finalizedSessionIsActive = targetSessionId === activeSessionId
+        if (!targetSessionId || !streamingMessageId) return state
 
-        const session = sessions.get(activeSessionId)
+        const session = sessions.get(targetSessionId)
         if (!session) return state
 
         // Capture per-turn stats for the assistant footer (the shell-styled surface shows
@@ -2742,12 +3035,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
 
         const updatedSessions = new Map(sessions)
-        updatedSessions.set(activeSessionId, updatedSession)
+        updatedSessions.set(targetSessionId, updatedSession)
 
         return {
           sessions: updatedSessions,
           isStreaming: false,
           streamingMessageId: null,
+          streamingSessionId: null,
           agentStartTime: null,
         }
       })
@@ -2757,7 +3051,12 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       // Rebuild conversation history outside set() — avoids blocking
       // render with JSON parsing and string processing on large sessions.
-      if (finalMessages) {
+      // ONLY when the finalized (streaming) session is still the ACTIVE one:
+      // the user may have switched the view to a parallel task's session
+      // mid-run, and stamping the main run's history over the active session
+      // would contaminate the next message they send there. When they switch
+      // back, setActiveSession rebuilds the history from the session itself.
+      if (finalMessages && finalizedSessionIsActive) {
         const conversationHistory = rebuildConversationHistory(finalMessages)
         set({ conversationHistory })
       }
@@ -3012,9 +3311,10 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     setProviderState: (providerState: ProviderState) => {
-      const { activeSessionId, streamingMessageId, sessions } = get()
-      if (!activeSessionId || !streamingMessageId) return
-      const session = sessions.get(activeSessionId)
+      const { activeSessionId, streamingSessionId, streamingMessageId, sessions } = get()
+      const targetSessionId = streamingSessionId ?? activeSessionId
+      if (!targetSessionId || !streamingMessageId) return
+      const session = sessions.get(targetSessionId)
       if (!session) return
 
       const msg = session.messages.find(m => m.id === streamingMessageId)
@@ -3488,9 +3788,23 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       if (isStale()) return ''
       useCheckpointStore.getState().clear()
 
-      set(() => {
-        // Only keep the new session in memory
+      set((prev) => {
+        // Doutrina multi-agent ("sem deus", 2026-07-17): Novo Chat NUNCA
+        // passa por cima dos agentes vivos. O Map novo PRESERVA as sessões
+        // de tarefa e as sessões com run paralelo vivo — evictá-las cortava
+        // o transcript a meio (writers *InSession no vazio) e o stamp final
+        // falhava ("Novo Chat apagou a minha tarefa", feedback do user).
+        // As restantes sessões continuam a sair (mesma economia de memória).
         const sessions = new Map<string, ChatSession>()
+        try {
+          const liveIds = new Set<string>()
+          for (const r of useParallelTaskStore.getState().runs.values()) {
+            if (r.sessionId && (r.status === 'running' || r.status === 'queued')) liveIds.add(r.sessionId)
+          }
+          for (const [id, s] of prev.sessions) {
+            if (s.isParallelTask === true || liveIds.has(id)) sessions.set(id, s)
+          }
+        } catch { /* store indisponível — segue só com a nova */ }
         sessions.set(session.id, session)
         return {
           sessions,
@@ -3734,19 +4048,19 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
     updateCardStatus: (messageId: string, status: ChatMessageCard['status']) => {
       set(state => {
-        const { activeSessionId, sessions } = state
-        if (!activeSessionId) return state
+        // O card pode viver em QUALQUER sessão (perguntas/credenciais de
+        // tarefas paralelas escrevem na sessão da tarefa) — procura a dona
+        // da mensagem em vez de assumir a ativa.
+        const owner = findSessionByMessageId(state.sessions, messageId)
+        if (!owner) return state
 
-        const session = sessions.get(activeSessionId)
-        if (!session) return state
-
-        const messages = session.messages.map(msg => {
+        const messages = owner.session.messages.map(msg => {
           if (msg.id !== messageId || !msg.card) return msg
           return { ...msg, card: { ...msg.card, status } }
         })
 
-        const updatedSessions = new Map(sessions)
-        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+        const updatedSessions = new Map(state.sessions)
+        updatedSessions.set(owner.sessionId, { ...owner.session, messages, updatedAt: Date.now() })
 
         return { sessions: updatedSessions }
       })
@@ -3754,7 +4068,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       debouncedSave()
     },
 
-    addCredentialRequestCard: (projectPath, requestId, serviceName, fields) => {
+    addCredentialRequestCard: (projectPath, requestId, serviceName, fields, targetSessionId) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
         id: messageId,
@@ -3772,10 +4086,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       }
 
       set(state => {
-        const { activeSessionId, sessions } = state
-        if (!activeSessionId) return state
+        // Tarefa paralela → card na sessão DELA; agente principal → sessão
+        // do run (streaming), com fallback à ativa.
+        const { activeSessionId, streamingSessionId, sessions } = state
+        const sid = targetSessionId ?? streamingSessionId ?? activeSessionId
+        if (!sid) return state
 
-        const session = sessions.get(activeSessionId)
+        const session = sessions.get(sid)
         if (!session) return state
 
         const updatedSession: ChatSession = {
@@ -3785,7 +4102,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
 
         const updatedSessions = new Map(sessions)
-        updatedSessions.set(activeSessionId, updatedSession)
+        updatedSessions.set(sid, updatedSession)
 
         return { sessions: updatedSessions }
       })
@@ -3796,13 +4113,10 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
     markCredentialRequestSubmitted: (messageId, submittedKeys) => {
       set(state => {
-        const { activeSessionId, sessions } = state
-        if (!activeSessionId) return state
+        const owner = findSessionByMessageId(state.sessions, messageId)
+        if (!owner) return state
 
-        const session = sessions.get(activeSessionId)
-        if (!session) return state
-
-        const messages = session.messages.map(msg => {
+        const messages = owner.session.messages.map(msg => {
           if (msg.id !== messageId || !msg.card) return msg
           return {
             ...msg,
@@ -3810,8 +4124,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           }
         })
 
-        const updatedSessions = new Map(sessions)
-        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+        const updatedSessions = new Map(state.sessions)
+        updatedSessions.set(owner.sessionId, { ...owner.session, messages, updatedAt: Date.now() })
 
         return { sessions: updatedSessions }
       })
@@ -3819,7 +4133,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       debouncedSave()
     },
 
-    addAskUserQuestionCard: (projectPath, requestId, questions) => {
+    addAskUserQuestionCard: (projectPath, requestId, questions, targetSessionId) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
         id: messageId,
@@ -3836,10 +4150,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       }
 
       set(state => {
-        const { activeSessionId, sessions } = state
-        if (!activeSessionId) return state
+        const { activeSessionId, streamingSessionId, sessions } = state
+        const sid = targetSessionId ?? streamingSessionId ?? activeSessionId
+        if (!sid) return state
 
-        const session = sessions.get(activeSessionId)
+        const session = sessions.get(sid)
         if (!session) return state
 
         const updatedSession: ChatSession = {
@@ -3849,7 +4164,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
 
         const updatedSessions = new Map(sessions)
-        updatedSessions.set(activeSessionId, updatedSession)
+        updatedSessions.set(sid, updatedSession)
 
         return { sessions: updatedSessions }
       })
@@ -3880,21 +4195,20 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
     appendSubAgentRunId: (messageId, runId) => {
       set(state => {
-        const { activeSessionId, sessions } = state
-        if (!activeSessionId) return state
+        // A mensagem-âncora pode viver noutra sessão (delegação de tarefa
+        // paralela ancora na sessão DELA) — procura a dona, não a ativa.
+        const owner = findSessionByMessageId(state.sessions, messageId)
+        if (!owner) return state
 
-        const session = sessions.get(activeSessionId)
-        if (!session) return state
-
-        const messages = session.messages.map(msg => {
+        const messages = owner.session.messages.map(msg => {
           if (msg.id !== messageId) return msg
           const existing = msg.subAgentRunIds || []
           if (existing.includes(runId)) return msg
           return { ...msg, subAgentRunIds: [...existing, runId] }
         })
 
-        const updatedSessions = new Map(sessions)
-        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+        const updatedSessions = new Map(state.sessions)
+        updatedSessions.set(owner.sessionId, { ...owner.session, messages, updatedAt: Date.now() })
         return { sessions: updatedSessions }
       })
     },

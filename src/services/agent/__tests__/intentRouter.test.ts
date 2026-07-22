@@ -36,7 +36,13 @@ describe('intentRouter local no-edit safety', () => {
 
   it('detects English no-edit instructions deterministically', () => {
     expect(hasExplicitNoEditIntent("don't edit, just inspect")).toBe(true)
-    expect(hasExplicitNoEditIntent('read-only review')).toBe(true)
+    // 2026-07-17: "read-only" SOLTO deixou de classificar — quase sempre
+    // descreve um artefacto ("modal read-only"), não uma instrução ao agente
+    // (falso positivo real: "Adicione um modal para listar o perfil read-only"
+    // negou create/edit ao run inteiro). Instruções genuínas usam imperativos.
+    expect(hasExplicitNoEditIntent('read-only review')).toBe(false)
+    expect(hasExplicitNoEditIntent('Adicione um modal para listar o perfil read-only da pessoa')).toBe(false)
+    expect(hasExplicitNoEditIntent('do not edit anything, read-only review')).toBe(true)
   })
 
   it('does not classify ordinary edit requests as no-edit', () => {

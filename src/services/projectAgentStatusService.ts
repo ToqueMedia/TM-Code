@@ -202,7 +202,15 @@ function truncateLabel(text: string): string {
  */
 function extractTaskMeta(): { label: string | null; description: string | null } {
   try {
-    const session = useChatStore.getState().getActiveSession()
+    const chat = useChatStore.getState()
+    // A sessão DO RUN, não a visível: desde o modelo foreground (Fases 1-4) o
+    // user pode estar a VER o chat de uma tarefa paralela enquanto o main
+    // corre — o heartbeat lia getActiveSession() e o badge do run principal
+    // herdava o NOME da tarefa (feedback do user 2026-07-17: "as duas tarefas
+    // ficam com o mesmo nome"). streamingSessionId é onde o run vive.
+    const session = chat.streamingSessionId
+      ? chat.sessions.get(chat.streamingSessionId) ?? chat.getActiveSession()
+      : chat.getActiveSession()
     if (!session) return { label: null, description: null }
     const description = session.description?.trim() || null
     if (session.name?.trim()) {

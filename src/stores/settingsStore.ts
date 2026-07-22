@@ -86,6 +86,11 @@ interface SettingsState {
   shortcuts: ShortcutMap
   hasCompletedOnboarding: boolean
   sandboxEnabled: boolean
+  /** Fase 5 (multi-agente): isolar cada tarefa paralela num git worktree
+   *  próprio (branch dedicada, merge deliberado — padrão Cursor/claude-vaz).
+   *  DEFAULT ON por design (decisão do user 2026-07-16: git é requisito da
+   *  IDE; sem repo, o sistema cria um local). O toggle fica como escape. */
+  parallelTaskWorktrees: boolean
   chatTextFontSize: ChatTextFontSize
   /** Commands that require explicit developer approval every time the agent uses them.
    *  Empty by default (nothing blocked). User selects which commands to flag in Settings. */
@@ -100,6 +105,7 @@ interface SettingsActions {
   setAutocompleteModel: (model: string) => void
   setAutocompleteOllamaUrl: (url: string) => void
   setSandboxEnabled: (enabled: boolean) => void
+  setParallelTaskWorktrees: (enabled: boolean) => void
   setFlaggedCommands: (commands: string[]) => void
   toggleFlaggedCommand: (command: string) => void
   setFormatOnSave: (value: boolean) => void
@@ -131,6 +137,7 @@ const DEFAULTS: SettingsState = {
   shortcuts: { ...DEFAULT_SHORTCUTS },
   hasCompletedOnboarding: false,
   sandboxEnabled: false,
+  parallelTaskWorktrees: true,
   chatTextFontSize: DEFAULT_CHAT_TEXT_FONT_SIZE,
   flaggedCommands: [],
 }
@@ -190,6 +197,10 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         set((state) => ({
           autocomplete: { ...state.autocomplete, ollamaUrl: url }
         }))
+      },
+
+      setParallelTaskWorktrees: (enabled: boolean) => {
+        set(() => ({ parallelTaskWorktrees: enabled }))
       },
 
       setSandboxEnabled: (enabled: boolean) => {
@@ -264,7 +275,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
     {
       name: 'settings-storage',
       partialize: (state) => {
-        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, autoSave: state.autoSave, autoSaveDelay: state.autoSaveDelay, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, chatTextFontSize: state.chatTextFontSize, flaggedCommands: state.flaggedCommands }
+        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, autoSave: state.autoSave, autoSaveDelay: state.autoSaveDelay, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, taskWorktreesV2: state.parallelTaskWorktrees, chatTextFontSize: state.chatTextFontSize, flaggedCommands: state.flaggedCommands }
       },
       // Deep merge — ensures new fields added to sub-objects get defaults
       merge: (persisted, current) => {
@@ -289,6 +300,9 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           agentLanguage: p.agentLanguage ?? DEFAULTS.agentLanguage,
           hasCompletedOnboarding: p.hasCompletedOnboarding ?? DEFAULTS.hasCompletedOnboarding,
           sandboxEnabled: p.sandboxEnabled ?? DEFAULTS.sandboxEnabled,
+          // Chave v2: o opt-in de horas antes persistiu false em máquinas de
+          // teste — a chave nova ignora esse legado e nasce ON por design.
+          parallelTaskWorktrees: (p as Record<string, unknown>).taskWorktreesV2 as boolean ?? DEFAULTS.parallelTaskWorktrees,
           chatTextFontSize: normalizeChatTextFontSize(p.chatTextFontSize),
           flaggedCommands: Array.isArray(p.flaggedCommands) ? p.flaggedCommands : DEFAULTS.flaggedCommands,
           // Merge shortcuts: defaults for new keys, but preserve null (cleared by conflict)

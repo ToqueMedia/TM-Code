@@ -2651,10 +2651,11 @@ export async function* query(
         mutableTask &&
         !runHasEdited &&
         noEditRecoveryCount < 1 &&
-        toolsetSelector &&
-        !toolsetSelector.isReadOnly()
+        // FASE A: selector null = toolset completo congelado (o caso normal);
+        // o guard continua vivo — read-only explícito continua a desarmá-lo.
+        (!toolsetSelector || !toolsetSelector.isReadOnly())
       ) {
-        const hasEditFile = toolsetSelector.isActive(EDIT_FILE);
+        const hasEditFile = !toolsetSelector || toolsetSelector.isActive(EDIT_FILE);
         noEditGuardReason = "mutable original_task attempted to stop without file edit";
         noEditRecoveryAction = hasEditFile ? "apply_edit" : "request_tools:edit_file";
         state = {
@@ -2663,9 +2664,15 @@ export async function* query(
             ...updatedMessages,
             {
               role: "user",
+              // DEBIAS (auditoria 2026-07-17): a versão anterior ORDENAVA um
+              // edit ("apply the change now") — num diagnóstico cuja resposta
+              // certa é uma decisão de arquitetura ("este runtime não suporta
+              // esta dependência"), isso empurrava o modelo para remendos de
+              // config/bundler em vez de fechar a decisão. A porta de saída
+              // explícita mantém o guardrail (não adiar) sem forçar o remendo.
               content: hasEditFile
-                ? "You have edit_file available but have not applied any edit yet. Apply the requested change now — do not defer to the next turn."
-                : "You have not applied any file edit yet. The edit_file tool is not in your active toolset — call request_tools to activate it, then apply the requested change. Do not defer to the next turn — continue now.",
+                ? "You have edit_file available but have not applied any edit yet. If a code change is genuinely the right outcome, apply it now — do not defer to the next turn. But if your investigation concluded that NO edit is appropriate (the correct outcome is an architecture/runtime decision, a recommendation, or the cause lies outside this codebase), do not force one: state that conclusion explicitly and decisively as your final answer."
+                : "You have not applied any file edit yet. If a code change is genuinely the right outcome, call request_tools to activate edit_file and apply it now — do not defer. But if your investigation concluded that NO edit is appropriate (architecture/runtime decision, recommendation, or external cause), do not force one: state that conclusion explicitly and decisively as your final answer.",
             },
           ],
           continuationCount: 0,

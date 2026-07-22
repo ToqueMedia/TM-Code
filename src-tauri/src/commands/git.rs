@@ -609,7 +609,11 @@ pub async fn git_discard_all(project_path: String) -> Result<(), String> {
 
     // Remove untracked files
     let output2 = git_cmd(&project_path)
-        .args(["clean", "-fd"])
+        // -e: o `git clean` do Discard All apagava o `.toquemedia-id`
+        // (untracked por design) — a identidade do projecto era re-cunhada
+        // no arranque seguinte e o ESTADO bifurcava (sessões/tarefas
+        // "desapareciam"; incidente 2026-07-17). A pasta .toquemedia idem.
+        .args(["clean", "-fd", "-e", ".toquemedia-id", "-e", ".toquemedia"])
         .output()
         .map_err(|e| format!("git clean failed: {}", e))?;
     if !output2.status.success() {

@@ -22,8 +22,28 @@ import type { OpenAIContentPart } from './types'
 
 const VISION_SIDECAR_TIMEOUT_MS = 60_000
 
+const DEFAULT_VISION_SYSTEM =
+  'You are a vision assistant serving a coding agent that cannot see images. ' +
+  'Describe each attached image exhaustively and factually: overall layout, ALL visible text transcribed verbatim ' +
+  '(code, error messages, stack traces, labels, URLs), UI elements and their states, colors, diagrams and their ' +
+  'relationships. Number the descriptions "Image 1", "Image 2", ... in order. Do not speculate beyond what is visible.'
+
+/** Design-copy handoff: the agent will recreate the UI from this alone. */
+export const DESIGN_VISION_SYSTEM =
+  'You are a design-transcription assistant for a coding agent that will recreate a UI from your description alone. ' +
+  'Describe the screenshot as a precise design handoff: overall layout (sections, grid, hero, nav, footer), ' +
+  'color palette (approximate hex when readable), typography (size hierarchy, weight, font feel), spacing patterns, ' +
+  'component inventory (buttons, cards, forms, icons) with states, and ALL visible text transcribed verbatim. ' +
+  'Be exhaustive and concrete. Do not invent content that is not visible. Structure the answer with clear headings.'
+
 export async function describeImagesViaSidecar(
   parts: OpenAIContentPart[],
+  options?: {
+    /** Override the system prompt (e.g. design-copy handoff). */
+    systemPrompt?: string
+    /** Override the user text that accompanies the images. */
+    userText?: string
+  },
 ): Promise<string | null> {
   const imageParts = parts.filter(p => p.type === 'image_url')
   if (imageParts.length === 0) return null
@@ -32,6 +52,8 @@ export async function describeImagesViaSidecar(
   // BYOK it's disabled (self-funded; if the user's model is natively
   // vision-capable, images already flow through the main loop). Paid + BYOK and
   // non-BYOK keep the worker route.
+  // capture_url_design also uses this path: without a vision sidecar there is
+  // no way to turn a screenshot into text for a text-only tool result.
   const { resolveAuxByokRoute } = await import('./byokRouting')
   if (resolveAuxByokRoute()) return null
 
@@ -49,16 +71,12 @@ export async function describeImagesViaSidecar(
     messages: [
       {
         role: 'system',
-        content:
-          'You are a vision assistant serving a coding agent that cannot see images. ' +
-          'Describe each attached image exhaustively and factually: overall layout, ALL visible text transcribed verbatim ' +
-          '(code, error messages, stack traces, labels, URLs), UI elements and their states, colors, diagrams and their ' +
-          'relationships. Number the descriptions "Image 1", "Image 2", ... in order. Do not speculate beyond what is visible.',
+        content: options?.systemPrompt ?? DEFAULT_VISION_SYSTEM,
       },
       {
         role: 'user',
         content: [
-          { type: 'text', text: 'Describe the attached image(s) in full detail.' },
+          { type: 'text', text: options?.userText ?? 'Describe the attached image(s) in full detail.' },
           ...imageParts,
         ],
       },

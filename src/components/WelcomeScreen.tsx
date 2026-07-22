@@ -6,18 +6,29 @@ import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { WelcomeSidebar, CloneDialog, StartupRequirementsBanner } from './welcome'
+import { TeamChatPanel } from './collab/TeamChatPanel'
+import { useBillingStore, isTeamCollabActive } from '../stores/billingStore'
 import SettingsView from './views/SettingsView'
 import MinimalTitleBar from './MinimalTitleBar'
 import { WindowTitleManager } from '../utils/windowTitleManager'
 import MainLayout from './MainLayout'
 import { LoadingSpinner } from './ui/LoadingSpinner'
 import { useLayoutStore } from '../stores/layoutStore'
+import { useCollabSession } from '../hooks/useCollabSession'
 
 interface WelcomeScreenProps {
   onOpenProject: (path?: string, options?: { initGit?: boolean }) => void | Promise<void>
 }
 
 const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
+  // Collab session lifecycle lives HERE — the WelcomeScreen shell is mounted for
+  // the entire authenticated app lifetime (App.tsx), so the team session (chat,
+  // voice calls, screen share, live-preview sharing) survives EVERY IDE
+  // operation: project switches, opening Settings, the loading spinner, editor/
+  // preview fullscreen. It tears down only on real events — plan expiry / leaving
+  // the team (the hook's own gate) or app close (pagehide). Moved off MainLayout,
+  // which unmounts on all those IDE operations and was resetting collab each time.
+  useCollabSession()
   // While a clone is in flight the dialog must be non-dismissable (no escape,
   // no outside-click, no ×). These machine props are reactive, so flipping
   // cloneBusy re-syncs them; CloneDialog reports the state via onBusyChange.
@@ -28,6 +39,10 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
   })
   const { recentProjects, loadRecentProjects, clearAllRecent, welcomeScreen, setWelcomeScreen } = useProjectStore()
   const currentProject = useProjectStore(s => s.currentProject)
+  // Team chat drawer is reachable from Welcome (no project needed). Mounted here
+  // ONLY while no project is open — once a project opens, MainLayout mounts its
+  // own TeamChatPanel, so this avoids a double mount.
+  const teamCollabActive = useBillingStore(isTeamCollabActive)
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewFullscreen = useLayoutStore(s => s.isPreviewFullscreen)
   const [openingProjectPath, setOpeningProjectPath] = useState<string | null>(null)
@@ -93,6 +108,12 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
 
   const handleOpenRecentProject = useCallback(async (path?: string) => {
     if (!path) return
+    // Re-clicking the project that's ALREADY open is a no-op. Without this guard
+    // we'd flip to the loading spinner, which swaps out <MainLayout/> for a
+    // moment — unmounting it tears down useCollabSession (stopCollabSession),
+    // resetting the team "who's online" count (and churning the whole workspace)
+    // for a project that never actually changed.
+    if (path === useProjectStore.getState().currentProject?.path) return
     setOpeningProjectPath(path)
     try {
       await onOpenProject(path)
@@ -150,6 +171,10 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
             <MainLayout embedded />
           </Flex>
         ) : null}
+
+        {/* Team chat drawer — reachable from Welcome (no project). Only while no
+            project is open; MainLayout owns the with-project instance. */}
+        {teamCollabActive && !currentProject && <TeamChatPanel />}
 
         <CloneDialog dialog={cloneDialog} onCloned={onOpenProject} onBusyChange={setCloneBusy} />
 

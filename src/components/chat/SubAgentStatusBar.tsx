@@ -18,10 +18,12 @@ const pulseCss = {
 }
 
 function SubAgentStatusBar() {
+  // Fase 3: a barra do composer é do run PRINCIPAL — sub-agents de tarefas
+  // paralelas aparecem no contexto da tarefa (chat/rows), não aqui.
   const runningCount = useSubAgentStore(s => {
     let count = 0
     for (const run of s.runs.values()) {
-      if (run.status === 'running') count++
+      if (run.status === 'running' && !run.ownerTaskId) count++
     }
     return count
   })

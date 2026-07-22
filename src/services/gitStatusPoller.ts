@@ -1,3 +1,4 @@
+import { hasOwnRepo } from './repoOwnership'
 import { GitService } from './gitService'
 import { useGitStatusStore } from '../stores/gitStatusStore'
 
@@ -30,12 +31,34 @@ let unwatchGitDir: (() => void) | null = null
 /** Guards the async watch() setup against a path switch racing it. */
 let watchToken = 0
 
+/**
+ * ARMADILHA DO REPO ANCESTRAL (2026-07-17, report do user): projecto SEM repo
+ * próprio dentro de uma pasta-ancestral versionada (~/dev é um repo!) fazia o
+ * git status resolver contra o ANCESTRAL — o painel mostrava as alterações de
+ * TODOS os projectos do user como se fossem deste. Só confiamos no git quando
+ * o toplevel é a PRÓPRIA raiz do projecto (mesma guarda da taskWorktree).
+ */
+async function projectHasOwnRepo(path: string): Promise<boolean> {
+  // Delegado ao helper cross-platform (a versão inline era POSIX-only e no
+  // Windows — cmd /C — devolvia sempre false: Source Control ficava vazio).
+  return hasOwnRepo(path)
+}
+
 export async function refreshGitStatus(opts?: { spinner?: boolean }): Promise<void> {
   const path = currentPath
   if (!path || inFlight) return
   inFlight = true
   if (opts?.spinner) useGitStatusStore.getState()._update({ loading: true })
   try {
+    if (!(await projectHasOwnRepo(path))) {
+      // Sem repo PRÓPRIO = painel limpo e honesto ("sem git"), nunca o
+      // estado do repo pai. Verificado a cada ciclo: um git init posterior
+      // (ex.: auto-init das tarefas) é apanhado no refresh seguinte.
+      if (path === currentPath) {
+        useGitStatusStore.getState()._update({ files: [], branch: '', ahead: 0, behind: 0, hasUpstream: false })
+      }
+      return
+    }
     const [files, branch] = await Promise.all([
       GitService.getStatusFiles(path),
       GitService.getCurrentBranch(path),

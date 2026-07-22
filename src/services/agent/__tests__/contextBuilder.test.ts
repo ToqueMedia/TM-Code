@@ -104,13 +104,22 @@ describe('ContextBuilder', () => {
       })
     })
 
+    // FASE B (2026-07-17): o prompt devolvido é o bloco ESTÁTICO; as secções
+    // voláteis (environment/árvore/git/…) seguem em getLastVolatileContext()
+    // e são anexadas à mensagem do user pelos runners. Os testes de presença
+    // verificam o CONJUNTO (estático + volátil) — o modelo recebe ambos.
+    const fullPrompt = async (...args: Parameters<typeof builder.buildSystemPrompt>) => {
+      const staticPart = await builder.buildSystemPrompt(...args)
+      return `${staticPart}\n\n${builder.getLastVolatileContext() ?? ''}`
+    }
+
     it('returns a string', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
       expect(typeof prompt).toBe('string')
     })
 
-    it('includes the project path', async () => {
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+    it('includes the project path (static + volatile)', async () => {
+      const prompt = await fullPrompt('/test/project', 'web')
       expect(prompt).toContain('/test/project')
     })
 
@@ -124,13 +133,13 @@ describe('ContextBuilder', () => {
       expect(prompt).toContain('# Role')
     })
 
-    it('includes environment section', async () => {
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+    it('includes environment section (volatile block)', async () => {
+      const prompt = await fullPrompt('/test/project', 'web')
       expect(prompt).toContain('# Environment')
     })
 
-    it('includes project structure section', async () => {
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+    it('includes project structure section (volatile block)', async () => {
+      const prompt = await fullPrompt('/test/project', 'web')
       expect(prompt).toContain('# Project structure')
     })
 
@@ -147,11 +156,8 @@ describe('ContextBuilder', () => {
       expect(prompt).not.toContain('This project has no TMS.md')
     })
 
-    it('does not abort prompt build when the context planner returns empty content', async () => {
+    it('builds without calling the model context planner (FASE C: planner disabled)', async () => {
       const fetchMock = jest.fn()
-        .mockResolvedValueOnce(mockResponse(completionEnvelope('')) as never)
-        .mockResolvedValueOnce(mockResponse(completionEnvelope('')) as never)
-        .mockResolvedValueOnce(mockResponse(completionEnvelope('')) as never)
         .mockResolvedValueOnce(mockResponse(completionEnvelope('')) as never)
       Object.defineProperty(globalThis, 'fetch', {
         value: fetchMock,
@@ -177,11 +183,11 @@ describe('ContextBuilder', () => {
       const selection = builder.getLastAuxiliarySelection()
 
       expect(prompt).toContain('# Role')
-      expect(fetchMock).toHaveBeenCalledTimes(4)
+      // Planner desligado: ZERO chamadas sidecar; seleção determinística.
+      expect(fetchMock).toHaveBeenCalledTimes(0)
       expect(selection?.profile).toBe('frontend_ui')
       expect(selection?.contextPlannerStatus).toBe('fallback')
       expect(selection?.contextPlan.selectedContexts).toEqual([])
-      expect(selection?.contextPlannerError).toContain('context planner failed after')
     })
 
     it('includes system section', async () => {
@@ -190,7 +196,7 @@ describe('ContextBuilder', () => {
     })
 
     it('includes reminder section', async () => {
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+      const prompt = await fullPrompt('/test/project', 'web')
       expect(prompt).toContain('# Reminder')
     })
 
@@ -297,26 +303,19 @@ describe('ContextBuilder', () => {
         },
       )
 
-      const boundaryIndex = prompt.indexOf(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
-      expect(boundaryIndex).toBeGreaterThan(-1)
-
-      const beforeBoundary = prompt.slice(0, boundaryIndex)
-      const afterBoundary = prompt.slice(boundaryIndex + SYSTEM_PROMPT_DYNAMIC_BOUNDARY.length)
-      const dynamicAuxiliaryMarkers = [
-        '## Scaffolding workflow — REQUIRED for new projects',
-        '## Vision (images)',
-        '## Dev servers',
-        '# Design system: semantic tokens',
-      ]
-
-      for (const marker of dynamicAuxiliaryMarkers) {
-        expect(afterBoundary).toContain(marker)
-        expect(beforeBoundary).not.toContain(marker)
-      }
+      // FASE B: o boundary deixou de existir DENTRO do prompt — virou o
+      // ponto de CORTE. Invariantes novos: estático sem secções voláteis,
+      // volátil com elas, e o marcador literal nunca chega ao modelo.
+      const volatile = builder.getLastVolatileContext() ?? ''
+      expect(prompt).toContain('# Role')
+      expect(prompt).not.toContain('# Environment')
+      expect(volatile).toContain('# Environment')
+      expect(prompt).not.toContain(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+      expect(volatile).not.toContain(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
     })
 
     it('includes package.json summary when available', async () => {
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+      const prompt = await fullPrompt('/test/project', 'web')
       expect(prompt).toContain('react')
     })
 
@@ -328,7 +327,7 @@ describe('ContextBuilder', () => {
         throw new Error('File not found')
       })
 
-      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+      const prompt = await fullPrompt('/test/project', 'web')
       expect(prompt).toContain('(Could not read project structure)')
     })
 
@@ -362,13 +361,17 @@ describe('ContextBuilder', () => {
         }
 
         useChatStore.getState().setSessionMemory('first session note')
-        const first = await builder.buildSystemPrompt('/p', 'web', [], 20, 'fix it', [], intentOverride)
+        await builder.buildSystemPrompt('/p', 'web', [], 20, 'fix it', [], intentOverride)
+        const firstVol = builder.getLastVolatileContext() ?? ''
         useChatStore.getState().setSessionMemory('second session note')
-        const second = await builder.buildSystemPrompt('/p', 'web', [], 20, 'fix it', [], intentOverride)
+        await builder.buildSystemPrompt('/p', 'web', [], 20, 'fix it', [], intentOverride)
+        const secondVol = builder.getLastVolatileContext() ?? ''
 
-        expect(first).toContain('first session note')
-        expect(second).toContain('second session note')
-        expect(second).not.toContain('first session note')
+        // FASE B: a memória de sessão vive no bloco VOLÁTIL — e a assinatura
+        // dinâmica da cacheKey continua a impedir servir volátil stale.
+        expect(firstVol).toContain('first session note')
+        expect(secondVol).toContain('second session note')
+        expect(secondVol).not.toContain('first session note')
       })
 
       it('cache misses after bumpFsVersion (write happened between builds)', async () => {

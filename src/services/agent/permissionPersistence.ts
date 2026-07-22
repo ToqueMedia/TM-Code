@@ -32,12 +32,16 @@ export interface PermissionsFileV2 {
   approvedTools: string[]
   /** Extra directories the user approved for agent file access. */
   additionalDirectories?: string[]
+  /** Modo Auto (classificador de permissões) — POR PROJECTO, como qualquer
+   *  grant de confiança: autonomia no Projeto A não implica autonomia no B. */
+  autoModePermissions?: boolean
 }
 
 export interface LoadedPermissions {
   scopes: Set<ApprovedScope>
   tools: Set<string>
   directories: Set<string>
+  autoMode: boolean
 }
 
 /**
@@ -49,7 +53,7 @@ export interface LoadedPermissions {
  * tool set. The next save will upgrade the file to v2.
  */
 export async function loadPermissionsFromDisk(projectPath: string): Promise<LoadedPermissions> {
-  const empty: LoadedPermissions = { scopes: new Set(), tools: new Set(), directories: new Set() }
+  const empty: LoadedPermissions = { scopes: new Set(), tools: new Set(), directories: new Set(), autoMode: false }
   if (!projectPath) return empty
   try {
     const raw = await invoke<string | null>('read_agent_state', {
@@ -60,7 +64,7 @@ export async function loadPermissionsFromDisk(projectPath: string): Promise<Load
     // Use a loose shape — the discriminated union of v1/v2 makes
     // Partial<...> collapse to `never` on shared keys with different
     // literal types. Parse generically then branch on schemaVersion.
-    const parsed = JSON.parse(raw) as { schemaVersion?: number; approvedScopes?: unknown; approvedTools?: unknown; additionalDirectories?: unknown }
+    const parsed = JSON.parse(raw) as { schemaVersion?: number; approvedScopes?: unknown; approvedTools?: unknown; additionalDirectories?: unknown; autoModePermissions?: unknown }
 
     // v2 file — preferred
     if (parsed.schemaVersion === 2 && Array.isArray(parsed.approvedScopes)) {
@@ -70,6 +74,7 @@ export async function loadPermissionsFromDisk(projectPath: string): Promise<Load
         ),
         tools: new Set(Array.isArray(parsed.approvedTools) ? (parsed.approvedTools as string[]) : []),
         directories: new Set(Array.isArray(parsed.additionalDirectories) ? (parsed.additionalDirectories as string[]) : []),
+        autoMode: parsed.autoModePermissions === true,
       }
     }
 
@@ -81,6 +86,7 @@ export async function loadPermissionsFromDisk(projectPath: string): Promise<Load
         ),
         tools: new Set(),
         directories: new Set(),
+        autoMode: false,
       }
     }
 
@@ -103,6 +109,7 @@ export async function savePermissionsToDisk(
   approvedScopes: Set<ApprovedScope>,
   approvedTools: Set<string>,
   additionalDirectories?: Set<string>,
+  autoModePermissions?: boolean,
 ): Promise<void> {
   if (!projectPath) return
   const payload: PermissionsFileV2 = {
@@ -111,6 +118,7 @@ export async function savePermissionsToDisk(
     approvedScopes: Array.from(approvedScopes),
     approvedTools: Array.from(approvedTools),
     additionalDirectories: additionalDirectories ? Array.from(additionalDirectories) : [],
+    autoModePermissions: autoModePermissions === true,
   }
   try {
     await invoke('write_agent_state', {

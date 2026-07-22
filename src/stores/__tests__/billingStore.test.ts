@@ -1,7 +1,28 @@
-import { useBillingStore, isBlocked, isInOverage, persistBillingCache, getCachedBillingUid, type MeResponse } from '../billingStore'
+import { useBillingStore, isBlocked, isInOverage, isTeamCollabActive, persistBillingCache, getCachedBillingUid, type MeResponse } from '../billingStore'
 
 beforeEach(() => {
   useBillingStore.getState().reset()
+})
+
+describe('isTeamCollabActive', () => {
+  const future = new Date(Date.now() + 30 * 864e5).toISOString()
+  const past = new Date(Date.now() - 864e5).toISOString()
+
+  it('is false without a team membership', () => {
+    expect(isTeamCollabActive({ teamMemberOf: null, planExpiresAt: future })).toBe(false)
+  })
+  it('is true for a member with a future expiry', () => {
+    expect(isTeamCollabActive({ teamMemberOf: 'team-1', planExpiresAt: future })).toBe(true)
+  })
+  it('is true for a member when expiry is unknown (empty — old worker)', () => {
+    expect(isTeamCollabActive({ teamMemberOf: 'team-1', planExpiresAt: '' })).toBe(true)
+  })
+  it('is FALSE once the term has lapsed (the v1.0.1 expiry requirement)', () => {
+    expect(isTeamCollabActive({ teamMemberOf: 'team-1', planExpiresAt: past })).toBe(false)
+  })
+  it('ignores an unparseable expiry (stays permissive)', () => {
+    expect(isTeamCollabActive({ teamMemberOf: 'team-1', planExpiresAt: 'not-a-date' })).toBe(true)
+  })
 })
 
 describe('billingStore', () => {

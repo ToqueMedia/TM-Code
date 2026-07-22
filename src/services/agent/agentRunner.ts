@@ -1,24 +1,29 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { logger } from '@/utils/logger'
-import { useChatStore, appendTextDeltaBuffered, appendUiTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, markReasoningBoundary, resolveAllPendingDiffApprovals } from '../../stores/chatStore'
+import { useChatStore, appendUiTextDeltaBuffered, flushBufferedDeltas } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useProjectStore } from '../../stores/projectStore'
-import { useProblemsStore } from '../../stores/problemsStore'
 import { useBillingStore } from '../../stores/billingStore'
-import { triggerGoalCelebration } from '../../stores/celebrationStore'
 import { t } from '../../i18n/useTranslation'
 import AgentService from './agentService'
+import type { IntentClassification } from './intentRouter'
+import {
+  refreshMcpForDispatch,
+  buildMainSystemPrompt,
+  appendVolatileToUserContent,
+  buildMainLoopCallbacks,
+  estimateTokensFromText,
+  estimateTokensFromValue,
+} from './mainDispatch'
+import { getQueryGuard } from './queryGuard'
 import type { OpenAIContentPart } from './types'
-import ContextBuilder from './contextBuilder'
-import { classifyIntent, type IntentClassification } from './intentRouter'
 import ToolExecutor from './toolExecutor'
-import MCPService from '../mcp/mcpService'
 import { browserSession } from '../browserSessionManager'
 import { getProjectSessionsDir } from '../projectStatePaths'
 import { resolveAttachments, resolveImageToDataUri } from '../attachmentService'
-import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText, extractDisplayFromValue } from './promptValueHelpers'
-import { drainSteerableMessages, joinPromptValues } from './messageQueue'
+import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText } from './promptValueHelpers'
 import { describeImagesViaSidecar } from './visionSidecar'
+// joinPromptValues: agora só usado pelo steering em mainDispatch (F2).
 import { MODEL_PROFILES, getProfileForPlan } from './modelProfiles'
 import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from './atMentions'
 import {
@@ -93,23 +98,6 @@ interface RunAgentOptions {
   intentOverride?: IntentClassification
 }
 
-const APPROX_CHARS_PER_TOKEN = 4
-
-function estimateTokensFromText(value: string): number {
-  if (!value) return 0
-  return Math.ceil(value.length / APPROX_CHARS_PER_TOKEN)
-}
-
-function estimateTokensFromValue(value: unknown): number {
-  if (typeof value === 'string') return estimateTokensFromText(value)
-  if (value === null || value === undefined) return 0
-  try {
-    return estimateTokensFromText(JSON.stringify(value))
-  } catch {
-    return estimateTokensFromText(String(value))
-  }
-}
-
 /**
  * Serialization chain — each invocation awaits the previous one to fully
  * settle before starting. We *cannot* simply drop concurrent calls: the
@@ -161,6 +149,14 @@ async function runAgentInternal(
   prompt: string,
   options: RunAgentOptions
 ): Promise<void> {
+  // ANTI-RESSURREIÇÃO (Bloco A item 2, 2026-07-17): epoch do guard no início
+  // do dispatch. Stop durante a preparação → cancelLoop aborta o controller
+  // ANTIGO (o novo só nasce dentro do runAgentLoop) e forceEnd AVANÇA a
+  // generation. Compara-se antes de arrancar o loop: mudou ⇒ houve Stop ⇒
+  // esta preparação é zombie e morre aqui, com o finally a limpar. Sem isto,
+  // o run ressuscitava (controller fresco não-abortado passa a guarda
+  // pré-voo), o guard ficava preso e a mensagem seguinte apodrecia na fila.
+  const dispatchGeneration = getQueryGuard().generation
   const {
     addUserMessage = true,
     userMessageText,
@@ -264,6 +260,20 @@ async function runAgentInternal(
     })
   }
   const bootstrapOnly = tmsPreflight?.shouldBootstrap === true
+
+  // claude-vaz parity: a missing TMS.md never blocks or redirects the task
+  // (shouldBootstrap is permanently false for 'missing' — see tmsBootstrap).
+  // Instead, surface the /init hint ONCE per project open. noTmsFile is only
+  // set when the project has meaningful content (projectHasContent.ts), so
+  // empty folders don't get nagged — same gating as claude-vaz onboarding.
+  if (tmsPreflight?.reason === 'missing') {
+    const projectStoreState = useProjectStore.getState()
+    if (projectStoreState.noTmsFile) {
+      projectStoreState.setNoTmsFile(false)
+      chatStore.addSystemMessage(t('common.noTmsFile'), 'info')
+    }
+  }
+
   const rawHistory = bootstrapOnly
     ? historyBeforeCurrentUser
     : conversationHistoryOverride
@@ -271,10 +281,8 @@ async function runAgentInternal(
       : useConversationHistory
         ? useChatStore.getState().conversationHistory
         : []
-  const hasImageForIntent =
-    (userMessageAttachments?.some(a => a.type === 'image') ?? false) ||
-    (userMessageBlocks?.some(block => block.type === 'attachment' && block.attachment.type === 'image') ?? false) ||
-    (modelMessageBlocks?.some(block => block.type === 'attachment' && block.attachment.type === 'image') ?? false)
+  // hasImageForIntent morreu com o router (as imagens seguem multimodais
+  // independentemente de perfil — o sidecar de visão é decidido no worker).
 
   // Reset the per-request token counter at the START of each new request so
   // the chat indicator shows tokens for the CURRENT request only (not the
@@ -304,19 +312,32 @@ async function runAgentInternal(
   agentStore.setStatus('awaiting_response')
   logger.info('agent', '⟳ Status: awaiting_response')
 
-  // Refresh MCP tools before building prompt (handles mid-session server changes)
-  const mcpService = MCPService.getInstance()
-  const mcpTools = mcpService.getAllTools()
+  // Checkpoint de prep (2ª ronda do bug Bloco-A-2): um Stop (forceEnd →
+  // generation avança) tem de matar este dispatch na PRÓXIMA fronteira de
+  // await — não no fim da prep inteira. O dispatch seguinte espera esta
+  // promise (enqueueSerializedRun), por isso cada segundo de prep zombie é
+  // um segundo em que o reenvio do developer apodrece na fila ("só arrancou
+  // passado um tempo"). A limpeza de UI só corre se NENHUM run mais novo
+  // ocupou o guard — o estado/bolha são dele, não deste zombie; o cmd-mode
+  // é solto aqui porque os returns pré-try não passam pelo finally.
+  const bailStopPrep = (): boolean => {
+    if (getQueryGuard().generation === dispatchGeneration) return false
+    logger.info('agent', 'Stop durante a preparação — dispatch zombie abandonado no checkpoint')
+    if (cmdOnlyMode && cmdCwd) {
+      try { ToolExecutor.getInstance().disableCmdMode() } catch { /* best-effort */ }
+    }
+    if (!getQueryGuard().isActive) {
+      agentStore.setStatus('cancelled')
+      useChatStore.getState().finalizeAssistantMessage()
+    }
+    return true
+  }
+
+  // FUSÃO F1: refresh MCP + summaries no núcleo único (mainDispatch).
   const toolExecutor = ToolExecutor.getInstance()
-  if (mcpTools.length > 0) {
-    toolExecutor.registerMCPTools(
-      mcpTools,
-      browserSession.wrapCallTool((serverName, toolName, args) =>
-        mcpService.callTool(serverName, toolName, args),
-      ),
-    )
-    AgentService.getInstance().refreshTools()
-    logger.info('agent', `→ MCP tools: ${mcpTools.length} tools registered`)
+  const mcpToolSummaries = refreshMcpForDispatch()
+  if (mcpToolSummaries.length > 0) {
+    logger.info('agent', `→ MCP tools: ${mcpToolSummaries.length} tools registered`)
   }
 
   // Set disk directory for large result persistence (survives session reloads).
@@ -341,65 +362,30 @@ async function runAgentInternal(
     logger.info('agent', `→ cwd-scoped execution enabled: ${cmdCwd}`)
   }
 
-  // Build system prompt with MCP tool info
-  const mcpToolSummaries = mcpTools.map(t => ({
-    name: t.name,
-    description: t.description,
-    serverName: t.serverName,
-  }))
-  const contextBuilder = ContextBuilder.getInstance()
-  const coreToolCount = toolExecutor.getCoreToolCount()
-
+  // FUSÃO F1: montagem do prompt no NÚCLEO ÚNICO (mainDispatch) — a mesma
+  // função serve o Chat direto, este runner e as tarefas. Histórico da
+  // divergência 3× e doutrina no cabeçalho do módulo.
   let systemPrompt: string
   logger.info('agent', '→ Building system prompt...')
   const promptBuildStart = Date.now()
   if (systemPromptOverride) {
     systemPrompt = systemPromptOverride
   } else {
-    const projectType = currentProject?.projectType || 'unknown'
-    // userMessageText carries the raw user input so contextBuilder can detect
-    // skill-trigger hashtags (#auth-google etc.) and inline the corresponding
-    // CRITICAL rules at turn 1.
-    //
-    // Intent Router: a lightweight model call (qwen3.7-plus, no tools,
-    // non-streaming) classifies the user's intent into a PromptProfile,
-    // readOnly flag, and requiresMutation flag BEFORE the system prompt is
-    // assembled. The result feeds
-    // the context builder (prompt profile + on-demand auxiliaries) and — via
-    // lastAuxiliarySelection — the ToolsetSelector (starter toolset). User-text
-    // inference stays in the model router/planner except for the local
-    // no-edit/read-only safety override in classifyIntent.
-    // Never throws; on failure it falls back to { bugfix_local, readOnly:false }
-    // and buildSystemPrompt uses a conservative no-auxiliary fallback.
     const bootstrapUserMessageText = bootstrapOnly && tmsPreflight
       ? buildTmsBootstrapOnlyPrompt(tmsPreflight, userMessageText ?? prompt)
       : null
-    const promptForSystem = bootstrapUserMessageText ?? userMessageText
-    const intentStart = Date.now()
-    const intent = bootstrapOnly
-      ? {
-          profile: 'project_bootstrap' as const,
-          readOnly: false,
-          requiresMutation: true,
-          source: 'keyword' as const,
-          confidence: 'high' as const,
-          reason: 'TMS.md bootstrap preflight selected project_bootstrap before the original task',
-        }
-      : intentOverride
-        ? intentOverride
-      : await classifyIntent(userMessageText ?? '', {
-          hasImage: hasImageForIntent,
-          conversationHistory: rawHistory,
-        })
-    const effectiveIntent = intent
-    AgentService.getInstance().clearPostTmsBootstrapToolProfile()
-    logger.info(
-      'agent',
-      `→ Intent router: profile=${effectiveIntent.profile} readOnly=${effectiveIntent.readOnly} requiresMutation=${effectiveIntent.requiresMutation} (${effectiveIntent.source}, ${Date.now() - intentStart}ms) — ${effectiveIntent.reason}`,
-    )
-    systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, promptForSystem, AgentService.getInstance().getAccessedFilePaths(), { profile: effectiveIntent.profile, readOnly: effectiveIntent.readOnly, requiresMutation: effectiveIntent.requiresMutation, reason: effectiveIntent.reason, source: effectiveIntent.source, confidence: effectiveIntent.confidence, error: effectiveIntent.error, diagnostics: effectiveIntent.diagnostics })
+    if (bailStopPrep()) return
+    systemPrompt = await buildMainSystemPrompt({
+      projectPath,
+      projectType: currentProject?.projectType || 'unknown',
+      userMessageText: bootstrapUserMessageText ?? userMessageText,
+      bootstrapOnly,
+      intentOverride,
+      mcpToolSummaries,
+    })
   }
   logger.info('agent', `✓ System prompt built (${systemPrompt.length} chars, ${Date.now() - promptBuildStart}ms)`)
+  if (bailStopPrep()) return
 
   // Get conversation history
   logger.info('agent', `→ Conversation history: ${rawHistory.length} messages`)
@@ -526,280 +512,36 @@ async function runAgentInternal(
     ? rawHistory
     : downgradeHistoryToText(rawHistory)
 
-  // Guard against double-finalization (onDone and onError can't both finalize)
-  let finalized = false
+  // FUSÃO F1: apêndice do volátil no núcleo único (antes da estimativa, para
+  // o ctx-pill contar o bloco volátil que segue na mensagem).
+  userContent = appendVolatileToUserContent(userContent, {
+    skip: !!systemPromptOverride,
+    surface: 'runner',
+  }) as typeof userContent
 
-  const loopStartTime = Date.now()
-  let firstTextReceived = false
-  let firstReasoningReceived = false
-  let streamedAssistantText = ''
-  // Estimativas LOCAIS são apenas para o ctx-pill (chatStore) — a
-  // contabilidade de billing é exclusiva do worker ai-pass-through (único
-  // ponto de verdade): ele observa o `usage` real de cada resposta, aplica o
-  // multiplicador do TM Speed e comita ao Firestore. O estado de billing da
-  // IDE move-se pelos headers X-Budget-* de cada turno + /v1/me.
+  // Estimativa inicial (system+history+user) — só ctx-pill; a contabilidade
+  // real é exclusiva do worker ai-pass-through.
   const initialPromptEstimate = estimateTokensFromText(systemPrompt)
     + estimateTokensFromValue(history)
     + estimateTokensFromValue(userContent)
-  let estimatedPromptTokens = 0
-  let estimatedOutputTokens = 0
-  const applyLiveTokenEstimate = (inputDelta: number, outputDelta: number) => {
-    if (inputDelta > 0) estimatedPromptTokens += inputDelta
-    if (outputDelta > 0) estimatedOutputTokens += outputDelta
-
-    if (inputDelta > 0 || outputDelta > 0) {
-      useChatStore.getState().addEstimatedTokenUsage(
-        estimatedPromptTokens,
-        estimatedOutputTokens,
-      )
-    }
-  }
-
-  useBillingStore.getState().resetLastRequestStats()
-  applyLiveTokenEstimate(initialPromptEstimate, 0)
-  logger.info('agent', '→ Agent loop starting...')
 
   try {
+    if (bailStopPrep()) return
+    // FUSÃO F2: callbacks do loop no NÚCLEO ÚNICO (buildMainLoopCallbacks). O
+    // objeto inline viveu aqui e no Chat e divergiu em 9 pontos; a união dos
+    // melhores comportamentos vive em mainDispatch.ts. Slash/auto-wake não
+    // fazem steer de imagens — supportsMultimodal (plano) chega para ambos os
+    // flags de imagem deste caminho.
     await agentService.runAgentLoop(userContent, history, {
-      onTextDelta: (delta) => {
-        // After handleStop the abort controller is set; SSE chunks already
-        // in flight would otherwise flip the status back to a busy state and
-        // strand "A pensar..." in the title bar / status indicators.
-        if (agentService.isAborted()) return
-        if (!firstTextReceived) {
-          firstTextReceived = true
-          logger.info('agent', `✓ First text delta received (${Date.now() - loopStartTime}ms into loop)`)
-        }
-        agentStore.setStatus('generating')
-        applyLiveTokenEstimate(0, estimateTokensFromText(delta))
-        streamedAssistantText += delta
-        appendTextDeltaBuffered(delta)
-      },
-      onReasoningDelta: (delta) => {
-        if (agentService.isAborted()) return
-        if (!firstReasoningReceived) {
-          firstReasoningReceived = true
-          logger.info('agent', `✓ Reasoning started (${Date.now() - loopStartTime}ms into loop)`)
-        }
-        agentStore.setStatus('reasoning')
-        applyLiveTokenEstimate(0, estimateTokensFromText(delta))
-        appendReasoningDeltaBuffered(delta)
-      },
-      onReasoningComplete: () => {
-        if (agentService.isAborted()) return
-        // Drain the delta buffer immediately so the reasoning text is fully
-        // visible before the next content (tool call / final text) starts.
-        flushBufferedDeltas()
-        // Mark the block boundary so the NEXT thinking block (next agent
-        // loop iteration's reasoning) gets a `\n\n` prefix — without this,
-        // consecutive blocks render as a single run-on paragraph.
-        markReasoningBoundary()
-      },
-      onToolCallPending: (toolId, toolName) => {
-        if (agentService.isAborted()) return
-        logger.info('agent', `→ Tool call pending: ${toolName} (id: ${toolId})`)
-        flushBufferedDeltas()
-        agentStore.setStatus('applying')
-        useChatStore.getState().addPendingToolCall(toolId, toolName)
-      },
-      onToolCallStart: (toolId, toolName, args) => {
-        if (agentService.isAborted()) return
-        const argsPreview = JSON.stringify(args).slice(0, 80)
-        logger.info('agent', `→ Executing: ${toolName}(${argsPreview}...)`)
-        useChatStore.getState().updateToolCallWithArgs(toolId, args)
-      },
-      onToolResult: (toolId, toolName, result, isError) => {
-        if (agentService.isAborted()) return
-        const resultLen = typeof result === 'string' ? result.length : JSON.stringify(result).length
-        logger.info('agent', `✓ ${toolName} completed (${resultLen} chars${isError ? ', ERROR' : ''})`)
-        useChatStore.getState().updateToolCallWithResult(toolId, result, isError)
-        applyLiveTokenEstimate(estimateTokensFromValue(result), 0)
-        // Tool finished — we are now waiting for the model's next response.
-        agentStore.setStatus('awaiting_response')
-      },
-      onTurnComplete: (turnNumber, providerState) => {
-        logger.info('agent', `✓ Turn ${turnNumber} complete`)
-        useChatStore.getState().incrementTurnCount()
-        if (providerState) {
-          useChatStore.getState().setProviderState(providerState)
-        }
-      },
-      onDone: (finalText) => {
-        flushBufferedDeltas()
-        if (finalText && finalText !== streamedAssistantText) {
-          const suffix = finalText.startsWith(streamedAssistantText)
-            ? finalText.slice(streamedAssistantText.length)
-            : finalText
-          if (suffix) {
-            appendTextDeltaBuffered(suffix)
-            flushBufferedDeltas()
-          }
-        }
-        const keepAssistantOpenForOriginalTask =
-          !isBackgroundRun &&
-          bootstrapOnly &&
-          (() => {
-            const tms = getTmsTurnTelemetry()
-            return tms.tmsCreated || tms.tmsAlreadyExists
-          })()
-        if (keepAssistantOpenForOriginalTask) {
-          agentStore.setStatus('awaiting_response')
-          return
-        }
-        if (!finalized) {
-          finalized = true
-          useChatStore.getState().finalizeAssistantMessage()
-        }
-        // Close the task tracker on a clean finish. The agent routinely ends a
-        // run with its final task still `in_progress` — it does the work but
-        // skips the closing update_tasks call — which strands the
-        // AgentTasksPanel open on a half-finished row that never auto-hides.
-        // On a successful, user-initiated, non-aborted run we flip any lingering
-        // `in_progress` task to `completed`, guaranteeing the last worked task is
-        // always marked done. `pending` tasks are deliberately left untouched: a
-        // /plan seed is ALL-pending and onDone fires right after seeding, so
-        // auto-completing those would mark an entire just-created plan as done.
-        // (Aborted runs and background auto-wakes are skipped.)
-        if (!isBackgroundRun && !agentService.isAborted()) {
-          const tasks = useAgentStore.getState().tasks
-          if (tasks.some(tk => tk.status === 'in_progress')) {
-            const closed = tasks.map(tk =>
-              tk.status === 'in_progress'
-                ? { ...tk, status: 'completed' as const, evidence: tk.evidence || 'Run completed' }
-                : tk,
-            )
-            useAgentStore.getState().setTasks(closed)
-            const projectPath = useProjectStore.getState().currentProject?.path
-            if (projectPath) {
-              void import('./taskPersistence')
-                .then(({ saveTasksToDisk }) => saveTasksToDisk(projectPath, closed))
-                .catch(() => { /* persistence is best-effort */ })
-            }
-          }
-        }
-        agentStore.setStatus('idle')
-        logger.info('agent', `✓ Agent done (total: ${Date.now() - loopStartTime}ms)`)
-        useProblemsStore.getState().scanProject().catch(() => {})
-        // Seasonal flourish — a successful, user-initiated run "scores" a goal
-        // (World Cup 2026). Background auto-wakes pass isBackgroundRun so the
-        // burst only fires on work the user actually asked for. The helper
-        // itself no-ops when the seasonal feature is disabled.
-        if (!isBackgroundRun) triggerGoalCelebration('agent_run_complete')
-      },
-      onError: (error) => {
-        flushBufferedDeltas()
-        resolveAllPendingDiffApprovals(false)
-        agentStore.setCompactPhase('idle')
-        if (agentService.isAborted()) {
-          agentStore.setError(null)
-          agentStore.setStatus('cancelled')
-          logger.info('agent', `Agent run cancelled by user: ${error.message}`)
-          if (!finalized) {
-            finalized = true
-            useChatStore.getState().finalizeAssistantMessage()
-          }
-          return
-        }
-        agentStore.setStatus('error')
-        agentStore.setError(error.message)
-        logger.info('agent', `✗ Agent error: ${error.message}`)
-        if (!finalized) {
-          finalized = true
-          useChatStore.getState().finalizeAssistantMessage()
-        }
-      },
-      onUsageUpdate: (inputTokens, outputTokens, speedApplied = false) => {
-        // Defensive ?? 0: partial-usage providers can pass undefined for either
-        // counter; .toLocaleString() on undefined crashes the whole run.
-        const inTok = inputTokens ?? 0
-        const outTok = outputTokens ?? 0
-        // O multiplicador real (3x por defeito) é do worker (env
-        // TM_SPEED_BILLING_MULTIPLIER); o cliente não o conhece, por isso o log
-        // afirma apenas que o speed foi servido — sem cravar um número que pode
-        // divergir da config do worker.
-        logger.info('agent', `→ Tokens: ${inTok.toLocaleString()} in / ${outTok.toLocaleString()} out${speedApplied ? ' (TM Speed — billed at the server-side speed rate)' : ''}`)
-        // isForeground = !isBackgroundRun: invisible auto-wake / background runs
-        // still count toward billing + the activity indicator, but must NOT move
-        // the ctx pill (it tracks the FOREGROUND conversation's context size).
-        useChatStore.getState().addTokenUsage(inTok, outTok, !isBackgroundRun)
-        // Display-only: alimenta a stat "último pedido" (ApiKeysSection).
-        // A cobrança real (incl. multiplicador do TM Speed) acontece no
-        // worker — nada de matemática de consumo no cliente.
-        useBillingStore.getState().addLastRequestTokens(inTok + outTok)
-      },
-      onRequestUsage: (entry) => {
-        // Persist the per-request usage log on the active session — real
-        // tokens + payloadInspector estimate + breakdown. Best-effort: never
-        // blocks the agent loop. Provider is enriched in the store from the
-        // session's byokSnapshot (BYOK providerId, or 'tms' for data-plane).
-        try { useChatStore.getState().addRequestUsage(entry) } catch { /* observability never blocks */ }
-      },
-      onContextCompression: (event) => {
-        if (event.type === 'hooks_start') {
-          agentStore.setCompactPhase(event.hookType === 'pre_compact' ? 'hooks_pre' : 'hooks_post')
-        } else if (event.type === 'compact_start') {
-          logger.info('agent', `⟳ Context compression starting (current: ${event.beforeTokens} tokens, trigger: ${event.trigger})...`)
-          agentStore.setCompactPhase('compressing')
-          agentStore.setStatus('compressing')
-        } else if (event.type === 'compact_end') {
-          logger.info('agent', '✓ Context compression complete')
-          agentStore.setCompactPhase('idle')
-          agentStore.setStatus('awaiting_response')
-          useChatStore.getState().addCompactBoundaryMessage(event.beforeTokens, event.trigger, event.messagesSummarized, event.summary)
-        }
-      },
-      // ── Queued-message steering (claude-vaz parity) ──
-      // Called by the query loop at every turn boundary. Without this, a
-      // message the developer queues mid-run sits in the queue until the WHOLE
-      // run goes idle ("only sent when the session ends") — because the idle
-      // drain (useQueueProcessor) can't fire while the guard is held. Here we
-      // drain it INSIDE the live run so it rides the next turn, exactly like
-      // claude-vaz. Foreground main agent only — `isBackgroundRun` covers the
-      // invisible auto-wakes, and sub-agents never receive this callback.
-      collectSteeringMessages: isBackgroundRun
-        ? undefined
-        : async (): Promise<string | null> => {
-            // Sub-agent results are PUSHED here (never polled): finished team
-            // members queue their formatted reports and the live run picks
-            // them up at this turn boundary.
-            const { drainSubAgentDeliveries } = await import('./subAgents/autoWake')
-            const deliveries = drainSubAgentDeliveries()
-
-            // Only steerable messages BEFORE the first queued task ride the
-            // live run (drainSteerableMessages): slash/bash need
-            // executeInput's per-command handling, tasks wait for the idle
-            // drain, and a steer message the user reordered BELOW a task
-            // belongs to that task's run — not to this one.
-            const drained = drainSteerableMessages()
-            if (drained.length === 0) return deliveries
-
-            // Coalesce a burst into ONE steered turn (same as the queue's
-            // batched dispatch — joinPromptValues preserves block ordering).
-            const merged =
-              drained.length > 1
-                ? joinPromptValues(drained.map(c => c.value))
-                : drained[0]!.value
-            const display = extractDisplayFromValue(merged)
-
-            const cs = useChatStore.getState()
-            cs.splitForQueuedMessage(
-              display.text,
-              display.attachments,
-              typeof merged === 'string' ? undefined : merged,
-            )
-
-            // Model-facing text. buildAugmentedPrompt resolves file/folder
-            // attachments to XML; images degrade to <attached_image> markers
-            // (steering is text-first — the transcript still shows the real
-            // attachment, and the rare image-steer keeps its intent). @-mentions
-            // are intentionally not re-resolved here.
-            const text = await buildAugmentedPrompt(merged, {
-              resolveAttachmentXml: resolveAttachments,
-              resolveImageDataUri: resolveImageToDataUri,
-            })
-            const userText = text && text.trim().length > 0 ? text : display.text
-            return deliveries ? `${deliveries}\n\n${userText}` : userText
-          },
+      dispatchGeneration,
+      ...buildMainLoopCallbacks({
+        surface: 'runner',
+        isBackgroundRun,
+        bootstrapOnly,
+        initialPromptEstimate,
+        planAllowsImagePipeline: supportsMultimodal,
+        activeModelSupportsImageParts: supportsMultimodal,
+      }),
     })
 
     if (!isBackgroundRun && bootstrapOnly) {

@@ -69,6 +69,24 @@ export function resolveActiveByokSnapshot(): {
 }
 
 /**
+ * Snapshot BYOK para um run cuja SESSÃO é conhecida (tarefa paralela /
+ * sub-agent com dono): usa o snapshot CONGELADO dessa sessão — nunca o da
+ * sessão visível, que o user pode ter trocado entre o lançamento e o arranque
+ * do runner (herança BYOK, doutrina "sem deus" 2026-07-17). Sessão em falta
+ * (edge: tarefa sem transcript) → comportamento antigo (sessão ativa).
+ */
+export function resolveByokSnapshotForSession(sessionId?: string | null): {
+  snapshot: ByokSessionSnapshot | null
+  byokActive: boolean
+} {
+  const chat = useChatStore.getState()
+  const session = (sessionId ? chat.sessions.get(sessionId) : undefined) ?? chat.getActiveSession()
+  const snapshot = session?.byokSnapshot ?? null
+  const byokActive = !!snapshot && useByokStore.getState().enabled
+  return { snapshot, byokActive }
+}
+
+/**
  * Should an AUXILIARY model call (memory, commit message, etc.) route through
  * the user's BYOK key? True only on free plans with BYOK active. Returns the
  * snapshot to use, or null to keep the managed (worker) path.

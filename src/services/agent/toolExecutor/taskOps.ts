@@ -101,6 +101,7 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
     execute: async (input) => {
       const { useAgentStore } = await import('../../../stores/agentStore')
       const { useProjectStore } = await import('../../../stores/projectStore')
+      const { useChatStore } = await import('../../../stores/chatStore')
 
       // Plan-mode gate: update_tasks must follow a completed PLAN.md, not
       // just the initial scaffold write.
@@ -111,7 +112,17 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
         return 'Blocked in /plan mode: update_tasks must follow the final Status: PENDING APPROVAL edit — finish PLAN.md before seeding the task tracker.'
       }
 
-      const prev = useAgentStore.getState().tasks as StoredTask[]
+      // TRACKER POR-SESSÃO: escreve no balde da sessão que EXECUTA este tool —
+      // uma tarefa paralela usa a sua origem (getTaskOrigin().sessionId), o
+      // agente principal usa a sessão do run (streaming) ou a ativa. Sem isto,
+      // duas tarefas a correr pisavam o mesmo tracker global.
+      const chat = useChatStore.getState()
+      // Em produção há sempre uma sessão ativa; o fallback '__main__' cobre
+      // contextos sem chat (testes, races transitórias) sem falhar o tool.
+      const execSid =
+        ctx.getTaskOrigin()?.sessionId ?? chat.streamingSessionId ?? chat.activeSessionId ?? '__main__'
+
+      const prev = useAgentStore.getState().getTasksForSession(execSid) as StoredTask[]
       const prevCompletedIds = new Set(prev.filter(t => t.status === 'completed').map(t => t.id))
 
       type IncomingTask = { id: string; description?: string; status: string; dependsOn?: string[]; blockedBy?: string[]; files?: string[]; evidence?: string }
@@ -196,13 +207,13 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
         ? tasks
         : tasks.map(t => revertSet.has(t.id) ? { ...t, status: 'in_progress' as const } : t)
 
-      useAgentStore.getState().setTasks(finalTasks)
+      useAgentStore.getState().setTasksForSession(execSid, finalTasks)
 
-      // Persist to tasks.json so the tracker survives restarts.
+      // Persist per-sessão (tasks-<sid>.json) para sobreviver a restarts.
       const project = useProjectStore.getState().currentProject
       if (project?.path) {
-        void import('../taskPersistence').then(({ saveTasksToDisk }) =>
-          saveTasksToDisk(project.path, finalTasks),
+        void import('../taskPersistence').then(({ saveTasksForSession }) =>
+          saveTasksForSession(project.path, execSid, finalTasks),
         ).catch(() => { /* non-critical */ })
       }
 

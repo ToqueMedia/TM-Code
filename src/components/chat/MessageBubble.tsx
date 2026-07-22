@@ -1,10 +1,6 @@
 import { memo, useCallback, useMemo, useRef, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiUser, FiCopy, FiCheck, FiDownload, FiCode, FiFileText } from 'react-icons/fi'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { ChatMessage } from '../../types/chat'
 import { useChatStore } from '../../stores/chatStore'
 import { useAuthStore } from '../../stores/authStore'
@@ -18,6 +14,7 @@ import { isAgentShellTool, ShellSessionBlock } from '../shell/ShellCommandBlock'
 import AgentLogo from '../ui/AgentLogo'
 import CompactSummary from './CompactSummary'
 import ReasoningBlock from './ReasoningBlock'
+import { MemoMarkdown, StreamingMarkdown } from './ChatMarkdown'
 import PlanApprovalCard from './PlanApprovalCard'
 import TodoListCard from './TodoListCard'
 import CredentialRequestCard from './CredentialRequestCard'
@@ -31,7 +28,6 @@ import {
   buildEnvironmentSnapshot,
 } from '../../utils/sessionExport'
 import { useToastStore } from '../../stores/toastStore'
-import { normalizeAssistantText } from '../../utils/normalizeAssistantText'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { canonicalToolName, normalizeToolInputForCanonical } from '@/services/agent/toolNames'
@@ -173,42 +169,6 @@ export const markdownStyles = {
   },
 }
 
-function CopyButton({ code }: { code: string }) {
-  const [copied, setCopied] = useState(false)
-
-  const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(code).catch(() => {})
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }, [code])
-
-  return (
-    <Box
-      as="button"
-      display="flex"
-      alignItems="center"
-      gap="5px"
-      px="9px"
-      py="6px"
-      borderRadius="8px"
-      bg="transparent"
-      border="1px solid rgba(255,255,255,0.075)"
-      color={copied ? tokens.colors.accent.green : tokens.colors.text.disabled}
-      fontSize="11px"
-      fontFamily={tokens.fontFamily.ui}
-      fontWeight="650"
-      cursor="pointer"
-      transition="all 0.15s ease"
-      _hover={{ bg: 'rgba(255,255,255,0.06)', color: tokens.colors.text.secondary, borderColor: 'rgba(255,255,255,0.14)', transform: 'translateY(-1px)' }}
-      _active={{ transform: 'translateY(0) scale(0.98)' }}
-      onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleCopy() }}
-      aria-label={copied ? t('chat.copied') : t('chat.copy')}
-    >
-      {copied ? <FiCheck size={11} /> : <FiCopy size={11} />}
-      {copied ? t('chat.copied') : t('chat.copy')}
-    </Box>
-  )
-}
 
 function CopyMessageButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
@@ -244,74 +204,6 @@ function CopyMessageButton({ text }: { text: string }) {
   )
 }
 
-export const markdownComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
-  code({ className, children, ...props }) {
-    const match = /language-(\w+)/.exec(className || '')
-    const codeString = String(children).replace(/\n$/, '')
-
-    if (match) {
-      return (
-        <Box
-          borderRadius="12px"
-          overflow="hidden"
-          my={3}
-          border="1px solid rgba(255, 255, 255, 0.09)"
-          bg="rgba(10, 10, 10, 0.94)"
-          boxShadow="0 16px 38px rgba(0,0,0,0.26)"
-        >
-          <Flex
-            align="center"
-            justify="space-between"
-            gap={3}
-            px={{ base: 3, md: 4 }}
-            py="8px"
-            bg="linear-gradient(180deg, rgba(255,255,255,0.052), rgba(255,255,255,0.022))"
-            borderBottom="1px solid rgba(255, 255, 255, 0.075)"
-          >
-            <Text
-              fontSize="10px"
-              color={tokens.colors.text.disabled}
-              fontFamily={tokens.fontFamily.mono}
-              textTransform="uppercase"
-              fontWeight="700"
-              bg="rgba(255,255,255,0.045)"
-              border="1px solid rgba(255,255,255,0.07)"
-              borderRadius="999px"
-              px="7px"
-              py="2px"
-              lineHeight="1"
-            >
-              {match[1]}
-            </Text>
-            <CopyButton code={codeString} />
-          </Flex>
-          <SyntaxHighlighter
-            style={vscDarkPlus}
-            language={match[1]}
-            customStyle={{
-              margin: 0,
-              padding: '16px 18px',
-              fontSize: '12.5px',
-              lineHeight: '1.68',
-              background: 'transparent',
-              borderRadius: 0,
-              maxWidth: '100%',
-              overflowX: 'auto',
-            }}
-          >
-            {codeString}
-          </SyntaxHighlighter>
-        </Box>
-      )
-    }
-
-    return (
-      <code className={className} {...props}>
-        {children}
-      </code>
-    )
-  },
-}
 
 function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const isUser = message.role === 'user'
@@ -755,11 +647,18 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                 // the very last keeps consecutive text blocks visually
                 // separated even when no tool card sits between them.
                 const isLastBlock = idx === (message.contentBlocks?.length ?? 0) - 1
+                // Bloco ATIVO (último + stream vivo): render incremental —
+                // segmentos estáveis memoizados + cauda pequena; fences em
+                // crescimento sem Prism. Sem isto o bloco re-parseava TUDO a
+                // cada flush de 50ms (O(n²) ao longo do stream — o "torna-se
+                // lento a escrever código"). Ao terminar, volta ao MemoMarkdown
+                // inteiro (1 parse final, Prism em tudo).
+                const isActiveStreamingText = isStreaming === true && isLastBlock
                 return (
                   <Box key={`text-${idx}`} css={markdownStyles} mb={isLastBlock ? 0 : 3}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                      {normalizeAssistantText(block.text)}
-                    </ReactMarkdown>
+                    {isActiveStreamingText
+                      ? <StreamingMarkdown text={block.text} />
+                      : <MemoMarkdown text={block.text} />}
                   </Box>
                 )
               }
@@ -839,9 +738,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                 </Box>
               ) : (
                 <Box css={markdownStyles}>
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                    {normalizeAssistantText(message.content)}
-                  </ReactMarkdown>
+                  <MemoMarkdown text={message.content} />
                 </Box>
               )
             )}

@@ -125,6 +125,10 @@ export interface PromptContext {
 export interface PromptCacheEntry {
   key: string
   prompt: string
+  /** Bloco volátil (abaixo do boundary) capturado no build — servido no hit
+   *  junto com o prompt estático (a assinatura dinâmica da cacheKey garante
+   *  que um hit tem volátil idêntico). */
+  volatile?: string | null
   expiresAt: number
   symbolIndexTelemetry?: {
     filesConsidered: number

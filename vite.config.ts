@@ -15,6 +15,28 @@ const emulatorHost =
   process.env.VITE_EMULATOR_HOST ||
   (process.platform === "win32" ? "192.168.64.1" : "127.0.0.1");
 const firestoreEmulatorTarget = `http://${emulatorHost}:8082`;
+// Auth emulator (identitytoolkit sign-in + securetoken refresh). Proxied like
+// Firestore so the Tauri WebView reaches it through the dev server instead of
+// hitting 127.0.0.1:9999 cross-origin — that direct hit was CORS-blocked
+// ("access control checks") and broke every token refresh on reload
+// (auth/network-request-failed → no token → /v1/me could not authenticate).
+const authEmulatorTarget = `http://${emulatorHost}:9999`;
+
+// Stamp permissive CORS headers onto proxied emulator responses so the WebView
+// accepts them regardless of its exact origin, and answer preflight. The Firebase
+// emulators don't send CORS headers themselves.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const addEmulatorCors = (proxy: any) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  proxy.on("proxyRes", (proxyRes: any, req: any) => {
+    const origin = req.headers?.origin;
+    proxyRes.headers["access-control-allow-origin"] = origin || "*";
+    proxyRes.headers["access-control-allow-credentials"] = "true";
+    proxyRes.headers["access-control-allow-methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS";
+    proxyRes.headers["access-control-allow-headers"] =
+      req.headers?.["access-control-request-headers"] || "*";
+  });
+};
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
@@ -52,10 +74,25 @@ export default defineConfig(async () => ({
       '/google.firestore.v1.Firestore': {
         target: firestoreEmulatorTarget,
         changeOrigin: true,
+        configure: addEmulatorCors,
       },
       '/v1/projects': {
         target: firestoreEmulatorTarget,
         changeOrigin: true,
+        configure: addEmulatorCors,
+      },
+      // Auth emulator — the SDK, when pointed at the proxy (see firebaseAuth.ts
+      // connectAuthEmulator), calls /identitytoolkit.googleapis.com/* (sign-in)
+      // and /securetoken.googleapis.com/* (token refresh); forward both to 9999.
+      '/identitytoolkit.googleapis.com': {
+        target: authEmulatorTarget,
+        changeOrigin: true,
+        configure: addEmulatorCors,
+      },
+      '/securetoken.googleapis.com': {
+        target: authEmulatorTarget,
+        changeOrigin: true,
+        configure: addEmulatorCors,
       },
     },
   },

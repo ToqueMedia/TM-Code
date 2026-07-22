@@ -1,30 +1,30 @@
 import { useEffect } from 'react'
-import { useBillingStore } from '@/stores/billingStore'
-import { useProjectStore } from '@/stores/projectStore'
+import { useBillingStore, isTeamCollabActive } from '@/stores/billingStore'
 import { startCollabSession, stopCollabSession } from '@/services/collab/collabSessionService'
 
 /**
- * Drives the team collaboration session lifecycle: connect to the signaling
- * room for the current TEAM + PROJECT while both exist, disconnect otherwise.
- * Rooms are per-project — a teammate in another project is in another room
- * and never appears online here. Mounted once (MainLayout). Connecting is
- * best-effort — if the signaling worker is unreachable the failure is silent
- * and the rest of the app is unaffected.
+ * Drives the team collaboration session lifecycle: connect to the TEAM room
+ * while the team plan is active, disconnect otherwise. As of v1.0.1 the room is
+ * team-level (NOT per-project) — teammates meet regardless of which project each
+ * has open, and the session no longer requires an open project at all. It runs
+ * on the Welcome screen too. Mounted once (MainLayout).
+ *
+ * The gate is `isTeamCollabActive` (membership AND non-expired term), so when the
+ * team plan lapses and isn't renewed this effect re-runs and tears the session
+ * down — presence, chat, voice, screen share and preview sharing all stop.
+ * Connecting is best-effort: an unreachable signaling worker fails silently.
  */
 export function useCollabSession(): void {
-  const teamMemberOf = useBillingStore((s) => s.teamMemberOf)
-  const projectPath = useProjectStore((s) => s.currentProject?.path ?? null)
+  const canCollaborate = useBillingStore(isTeamCollabActive)
 
   useEffect(() => {
-    if (teamMemberOf && projectPath) {
-      // Project switches restart the session into the new project's room
-      // (startCollabSession is idempotent per room and tears down the old
-      // mesh when the room changes).
+    if (canCollaborate) {
+      // Idempotent per room; a team switch tears down the old mesh first.
       void startCollabSession()
     } else {
       stopCollabSession()
     }
-  }, [teamMemberOf, projectPath])
+  }, [canCollaborate])
 
   // Tear down on unmount (app close / window teardown).
   useEffect(() => () => stopCollabSession(), [])

@@ -11,6 +11,17 @@ import { create } from 'zustand'
 const SPEED_MODEL_PREFIX = 'mimo-v2.5-pro'
 
 /**
+ * Kill-switch: /speed foi RETIRADO da UI em 2026-07-16 (registo do comando +
+ * badge da titlebar desligados; implementação mantida como código morto para
+ * reativação futura). Enquanto true, updateFromProfile ignora o flag
+ * `users/{uid}.tmSpeedEnabled` — sem isto, quem tivesse ligado o speed no
+ * passado continuaria a enviar X-TM-Speed (cobrança 3x no worker) SEM nenhuma
+ * UI para o desligar. Reativar = false + descomentar o registo no
+ * slashCommandRegistry + remontar o TmSpeedIndicator na MinimalTitleBar.
+ */
+export const TM_SPEED_RETIRED = true
+
+/**
  * Elegibilidade por modelo. `null` (id ainda desconhecido — antes da primeira
  * resposta do worker) é FAIL-OPEN: esconder à partida impediria um user
  * pro/max de ligar o speed antes do primeiro turno; o worker degrada de
@@ -54,7 +65,7 @@ export const useTmSpeedStore = create<TmSpeedState>((set) => ({
 
   updateFromProfile: (profile) => {
     set({
-      enabled: profile?.tmSpeedEnabled === true,
+      enabled: !TM_SPEED_RETIRED && profile?.tmSpeedEnabled === true,
       isLoaded: true,
     })
   },

@@ -1,5 +1,4 @@
 import { create } from 'zustand'
-import { useBillingStore } from '@/stores/billingStore'
 import type { MediaPolicy, PeerInfo } from '@/services/collab/signalingProtocol'
 import type { PeerPath } from '@/services/collab/collabMesh'
 import type { ChatMessage } from '@/services/collab/collabChat'
@@ -137,7 +136,9 @@ export interface LivePreview {
   note?: string
 }
 
-/** Cap on the in-memory chat transcript (disk history is the durable record). */
+/** Cap on the in-memory chat transcript. Team chat is ephemeral P2P (v1.0.1 —
+ *  no on-disk transcript); continuity across sessions comes from the sender's
+ *  P2P replay to late joiners + the RTDB offline queue, not disk. */
 const MAX_CHAT_IN_MEMORY = 500
 
 export const useCollabStore = create<CollabState>((set) => ({
@@ -202,7 +203,7 @@ export const useCollabStore = create<CollabState>((set) => ({
     set((s) => {
       if (s.chat.some((m) => m.id === msg.id)) return s // dedup echoes
       // Cap the in-memory transcript so a long session can't grow unbounded
-      // (disk history is the durable record; load is itself capped).
+      // (chat is ephemeral P2P — there is no disk transcript to fall back on).
       const next = [...s.chat, msg]
       const chat = next.length > MAX_CHAT_IN_MEMORY ? next.slice(-MAX_CHAT_IN_MEMORY) : next
       return { chat, chatUnread: s.chatOpen ? 0 : s.chatUnread + 1 }
@@ -279,9 +280,9 @@ export const useCollabStore = create<CollabState>((set) => ({
     }),
 }))
 
-/// Team collaboration is gated on TEAM MEMBERSHIP (`teamMemberOf`), NOT Pro/Max.
-/// A member keeps `teamMemberOf` even when the personal/team billing toggle is
-/// in personal mode, so collaboration stays available regardless of billing.
-export function canShareCode(): boolean {
-  return Boolean(useBillingStore.getState().teamMemberOf)
-}
+// NOTE: the team-collab gate is `isTeamCollabActive(billing)` in billingStore.
+// UI subscribes to it reactively via `useBillingStore(isTeamCollabActive)` so the
+// team indicator / chat / preview sharing hide the instant the plan expires. The
+// old imperative `canShareCode()` wrapper was removed: called in a render body it
+// did NOT react to billing changes, which is exactly the bug that let team UI
+// linger after expiry.

@@ -19,6 +19,11 @@
  */
 
 import SkillService from './skillService'
+import {
+  discoverExternalAgentSessions,
+  buildExternalAgentSessionsSection,
+  type ExternalAgentSessions,
+} from './externalAgents'
 import { logger } from '../../utils/logger'
 import {
   CRITICAL_SECTIONS_MAX_BYTES,
@@ -147,6 +152,10 @@ export type { PromptContext, MCPToolSummary, PackageSummary }
 class ContextBuilder {
   private static instance: ContextBuilder
   private promptCache = new Map<string, PromptCacheEntry>()
+  // Superfície de TAREFA PARALELA (fusão 4b): omite as secções do tracker
+  // GLOBAL do agente interativo (task_tracker_live/task_list) — uma tarefa
+  // não adota o backlog do main nem tem update_tasks no toolset dela.
+  private taskSurface = false
 
   // ── Auxiliary context selection (on-demand architecture) ──
   // Set during buildSystemPrompt. Read by:
@@ -163,6 +172,18 @@ class ContextBuilder {
     promptCtx?: PromptContext
     loadedSkills?: import('./skillService').Skill[]
   } | null = null
+
+  // FASE B (recalibração de cache 2026-07-17): o bloco VOLÁTIL — tudo
+  // abaixo do SYSTEM_PROMPT_DYNAMIC_BOUNDARY — sai do system prompt (que
+  // fica byte-estável entre runs → prefixo tools+system+histórico cacheável
+  // no provider) e segue na PRIMEIRA mensagem do user em <system-reminder>
+  // (padrão claude-vaz). Preenchido em cada build, miss E hit.
+  private lastVolatileContext: string | null = null
+
+  /** Bloco volátil do último build — o caller anexa à mensagem do user. */
+  getLastVolatileContext(): string | null {
+    return this.lastVolatileContext
+  }
 
   /** The auxiliary selection from the most recent prompt build (or null). */
   getLastAuxiliarySelection(): AuxiliarySelection | null {
@@ -359,6 +380,21 @@ class ContextBuilder {
     return { content, name: meta?.name ?? resolvedId }
   }
 
+  /**
+   * Instância EFÉMERA para runs de TAREFA PARALELA (fusão 4b, doutrina "sem
+   * deus"): estado próprio (promptCache, lastAuxiliarySelection,
+   * lastAuxiliaryCtx) — o singleton fica exclusivo do run interativo, que lê
+   * getLastAuxiliarySelection() logo após o build DELE; partilhar a instância
+   * entre agentes concorrentes corrompia essa leitura (single-active-run
+   * assumption acima). request_context de uma tarefa resolve na instância
+   * dela (o runner guarda a referência).
+   */
+  static createEphemeral(opts?: { taskSurface?: boolean }): ContextBuilder {
+    const builder = new ContextBuilder()
+    builder.taskSurface = opts?.taskSurface === true
+    return builder
+  }
+
   static getInstance(): ContextBuilder {
     if (!ContextBuilder.instance) {
       ContextBuilder.instance = new ContextBuilder()
@@ -510,6 +546,7 @@ class ContextBuilder {
   }
 
   async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[], coreToolCount?: number, userMessage?: string, accessedPaths?: string[], intentOverride?: IntentOverride): Promise<string> {
+    this.lastVolatileContext = null
     // Cache key must include everything that affects the prompt shape.
     // Plan is read below; include it in the key so plan switches bypass the cache.
     let planKey = 'unknown'
@@ -559,9 +596,33 @@ class ContextBuilder {
     })
     const readOnly = intentOverride?.readOnly ?? false
     const requiresMutation = !readOnly && intentOverride?.requiresMutation === true
+    // FASE C (recalibração de cache 2026-07-17): o planner de contexto por
+    // MODELO está DESLIGADO — poupa uma chamada sidecar por run e elimina o
+    // vetor de viés da seleção (auditoria pg/bundler: o planner empurrava
+    // hipóteses). A seleção fica no caminho determinístico + on-demand: o
+    // índice request_context continua no prompt e o agente pede o que
+    // precisar. Repor: flag a true (código do planner intacto).
+    const MODEL_CONTEXT_PLANNER_ENABLED = false as boolean
     let contextPlan: Awaited<ReturnType<typeof planContextWithModel>>
     let plannerFailure: ContextPlannerError | null = null
-    try {
+    if (!MODEL_CONTEXT_PLANNER_ENABLED) {
+      contextPlan = {
+        plan: {
+          taskDomain: `${auxProfile}.planner_disabled`,
+          requiredCapabilities: [],
+          minimumContextNeeded: 'index',
+          candidateContexts: [],
+          selectedContexts: [],
+          rejectedContexts: [],
+          toolGroups: readOnly ? [] : ['FILE_OPS'],
+          fallbackRisk: 'low',
+          reason: 'Model context planner disabled (cache recalibration): auxiliary context is on-demand via request_context.',
+        },
+        source: 'fallback',
+        confidence: 'none',
+        reason: 'planner disabled; on-demand selection by the primary agent',
+      }
+    } else try {
       contextPlan = await planContextWithModel(userMessage ?? '', auxProfile, readOnly)
     } catch (err) {
       if (err instanceof ContextPlannerError) {
@@ -774,6 +835,15 @@ class ContextBuilder {
     const teamSection = await getTeamSection()
     const bgCommandsSection = await getBackgroundCommandsSection()
 
+    // Other AI agents' local session history for THIS project (Claude Code,
+    // Qwen, Aider, …) — surfaced so the agent can resume another tool's work.
+    // Metadata only (existence + count); best-effort, never throws. Resolved
+    // here so the dynamicSection() below can stay synchronous.
+    let externalAgentSessions: ExternalAgentSessions[] = []
+    try {
+      externalAgentSessions = await discoverExternalAgentSessions(projectPath)
+    } catch { /* non-critical */ }
+
     // ── Load auxiliary content for the selected auxiliaries ──
     // The selection (metadata) was computed before the cache key; the actual
     // CONTENT is loaded here because the scaffolding/install loader needs
@@ -836,6 +906,7 @@ class ContextBuilder {
       if (cached.symbolIndexTelemetry) {
         markProjectSymbolIndexRequested(cached.symbolIndexTelemetry)
       }
+      this.lastVolatileContext = cached.volatile ?? null
       return cached.prompt
     }
 
@@ -925,6 +996,8 @@ class ContextBuilder {
         '.toquemedia/project.json or .toquemedia-template changes when scaffold is re-run'),
       dynamicSection('environment', () => getEnvironmentSection(ctx),
         'project path / package manager / language detected per session'),
+      dynamicSection('external_agent_sessions', () => buildExternalAgentSessionsSection(externalAgentSessions),
+        'other AI agents\' local session dirs for this project — changes as those tools write; null when none found'),
       dynamicSection('preview_compatibility', () => getPreviewCompatibilitySection(ctx),
         'framework/deploy compatibility detected per project — null for compatible projects'),
       dynamicSection('dev_server_status', () => auxLoadedContent['delivery.dev_server'] ?? null,
@@ -971,9 +1044,9 @@ class ContextBuilder {
       // architect's snapshot, not the implementer's progress). With the
       // live block first the model anchors on the actual state and reads
       // TODO.md as the supporting plan, not the other way around.
-      dynamicSection('task_tracker_live', () => getTrackerStateSection(ctx),
+      dynamicSection('task_tracker_live', () => this.taskSurface ? null : getTrackerStateSection(ctx),
         'live in-memory tracker mutated by every update_tasks call'),
-      dynamicSection('task_list', () => getTaskListSection(ctx),
+      dynamicSection('task_list', () => this.taskSurface ? null : getTaskListSection(ctx),
         'TODO.md task statuses flip as the implementation agent progresses'),
       dynamicSection('memory_guidance', () => getMemoryGuidanceSection(ctx),
         'guidance is conditional on the presence of project memory files'),
@@ -999,6 +1072,13 @@ class ContextBuilder {
       .slice(0, 15)
 
     const full = sections.join('\n\n')
+    // FASE B: corte na fronteira — o ESTÁTICO é devolvido como system prompt;
+    // o VOLÁTIL viaja na mensagem do user (o marcador nunca chega ao modelo).
+    const boundaryIdx = sections.indexOf(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+    const staticPrompt = (boundaryIdx >= 0 ? sections.slice(0, boundaryIdx) : sections).join('\n\n')
+    this.lastVolatileContext = boundaryIdx >= 0
+      ? (sections.slice(boundaryIdx + 1).join('\n\n') || null)
+      : null
     const telemetryAfterRender = getTmsTurnTelemetry()
     const symbolIndexTelemetry = telemetryAfterRender.symbolIndexRequested
       ? {
@@ -1009,7 +1089,7 @@ class ContextBuilder {
           tokensEstimate: telemetryAfterRender.symbolIndexTokensEstimate,
         }
       : undefined
-    this.promptCache.set(cacheKey, { key: cacheKey, prompt: full, expiresAt: now + PROMPT_CACHE_TTL_MS, symbolIndexTelemetry, auxiliaryCtx: { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb, promptCtx: ctx, loadedSkills } })
+    this.promptCache.set(cacheKey, { key: cacheKey, prompt: staticPrompt, volatile: this.lastVolatileContext, expiresAt: now + PROMPT_CACHE_TTL_MS, symbolIndexTelemetry, auxiliaryCtx: { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb, promptCtx: ctx, loadedSkills } })
     // Cache-miss telemetry — includes the boundary split bytes so we can
     // see the prompt shape over time (regressions in cache discipline
     // surface as the static byte share shrinking).
@@ -1024,7 +1104,7 @@ class ContextBuilder {
       loadedSkillNames: ctx.loadedSkillNames,
       sectionBreakdown,
     })
-    return full
+    return staticPrompt
   }
 }
 

@@ -113,15 +113,24 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
       const { useCredentialRequestStore } = await import('../../../stores/credentialRequestStore')
       const chatStore = useChatStore.getState()
 
+      // Tarefa paralela: o pedido é etiquetado (badge "Credenciais" na row)
+      // e o card escrito NA SESSÃO da tarefa — o user decide no chat dela.
+      const taskOrigin = ctx.getTaskOrigin()
+
       const { id: requestId, promise: requestPromise } = useCredentialRequestStore
         .getState()
-        .request({ serviceName, fields })
+        .request({
+          serviceName,
+          fields,
+          ...(taskOrigin ? { origin: { taskId: taskOrigin.taskId, label: taskOrigin.label } } : {}),
+        })
 
       const cardMessageId = chatStore.addCredentialRequestCard(
         projectRoot,
         requestId,
         serviceName,
         fields,
+        taskOrigin?.sessionId,
       )
 
       const abortSignal = input._abortSignal as AbortSignal | undefined
@@ -169,7 +178,7 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
         properties: {
           questions: {
             type: 'array',
-            description: 'The questions to ask the user (1-4 questions per call)',
+            description: 'The questions to ask the user. Ask as many as the decision genuinely needs — you decide; prefer the fewest questions that unblock you, but do not artificially merge unrelated decisions.',
             items: {
               type: 'object',
               properties: {
@@ -202,8 +211,7 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
               },
               required: ['question', 'header', 'options']
             },
-            minItems: 1,
-            maxItems: 4
+            minItems: 1
           }
         },
         required: ['questions']
@@ -220,10 +228,6 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
       if (!questionsRaw || !Array.isArray(questionsRaw) || questionsRaw.length === 0) {
         return t('tool.minQuestions')
       }
-      if (questionsRaw.length > 4) {
-        return t('tool.maxQuestions')
-      }
-
       for (const q of questionsRaw) {
         if (!q.question || !q.header || !q.options || q.options.length < 2) {
           return t('tool.questionValidation')
@@ -245,12 +249,19 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
       const projectRoot = ctx.getProjectRoot()
       if (!projectRoot) return 'No active project — cannot ask questions. Open a project first.'
 
+      // Tarefa paralela: pedido etiquetado (badge "Pergunta" na row) e card
+      // escrito na sessão da tarefa.
+      const taskOrigin = ctx.getTaskOrigin()
+
       const { id: requestId, promise: answerPromise } = useAskUserQuestionStore
         .getState()
-        .request(questions)
+        .request(
+          questions,
+          taskOrigin ? { taskId: taskOrigin.taskId, label: taskOrigin.label } : undefined,
+        )
 
       const chatStore = useChatStore.getState()
-      const cardMessageId = chatStore.addAskUserQuestionCard(projectRoot, requestId, questions)
+      const cardMessageId = chatStore.addAskUserQuestionCard(projectRoot, requestId, questions, taskOrigin?.sessionId)
 
       const abortSignal = input._abortSignal as AbortSignal | undefined
 

@@ -8,15 +8,12 @@
 // reconnect.
 
 import FirebaseAuthService from '@/services/auth/firebaseAuth'
-import { CollabService } from '@/services/collabService'
 import { CollabMesh, reconcilePeerPath, type PeerPath } from '@/services/collab/collabMesh'
 import { BulkReassembler } from '@/services/collab/bulkFraming'
 import { attachTunnel, detachTunnel, onTunnelMessage, setLocalShare } from '@/services/collab/previewTunnelService'
 import {
   buildChatControl,
-  dedupeChatById,
   parseControlMessage,
-  parseStoredChat,
   type ChatMessage,
   type PreviewOffer,
 } from '@/services/collab/collabChat'
@@ -39,18 +36,17 @@ import {
   handleScreenControl,
   onRemoteVideoTrack,
   onScreenPeerGone,
+  onScreenPeerReconnected,
   replayScreenStateTo,
   resetScreenService,
 } from '@/services/collab/collabScreen'
-import { invoke } from '@/utils/invokeMetrics'
 import { resolveCollabSignalingUrl } from '@/utils/devUrls'
 import { playMessageChime } from '@/utils/notificationSound'
 import { stopLivePreviewServer } from '@/services/collab/livePreviewServer'
 import { t } from '@/i18n'
 import { useAuthStore } from '@/stores/authStore'
-import { useBillingStore } from '@/stores/billingStore'
+import { useBillingStore, isTeamCollabActive } from '@/stores/billingStore'
 import { useCollabStore } from '@/stores/collabStore'
-import { useProjectStore } from '@/stores/projectStore'
 import { useToastStore } from '@/stores/toastStore'
 
 /** Kill switch — flip to false to hard-disable collaboration networking. */
@@ -117,67 +113,23 @@ function selfIdentity(): { uid: string; name: string; email: string } {
   }
 }
 
-/** Path of the currently open project (null when none is open). */
-function activeProjectPath(): string | null {
-  return useProjectStore.getState().currentProject?.path ?? null
-}
-
-/** Normalise a git remote URL into a machine-independent identity: protocol,
- *  credentials and `.git` stripped, `git@host:path` → `host/path`, lowercase.
- *  Two teammates who cloned the same repo produce the same string. */
-function normalizeGitRemote(url: string): string {
-  let out = url.trim().toLowerCase()
-  const scp = /^[\w.-]+@([^:]+):(.+)$/.exec(out)
-  if (scp) out = `${scp[1]}/${scp[2]}`
-  out = out.replace(/^[a-z+]+:\/\//, '').replace(/^[^@/]+@/, '')
-  return out.replace(/\.git$/, '').replace(/\/+$/, '')
-}
-
-/**
- * Stable project identity for the room key. Team chat is PER PROJECT — two
- * members only meet when they're in the SAME project. Cross-machine identity:
- * the git remote (teammates clone the same repo) hashed short; projects
- * without a remote fall back to the folder name (same team + same project
- * name = same room, which matches how teams talk about "the project").
- */
-async function deriveProjectRoomKey(projectPath: string): Promise<string> {
-  let identity = ''
-  try {
-    const cfg = await invoke<string>('read_file', { path: `${projectPath}/.git/config` })
-    const m = /\[remote "origin"\][^[]*?url\s*=\s*([^\n\r]+)/i.exec(cfg)
-    if (m) identity = `git:${normalizeGitRemote(m[1])}`
-  } catch {
-    /* not a git repo (or worktree indirection) — fall back to the name */
-  }
-  if (!identity) {
-    const base = projectPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? projectPath
-    identity = `name:${base.toLowerCase()}`
-  }
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(identity))
-  return Array.from(new Uint8Array(digest).slice(0, 8))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('')
-}
-
 /**
  * Start (or restart) the collaboration session for the team the user belongs
- * to. Idempotent: re-calling for the same room is a no-op; switching teams OR
- * projects tears down the old mesh first (the room is team+project scoped).
- * Silently does nothing when not in a team or without an open project.
+ * to. Idempotent: re-calling for the same room is a no-op; switching teams tears
+ * down the old mesh first. Silently does nothing when the team plan is inactive.
+ *
+ * v1.0.1: the room is TEAM-LEVEL (the team id itself), no longer team+project.
+ * The whole team shares one room regardless of which project each member has
+ * open — so team chat / presence / preview sharing no longer require an open
+ * project, and switching projects no longer drops the session (or an active
+ * call). Expiry is enforced here too (defense in depth for the reconnect path).
  */
 export async function startCollabSession(): Promise<void> {
   if (!COLLAB_ENABLED) return
-  const teamId = useBillingStore.getState().teamMemberOf
-  if (!teamId) return
-  // Per-project scope: no open project → no room. A teammate in a DIFFERENT
-  // project must not appear online (the room key isolates them), and someone
-  // on the Welcome screen is in NO room at all.
-  const projectPath = activeProjectPath()
-  if (!projectPath) {
-    stopCollabSession()
-    return
-  }
-  const room = `${teamId}~${await deriveProjectRoomKey(projectPath)}`
+  const billing = useBillingStore.getState()
+  const teamId = billing.teamMemberOf
+  if (!teamId || !isTeamCollabActive(billing)) return
+  const room = teamId
   // Synchronous guard: a session for this room is already live OR being opened.
   // (Two rapid calls both awaiting the key resolve to the SAME room string, so
   // the second lands here and bails; a project switch mid-flight is rescued by
@@ -229,6 +181,11 @@ export async function startCollabSession(): Promise<void> {
         // ongoing call/presentation.
         replayVoiceStateTo(peer.peerId)
         replayScreenStateTo(peer.peerId)
+        // Re-arm screen media across a transient rebuild: presenter re-feeds a
+        // parked watcher's track; watcher re-requests the presenter's stream.
+        // (No-op on a genuine first connect.) Fixes the permanent freeze after
+        // any ICE drop → relay → rebuild.
+        onScreenPeerReconnected(peer.peerId)
         // Replay our path classification: it computes at ICE 'connected',
         // milliseconds BEFORE the channels open — the eager send in
         // onPeerPath can race a closed channel and drop.
@@ -327,9 +284,6 @@ export async function startCollabSession(): Promise<void> {
     attachVoiceTransport(mediaTransport, () => selfIdentity())
     attachScreenTransport(mediaTransport, () => selfIdentity())
 
-    // Rehydrate recent local chat history for continuity (best-effort).
-    void loadChatHistory()
-
     // Durable offline delivery: drain any messages queued in RTDB while we were
     // offline, and keep receiving ones that land later. onChatReceived dedups by
     // id, so a message we already have (P2P / disk) won't show twice.
@@ -367,20 +321,6 @@ function scheduleReconnect(): void {
   }, delay)
 }
 
-async function loadChatHistory(): Promise<void> {
-  const projectPath = activeProjectPath()
-  if (!projectPath) return
-  const lines = await CollabService.chatLoad(projectPath)
-  // Dedupe on load: the JSONL is append-only and (pre-fix) replays appended
-  // the same message repeatedly — setChat with duplicated ids means duplicated
-  // React keys in both chat panels. Keeping the first occurrence heals old
-  // transcripts without needing a rewrite primitive on the Rust side.
-  const messages = dedupeChatById(
-    lines.map(parseStoredChat).filter((m): m is ChatMessage => m !== null),
-  )
-  if (messages.length > 0) useCollabStore.getState().setChat(messages)
-}
-
 /** Auto-rejoin the voice call after a self-healed reconnect (consume-once).
  *  Fires on the first healthy presence; joinVoiceCall itself surfaces mic
  *  errors, so this only announces the success case. */
@@ -396,10 +336,15 @@ function maybeRejoinVoice(): void {
   })
 }
 
-/** Tear down the session (team switch, leave, sign-out, project close).
- *  Intentional by definition — also disarms any pending voice auto-rejoin. */
+/** Tear down the session (team switch, leave, sign-out, plan expiry, app close).
+ *  Intentional by definition — also disarms any pending voice auto-rejoin AND
+ *  closes the Team Chat drawer, so when the team plan lapses the whole team
+ *  surface (chat included) disappears rather than lingering open + disconnected.
+ *  NOT called on transient reconnects (those go through teardownSession), so a
+ *  network blip never closes your open chat. */
 export function stopCollabSession(): void {
   voiceRejoin = null
+  useCollabStore.getState().setChatOpen(false)
   teardownSession()
 }
 
@@ -454,31 +399,29 @@ function teardownSession(): void {
 }
 
 // ── Team chat ──────────────────────────────────────────────────────────────
-
-function persistChat(msg: ChatMessage): void {
-  const projectPath = activeProjectPath()
-  if (!projectPath) return // in-memory only when no project is open
-  void CollabService.chatAppend(projectPath, JSON.stringify(msg))
-}
+//
+// Chat is EPHEMERAL P2P (v1.0.1): no on-disk transcript. It used to be persisted
+// per-project (collab/chat.jsonl), but team chat is no longer tied to a project —
+// so it now lives purely in memory (capped by collabStore) with cross-session
+// continuity provided by the P2P replay of the sender's recent messages to late
+// joiners + the RTDB offline queue. Dropping the per-project persistence is what
+// decouples chat from the open project.
 
 function onChatReceived(msg: ChatMessage): void {
   const store = useCollabStore.getState()
   // Re-deliveries are ROUTINE, not exceptional: the P2P replay re-sends the
   // sender's recent messages to every late joiner, and the RTDB offline queue
-  // can hand us a message that already arrived P2P. addChat always deduped the
-  // UI — but persisting unconditionally appended a duplicate JSONL line per
-  // re-delivery, which came back as a duplicated transcript (duplicate React
-  // keys) on the next load. Drop known ids before ANY side effect.
+  // can hand us a message that already arrived P2P. addChat dedups the UI; we
+  // drop known ids here too so the chime doesn't fire twice for one message.
   if (store.chat.some((m) => m.id === msg.id)) return
   const wasOpen = store.chatOpen
   store.addChat(msg)
-  persistChat(msg)
   // Short chime to wake the user to an incoming message — ONLY when the chat
   // panel is closed (an open panel already shows the message).
   if (!wasOpen) playMessageChime()
 }
 
-/** Send a chat message to the team: broadcast P2P + echo locally + persist. */
+/** Send a chat message to the team: broadcast P2P + echo locally. */
 export function sendChatMessage(text: string): void {
   const trimmed = text.trim()
   if (!trimmed || !mesh) return
@@ -492,7 +435,6 @@ export function sendChatMessage(text: string): void {
   }
   mesh.broadcastControl(buildChatControl(msg))
   useCollabStore.getState().addChat(msg)
-  persistChat(msg)
   // Queue in RTDB for teammates who weren't online to get it P2P (offline
   // delivery). Best-effort + no-op when RTDB isn't configured.
   void enqueueForOffline(msg)

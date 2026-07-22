@@ -3,7 +3,8 @@ import { Box, Button, Flex, Text } from '@chakra-ui/react'
 import { VscBroadcast, VscComment, VscGlobe } from 'react-icons/vsc'
 import { useTranslation } from '@/i18n'
 import { tokens } from '@/theme/tokens'
-import { canShareCode, useCollabStore, type LivePreview } from '@/stores/collabStore'
+import { useCollabStore, type LivePreview } from '@/stores/collabStore'
+import { useBillingStore, isTeamCollabActive } from '@/stores/billingStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { stopLivePreview } from '@/services/collab/collabSessionService'
 import { startAndShareLivePreview } from '@/services/collab/livePreviewHost'
@@ -23,7 +24,15 @@ import { openPreview } from '@/services/collab/previewViewerService'
  * `compact` (Source-Control panel) renders icon-only chips; the default
  * (Chat header) adds text labels now that there's room for them.
  */
-export function CollabShareControls({ compact = false }: { compact?: boolean }) {
+/**
+ * `previewOnly` (v1.0.1): render ONLY the project-scoped preview affordances
+ * (share Live Preview + open incoming previews) and drop the Chat/presence chip.
+ * The chat + online count are now redundant with the persistent WelcomeSidebar
+ * team section — keeping them in the per-project chat toolbar duplicated the
+ * same session. Live Preview share stays because it IS project-scoped (it shares
+ * THIS project's running dev server).
+ */
+export function CollabShareControls({ compact = false, previewOnly = false }: { compact?: boolean; previewOnly?: boolean }) {
   const t = useTranslation()
   const connected = useCollabStore((s) => s.connected)
   const peers = useCollabStore((s) => s.peers)
@@ -35,8 +44,12 @@ export function CollabShareControls({ compact = false }: { compact?: boolean }) 
   const starting = useCollabStore((s) => s.startingPreview)
   const [shareOpen, setShareOpen] = useState(false)
   const [offersOpen, setOffersOpen] = useState(false)
+  // Reactive: subscribe to the team-plan gate so these controls VANISH the
+  // instant the plan expires — not only when the session teardown happens to
+  // re-render us. Same predicate the CreditIndicator/SettingsView use.
+  const teamActive = useBillingStore(isTeamCollabActive)
 
-  if (!canShareCode()) return null
+  if (!teamActive) return null
 
   // Live Preview click: while live → open the stop dropdown; while idle → start
   // the dedicated 7773 server and share (handled by livePreviewHost).
@@ -77,28 +90,33 @@ export function CollabShareControls({ compact = false }: { compact?: boolean }) 
         onClick={onLivePreviewClick}
       />
 
-      {/* Chat — with merged online-presence count + unread badge */}
-      <Chip
-        icon={<VscComment size={13} />}
-        label={compact ? undefined : t('team.chatLabel')}
-        title={t('team.chatTitle')}
-        active={chatOpen}
-        onClick={() => setChatOpen(!chatOpen)}
-        trailing={
-          <Flex align="center" gap="3px">
-            <Box
-              w="6px"
-              h="6px"
-              borderRadius="full"
-              bg={connected ? tokens.colors.accent.greenBright : tokens.colors.text.disabled}
-            />
-            <Text fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.text.muted}>
-              {peers.length}
-            </Text>
-          </Flex>
-        }
-        badge={chatUnread > 0 ? chatUnread : undefined}
-      />
+      {/* Chat — with merged online-presence count + unread badge. Hidden in
+          previewOnly mode: chat + presence now live in the WelcomeSidebar team
+          section (project-independent, persistent), so showing them here too was
+          a redundant second surface for the same session. */}
+      {!previewOnly && (
+        <Chip
+          icon={<VscComment size={13} />}
+          label={compact ? undefined : t('team.chatLabel')}
+          title={t('team.chatTitle')}
+          active={chatOpen}
+          onClick={() => setChatOpen(!chatOpen)}
+          trailing={
+            <Flex align="center" gap="3px">
+              <Box
+                w="6px"
+                h="6px"
+                borderRadius="full"
+                bg={connected ? tokens.colors.accent.greenBright : tokens.colors.text.disabled}
+              />
+              <Text fontSize="10px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.text.muted}>
+                {peers.length}
+              </Text>
+            </Flex>
+          }
+          badge={chatUnread > 0 ? chatUnread : undefined}
+        />
+      )}
 
       {/* Incoming live previews */}
       {livePreviews.length > 0 && (

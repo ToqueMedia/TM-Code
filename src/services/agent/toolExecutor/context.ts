@@ -30,6 +30,11 @@ export interface ToolRegistrationContext {
   // ── Project root ───────────────────────────────────────────────────
   getProjectRoot(): string
 
+  // ── Identidade da tarefa paralela dona deste executor (isolated child) ──
+  // null no agente principal. Ferramentas interativas usam-na para escrever
+  // os cards NA SESSÃO da tarefa e etiquetar os pedidos (badge nas rows).
+  getTaskOrigin(): { taskId: string; label: string; sessionId?: string } | null
+
   // ── Path validation (returns normalized path) ──────────────────────
   validatePathWithinProject(filePath: string): string
 

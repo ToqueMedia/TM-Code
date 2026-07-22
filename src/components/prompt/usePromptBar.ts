@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useSyncExternalStore } from 'react'
-import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, flushBufferedDeltas, resolveAllPendingDiffApprovals, generateId } from '../../stores/chatStore'
+import { useChatStore, appendTextDeltaBuffered, flushBufferedDeltas, generateId } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { MODEL_PROFILES, getProfileForPlan } from '../../services/agent/modelProfiles'
 import { describeImagesViaSidecar } from '../../services/agent/visionSidecar'
@@ -10,16 +10,14 @@ import { useByokStore } from '../../stores/byokStore'
 import { useAuthStore } from '../../stores/authStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
-import { useProblemsStore } from '../../stores/problemsStore'
 import { useToastStore } from '../../stores/toastStore'
+import { addParallelTask, addSessionAgentRun } from '../../services/agent/parallelTasks/parallelTaskManager'
+import { useParallelTaskStore } from '../../stores/parallelTaskStore'
 import { activatePreview, detectDevCommand, ensureDevServerRunning } from '../../services/previewActivation'
 import { devServerManager } from '../../services/devServerManager'
 import { improveUserPrompt } from '../../services/promptImprovementService'
 import AgentService from '../../services/agent/agentService'
-import ToolExecutor from '../../services/agent/toolExecutor'
-import ContextBuilder from '../../services/agent/contextBuilder'
-import { classifyIntent } from '../../services/agent/intentRouter'
-import MCPService from '../../services/mcp/mcpService'
+import { refreshMcpForDispatch, buildMainSystemPrompt, appendVolatileToUserContent, buildMainLoopCallbacks, estimateTokensFromText, estimateTokensFromValue } from '../../services/agent/mainDispatch'
 import { browserSession } from '../../services/browserSessionManager'
 import { isSlashCommandAllowedForPlan, slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
 import { useRequiredToolsStore, selectAgentBlocked, selectMissingTools } from '../../stores/requiredToolsStore'
@@ -33,7 +31,6 @@ import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAt
 import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from '../../services/agent/atMentions'
 import {
   enqueue as enqueueMessage,
-  drainSteerableMessages,
   joinPromptValues,
   setQueuePaused,
 } from '../../services/agent/messageQueue'
@@ -63,23 +60,8 @@ import {
 } from '../../services/agent/tmsBootstrap'
 import { getTmsTurnTelemetry, markOriginalTaskFailed } from '../../services/agent/tmsContext'
 
-/**
- * ServiceError codes that mean "transient upstream / network problem the user
- * can recover from by re-sending Continue". When `agentService.runAgentLoop`
- * fires onError with one of these, we add a recovery-hint system message to
- * the transcript so the user knows what to do — and so the hint persists
- * across reloads (chat-store messages are sanitized + saved).
- *
- * Pure code-based detection — no string matching. New error sources should
- * extend this set rather than reach for a regex on the human message.
- */
-const RECOVERABLE_UPSTREAM_CODES = new Set<string>([
-  'SERVER_ERROR',     // 5xx from worker / cloud BYOK
-  'NETWORK_ERROR',    // fetch retry exhausted
-  'BYOK_LOCAL_ERROR', // local provider (Ollama / LM Studio) unreachable
-  'STREAM_ERROR',     // SSE error event mid-turn
-])
-
+// RECOVERABLE_UPSTREAM_CODES + a mensagem de erro recuperável migraram para o
+// núcleo único (mainDispatch.buildMainLoopCallbacks, FUSÃO F2).
 import { logger } from '../../utils/logger'
 
 function resolveByokNativeVision(snapshot: ByokSessionSnapshot | null): boolean | null {
@@ -136,18 +118,44 @@ export function usePromptBar() {
   const queryGuard = getQueryGuard()
   const isAgentBusy = useSyncExternalStore(queryGuard.subscribe, queryGuard.getSnapshot)
 
+  // ── Fase 2 (modelo foreground) ──
+  // Há tarefas paralelas vivas? Mantém o toggle "Nova tarefa" disponível
+  // mesmo com o main idle (lançar a 2ª/3ª tarefa não exige um run principal).
+  const anyLiveTask = useParallelTaskStore(s => {
+    for (const r of s.runs.values()) {
+      if (r.status === 'running' || r.status === 'queued') return true
+    }
+    return false
+  })
+  // A sessão VISÍVEL é de uma tarefa viva? O Stop do composer é posicional:
+  // para o run desta vista, não o global.
+  const activeSessionIdForRun = useChatStore(s => s.activeSessionId)
+  const viewedTaskBusy = useParallelTaskStore(s => {
+    if (!activeSessionIdForRun) return false
+    for (const r of s.runs.values()) {
+      if (r.sessionId === activeSessionIdForRun && (r.status === 'running' || r.status === 'queued')) return true
+    }
+    return false
+  })
+
   // Reset the Steer/Task toggle whenever the agent goes idle — the toggle
   // only has meaning against a live run, and the parity default (steer)
   // must be restored for the next one.
   useEffect(() => {
-    if (!isAgentBusy) setQueueAsTask(false)
-  }, [isAgentBusy])
+    if (!isAgentBusy && !anyLiveTask) setQueueAsTask(false)
+  }, [isAgentBusy, anyLiveTask])
 
   // Sidebar "+ Nova tarefa" (and any other surface) can request task mode +
   // focus without reaching into this hook's local state.
   useEffect(() => {
     const onNewTask = () => {
-      if (!getQueryGuard().getSnapshot()) return
+      const tasksAlive = (() => {
+        for (const r of useParallelTaskStore.getState().runs.values()) {
+          if (r.status === 'running' || r.status === 'queued') return true
+        }
+        return false
+      })()
+      if (!getQueryGuard().getSnapshot() && !tasksAlive) return
       setQueueAsTask(true)
       // Defer focus so the composer re-render (toggle visible) lands first.
       requestAnimationFrame(() => textareaRef.current?.focus())
@@ -662,6 +670,19 @@ export function usePromptBar() {
     }
     const bootstrapOnly = tmsPreflight?.shouldBootstrap === true
 
+    // claude-vaz parity: a missing TMS.md never blocks or redirects the task
+    // (shouldBootstrap is permanently false for 'missing' — see tmsBootstrap).
+    // Instead, surface the /init hint ONCE per project open. noTmsFile is only
+    // set when the project has meaningful content (projectHasContent.ts), so
+    // empty folders don't get nagged — same gating as claude-vaz onboarding.
+    if (tmsPreflight?.reason === 'missing') {
+      const projectStoreState = useProjectStore.getState()
+      if (projectStoreState.noTmsFile) {
+        projectStoreState.setNoTmsFile(false)
+        chatStore.addSystemMessage(t('common.noTmsFile'), 'info')
+      }
+    }
+
     if (!runOptions?.reuseAssistantMessage) {
       chatStore.startAssistantMessage(
         AgentService.getInstance().isThinkingRequestedForNextTurn(),
@@ -773,67 +794,24 @@ export function usePromptBar() {
     let hadError = false
 
     try {
-      // Refresh MCP tools before building prompt (handles mid-session server changes)
-      const mcpService = MCPService.getInstance()
-      const mcpTools = mcpService.getAllTools()
-      if (mcpTools.length > 0) {
-        const toolExecutor = ToolExecutor.getInstance()
-        toolExecutor.registerMCPTools(
-          mcpTools,
-          browserSession.wrapCallTool((serverName, toolName, args) =>
-            mcpService.callTool(serverName, toolName, args),
-          ),
-        )
-        AgentService.getInstance().refreshTools()
-      }
-
-      // Build system prompt with MCP tool info for the tool_routing section
-      const contextBuilder = ContextBuilder.getInstance()
-      const mcpToolSummaries = mcpTools.map(t => ({
-        name: t.name,
-        description: t.description,
-        serverName: t.serverName,
-      }))
-      const coreToolCount = ToolExecutor.getInstance().getCoreToolCount()
-      // Pass the raw user text so contextBuilder can detect skill-trigger
-      // hashtags (#design, etc.) and inline the corresponding
-      // CRITICAL skill rules at turn 1.
+      // FUSÃO F1 (2026-07-18): montagem do prompt no NÚCLEO ÚNICO
+      // (mainDispatch) — a mesma função que serve o agentRunner e as
+      // tarefas. Este bloco era o gémeo que divergiu 3× (steering, volátil,
+      // classificador); a doutrina vive no cabeçalho do módulo.
+      const mcpToolSummaries = refreshMcpForDispatch()
       const userMessageText = bootstrapOnly && tmsPreflight
         ? buildTmsBootstrapOnlyPrompt(tmsPreflight, display.text)
         : display.text
       const rawHistory = bootstrapOnly
         ? historyBeforeCurrentUser
         : (runOptions?.conversationHistoryOverride ?? useChatStore.getState().conversationHistory)
-      // Intent Router: classify the user's intent via a lightweight model
-      // call (qwen3.7-plus, no tools, non-streaming) BEFORE assembling the
-      // system prompt. The result feeds the context builder (prompt profile +
-      // on-demand auxiliaries) and — via lastAuxiliarySelection — the
-      // ToolsetSelector (bound toolset + readOnly + requiresMutation).
-      // Replaces regex/keyword
-      // intent inference per the `no-regex-for-inference` rule. Never throws;
-      // on failure it falls back to { bugfix_local, readOnly:false } and
-      // buildSystemPrompt then uses the deterministic keyword classifier.
-      const intentStart = Date.now()
-      const intent = bootstrapOnly
-        ? {
-            profile: 'project_bootstrap' as const,
-            readOnly: false,
-            requiresMutation: true,
-            source: 'keyword' as const,
-            confidence: 'high' as const,
-            reason: 'TMS.md bootstrap preflight selected project_bootstrap before the original task',
-          }
-        : await classifyIntent(userMessageText, {
-            hasImage: display.attachments.some(a => a.type === 'image'),
-            conversationHistory: rawHistory,
-          })
-      const effectiveIntent = intent
-      AgentService.getInstance().clearPostTmsBootstrapToolProfile()
-      logger.info(
-        'agent',
-        `→ Intent router: profile=${effectiveIntent.profile} readOnly=${effectiveIntent.readOnly} requiresMutation=${effectiveIntent.requiresMutation} (${effectiveIntent.source}, ${Date.now() - intentStart}ms) — ${effectiveIntent.reason}`,
-      )
-      const systemPrompt = await contextBuilder.buildSystemPrompt(projectPath, projectType, mcpToolSummaries, coreToolCount, userMessageText, AgentService.getInstance().getAccessedFilePaths(), { profile: effectiveIntent.profile, readOnly: effectiveIntent.readOnly, requiresMutation: effectiveIntent.requiresMutation, reason: effectiveIntent.reason, source: effectiveIntent.source, confidence: effectiveIntent.confidence, error: effectiveIntent.error, diagnostics: effectiveIntent.diagnostics })
+      const systemPrompt = await buildMainSystemPrompt({
+        projectPath,
+        projectType,
+        userMessageText,
+        bootstrapOnly,
+        mcpToolSummaries,
+      })
 
       // The history is canonical (carries content parts when previous
       // turns had images). Downgrade to text if the active model is
@@ -844,195 +822,28 @@ export function usePromptBar() {
       const agentService = AgentService.getInstance()
       agentService.setSystemPrompt(systemPrompt)
 
-      // Novo pedido → zera a stat de display "último pedido" (paridade com
-      // agentRunner; a contabilidade real vive no worker ai-pass-through).
-      useBillingStore.getState().resetLastRequestStats()
+      // FUSÃO F1: apêndice do volátil no núcleo único.
+      userContent = appendVolatileToUserContent(userContent, { surface: 'chat' }) as typeof userContent
 
-      let streamedAssistantText = ''
+      // FUSÃO F2 (2026-07-18): callbacks do loop no NÚCLEO ÚNICO
+      // (buildMainLoopCallbacks). Este objeto inline era o gémeo do
+      // agentRunner e divergiu em 9 pontos (o Chat perdera onReasoningComplete,
+      // providerState, guard de dupla-finalização, fecho do tracker,
+      // celebração e o ?? 0 defensivo). onErrorSignal liga o hadError deste
+      // caminho (para a fila + suprime o re-dispatch do bootstrap).
+      const initialPromptEstimate = estimateTokensFromText(systemPrompt)
+        + estimateTokensFromValue(history)
+        + estimateTokensFromValue(userContent)
       await agentService.runAgentLoop(userContent, history, {
-        onTextDelta: (delta) => {
-          agentStore.setStatus('generating')
-          streamedAssistantText += delta
-          appendTextDeltaBuffered(delta)
-        },
-        onReasoningDelta: (delta) => {
-          agentStore.setStatus('reasoning')
-          appendReasoningDeltaBuffered(delta)
-        },
-        onToolCallPending: (toolId, toolName) => {
-          flushBufferedDeltas()
-          agentStore.setStatus('applying')
-          useChatStore.getState().addPendingToolCall(toolId, toolName)
-        },
-        onToolCallStart: (toolId, _toolName, args) => {
-          useChatStore.getState().updateToolCallWithArgs(toolId, args)
-        },
-        onToolResult: (toolId, _toolName, result, isError) => {
-          useChatStore.getState().updateToolCallWithResult(toolId, result, isError)
-          agentStore.setStatus('awaiting_response')
-        },
-        onTurnComplete: () => {
-          useChatStore.getState().incrementTurnCount()
-        },
-        onDone: async (finalText) => {
-          flushBufferedDeltas()
-          if (finalText && finalText !== streamedAssistantText) {
-            const suffix = finalText.startsWith(streamedAssistantText)
-              ? finalText.slice(streamedAssistantText.length)
-              : finalText
-            if (suffix) {
-              appendTextDeltaBuffered(suffix)
-              flushBufferedDeltas()
-            }
-          }
-          const keepAssistantOpenForOriginalTask =
-            bootstrapOnly &&
-            (() => {
-              const tms = getTmsTurnTelemetry()
-              return tms.tmsCreated || tms.tmsAlreadyExists
-            })()
-          if (!keepAssistantOpenForOriginalTask) {
-            useChatStore.getState().finalizeAssistantMessage()
-          }
-          agentStore.setStatus(keepAssistantOpenForOriginalTask ? 'awaiting_response' : 'idle')
-
-          // Re-scan project diagnostics after agent finishes
-          useProblemsStore.getState().scanProject().catch(() => {})
-
-          const layoutStore = useLayoutStore.getState()
-
-          // If a preview server is running, keep it fresh but do not switch
-          // views. Chat-mode completion stays in Chat; the assistant's final
-          // answer tells the user to click Preview when they want to inspect it.
-          if (selectIsPreviewServerRunning(layoutStore)) {
-            layoutStore.reloadPreview()
-          }
-        },
-        onError: (error) => {
-          flushBufferedDeltas()
-          resolveAllPendingDiffApprovals(false)
-          if (AgentService.getInstance().isAborted()) {
-            agentStore.setError(null)
-            agentStore.setStatus('cancelled')
-            useChatStore.getState().finalizeAssistantMessage()
-            hadError = true
-            return
-          }
-          agentStore.setStatus('error')
-          agentStore.setError(error.message)
-          useChatStore.getState().finalizeAssistantMessage()
-          hadError = true
-
-          // Surface a "what happened + how to recover" system message for the
-          // error classes that the user can recover from by re-running the
-          // same prompt or sending "Continue". All onError callers in
-          // agentService.ts now throw ServiceError with a known `code` —
-          // no regex / string-matching here. If a new code needs the same
-          // UX, add it to RECOVERABLE_UPSTREAM_CODES at the top of this file
-          // and the surface message picks it up.
-          const errorCode = (error as { code?: string }).code ?? 'UNKNOWN_ERROR'
-          if (RECOVERABLE_UPSTREAM_CODES.has(errorCode)) {
-            useChatStore.getState().addSystemMessage(
-              t('chat.recoverableUpstreamError'),
-              'error',
-            )
-          }
-        },
-        onUsageUpdate: (inputTokens, outputTokens) => {
-          useChatStore.getState().addTokenUsage(inputTokens, outputTokens)
-          // Display-only ("último pedido" em ApiKeysSection). A cobrança real
-          // é exclusiva do worker ai-pass-through — ver billingStore.ts.
-          useBillingStore.getState().addLastRequestTokens(inputTokens + outputTokens)
-        },
-        onRequestUsage: (entry) => {
-          // Persist per-provider-call usage for session export. Serialized
-          // runs wire this through in agentRunner; this direct AgentService
-          // path must bridge the callback here as well.
-          try { useChatStore.getState().addRequestUsage(entry) } catch { /* observability never blocks */ }
-        },
-        onContextCompression: (event) => {
-          if (event.type === 'hooks_start') {
-            agentStore.setCompactPhase(event.hookType === 'pre_compact' ? 'hooks_pre' : 'hooks_post')
-          } else if (event.type === 'compact_start') {
-            agentStore.setCompactPhase('compressing')
-            agentStore.setStatus('compressing')
-          } else if (event.type === 'compact_end') {
-            agentStore.setCompactPhase('idle')
-            agentStore.setStatus('awaiting_response')
-            useChatStore.getState().addCompactBoundaryMessage(event.beforeTokens, event.trigger, event.messagesSummarized, event.summary)
-          }
-        },
-        // ── Queued-message steering (claude-vaz parity) ──
-        // The query loop calls this at every turn boundary. WITHOUT it, a
-        // message the user queues mid-run (QueuedMessagesPreview) sits in the
-        // queue until the WHOLE run goes idle — because the idle drain
-        // (useQueueProcessor) is gated on `!isQueryActive` and can't fire while
-        // the QueryGuard is held. That was the "queued messages só entram no
-        // chat depois do agente terminar" bug: one dispatch path wired this
-        // collector (agentRunner.ts) but this direct path did not, so
-        // `agentService` got `collectQueuedSteering: undefined` and the
-        // per-turn drain in query.ts was a no-op. Draining here rides the
-        // steered message onto the NEXT turn of the live run. This path is
-        // always foreground (runAgentForPrompt), so there's no background gate.
-        collectSteeringMessages: async (): Promise<string | OpenAIContentPart[] | null> => {
-          // Sub-agent results are PUSHED here (never polled): finished team
-          // members queue their formatted reports and the live run picks them
-          // up at this turn boundary.
-          const { drainSubAgentDeliveries } = await import('../../services/agent/subAgents/autoWake')
-          const deliveries = drainSubAgentDeliveries()
-          const withDeliveries = (
-            v: string | OpenAIContentPart[],
-          ): string | OpenAIContentPart[] =>
-            !deliveries
-              ? v
-              : typeof v === 'string'
-                ? `${deliveries}\n\n${v}`
-                : [{ type: 'text', text: deliveries }, ...v]
-
-          // Only steerable messages BEFORE the first queued task ride the
-          // live run (drainSteerableMessages): slash/bash need
-          // executeInput's per-command handling, tasks wait for the idle
-          // drain, and a steer message the user reordered BELOW a task
-          // belongs to that task's run — not to this one.
-          const drained = drainSteerableMessages()
-          if (drained.length === 0) return deliveries
-
-          // Coalesce a burst into ONE steered turn (joinPromptValues preserves
-          // block ordering, same as the queue's batched dispatch).
-          const merged =
-            drained.length > 1
-              ? joinPromptValues(drained.map(c => c.value))
-              : drained[0]!.value
-          const display = extractDisplayFromValue(merged)
-          const blocks = typeof merged === 'string' ? undefined : merged
-
-          const cs = useChatStore.getState()
-          cs.splitForQueuedMessage(display.text, display.attachments, blocks)
-
-          // Model-facing content. Keep the same native-vision vs sidecar split
-          // as the initial send path; otherwise a queued image sent mid-run is
-          // silently degraded to text even when the active BYOK model can see.
-          if (planAllowsImagePipeline && display.attachments.some(a => a.type === 'image')) {
-            const parts = await buildContentParts(merged, promptResolvers)
-            if (parts && activeModelSupportsImageParts) return withDeliveries(parts)
-            if (parts) {
-              const description = await describeImagesViaSidecar(parts)
-              if (description) {
-                const textOnly = await buildAugmentedPrompt(merged, promptResolvers)
-                return withDeliveries(`${textOnly}\n\n<image_description source="image-analysis">\n${description}\n</image_description>`)
-              }
-            }
-          }
-
-          // Text-only fallback. buildAugmentedPrompt resolves file/folder
-          // attachments to XML and image attachments to placeholders.
-          // @-mentions are intentionally not re-resolved here.
-          const text = await buildAugmentedPrompt(merged, {
-            resolveAttachmentXml: resolveAttachments,
-            resolveImageDataUri: resolveImageToDataUri,
-          })
-          return withDeliveries(text && text.trim().length > 0 ? text : display.text)
-        },
+        ...buildMainLoopCallbacks({
+          surface: 'chat',
+          isBackgroundRun: false,
+          bootstrapOnly,
+          initialPromptEstimate,
+          planAllowsImagePipeline,
+          activeModelSupportsImageParts,
+          onErrorSignal: () => { hadError = true },
+        }),
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -1048,6 +859,13 @@ export function usePromptBar() {
       useChatStore.getState().addSystemMessage(`A tarefa não pôde continuar: ${message}`, 'error')
       hadError = true
     }
+
+    // Restore the preview pane if a browser-driven session hid it (capture_url_design
+    // or MCP browser tools call beginSession mid-run). Parity with agentRunner's
+    // finally — THIS is the dispatch path conversational design-copy runs through,
+    // so without it the user parked in Preview never got their view back. No-op
+    // when no browser session is active.
+    browserSession.endSession()
 
     if (!hadError && bootstrapOnly) {
       const tms = getTmsTurnTelemetry()
@@ -1149,6 +967,25 @@ export function usePromptBar() {
     if (slashCommandRegistry.isSlashCommand(prompt)) {
       const command = slashCommandRegistry.getCommand(prompt)
       if (!command) return
+
+      // Limitação #1 eliminada (ronda crítica 2026-07-16): slash commands
+      // operam a MAIN machinery sobre a sessão ativa — sobre o chat de uma
+      // tarefa VIVA seriam no-ops confusos (/compact não alcança o engine da
+      // tarefa) ou runs cruzados. Bloqueio honesto; steering continua a ser
+      // o canal para falar com a tarefa.
+      {
+        const activeId = useChatStore.getState().activeSessionId
+        if (activeId) {
+          for (const r of useParallelTaskStore.getState().runs.values()) {
+            if (r.sessionId === activeId && (r.status === 'running' || r.status === 'queued')) {
+              useChatStore.getState().setDraftInput('')
+              clearDraftAttachments()
+              useChatStore.getState().addSystemMessage(t('parallel.slashBlocked'), 'warn')
+              return
+            }
+          }
+        }
+      }
 
       if (!command.enabled) {
         useChatStore.getState().setDraftInput('')
@@ -1255,6 +1092,84 @@ export function usePromptBar() {
       }
     }
 
+    // ── Fase 3 (modelo foreground): composer fala com a SESSÃO EM FOCO ──
+    // Sessão de uma tarefa paralela viva ativa → a mensagem steera ESSA
+    // tarefa: bolha escrita já no chat dela, texto drenado pelo runner no
+    // próximo turn boundary (paridade com o steering do main). Corre ANTES
+    // do setQueuePaused(false): orientar uma tarefa não pode despausar a
+    // fila do MAIN. "Nova tarefa" (queueAsTask) tem precedência — lança
+    // outra tarefa em vez de steerar.
+    if (!queueAsTask) {
+      const activeId = useChatStore.getState().activeSessionId
+      if (activeId) {
+        const taskStore = useParallelTaskStore.getState()
+        for (const r of taskStore.runs.values()) {
+          if (r.sessionId === activeId && (r.status === 'running' || r.status === 'queued')) {
+            useChatStore.getState().appendMessageToSession(activeId, { role: 'user', content: prompt })
+            taskStore.enqueueSteer(r.id, prompt)
+            // RACE (H42, ronda crítica): a tarefa pode terminar entre o check
+            // acima e o enqueue — o sweep do runner já correu e a orientação
+            // ficaria órfã em silêncio. Se o run já não está vivo, drena o
+            // resto e avisa já.
+            {
+              const now = useParallelTaskStore.getState().runs.get(r.id)
+              if (now && now.status !== 'running' && now.status !== 'queued' && now.steerQueue.length > 0) {
+                useParallelTaskStore.getState().drainSteer(r.id)
+                useChatStore.getState().appendMessageToSession(activeId, {
+                  role: 'system',
+                  level: 'warn',
+                  content: t('parallel.steerUndelivered'),
+                })
+              }
+            }
+            if (useChatStore.getState().draftAttachments.length > 0) {
+              // Steering de tarefa é (por agora) só texto — sê honesto sobre
+              // o que NÃO seguiu em vez de deixar anexos cair em silêncio.
+              useChatStore.getState().appendMessageToSession(activeId, {
+                role: 'system',
+                level: 'warn',
+                content: t('parallel.steerAttachmentsIgnored'),
+              })
+            }
+            useChatStore.getState().setDraftInput('')
+            clearDraftAttachments()
+            logger.info('queue', `Task steer enqueued for ${r.id}: "${prompt.slice(0, 50)}"`)
+            return
+          }
+        }
+      }
+    }
+
+    // ── Doutrina "sem deus" (2026-07-17): sessão IDLE em foco + run
+    // interativo vivo NOUTRA sessão → esta mensagem lança o AGENTE DESTA
+    // sessão (continuação com histórico, via runner paralelo) em vez de ir
+    // para a fila — a fila drena como STEERING do run da OUTRA sessão, que
+    // era o buraco posicional (a tua mensagem na vista B orientava o run de
+    // A). Sessão do run em prep (streamingSessionId ainda null) cai na fila
+    // como antes — janela de milissegundos, residual documentado.
+    if (!queueAsTask) {
+      const chatNow = useChatStore.getState()
+      const activeId = chatNow.activeSessionId
+      const streamingId = chatNow.streamingSessionId
+      if (activeId && streamingId && streamingId !== activeId && getQueryGuard().getSnapshot()) {
+        if (chatNow.draftAttachments.length > 0) {
+          chatNow.appendMessageToSession(activeId, {
+            role: 'system',
+            level: 'warn',
+            content: t('parallel.steerAttachmentsIgnored'),
+          })
+        }
+        const launched = addSessionAgentRun(activeId, prompt)
+        if (launched) {
+          useChatStore.getState().setDraftInput('')
+          clearDraftAttachments()
+          logger.info('queue', `Session agent launched on ${activeId}: "${prompt.slice(0, 50)}"`)
+        }
+        // launched=null → billing recusou e o addSessionAgentRun já anotou.
+        return
+      }
+    }
+
     // A manual send is an explicit "continue" — lift any queue pause left
     // by Stop / budget stop / task rehydrate before this message queues.
     setQueuePaused(false)
@@ -1275,6 +1190,22 @@ export function usePromptBar() {
       value = blocks
     }
 
+    // "New task" toggle → launch a CONCURRENT parallel task agent (v1.0.1
+    // multi-agent) instead of enqueuing a serial run. Up to 4 run at once; the
+    // rest wait in the parallel-task queue. These are independent writable
+    // agents rendered as cards (ParallelTasksDock), so they run ALONGSIDE the
+    // main interactive chat without touching its transcript/streaming.
+    if (queueAsTask) {
+      const taskPrompt = typeof value === 'string' ? value : prompt
+      if (taskPrompt.trim()) {
+        addParallelTask(taskPrompt)
+        useChatStore.getState().setDraftInput('')
+        clearDraftAttachments()
+        logger.info('queue', `Parallel task launched: "${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}"`)
+      }
+      return
+    }
+
     // The queued message lives only in the queue (rendered by
     // QueuedMessagesPreview above the input). The chat bubble is created
     // freshly when executeQueuedInput dispatches via runAgentForPrompt —
@@ -1286,16 +1217,13 @@ export function usePromptBar() {
       mode: 'prompt',
       priority: 'next',
       uuid: generateId('queued'),
-      // Steer/Task toggle: tasks skip the per-turn steering drain and are
-      // dispatched as their own run by the idle drain (queueProcessor).
-      ...(queueAsTask ? { asTask: true } : {}),
     })
 
     // Clear input immediately — message is in the queue
     useChatStore.getState().setDraftInput('')
     clearDraftAttachments()
 
-    logger.info('queue', `Message enqueued${queueAsTask ? ' as task' : ''}: "${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}"`)
+    logger.info('queue', `Message enqueued: "${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}"`)
   }, [currentProject, devCommand, runAgentForPrompt, queueAsTask])
 
   // Shared implementation with the status-bar Stop (stopAgentRun): drops
@@ -1303,6 +1231,18 @@ export function usePromptBar() {
   // to clear the whole queue while the status bar cleared nothing), kills
   // all live work.
   const handleStop = useCallback(() => {
+    // Fase 2: Stop é POSICIONAL — a ver a sessão de uma tarefa viva, para
+    // ESSA tarefa; caso contrário, o contrato global (stopAgentRun).
+    const activeId = useChatStore.getState().activeSessionId
+    if (activeId) {
+      const taskStore = useParallelTaskStore.getState()
+      for (const r of taskStore.runs.values()) {
+        if (r.sessionId === activeId && (r.status === 'running' || r.status === 'queued')) {
+          taskStore.abort(r.id)
+          return
+        }
+      }
+    }
     stopAgentRun()
   }, [])
 
@@ -1649,6 +1589,8 @@ export function usePromptBar() {
     textareaRef,
     isStreaming,
     isAgentBusy,
+    anyLiveTask,
+    viewedTaskBusy,
     // Steer/Task toggle (composer, visible while the agent is busy)
     queueAsTask,
     setQueueAsTask,

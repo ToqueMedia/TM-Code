@@ -34,6 +34,17 @@ import type { AgentTask } from '../../stores/agentStore'
 
 const TASKS_FILENAME = 'tasks.json'
 
+/**
+ * Nome de ficheiro do tracker de UMA sessão (tracker por-sessão, sem-deus
+ * 2026-07-18): cada sessão persiste o seu — o "main" é apenas mais um
+ * sessionId, sem tasks.json privilegiado. O sid é saneado para o allowlist
+ * do validador Rust (alfanumérico + . - _, ≤64 chars).
+ */
+function tasksFilenameForSession(sessionId: string): string {
+  const safe = sessionId.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 50)
+  return `tasks-${safe}.json`
+}
+
 interface TasksFileV1 {
   /** Schema version — bumped if the on-disk shape ever changes (currently 1). */
   schemaVersion: 1
@@ -52,11 +63,14 @@ interface TasksFileV1 {
  * file doesn't exist (first open, never persisted), throws only on real
  * I/O or parse failure so the caller can surface those distinctly.
  */
-export async function loadTasksFromDisk(projectPath: string): Promise<AgentTask[]> {
+export async function loadTasksFromDisk(
+  projectPath: string,
+  filename: string = TASKS_FILENAME,
+): Promise<AgentTask[]> {
   if (!projectPath) return []
   const raw = await invoke<string | null>('read_agent_state', {
     projectPath,
-    filename: TASKS_FILENAME,
+    filename,
   })
   if (!raw) return []
   try {
@@ -113,7 +127,11 @@ export async function loadTasksFromDisk(projectPath: string): Promise<AgentTask[
  *   3. The project state directory stays tidy — no fragmentation from
  *      repeated delete→re-create cycles across sessions.
  */
-export async function saveTasksToDisk(projectPath: string, tasks: AgentTask[]): Promise<void> {
+export async function saveTasksToDisk(
+  projectPath: string,
+  tasks: AgentTask[],
+  filename: string = TASKS_FILENAME,
+): Promise<void> {
   if (!projectPath) return
   const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
   const allTerminal = tasks.length > 0 && tasks.every(t => TERMINAL.has(t.status))
@@ -126,12 +144,36 @@ export async function saveTasksToDisk(projectPath: string, tasks: AgentTask[]): 
   try {
     await invoke('write_agent_state', {
       projectPath,
-      filename: TASKS_FILENAME,
+      filename,
       content: JSON.stringify(payload, null, 2),
     })
   } catch (err) {
     // Surface in logs only — agent flow must not break on a transient
     // I/O hiccup. The store keeps the live state; next mutation re-saves.
-    console.warn('[taskPersistence] failed to write tasks.json:', err)
+    console.warn(`[taskPersistence] failed to write ${filename}:`, err)
   }
+}
+
+/**
+ * Tracker POR-SESSÃO (sem-deus): carrega/persiste o tracker de uma sessão
+ * específica em `tasks-<sid>.json`. O "main" usa isto como qualquer outra
+ * sessão — não há tasks.json privilegiado no runtime. Runs de tarefas
+ * paralelas são efémeros, mas persistir por-sid é barato e mantém o modelo
+ * uniforme (e o tracker sobrevive a compactação/reload dentro da sessão).
+ */
+export async function loadTasksForSession(
+  projectPath: string,
+  sessionId: string,
+): Promise<AgentTask[]> {
+  if (!projectPath || !sessionId) return []
+  return loadTasksFromDisk(projectPath, tasksFilenameForSession(sessionId))
+}
+
+export async function saveTasksForSession(
+  projectPath: string,
+  sessionId: string,
+  tasks: AgentTask[],
+): Promise<void> {
+  if (!projectPath || !sessionId) return
+  return saveTasksToDisk(projectPath, tasks, tasksFilenameForSession(sessionId))
 }

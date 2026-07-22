@@ -420,6 +420,15 @@ export interface ChatSession {
   status: 'idle' | 'running' | 'paused' | 'completed' | 'error'
   createdAt: number
   updatedAt: number
+  /**
+   * Sessão criada como transcript de uma tarefa paralela ("Nova tarefa").
+   * Persistido: as rows de tarefas na sidebar/ProjectMenu derivam das sessões
+   * com esta flag, por isso sobrevivem a reload — o user consulta o chat da
+   * tarefa a qualquer momento.
+   */
+  isParallelTask?: boolean
+  /** Último estado conhecido da tarefa (carimbado pelo runner no fim). */
+  parallelTaskStatus?: ParallelTaskSessionStatus
   /** BYOK snapshot taken at session creation. Frozen for the lifetime of
    *  the session — switching the global active provider in Settings does
    *  NOT migrate active sessions. Null when the session was created
@@ -528,7 +537,19 @@ export interface SessionSummary {
   status: ChatSession['status']
   createdAt: number
   updatedAt: number
+  /** Sessão criada por uma tarefa paralela ("Nova tarefa") — ver ChatSession. */
+  isParallelTask?: boolean
+  parallelTaskStatus?: ParallelTaskSessionStatus
 }
+
+/**
+ * Estado final de uma tarefa paralela carimbado na SESSÃO (não só no
+ * parallelTaskStore, que é memória): as tarefas não podem desaparecer — o
+ * user consulta o chat delas em qualquer altura, mesmo depois de reload
+ * (pedido 2026-07-16). 'running' só existe transientemente (crash a meio
+ * deixa 'running' órfão; a UI trata sessão-sem-run-vivo como histórico).
+ */
+export type ParallelTaskSessionStatus = 'running' | 'completed' | 'error' | 'aborted'
 
 /** Per-request usage record — one entry per `chat.completions.create` call.
  *  Captured in query.ts right after each provider response and persisted on
@@ -869,4 +890,7 @@ export interface PersistedSession {
   /** Per-request usage log — persisted so an exported session shows real
    *  consumption per request (eliminates manual inference). */
   requestUsageLog?: RequestUsageEntry[]
+  /** Sessão de tarefa paralela — ver ChatSession.isParallelTask. */
+  isParallelTask?: boolean
+  parallelTaskStatus?: ParallelTaskSessionStatus
 }

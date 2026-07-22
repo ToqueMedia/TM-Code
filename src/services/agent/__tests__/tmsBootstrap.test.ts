@@ -35,7 +35,7 @@ describe('runTmsPreflight', () => {
     mockedInvoke.mockReset()
   })
 
-  it('bootstraps the project when TMS.md is absent', async () => {
+  it('never bootstraps when TMS.md is absent (claude-vaz parity: /init is the only creation path)', async () => {
     mockedInvoke.mockRejectedValueOnce(new Error('not found'))
 
     const result = await runTmsPreflight({
@@ -46,23 +46,22 @@ describe('runTmsPreflight', () => {
 
     expect(result).toMatchObject({
       tmsFound: false,
-      shouldBootstrap: true,
+      shouldBootstrap: false,
       reason: 'missing',
       path: '/repo/TMS.md',
     })
     expect(telemetry).toMatchObject({
-      executionPhase: 'project_bootstrap',
+      executionPhase: 'original_task',
       tmsFoundAtStart: false,
       tmsAvailable: false,
-      tmsBootstrapTriggered: true,
-      tmsBootstrapPhase: 'preflight_missing',
-      tmsBootstrapToolset: 'project_bootstrap',
+      tmsBootstrapTriggered: false,
+      tmsBootstrapPhase: 'missing_skipped',
       originalUserMessageDisplayed: true,
       originalTaskResumedAfterBootstrap: false,
     })
   })
 
-  it('builds a bootstrap prompt only for missing TMS.md', async () => {
+  it('builds no bootstrap prompt for missing TMS.md (the user message is never hijacked)', async () => {
     mockedInvoke.mockRejectedValueOnce(new Error('not found'))
 
     const result = await runTmsPreflight({
@@ -72,10 +71,7 @@ describe('runTmsPreflight', () => {
     })
     const prompt = buildTmsBootstrapOnlyPrompt(result, 'Implementar modal de NIF em /billing.')
 
-    expect(prompt).toContain('TMS.md was not found')
-    expect(prompt).toContain('Original user request, pending for the next phase')
-    expect(prompt).toContain('Implementar modal de NIF em /billing.')
-    expect(prompt).toContain('First map the project and create TMS.md')
+    expect(prompt).toBe('')
   })
 
   it('does not auto-repair an existing invalid TMS.md during normal preflight', async () => {

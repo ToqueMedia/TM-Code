@@ -98,6 +98,7 @@ const CONTEXT_PLANNER_SYSTEM = [
   '- For git/commit/diff/branch tasks, prefer delivery.git_status and delivery.changed_files.',
   '- For visual UI polish, prefer design_system.component_patterns, design_system.semantic_tokens, and ui_patterns.',
   '- Keep selectedContexts minimal. Put fallback candidates in candidateContexts instead of selectedContexts.',
+  '- Select contexts by the CAPABILITY the task needs, never by a guessed root cause. Your "reason" must describe capability need ("task touches build scripts"), NOT a diagnosis ("bundler misconfig", "missing dependency") — the agent must never inherit a failure hypothesis from context selection. When a failure could be environment/runtime-level (unsupported dependency, wrong platform) rather than configuration-level, do not steer toward config contexts; keep the selection neutral and minimal.',
   '- rejectedContexts lists candidate contexts you considered but did NOT select. It must never overlap with selectedContexts.',
   '- Use toolGroups only to preload tool categories likely needed on the first model step. Omitted groups are still available later via request_tools.',
   '- If readOnly is true, avoid preloading mutating groups unless clearly needed; readOnly is not a permanent tool denial policy here.',

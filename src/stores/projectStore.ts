@@ -281,6 +281,14 @@ export const useProjectStore = create<ProjectStore>()(
       },
 
       openProject: async (path: string, options?: { initGit?: boolean }) => {
+        // Re-selecting the project you ALREADY have open is a no-op. Without this,
+        // clicking the active project in the recents list / titlebar re-ran the
+        // whole open flow — stopping its dev server, clearing the preview + logs,
+        // resetting the HTTP client and bouncing the view back to chat — i.e. a
+        // pointless "reload" of the project you're already in. An explicit initGit
+        // refresh is exempt (the user asked for a git action on this path).
+        if (get().currentProject?.path === path && !options?.initGit) return;
+
         // Clean up previous project's state before loading the new one
         const prevProject = get().currentProject;
 
@@ -413,23 +421,19 @@ export const useProjectStore = create<ProjectStore>()(
           // re-infer progress from the filesystem (the failure mode behind
           // the 2026-05-19 batch-completion bug).
           try {
-            const [{ loadTasksFromDisk }, { useAgentStore }] = await Promise.all([
-              import('../services/agent/taskPersistence'),
-              import('./agentStore'),
-            ]);
-            // Hydrate atomically — no clearTasks() before load. The old
-            // project's tasks stay in the store during the async load, then
-            // setTasks() atomically replaces them. This eliminates the race
-            // window where the store is empty but tasks.json exists on disk
-            // (which could cause the agent to re-seed a fresh tracker and
-            // overwrite the real state). On load failure, clear stale data.
-            const tasks = await loadTasksFromDisk(path);
-            useAgentStore.getState().setTasks(tasks);
+            // TRACKER POR-SESSÃO (sem-deus): o tracker é por-sessão, não mais
+            // por-projeto. O sync do foco garante a invariante "o painel mostra
+            // o tracker da sessão ativa"; arranca-o (idempotente) e reconcilia
+            // já a sessão ativa deste projeto (foca + hidrata tasks-<sid>.json).
+            const { startTrackerFocusSync, reconcileTrackerFocus } = await import(
+              '../services/agent/trackerFocusSync'
+            );
+            startTrackerFocusSync();
+            const { useChatStore } = await import('./chatStore');
+            await reconcileTrackerFocus(useChatStore.getState().activeSessionId);
           } catch (error) {
-            // Tracker hydration is non-critical — fall back to an empty
-            // tracker rather than block project open. The agent will seed
-            // a fresh one on its next /plan or update_tasks call.
-            // Also clear stale cross-project data from the previous project.
+            // Hidratação não-crítica — a sessão começa com tracker vazio; o
+            // agente re-semeia no próximo /plan ou update_tasks.
             try {
               const { useAgentStore } = await import('./agentStore');
               useAgentStore.getState().clearTasks();
@@ -449,7 +453,7 @@ export const useProjectStore = create<ProjectStore>()(
               import('./permissionStore'),
             ]);
             const perms = await loadPermissionsFromDisk(path);
-            hydrateApprovedScopes(perms.scopes, path, perms.tools, perms.directories);
+            hydrateApprovedScopes(perms.scopes, path, perms.tools, perms.directories, perms.autoMode);
           } catch (error) {
             logger.warn('project', 'Failed to hydrate permission grants:', error);
           }

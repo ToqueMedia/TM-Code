@@ -178,7 +178,6 @@ export async function runTmsPreflight(options: {
   projectPath: string
   originalUserMessageDisplayed: boolean
   originalUserMessage?: string
-  skipBootstrap?: boolean
 }): Promise<TmsPreflightResult> {
   const tmsPath = `${options.projectPath}/TMS.md`
   let existing: string | null = null
@@ -189,11 +188,15 @@ export async function runTmsPreflight(options: {
   }
 
   if (existing === null) {
-    // Automatic project bootstrap is only for the missing-file case. If a
-    // TMS.md already exists, even if it is stale or incomplete, normal user
-    // messages must not be hijacked into repair work; /init is the explicit
-    // refresh path.
-    const shouldBootstrap = !options.skipBootstrap
+    // A missing TMS.md NEVER hijacks the user's message into a bootstrap run
+    // (user decision 2026-07-16, claude-vaz parity: a missing CLAUDE.md there
+    // changes nothing about the run — the system prompt simply omits project
+    // memory and the UI suggests /init). The forced two-phase
+    // project_bootstrap used to fire here for EVERY first message in a
+    // TMS-less project, even an empty folder; /init is now the ONLY creation
+    // path. The one-time "/init" hint is shown by the dispatch call sites
+    // (usePromptBar + agentRunner), gated on projectStore.noTmsFile.
+    const shouldBootstrap = false
     const result: TmsPreflightResult = {
       tmsFound: false,
       valid: false,

@@ -513,7 +513,9 @@ Skills são **recipes em markdown** que o agente carrega para resolver problemas
 
 - **Bundled** — fornecidos pelo TM Code (auth-email-password, auth-google, frontend-design, etc.)
 - **Global** — em `~/.toquemedia-studio/skills/` (a tua biblioteca pessoal)
-- **Project-local** — em `.toquemedia/skills/` (específicos do projecto, vão para git)
+- **Project-local** — em `.toquemedia-studio/skills/` (específicos do projecto, vão para git). Também é aceite `.toquemedia/skills/` por retrocompatibilidade.
+
+Cada skill pode ser um ficheiro único `<nome>.md` ou uma pasta `<nome>/SKILL.md` (com `references/*.md` opcionais). O nome do ficheiro `SKILL.md` é reconhecido em qualquer capitalização.
 
 ### Como invocar
 
@@ -532,7 +534,7 @@ O TM Code:
 
 ### Como criar um skill
 
-Cria `.toquemedia/skills/meu-skill.md`:
+Cria `.toquemedia-studio/skills/meu-skill.md`:
 
 ```markdown
 ---
@@ -1160,7 +1162,7 @@ arranja o bug do logout: ao clicar, o user fica em loop infinite redirect entre 
 
 - Usa `#auth-google` em vez de copiar instruções de auth a cada projecto
 - Cria skills pessoais para patterns que repetes
-- Para o teu projecto, cria skills em `.toquemedia/skills/` e versiona em git
+- Para o teu projecto, cria skills em `.toquemedia-studio/skills/` e versiona em git
 
 ### Token efficiency
 

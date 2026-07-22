@@ -7,11 +7,17 @@ import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n/useTranslation'
 import { buildChatTipPool } from './chatTips'
 
-// Paridade com o TerminalWorkingTips: dicas rotativas dos comandos disponíveis,
-// numa linha subtil por cima da PromptBar, APENAS enquanto o agente trabalha.
-// Primeira dica aos 2 min, renova a cada 2 min — descoberta progressiva do
-// catálogo de comandos sem poluir o transcript.
-const TIP_INTERVAL_MS = 2 * 60 * 1000 // 2 minutos
+// Dicas rotativas de comandos + funcionalidades da IDE, numa linha subtil por
+// cima da PromptBar, APENAS enquanto o agente trabalha — descoberta progressiva
+// do catálogo sem poluir o transcript.
+//
+// A primeira dica sai aos 15s: o desenho original (primeira só aos 2 min)
+// tornou-as praticamente invisíveis quando os runs encurtaram — a maioria
+// termina antes do intervalo alguma vez disparar, e o user deixou de as ver
+// (report 2026-07-16). 15s ainda evita flashar dicas em respostas rápidas de
+// pergunta-resposta, mas garante que qualquer tarefa real expõe uma dica.
+const FIRST_TIP_DELAY_MS = 15 * 1000
+const TIP_INTERVAL_MS = 2 * 60 * 1000 // rotação depois da primeira
 
 export const ChatWorkingTips = memo(function ChatWorkingTips() {
   const t = useTranslation()
@@ -50,8 +56,15 @@ export const ChatWorkingTips = memo(function ChatWorkingTips() {
       lastTipRef.current = next
       setTip(next)
     }
+    // Primeira dica cedo (15s), depois rotação lenta. O interval conta desde
+    // o arranque do run, por isso a primeira troca acontece aos 2 min — a
+    // dica dos 15s fica visível tempo suficiente para ser lida.
+    const first = setTimeout(pickNext, FIRST_TIP_DELAY_MS)
     const id = setInterval(pickNext, TIP_INTERVAL_MS)
-    return () => clearInterval(id)
+    return () => {
+      clearTimeout(first)
+      clearInterval(id)
+    }
   }, [working])
 
   if (!working || !tip) return null

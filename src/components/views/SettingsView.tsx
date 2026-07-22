@@ -15,13 +15,14 @@ import {
 import { FiArrowLeft, FiPlus, FiTrash2, FiSquare, FiRefreshCw, FiServer, FiExternalLink, FiLogOut } from 'react-icons/fi'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useSettingsStore, DEFAULT_SHORTCUTS, CHAT_TEXT_FONT_SIZE_OPTIONS, type ShortcutId, type KeyBinding } from '../../stores/settingsStore'
+import { usePermissionStore } from '../../stores/permissionStore'
 import { useUpdateStore } from '../../stores/updateStore'
 import KeyBindingDisplay from '../ui/KeyBindingDisplay'
 import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore, McpServerState } from '../../stores/mcpStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useAuthStore } from '../../stores/authStore'
-import { useBillingStore, extraConsumptionPct } from '../../stores/billingStore'
+import { useBillingStore, extraConsumptionPct, isTeamCollabActive } from '../../stores/billingStore'
 import FirebaseAuthService from '../../services/auth/firebaseAuth'
 import SkillService from '../../services/agent/skillService'
 import MCPService from '../../services/mcp/mcpService'
@@ -227,7 +228,10 @@ function ProfileSection() {
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
   const noCredits = useBillingStore(s => s.noCredits)
   const team = useBillingStore(s => s.team)
-  const teamMemberOf = useBillingStore(s => s.teamMemberOf)
+  // Team section shows only while the team plan is active (membership + non-expired
+  // term). Date-based so a lapsed plan hides it even if the boot cache still has
+  // teamMemberOf. See isTeamCollabActive.
+  const teamCollabActive = useBillingStore(isTeamCollabActive)
   const [modeBusy, setModeBusy] = useState(false)
   const [modeErr, setModeErr] = useState<string | null>(null)
   const teamActive = !!team // consumo a faturar a equipa agora
@@ -293,8 +297,15 @@ function ProfileSection() {
     } catch {}
   }
 
-  const initials = user?.displayName
-    ? user.displayName.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2)
+  // Prefer the Firebase/Firestore display name; fall back to the email's local
+  // part (e.g. "kwanzaonline@gmail.com" → "Kwanzaonline") so the profile shows a
+  // meaningful name even when no displayName was set (emulator/test users,
+  // email-password accounts). Generic "User" only as a last resort.
+  const emailName = user?.email?.split('@')[0] ?? ''
+  const prettyEmailName = emailName ? emailName.charAt(0).toUpperCase() + emailName.slice(1) : ''
+  const resolvedName = user?.displayName || prettyEmailName || t('common.user')
+  const initials = resolvedName
+    ? resolvedName.split(/[\s._-]+/).filter(Boolean).map(w => w[0]).join('').toUpperCase().slice(0, 2)
     : user?.email?.[0]?.toUpperCase() || '?'
 
   return (
@@ -318,7 +329,7 @@ function ProfileSection() {
           )}
           <Box flex={1} minW={0}>
             <Text fontSize="14px" fontWeight="600" color={tokens.colors.text.primary} lineClamp={1}>
-              {user?.displayName || t('common.user')}
+              {resolvedName}
             </Text>
             <Text fontSize="12px" color={tokens.colors.text.secondary} lineClamp={1}>
               {user?.email || '—'}
@@ -451,7 +462,7 @@ function ProfileSection() {
       </VStack>
 
       {/* ── Team (Plano de Equipas) ─────────────────────── */}
-      {teamMemberOf && (
+      {teamCollabActive && (
         <VStack align="stretch" gap={3}>
           <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.muted} textTransform="uppercase" letterSpacing="0.06em">
             {t('settings.teamTitle' as any)}
@@ -689,7 +700,11 @@ function UpdateSection() {
 function SandboxSection() {
   const t = useTranslation()
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
+  const autoModePermissions = usePermissionStore(s => s.autoModePermissions)
+  const setAutoModePermissions = usePermissionStore(s => s.setAutoModePermissions)
   const setSandboxEnabled = useSettingsStore(s => s.setSandboxEnabled)
+  const parallelTaskWorktrees = useSettingsStore(s => s.parallelTaskWorktrees)
+  const setParallelTaskWorktrees = useSettingsStore(s => s.setParallelTaskWorktrees)
   const [sandboxAvailable, setSandboxAvailable] = useState(false)
   const [platform, setPlatform] = useState('')
   const [depsOk, setDepsOk] = useState(true)
@@ -721,6 +736,56 @@ function SandboxSection() {
 
   return (
     <VStack align="stretch" gap={6}>
+      {/* Fase 5 (multi-agente): isolamento de tarefas paralelas em worktrees.
+          Vive nesta secção por ser, como o sandbox, uma política de EXECUÇÃO
+          do agente. */}
+      <SettingsGroup title={t('settings.taskWorktreesTitle')}>
+        <HStack justify="space-between">
+          <Box>
+            <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px">
+              {t('settings.taskWorktreesTitle')}
+            </Text>
+            <Text color={tokens.colors.text.secondary} fontSize="12px" mt="2px">
+              {t('settings.taskWorktreesDesc')}
+            </Text>
+          </Box>
+          <Switch.Root
+            checked={parallelTaskWorktrees}
+            onCheckedChange={(e) => setParallelTaskWorktrees(e.checked)}
+            colorPalette="green"
+          >
+            <Switch.HiddenInput />
+            <Switch.Control />
+          </Switch.Root>
+        </HStack>
+      </SettingsGroup>
+
+      <SettingsGroup title={t('autoMode.title')}>
+        <Field.Root>
+          <HStack justify="space-between">
+            <Box>
+              <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px">
+                {t('autoMode.title')}
+              </Text>
+              <Text color={tokens.colors.text.secondary} fontSize="12px" mt="2px">
+                {t('autoMode.description')}
+              </Text>
+              <Text color={tokens.colors.text.disabled} fontSize="11px" mt="4px">
+                {t('autoMode.note')}
+              </Text>
+            </Box>
+            <Switch.Root
+              checked={autoModePermissions}
+              onCheckedChange={function (e) { setAutoModePermissions(e.checked) }}
+              colorPalette="pink"
+            >
+              <Switch.HiddenInput />
+              <Switch.Control />
+            </Switch.Root>
+          </HStack>
+        </Field.Root>
+      </SettingsGroup>
+
       <SettingsGroup title={t('sandbox.title')}>
         <Field.Root>
           <HStack justify="space-between">
@@ -1351,7 +1416,7 @@ function SkillsSection() {
         )}
       </SettingsGroup>
 
-      <SettingsGroup title={t("settings.project")} badge={IS_WINDOWS ? '.tms\\skills\\' : '.tms/skills/'}>
+      <SettingsGroup title={t("settings.project")} badge={IS_WINDOWS ? '.toquemedia-studio\\skills\\' : '.toquemedia-studio/skills/'}>
         {projectSkills.length === 0 ? (
           <EmptyState text={t('settings.noProjectSkills')} />
         ) : (

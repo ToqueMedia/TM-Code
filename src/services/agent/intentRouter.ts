@@ -70,7 +70,12 @@ export function hasExplicitNoEditIntent(userMessage: string): boolean {
     /\bno\s+(?:file\s+)?edits?\b/,
     /\bno\s+code\s+changes?\b/,
     /\bwithout\s+editing\b/,
-    /\bread[-\s]?only\b/,
+    // NB: "read-only" SOLTO foi removido (2026-07-17): quase sempre descreve
+    // um ARTEFACTO ("modal read-only", "perfil read-only", "campo readonly"),
+    // não uma instrução ao agente — classificou um pedido de ESCRITA como
+    // analysis_readonly e o run inteiro falhou com DENIED em create/edit
+    // (sessão profile-me 15:26). Instruções genuínas continuam cobertas pelos
+    // imperativos acima/abaixo e pelo router por modelo.
     /\bnao\s+(?:edite|editar|altere|alterar|modifique|modificar|mexa|mexer)\b/,
     /\bsem\s+(?:editar|alterar|modificar|mexer|alteracoes?|mudancas?)\b/,
     /\bapenas\s+(?:confirme|verifique|analise|inspecione)\b/,

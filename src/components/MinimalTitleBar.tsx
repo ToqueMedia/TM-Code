@@ -5,10 +5,22 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { tokens } from '@/theme/tokens'
 import { useProjectStore } from '../stores/projectStore'
 import { useToastStore } from '../stores/toastStore'
+import { useChatStore } from '../stores/chatStore'
+import { useBillingStore } from '../stores/billingStore'
+import { useByokState } from '../hooks/useByokState'
+import { useOverflowCollapse } from '../hooks/useOverflowCollapse'
 import { prepareProjectWebExport, sendProjectToTmCodeWeb, type PreparedWebExport } from '../services/webExportService'
 import WindowControls from './ui/WindowControls'
 import MenuBar from './ui/titlebar/MenuBar'
 import BranchMenu from './ui/BranchMenu'
+import SessionDropdown from './views/SessionDropdown'
+// TmSpeedIndicator: /speed retirado 2026-07-16 — reimportar ao reativar.
+// import TmSpeedIndicator from './chat/TmSpeedIndicator'
+import AttentionInbox from './ui/AttentionInbox'
+import ModelIndicator from './chat/ModelIndicator'
+import { CreditIndicator } from './ui/CreditIndicator'
+import { McpIndicator } from './ui/StatusIndicators'
+import { useMcpStore } from '../stores/mcpStore'
 import { BrowserMissingDialog } from './dialogs/BrowserMissingDialog'
 import { useTranslation, t as translate } from '@/i18n'
 import { IS_MAC } from '@/utils/platform'
@@ -54,6 +66,27 @@ function buildSendToWebConfirmMessage(template: string, prepared: PreparedWebExp
 
 function MinimalTitleBar() {
   const currentProject = useProjectStore(s => s.currentProject)
+  // Collision-based collapse: when the bar's items would overflow (window too
+  // narrow), `collapsed` flips and the labels drop to icons — only then, not at
+  // a fixed breakpoint. See useOverflowCollapse.
+  const barRef = useRef<HTMLDivElement>(null)
+  const collapsed = useOverflowCollapse(barRef)
+  // Chat session + status controls migrated UP here from the ChatView toolbar,
+  // so New Chat / Sessions and the always-visible indicators align with the
+  // Project / Branch / Send-to-Web chips in one bar.
+  const activeSessionId = useChatStore(s => s.activeSessionId)
+  const isStreaming = useChatStore(s => s.isStreaming)
+  const { byokInPlay: showModelIndicator } = useByokState()
+  const billingPlan = useBillingStore(s => s.plan)
+  const noCredits = useBillingStore(s => s.noCredits)
+  const consumedPct = useBillingStore(s => s.consumedPct)
+  const tokensConsumed = useBillingStore(s => s.tokensConsumed)
+  const tokenBudget = useBillingStore(s => s.tokenBudget)
+  const cycleEnd = useBillingStore(s => s.cycleEnd)
+  const billingStatus = useBillingStore(s => s.status)
+  const tmsRemaining = useBillingStore(s => s.tmsRemaining)
+  const mcpServers = useMcpStore(s => s.servers)
+  const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   const [showIssueReporter, setShowIssueReporter] = useState(false)
   const [sendingToWeb, setSendingToWeb] = useState(false)
   // Painel de atividade do "Enviar para Web" — lista de passos com o atual
@@ -204,6 +237,7 @@ function MinimalTitleBar() {
 
   return (
     <Box
+      ref={barRef}
       height="40px"
       // Header LISO (redesign 2026-07-13): mesma cor do fundo da app, sem
       // borda nem translucidez — deixa de ler como "uma barra" e funde-se
@@ -248,12 +282,25 @@ function MinimalTitleBar() {
               title={currentProject.path}
             >
               <FiFolder size={12} />
-              <Text fontSize="12px" fontWeight="600" lineClamp={1}>
-                {currentProject.name}
-              </Text>
+              {!collapsed && (
+                <Text fontSize="12px" fontWeight="600" lineClamp={1}>
+                  {currentProject.name}
+                </Text>
+              )}
             </Flex>
             {/* Trocar/criar branch a partir do chat */}
             <BranchMenu projectPath={currentProject.path} />
+            {/* Sessions + New Chat — migrated up from the chat toolbar so they
+                align with the Project / Branch chips. Collapse to icon-only when
+                the bar runs out of room. */}
+            <Box maxW={collapsed ? undefined : '240px'} minW={0} data-no-drag>
+              <SessionDropdown
+                projectPath={currentProject.path}
+                activeSessionId={activeSessionId}
+                isStreaming={isStreaming}
+                compact={collapsed}
+              />
+            </Box>
           </HStack>
         )}
       </HStack>
@@ -261,19 +308,48 @@ function MinimalTitleBar() {
       {/* Center spacer */}
       <Flex flex={1} />
 
-      {/* Right: project actions + User identity. */}
+      {/* Right: status indicators + project actions. */}
       <HStack gap={2} flexShrink={0} pr={1} data-no-drag>
+        {/* Always-visible indicators — TM Speed / model (BYOK) / credits —
+            migrated up from the chat toolbar. Each self-nulls when N/A. Credits
+            and model are mutually exclusive (byokInPlay swaps them). */}
+        {currentProject && (
+          <HStack gap={1.5} flexShrink={0}>
+            {/* Inbox de atenção (Fase 6a) — só aparece quando há itens. */}
+            <AttentionInbox />
+            {/* TmSpeedIndicator desmontado — /speed retirado 2026-07-16
+                (código morto p/ futuro; ver slashCommandRegistry). */}
+            <ModelIndicator />
+            {!showModelIndicator && (
+              <CreditIndicator
+                plan={billingPlan}
+                noCredits={noCredits}
+                isStreaming={isStreaming}
+                consumedPct={consumedPct}
+                tokensConsumed={tokensConsumed}
+                tokenBudget={tokenBudget}
+                cycleEnd={cycleEnd}
+                status={billingStatus}
+                tmsRemaining={tmsRemaining}
+              />
+            )}
+            {/* MCP status — after credits, before Send-to-Web. Self-nulls when
+                no server is running/errored. */}
+            <McpIndicator servers={mcpServers} isInitializing={mcpIsInitializing} />
+          </HStack>
+        )}
+
         {/* Send to TM Code Web */}
         {currentProject && (
           <Flex
             as="button"
             align="center"
             justify="center"
-            gap="7px"
-            px="10px"
-            h="28px"
-            minW="28px"
-            borderRadius="9px"
+            gap="6px"
+            px="9px"
+            h="26px"
+            minW="26px"
+            borderRadius="8px"
             cursor={sendingToWeb ? 'progress' : 'pointer'}
             color={sendingToWeb ? tokens.colors.accent.primary : tokens.colors.text.primary}
             bg={sendingToWeb ? 'rgba(254, 16, 99, 0.12)' : 'rgba(254, 16, 99, 0.075)'}
@@ -313,9 +389,11 @@ function MinimalTitleBar() {
             >
               <FiUploadCloud size={14} />
             </Box>
-            <Text data-send-web-label fontSize="11px" fontWeight="700" whiteSpace="nowrap">
-              {t('titlebar.sendToWebShort')}
-            </Text>
+            {!collapsed && (
+              <Text data-send-web-label fontSize="11px" fontWeight="700" whiteSpace="nowrap">
+                {t('titlebar.sendToWebShort')}
+              </Text>
+            )}
           </Flex>
         )}
 

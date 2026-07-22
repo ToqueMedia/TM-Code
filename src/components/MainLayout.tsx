@@ -26,11 +26,11 @@ import { ErrorBoundary } from './ErrorBoundary'
 import SettingsView from './views/SettingsView'
 import { useCodeEditorState } from '../hooks/useEditorState'
 import { usePermissionStore } from '../stores/permissionStore'
+import { useBillingStore, isTeamCollabActive } from '../stores/billingStore'
 import { devServerManager } from '../services/devServerManager'
 import DevServerStatus from './chat/DevServerStatus'
 import { TeamChatPanel } from './collab/TeamChatPanel'
 import { ScreenShareViewer } from './collab/ScreenShareViewer'
-import { useCollabSession } from '@/hooks/useCollabSession'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 import { GoalCelebration } from './celebration/GoalCelebration'
@@ -42,10 +42,17 @@ interface MainLayoutProps {
 
 function MainLayout({ embedded = false }: MainLayoutProps) {
   const t = useTranslation()
-  useCollabSession()
+  // NB: the collab session lifecycle is driven by useCollabSession() in the
+  // always-mounted WelcomeScreen shell — NOT here. MainLayout unmounts on every
+  // project switch / Settings open / loading spinner, and driving the session
+  // from here tore down chat, voice calls, screen share and preview sharing on
+  // each of those IDE operations. The team collaboration must survive them.
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewFullscreen = useLayoutStore(s => s.isPreviewFullscreen)
   const isSidebarVisible = useLayoutStore(s => s.isSidebarVisible)
+  // Team chat drawer only exists while the team plan is active — unmounts (not
+  // just hides) when the plan expires, so nothing team-related lingers.
+  const teamCollabActive = useBillingStore(isTeamCollabActive)
   const previewFillsWorkspace = embedded && viewMode === 'preview'
   const pendingPermission = usePermissionStore(s => s.pendingPermission)
   const approve = usePermissionStore(s => s.approve)
@@ -458,6 +465,7 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
                             args={pendingPermission.args}
                             promptReason={pendingPermission.promptReason ?? null}
                             pathAccessTarget={pendingPermission.pathAccessTarget}
+                            originLabel={pendingPermission.origin?.label}
                             approve={approve}
                             approveAlwaysInProject={approveAlwaysInProject}
                             approveAlwaysGlobal={approveAlwaysGlobal}
@@ -515,6 +523,7 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
                   args={pendingPermission.args}
                   promptReason={pendingPermission.promptReason ?? null}
                   pathAccessTarget={pendingPermission.pathAccessTarget}
+                  originLabel={pendingPermission.origin?.label}
                   approve={approve}
                   approveAlwaysInProject={approveAlwaysInProject}
                   approveAlwaysGlobal={approveAlwaysGlobal}
@@ -532,8 +541,8 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
           <CheckpointDrawerPanel />
           <TerminalDrawerPanel />
           {/* Ephemeral team chat (P2P) — drawer like the terminal, toggled
-              from the Source Control header */}
-          <TeamChatPanel />
+              from the Source Control header. Only while the team plan is active. */}
+          {teamCollabActive && <TeamChatPanel />}
         </Flex>
       </Flex>
 

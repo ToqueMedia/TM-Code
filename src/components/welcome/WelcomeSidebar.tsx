@@ -19,6 +19,7 @@ import {
   LuLayers,
   LuExternalLink,
   LuX,
+  LuMessagesSquare,
 } from 'react-icons/lu'
 import { FiAlertCircle, FiLogOut } from 'react-icons/fi'
 import { getVersion } from '@tauri-apps/api/app'
@@ -35,6 +36,12 @@ import { invoke } from '@/utils/invokeMetrics'
 import { useAuthStore } from '@/stores/authStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useLayoutStore } from '@/stores/layoutStore'
+import { useParallelTaskStore } from '@/stores/parallelTaskStore'
+import { useChatStore } from '@/stores/chatStore'
+import { useParallelTaskRows, openParallelTaskChat, closeParallelTask, openMainSessionChat } from '@/hooks/useParallelTaskRows'
+import { requestTaskStop } from '@/services/agent/parallelTasks/taskStopRequestService'
+import { useBillingStore, isTeamCollabActive } from '@/stores/billingStore'
+import { useCollabStore } from '@/stores/collabStore'
 import { getQueryGuard } from '@/services/agent/queryGuard'
 import { signOutWithGuard } from '@/services/auth/signOutFlow'
 import type { PromptValue, QueuedCommand } from '@/types/messageQueueTypes'
@@ -156,6 +163,14 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
   // active project (QueryGuard is the same source the composer uses).
   const queryGuard = getQueryGuard()
   const isAgentBusy = useSyncExternalStore(queryGuard.subscribe, queryGuard.getSnapshot)
+  // Tarefas paralelas vivas mantêm o "+ Nova tarefa" disponível com o main
+  // idle — lançar mais uma tarefa não exige um run principal (Fase 2).
+  const anyLiveTask = useParallelTaskStore(s => {
+    for (const r of s.runs.values()) {
+      if (r.status === 'running' || r.status === 'queued') return true
+    }
+    return false
+  })
 
   useEffect(() => {
     getAppVersion().then(setAppVersion)
@@ -354,7 +369,7 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
               key={project.id || `project-${index}`}
               project={project}
               isActive={activeProjectPath === project.path}
-              isAgentBusyHere={activeProjectPath === project.path && isAgentBusy}
+              isAgentBusyHere={activeProjectPath === project.path && (isAgentBusy || anyLiveTask)}
               agentStatus={agentStatuses[project.path] ?? null}
               queuedTasks={activeProjectPath === project.path ? queuedTasks : []}
               onOpen={() => project.path && onOpenProject(project.path)}
@@ -364,9 +379,79 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
         </VStack>
       </VStack>
 
+      {/* Team section — project-INDEPENDENT (v1.0.1). Shows only while the team
+          plan is active; the team indicator + team chat are reachable from the
+          Welcome screen, no project required. */}
+      <TeamSection />
+
       {/* Footer — avatar + name + settings (reference layout) */}
       <UserFooter appVersion={appVersion} />
     </Box>
+  )
+}
+
+/** Team indicator + Team Chat entry point on the Welcome screen. Self-contained:
+ *  reads the team-plan gate + collab presence directly. Hidden unless the team
+ *  plan is active (membership AND non-expired term). The chat button opens the
+ *  TeamChatPanel, which WelcomeScreen mounts while no project is open. */
+function TeamSection() {
+  const teamActive = useBillingStore(isTeamCollabActive)
+  const connected = useCollabStore(s => s.connected)
+  const peers = useCollabStore(s => s.peers)
+  const chatUnread = useCollabStore(s => s.chatUnread)
+  const setChatOpen = useCollabStore(s => s.setChatOpen)
+
+  if (!teamActive) return null
+
+  return (
+    <VStack align="stretch" gap="2px" mt={3} pt={3} borderTop="1px solid" borderColor="rgba(255,255,255,0.06)">
+      <Flex align="center" gap={2} px={1} mb={1}>
+        <Box
+          w="6px"
+          h="6px"
+          borderRadius="full"
+          bg={connected ? tokens.colors.accent.greenBright : tokens.colors.text.muted}
+          flexShrink={0}
+        />
+        <Text fontSize="10px" fontWeight="700" letterSpacing="0.06em" textTransform="uppercase" color={tokens.colors.text.muted}>
+          {t('settings.teamTitle')}
+        </Text>
+        {connected && (
+          <Text fontSize="10px" color={tokens.colors.text.disabled}>
+            {t('team.peersOnline').replace('{count}', String(peers.length))}
+          </Text>
+        )}
+      </Flex>
+      <Flex
+        as="button"
+        align="center"
+        gap={2}
+        px={2}
+        py={1.5}
+        borderRadius="6px"
+        transition={`all ${tokens.transition.fast}`}
+        _hover={{ bg: 'rgba(255,255,255,0.05)' }}
+        onClick={() => setChatOpen(true)}
+      >
+        <LuMessagesSquare size={14} color={tokens.colors.text.secondary} />
+        <Text fontSize="12px" color={tokens.colors.text.secondary}>{t('team.chatTitle')}</Text>
+        {chatUnread > 0 && (
+          <Box
+            ml="auto"
+            px={1.5}
+            minW="16px"
+            textAlign="center"
+            borderRadius="full"
+            bg={tokens.colors.accent.primary}
+            color={tokens.colors.badge.notificationText}
+            fontSize="9px"
+            fontWeight="700"
+          >
+            {chatUnread}
+          </Box>
+        )}
+      </Flex>
+    </VStack>
   )
 }
 
@@ -393,6 +478,14 @@ function ProjectGroup({
   onContextMenu,
 }: ProjectGroupProps) {
   const timeLabel = relativeTime(project.lastOpened)
+  // A sessão ATIVA é a principal (não-tarefa)? Controla o highlight da row do
+  // chat principal — antes o highlight marcava o PROJECTO e ficava "presa"
+  // com o chat de uma tarefa aberto (feedback do user 2026-07-17).
+  const activeIsMainSession = useChatStore(s => {
+    const id = s.activeSessionId
+    if (!id) return true
+    return s.sessions.get(id)?.isParallelTask !== true
+  })
   const hasChildren =
     !!agentStatus || queuedTasks.length > 0 || isAgentBusyHere
 
@@ -481,33 +574,49 @@ function ProjectGroup({
       {/* Children: the parallel work under this project */}
       {agentStatus?.state === 'running' && (
         <TaskRow
-          highlight={isActive}
+          highlight={isActive && activeIsMainSession}
           dot={{ color: tokens.colors.accent.primary, pulse: true }}
           label={agentStatus.label || t('welcome.agentWorking')}
           description={agentStatus.description}
           // startedAt → "· 12m"; falls back to nothing on pre-field files.
           time={agentStatus.startedAt ? shortAgo(agentStatus.startedAt) : null}
-          onClick={onOpen}
+          onClick={() => {
+            onOpen()
+            if (isActive) openMainSessionChat(project.path)
+          }}
         />
       )}
       {agentStatus?.state === 'done' && (
         <TaskRow
+          highlight={isActive && activeIsMainSession}
           icon={<Icon as={LuCheck} fontSize="12px" color={tokens.colors.status.running} />}
           label={agentStatus.label || t('welcome.agentDone')}
           description={agentStatus.description}
           time={shortAgo(agentStatus.updatedAt)}
-          onClick={onOpen}
+          onClick={() => {
+            onOpen()
+            if (isActive) openMainSessionChat(project.path)
+          }}
         />
       )}
       {agentStatus?.state === 'error' && (
         <TaskRow
+          highlight={isActive && activeIsMainSession}
           dot={{ color: tokens.colors.status.error, pulse: false }}
           label={agentStatus.label || t('welcome.agentError')}
           description={agentStatus.description}
           time={shortAgo(agentStatus.updatedAt)}
-          onClick={onOpen}
+          onClick={() => {
+            onOpen()
+            if (isActive) openMainSessionChat(project.path)
+          }}
         />
       )}
+      {/* Parallel tasks of THIS window ("Nova tarefa" → start immediately,
+          up to 4 at once) — nested right below the main run's row, per the
+          user's design (2026-07-16). They live in parallelTaskStore, which
+          is process-local, so only the ACTIVE project can have them. */}
+      <ParallelTaskSidebarRows projectPath={project.path} isActiveProject={isActive} onOpenProject={onOpen} />
       {queuedTasks.map((task, index) => (
         <TaskRow
           key={task.uuid ?? `queued-${index}`}
@@ -545,6 +654,116 @@ function ProjectGroup({
         </Flex>
       )}
     </Box>
+  )
+}
+
+/** Estado → texto curto da coluna direita da row (par do "agora"/"hoje"). */
+const PARALLEL_STATE_LABEL: Record<'running' | 'queued' | 'completed' | 'error' | 'aborted', () => string> = {
+  running: () => t('welcome.agentWorking'),
+  queued: () => t('parallel.queued'),
+  completed: () => t('welcome.agentDone'),
+  error: () => t('welcome.agentError'),
+  aborted: () => t('parallel.taskStopped'),
+}
+
+/**
+ * Rows das tarefas paralelas do projecto, aninhadas sob a row do run
+ * principal. Fonte única: useParallelTaskRows (vivas do parallelTaskStore ∪
+ * sessões-tarefa persistidas) — as tarefas NUNCA desaparecem; o chat de cada
+ * uma fica consultável mesmo depois de reload (pedido do user 2026-07-16).
+ *
+ * Clique no NOME → abre o chat da tarefa (seguro mid-run: o streaming do
+ * agente principal escreve na sessão captada em startAssistantMessage, não
+ * na sessão visível). X só nas VIVAS = Stop; rows históricas não têm remoção.
+ * `needsAuth` → badge âmbar "Autorização" a pulsar: um pedido de permissão
+ * desta tarefa espera resposta — clicar leva ao chat onde o diálogo vive.
+ */
+function ParallelTaskSidebarRows({
+  projectPath,
+  isActiveProject,
+  onOpenProject,
+}: {
+  projectPath: string
+  /** Projecto aberto NESTA janela — cliques abrem o chat da tarefa; para
+   *  projetos de outras janelas o clique abre o projecto (fluxo existente). */
+  isActiveProject: boolean
+  onOpenProject: () => void
+}) {
+  const activeSessionId = useChatStore(s => s.activeSessionId)
+  // Projetos de outras janelas: o disco é o canal (limitação #3 eliminada) —
+  // poll lento do índice de sumários; o heartbeat 30s do runner mantém o
+  // 'running' fidedigno.
+  // refreshTick força re-fetch do índice após um fecho (a sessão apagada
+  // desaparece da lista sem esperar pelo próximo poll).
+  const [refreshTick, setRefreshTick] = React.useState(0)
+  const rows = useParallelTaskRows(
+    projectPath,
+    true,
+    isActiveProject ? { refreshKey: refreshTick } : { pollMs: 7000, refreshKey: refreshTick },
+  )
+  const abort = useParallelTaskStore(s => s.abort)
+  if (rows.length === 0) return null
+
+  return (
+    <>
+      {rows.map(row => (
+        <TaskRow
+          key={row.key}
+          dot={
+            row.needsAuth
+              ? { color: tokens.colors.status.warning, pulse: true }
+              : row.status === 'completed'
+                ? undefined
+                : {
+                    color:
+                      row.status === 'running'
+                        ? tokens.colors.accent.primary
+                        : row.status === 'error'
+                          ? tokens.colors.status.error
+                          : tokens.colors.text.muted,
+                    pulse: row.status === 'running',
+                  }
+          }
+          icon={
+            !row.needsAuth && row.status === 'completed'
+              ? <Icon as={LuCheck} fontSize="12px" color={tokens.colors.status.running} />
+              : undefined
+          }
+          label={row.worktreeBranch ? `⎇ ${row.label}` : row.label}
+          description={row.needsAuth
+            ? t('parallel.authNeededHint')
+            : row.worktreeBranch
+              ? `${row.prompt ?? ''}\n⎇ ${row.worktreeBranch}`.trim()
+              : row.prompt}
+          time={
+            row.attentionKind === 'question'
+              ? t('parallel.questionNeeded')
+              : row.attentionKind === 'credentials'
+                ? t('parallel.credentialsNeeded')
+                : row.needsAuth
+                  ? t('parallel.authNeeded')
+                  : PARALLEL_STATE_LABEL[row.status]()
+          }
+          highlight={row.needsAuth || (isActiveProject && !!row.sessionId && row.sessionId === activeSessionId)}
+          onClick={() => {
+            onOpenProject()
+            if (isActiveProject && row.sessionId) void openParallelTaskChat(projectPath, row.sessionId)
+          }}
+          onRemove={row.status === 'running' || row.status === 'queued'
+            // Viva NESTA janela: X = Stop direto. Noutra janela: PEDIDO de stop
+            // por disco (o runner dono consome no turn boundary/heartbeat) —
+            // nunca fechar/apagar o chat debaixo do runner do outro processo.
+            ? (row.live
+                ? () => abort(row.runId!)
+                : row.sessionId
+                  ? () => { void requestTaskStop(projectPath, row.sessionId!) }
+                  : undefined)
+            : row.sessionId
+              ? () => { void closeParallelTask(projectPath, row.sessionId!).then(closed => { if (closed) setRefreshTick(x => x + 1) }) }
+              : undefined}
+        />
+      ))}
+    </>
   )
 }
 
@@ -649,7 +868,11 @@ function UserFooter({ appVersion }: { appVersion: string }) {
   const [menuOpen, setMenuOpen] = useState(false)
 
   const initials = user ? getInitials(user.email, user.displayName) : '?'
-  const displayName = user?.displayName?.trim() || user?.email?.split('@')[0] || ''
+  // Fallback to the email's local part, capitalized (e.g. "kwanzaonline" →
+  // "Kwanzaonline"), matching the Settings profile so both surfaces agree.
+  const emailName = user?.email?.split('@')[0] ?? ''
+  const displayName = user?.displayName?.trim()
+    || (emailName ? emailName.charAt(0).toUpperCase() + emailName.slice(1) : '')
 
   // Mesma lógica dual do antigo menu do titlebar: sem projecto → ecrã de
   // settings do Welcome; com projecto → viewMode settings do workspace.

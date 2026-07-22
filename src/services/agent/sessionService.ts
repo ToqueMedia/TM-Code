@@ -76,6 +76,14 @@ class SessionService {
   // and delete_file_or_directory, recreating a session file inside (or just
   // after) the directory we're trying to remove.
   private currentSavePromise: Promise<void> | null = null
+  /**
+   * ESCRITOR ÚNICO: todas as gravações passam por esta cadeia. O índice de
+   * sumários é um read-modify-write partilhado — gravações concorrentes
+   * (flush da sessão ativa + save direto de uma sessão de tarefa, ou duas
+   * tarefas a terminar juntas) intercalavam e PERDIAM entradas/estados do
+   * índice (ronda estrutural 2026-07-17).
+   */
+  private saveChain: Promise<void> = Promise.resolve()
   // Set to true while deleteAllProjectSessions is running so any in-flight
   // saveSession that completes between the await and the actual unlink
   // becomes a no-op rather than re-creating the file. Reset after delete.
@@ -321,6 +329,13 @@ class SessionService {
         requestUsageLog: persisted.requestUsageLog,
       } as ChatSession & { lastTurnSnapshot?: SessionTurnSnapshot }
       if (persisted.lastTurnSnapshot) out.lastTurnSnapshot = persisted.lastTurnSnapshot
+      if (persisted.isParallelTask) {
+        out.isParallelTask = true
+        // Um 'running' persistido é órfão (crash/quit a meio do run — o
+        // processo que corria a tarefa morreu). Normaliza para 'aborted'.
+        out.parallelTaskStatus =
+          persisted.parallelTaskStatus === 'running' ? 'aborted' : persisted.parallelTaskStatus
+      }
       return out
     } catch (error) {
       logger.error('session', `Failed to load session ${sessionId}:`, error)
@@ -334,7 +349,10 @@ class SessionService {
     // its write_file AFTER the directory was removed, recreating it with a
     // stale session file inside.
     if (this.deletingProjectPath === session.projectPath) return
-    const promise = this._writeSessionToDisk(session, tokenUsage)
+    const promise = this.saveChain.then(() => this._writeSessionToDisk(session, tokenUsage))
+    // A cadeia sobrevive a falhas — um save rejeitado não pode encravar todos
+    // os seguintes.
+    this.saveChain = promise.catch(() => {})
     this.currentSavePromise = promise
     try {
       await promise
@@ -360,6 +378,11 @@ class SessionService {
         sessionMemory: session.sessionMemory,
         planResumePending: session.planResumePending ?? null,
         requestUsageLog: session.requestUsageLog,
+        // Tarefas paralelas: flag + estado persistem para as rows da
+        // sidebar/ProjectMenu sobreviverem a reload (o chat da tarefa fica
+        // consultável a qualquer momento — pedido do user 2026-07-16).
+        ...(session.isParallelTask && { isParallelTask: true }),
+        ...(session.parallelTaskStatus && { parallelTaskStatus: session.parallelTaskStatus }),
       }
 
       if (tokenUsage) {
@@ -393,14 +416,30 @@ class SessionService {
     }
   }
 
+  /**
+   * Enfileira uma mutação do ÍNDICE na mesma cadeia dos saves. Sem isto, o
+   * removeFromIndex/updateIndex faziam read-modify-write FORA da cadeia: um
+   * save concorrente (heartbeat de tarefa, persist da ativa) que tivesse lido
+   * o índice ANTES da remoção escrevia a lista velha por cima e RESSUSCITAVA
+   * a entrada apagada — o "fechei a tarefa mas continua no menu de sessões"
+   * (report do user 2026-07-17).
+   */
+  private enqueueIndexWrite<T>(op: () => Promise<T>): Promise<T> {
+    const run = this.saveChain.then(op)
+    this.saveChain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
   async deleteSession(projectPath: string, sessionId: string): Promise<void> {
-    try {
-      const filePath = await this.getSessionFilePath(projectPath, sessionId)
-      await invoke('delete_file_or_directory', { path: filePath })
-      await this.removeFromIndex(projectPath, sessionId)
-    } catch (error) {
-      logger.error('session', `Failed to delete session ${sessionId}:`, error)
-    }
+    await this.enqueueIndexWrite(async () => {
+      try {
+        const filePath = await this.getSessionFilePath(projectPath, sessionId)
+        await invoke('delete_file_or_directory', { path: filePath })
+        await this.removeFromIndex(projectPath, sessionId)
+      } catch (error) {
+        logger.error('session', `Failed to delete session ${sessionId}:`, error)
+      }
+    })
   }
 
   async deleteAllProjectSessions(projectPath: string): Promise<void> {
@@ -671,6 +710,11 @@ class SessionService {
         status: session.status,
         createdAt: session.createdAt,
         updatedAt: session.updatedAt,
+        // Rows de tarefas paralelas na sidebar/ProjectMenu leem o índice de
+        // sumários (não carregam sessões inteiras) — a flag+estado têm de
+        // viajar aqui para as tarefas reaparecerem após reload.
+        ...(session.isParallelTask && { isParallelTask: true }),
+        ...(session.parallelTaskStatus && { parallelTaskStatus: session.parallelTaskStatus }),
       }
 
       const filtered = summaries.filter(s => s.id !== session.id)
@@ -704,8 +748,14 @@ class SessionService {
     const summaries = await this.listSessions(projectPath)
     if (summaries.length <= MAX_SESSIONS_PER_PROJECT) return
 
+    // Chats de TAREFA nunca entram no prune — doutrina multi-agent ("uma
+    // tarefa nunca desaparece; só o developer apaga", ARCHITECTURE.md). O cap
+    // aplica-se só às sessões normais; as de tarefa saem via closeParallelTask.
+    const prunable = summaries.filter(s => s.isParallelTask !== true)
+    if (prunable.length <= MAX_SESSIONS_PER_PROJECT) return
+
     // Sort by updatedAt ascending (oldest first)
-    const sorted = [...summaries].sort((a, b) => a.updatedAt - b.updatedAt)
+    const sorted = [...prunable].sort((a, b) => a.updatedAt - b.updatedAt)
     const toDelete = sorted.slice(0, sorted.length - MAX_SESSIONS_PER_PROJECT)
 
     for (const session of toDelete) {
@@ -715,7 +765,7 @@ class SessionService {
 
   async renameSession(session: ChatSession, name: string): Promise<void> {
     session.name = name
-    await this.updateIndex(session.projectPath, session)
+    await this.enqueueIndexWrite(() => this.updateIndex(session.projectPath, session))
   }
 
   /**
@@ -733,8 +783,9 @@ class SessionService {
     if (!session) return false
     if (meta.name !== undefined) session.name = meta.name
     if (meta.description !== undefined) session.description = meta.description
+    // saveSession já escreve ficheiro + índice DENTRO da cadeia — o
+    // updateIndex extra que existia aqui era redundante e corria FORA dela.
     await this.saveSession(session)
-    await this.updateIndex(projectPath, session)
     return true
   }
 

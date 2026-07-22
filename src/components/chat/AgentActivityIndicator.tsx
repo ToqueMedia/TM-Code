@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef } from "react";
 import { Flex, Text, Box } from "@chakra-ui/react";
 import { useAgentStore } from "../../stores/agentStore";
+import { useParallelTaskStore, type ParallelTaskRun } from "../../stores/parallelTaskStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentElapsed } from "../../hooks/useAgentElapsed";
 import { useCompactionProgress, formatCompactElapsed } from "../../hooks/useCompactionProgress";
@@ -51,6 +52,23 @@ function AgentActivityIndicator() {
   const compactPhase = useAgentStore((s) => s.compactPhase);
   const workerStatus = useAgentStore((s) => s.workerStatus);
   const isStreaming = useChatStore((s) => s.isStreaming);
+  // ── Fase 2 (modelo foreground): o indicador é POSICIONAL — mostra o run
+  // da SESSÃO VISÍVEL. Sessão de tarefa → strip da tarefa; sessão do main →
+  // indicador clássico; a ver outra sessão qualquer → nada (o run principal
+  // continua, mas não é o desta vista).
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const streamingSessionId = useChatStore((s) => s.streamingSessionId);
+  // Selector devolve o PRÓPRIO run (referência muda a cada update dele) —
+  // re-renderiza só quando a tarefa vista mexe, não a cada tool-event global.
+  const viewedTaskRun = useParallelTaskStore((s) => {
+    if (!activeSessionId) return null;
+    for (const run of s.runs.values()) {
+      if (run.sessionId === activeSessionId) return run;
+    }
+    return null;
+  });
+  const abortTask = useParallelTaskStore((s) => s.abort);
+  const mainRunIsViewed = !streamingSessionId || streamingSessionId === activeSessionId;
   const totalTokensUsed = useChatStore((s) => s.totalTokensUsed);
   // Session-mode elapsed: total wall time per request, freezes during permission waits.
   const { elapsedMs: elapsed } = useAgentElapsed("session");
@@ -59,6 +77,9 @@ function AgentActivityIndicator() {
   const compaction = useCompactionProgress();
   const sessionStartRef = useRef(0);
   const prevStreamingRef = useRef(false);
+  // Sessão do run em curso — capturada enquanto streama para o fecho do
+  // timer saber ONDE o run viveu (streamingSessionId já está null no fim).
+  const lastStreamingSessionRef = useRef<string | null>(null);
   const prevOutputTokensRef = useRef(0);
 
   // Track session start so the "Trabalhou por Xm Ys" closing message reports
@@ -67,7 +88,10 @@ function AgentActivityIndicator() {
     if (isStreaming && sessionStartRef.current === 0) {
       sessionStartRef.current = Date.now();
     }
-  }, [isStreaming]);
+    if (isStreaming && streamingSessionId) {
+      lastStreamingSessionRef.current = streamingSessionId;
+    }
+  }, [isStreaming, streamingSessionId]);
 
   // When streaming ends, add "Worked for Xm Ys" system message
   useEffect(() => {
@@ -77,7 +101,13 @@ function AgentActivityIndicator() {
       sessionStartRef.current > 0
     ) {
       const finalElapsed = Date.now() - sessionStartRef.current;
-      if (finalElapsed > 2000) {
+      // Só quando a sessão do run ainda é a visível — addSystemMessage
+      // escreve na ATIVA, e o timer do main a cair no chat de uma tarefa
+      // era poluição de sessão (bug latente da Fase 2).
+      const endedSession = lastStreamingSessionRef.current;
+      const stillViewingEndedSession =
+        !endedSession || endedSession === useChatStore.getState().activeSessionId;
+      if (finalElapsed > 2000 && stillViewingEndedSession) {
         // Ephemeral footer — momentary "worked for X" timer. Not interesting
         // enough to persist; auto-removes from the transcript after ~8s.
         useChatStore
@@ -96,7 +126,7 @@ function AgentActivityIndicator() {
   // Compaction takes over the indicator with a polished gradient progress bar.
   // Placed before the !isStreaming guard so it also surfaces during a manual
   // /compact (where the streaming flag may not be set).
-  if (compaction.active) {
+  if (compaction.active && mainRunIsViewed) {
     const compactLabel = t("chat.compact.compacting").replace(/[.…]+\s*$/, "");
     return (
       <Flex
@@ -179,6 +209,16 @@ function AgentActivityIndicator() {
       </Flex>
     );
   }
+
+  // Sessão de tarefa em curso → strip própria (com Stop). Tem prioridade
+  // sobre o indicador do main: nesta vista, o run "daqui" é a tarefa.
+  if (viewedTaskRun && (viewedTaskRun.status === "running" || viewedTaskRun.status === "queued")) {
+    return <TaskRunStrip run={viewedTaskRun} onStop={() => abortTask(viewedTaskRun.id)} />;
+  }
+
+  // A ver uma sessão que não é a do run principal → o indicador do main não
+  // pertence a esta vista.
+  if (!mainRunIsViewed) return null;
 
   if (!isStreaming) return null;
 
@@ -344,6 +384,81 @@ function AgentActivityIndicator() {
         )}
         {")"}
       </Text>
+    </Flex>
+  );
+}
+
+/** Strip de atividade de uma TAREFA PARALELA cuja sessão está visível —
+ *  par posicional do indicador do main: pulso + último tool + Stop. */
+function TaskRunStrip({ run, onStop }: { run: ParallelTaskRun; onStop: () => void }) {
+  const lastCall = run.toolCalls[run.toolCalls.length - 1];
+  const detail =
+    run.status === "queued"
+      ? t("parallel.queued")
+      : lastCall
+        ? `${lastCall.toolName}${lastCall.argPreview ? ` ${lastCall.argPreview}` : ""}`
+        : t("welcome.agentWorking");
+  return (
+    <Flex
+      align="center"
+      gap="8px"
+      py="10px"
+      px={4}
+      bg="rgba(10, 10, 10, 0.96)"
+      zIndex={1}
+      borderTop="1px solid rgba(255, 255, 255, 0.05)"
+    >
+      <Box
+        w="6px"
+        h="6px"
+        borderRadius="full"
+        bg={run.status === "running" ? tokens.colors.accent.primary : tokens.colors.text.muted}
+        flexShrink={0}
+        css={{
+          animation: run.status === "running" ? "taskStripDot 1.2s ease-in-out infinite" : undefined,
+          "@keyframes taskStripDot": {
+            "0%, 100%": { opacity: 1 },
+            "50%": { opacity: 0.3 },
+          },
+        }}
+      />
+      <Text fontSize="12.5px" color={tokens.colors.text.secondary} fontWeight={500} flexShrink={0}>
+        {t("parallel.stripLabel")}
+      </Text>
+      <Text
+        fontSize="12px"
+        color={tokens.colors.text.muted}
+        fontFamily={tokens.fontFamily.mono}
+        flex="1"
+        minW={0}
+        whiteSpace="nowrap"
+        overflow="hidden"
+        textOverflow="ellipsis"
+      >
+        {detail}
+      </Text>
+      {run.tokenUsage.output > 0 && (
+        <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} flexShrink={0}>
+          {run.tokenUsage.output.toLocaleString()}t
+        </Text>
+      )}
+      <Box
+        as="button"
+        onClick={onStop}
+        title={t("parallel.stopTask")}
+        aria-label={t("parallel.stopTask")}
+        fontSize="11px"
+        fontWeight={600}
+        color={tokens.colors.accent.red}
+        px="8px"
+        h="22px"
+        borderRadius="6px"
+        border={`1px solid ${tokens.colors.accent.redMuted}`}
+        flexShrink={0}
+        _hover={{ bg: tokens.colors.accent.redSubtle }}
+      >
+        Stop
+      </Box>
     </Flex>
   );
 }

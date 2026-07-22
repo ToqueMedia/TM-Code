@@ -18,14 +18,12 @@ const OTHER_LABEL = '__other__'
 
 const QuestionBlock = memo(function QuestionBlock({
   question,
-  idx,
   selected,
   otherText,
   onSelect,
   onOtherTextChange,
 }: {
   question: Question
-  idx: number
   selected: string[]
   otherText: string
   onSelect: (label: string) => void
@@ -42,7 +40,7 @@ const QuestionBlock = memo(function QuestionBlock({
   }, [isOtherSelected])
 
   return (
-    <Box mb={idx < 3 ? 4 : 0}>
+    <Box>
       {/* Header chip */}
       <Flex align="center" gap={2} mb={2}>
         <Text
@@ -224,6 +222,11 @@ export const AskUserQuestionCard = memo(function AskUserQuestionCard({
   const [selections, setSelections] = useState<Record<number, string[]>>({})
   const [otherTexts, setOtherTexts] = useState<Record<number, string>>({})
   const [submitting, setSubmitting] = useState(false)
+  // Tabs (pedido do user 2026-07-17): uma pergunta por tab + tab final de
+  // Resumo — o bloco vertical com N perguntas empilhadas saiu. O índice
+  // questions.length É o Resumo.
+  const [activeTab, setActiveTab] = useState(0)
+  const summaryTab = questions.length
 
   // Auto-remove after submit/cancel
   useEffect(() => {
@@ -236,6 +239,7 @@ export const AskUserQuestionCard = memo(function AskUserQuestionCard({
 
   const handleSelect = useCallback(
     (questionIdx: number, label: string, multiSelect: boolean) => {
+      let advanced = false
       setSelections((prev) => {
         const current = prev[questionIdx] ?? []
         let next: string[]
@@ -246,10 +250,14 @@ export const AskUserQuestionCard = memo(function AskUserQuestionCard({
         } else {
           next = current.includes(label) ? [] : [label]
         }
+        // Single-select numa opção concreta = resposta dada → avança para a
+        // tab seguinte (Resumo no fim). "Other" fica: o user vai escrever.
+        advanced = !multiSelect && next.length > 0 && label !== OTHER_LABEL
         return { ...prev, [questionIdx]: next }
       })
+      if (advanced) setActiveTab(Math.min(questionIdx + 1, summaryTab))
     },
-    [],
+    [summaryTab],
   )
 
   const handleOtherTextChange = useCallback((questionIdx: number, text: string) => {
@@ -363,19 +371,140 @@ export const AskUserQuestionCard = memo(function AskUserQuestionCard({
         </Text>
       </Flex>
 
-      {/* Questions */}
+      {/* Tab bar: uma tab por pergunta + Resumo no fim. ✓ = respondida. */}
+      <Flex px={4} pt={2.5} pb={2} gap={1.5} flexWrap="wrap" borderBottom="1px solid rgba(255, 255, 255, 0.06)">
+        {questions.map((q, idx) => {
+          const sel = selections[idx] ?? []
+          const answered =
+            sel.length > 0 && !(sel.includes(OTHER_LABEL) && !(otherTexts[idx] ?? '').trim())
+          const active = activeTab === idx
+          return (
+            <Flex
+              key={idx}
+              as="button"
+              align="center"
+              gap={1.5}
+              px={2.5}
+              py="4px"
+              borderRadius="999px"
+              cursor="pointer"
+              bg={active ? 'rgba(254, 16, 99, 0.1)' : 'rgba(255, 255, 255, 0.03)'}
+              border={`1px solid ${active ? tokens.colors.accent.primary : 'rgba(255, 255, 255, 0.08)'}`}
+              transition="all 0.15s ease"
+              _hover={{ bg: active ? 'rgba(254, 16, 99, 0.14)' : 'rgba(255, 255, 255, 0.06)' }}
+              onClick={() => setActiveTab(idx)}
+            >
+              {answered ? (
+                <Text fontSize="9px" color={tokens.colors.terminal.green} lineHeight={1} fontWeight="bold">✓</Text>
+              ) : (
+                <Box w="5px" h="5px" borderRadius="full" bg={active ? tokens.colors.accent.primary : tokens.colors.text.muted} />
+              )}
+              <Text
+                fontSize="10px"
+                fontFamily={tokens.fontFamily.ui}
+                fontWeight="700"
+                textTransform="uppercase"
+                letterSpacing="0.04em"
+                color={active ? tokens.colors.text.primary : tokens.colors.text.secondary}
+              >
+                {q.header}
+              </Text>
+            </Flex>
+          )
+        })}
+        <Flex
+          as="button"
+          align="center"
+          gap={1.5}
+          px={2.5}
+          py="4px"
+          borderRadius="999px"
+          cursor="pointer"
+          bg={activeTab === summaryTab ? 'rgba(254, 16, 99, 0.1)' : 'rgba(255, 255, 255, 0.03)'}
+          border={`1px solid ${activeTab === summaryTab ? tokens.colors.accent.primary : 'rgba(255, 255, 255, 0.08)'}`}
+          transition="all 0.15s ease"
+          _hover={{ bg: activeTab === summaryTab ? 'rgba(254, 16, 99, 0.14)' : 'rgba(255, 255, 255, 0.06)' }}
+          onClick={() => setActiveTab(summaryTab)}
+        >
+          <Text
+            fontSize="10px"
+            fontFamily={tokens.fontFamily.ui}
+            fontWeight="700"
+            textTransform="uppercase"
+            letterSpacing="0.04em"
+            color={activeTab === summaryTab ? tokens.colors.text.primary : tokens.colors.text.secondary}
+          >
+            {t('chat.questionsSummary')}
+          </Text>
+        </Flex>
+      </Flex>
+
+      {/* Corpo: a pergunta ativa OU o resumo (Q→R, por-responder salta lá). */}
       <Box px={4} pt={3} pb={3}>
-        {questions.map((q, idx) => (
+        {activeTab < summaryTab ? (
           <QuestionBlock
-            key={idx}
-            question={q}
-            idx={idx}
-            selected={selections[idx] ?? []}
-            otherText={otherTexts[idx] ?? ''}
-            onSelect={(label) => handleSelect(idx, label, q.multiSelect)}
-            onOtherTextChange={(text) => handleOtherTextChange(idx, text)}
+            key={activeTab}
+            question={questions[activeTab]}
+            selected={selections[activeTab] ?? []}
+            otherText={otherTexts[activeTab] ?? ''}
+            onSelect={(label) => handleSelect(activeTab, label, questions[activeTab].multiSelect)}
+            onOtherTextChange={(text) => handleOtherTextChange(activeTab, text)}
           />
-        ))}
+        ) : (
+          <VStack align="stretch" gap={2}>
+            {questions.map((q, idx) => {
+              const sel = selections[idx] ?? []
+              const answered =
+                sel.length > 0 && !(sel.includes(OTHER_LABEL) && !(otherTexts[idx] ?? '').trim())
+              const resolved = answered ? resolveAnswer(q, sel, idx) : null
+              const answerText = resolved === null
+                ? t('chat.questionsUnanswered')
+                : Array.isArray(resolved) ? resolved.join(', ') : resolved
+              return (
+                <Flex
+                  key={idx}
+                  align="flex-start"
+                  gap={2.5}
+                  px={3}
+                  py={2}
+                  borderRadius="6px"
+                  cursor="pointer"
+                  bg="rgba(255, 255, 255, 0.02)"
+                  border={`1px solid ${answered ? tokens.colors.border.panel : 'rgba(240, 192, 0, 0.3)'}`}
+                  _hover={{ bg: 'rgba(255, 255, 255, 0.05)' }}
+                  onClick={() => setActiveTab(idx)}
+                  title={q.question}
+                >
+                  <Text
+                    fontSize="10px"
+                    fontFamily={tokens.fontFamily.ui}
+                    fontWeight="700"
+                    color={tokens.colors.accent.primary}
+                    textTransform="uppercase"
+                    letterSpacing="0.04em"
+                    flexShrink={0}
+                    mt="2px"
+                  >
+                    {q.header}
+                  </Text>
+                  <Box flex={1} minW={0}>
+                    <Text fontSize="11px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.ui} lineHeight="1.4" mb="2px">
+                      {q.question}
+                    </Text>
+                    <Text
+                      fontSize="12px"
+                      fontWeight="600"
+                      fontFamily={tokens.fontFamily.ui}
+                      color={answered ? tokens.colors.text.primary : tokens.colors.accent.orange}
+                    >
+                      {answerText}
+                    </Text>
+                  </Box>
+                </Flex>
+              )
+            })}
+          </VStack>
+        )}
       </Box>
 
       {/* Actions */}

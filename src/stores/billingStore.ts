@@ -272,6 +272,32 @@ export function isBlocked(status: CostBudgetStatus): boolean {
   return status === 'rejected'
 }
 
+/**
+ * Team-collaboration gate — the SINGLE source of truth for whether the team
+ * indicator, Team Chat, and Live Preview sharing should be shown/active.
+ *
+ * True when the user belongs to a team AND the team plan's term hasn't lapsed.
+ * The check is DATE-BASED on purpose: it must short-circuit the 7-day boot cache
+ * (which persists `teamMemberOf` + `planExpiresAt` and can otherwise resurrect a
+ * lapsed membership before /v1/me refreshes). Once `planExpiresAt` is in the
+ * past, collaboration hides immediately, even offline. An empty `planExpiresAt`
+ * (old worker / unknown) stays permissive — there was never an expiry to enforce.
+ *
+ * NOTE: `teamActive` is deliberately NOT used here — it is the personal/team
+ * BILLING toggle, not plan validity. A member in personal-billing mode is still
+ * a member and must keep collaboration.
+ */
+export function isTeamCollabActive(
+  s: Pick<BillingState, 'teamMemberOf' | 'planExpiresAt'>,
+): boolean {
+  if (!s.teamMemberOf) return false
+  if (s.planExpiresAt) {
+    const exp = Date.parse(s.planExpiresAt)
+    if (!Number.isNaN(exp) && exp <= Date.now()) return false
+  }
+  return true
+}
+
 /** Check if the user is in overage mode (cycle exhausted, paying via credits). */
 export function isInOverage(status: CostBudgetStatus): boolean {
   return status === 'allowed_overage'

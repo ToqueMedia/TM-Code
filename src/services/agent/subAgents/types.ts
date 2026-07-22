@@ -61,6 +61,10 @@ export interface SubAgentParentContext {
 export interface SubAgentRun {
   id: string
   parentMessageId?: string
+  /** Tarefa paralela que delegou este sub-agent (Fase 3 do modelo
+   *  foreground). undefined = delegado pelo run principal. Roteia a
+   *  ENTREGA dos resultados ao dono certo — nunca ao main por defeito. */
+  ownerTaskId?: string
   definition: SubAgentDefinition
   prompt: string
   description: string               // 3-5 word label for UI
@@ -91,6 +95,7 @@ export interface SubAgentToolCallSummary {
 /** Compact summary returned by check_team(). */
 export interface SubAgentRunSummary {
   id: string
+  ownerTaskId?: string
   agentType: SubAgentType
   description: string
   status: SubAgentRun['status']

@@ -519,7 +519,8 @@
       "Bash(npx --no-install wrangler secret list --env production)",
       "Bash(npx --no-install wrangler secret list)",
       "Bash(crane export *)",
-      "Bash(tar -x -C /tmp/fycargo-app app/server app/package.json)"
+      "Bash(tar -x -C /tmp/fycargo-app app/server app/package.json)",
+      "Bash(rg -rn \"SplitEditorLayout\" /Users/ithustle/dev/deskotp/exodus-ide/src -l)"
     ]
   }
 }

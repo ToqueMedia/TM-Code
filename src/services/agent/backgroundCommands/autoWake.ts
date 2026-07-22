@@ -8,6 +8,7 @@
  */
 
 import { useAgentStore } from '../../../stores/agentStore'
+import { t } from '../../../i18n'
 import { logger } from '../../../utils/logger'
 
 interface BackgroundCommandWake {
@@ -81,9 +82,41 @@ function doWake(): void {
   if (failed > 0) summaryParts.push(`${failed} failed`)
   if (cancelled > 0) summaryParts.push(`${cancelled} cancelled`)
 
-  const wakeMessage = `[System: Background command ${summaryParts.join(', ')}: ${ids}. Use check_background_commands once to read the result; do not poll.]`
+  const shortCmd = commands[0]?.command.slice(0, 60) ?? ''
 
-  logger.info('agent', `→ Background command auto-wake: ${summaryParts.join(', ')}`)
+  // GATE (user report 2026-07-16 "após o relatório vejo uma nova tarefa a
+  // iniciar sozinha — está mal"): um run terminado SÓ é retomado sozinho se o
+  // task tracker tiver trabalho aberto (pending/in_progress) — é a única
+  // evidência objetiva de que o agente parou A MEIO à espera do comando.
+  // Tracker vazio/completo = o relatório foi mesmo o fim; o resultado do
+  // comando é anunciado no chat, mas NENHUM run arranca sozinho.
+  const openTasks = useAgentStore.getState().tasks
+    .filter(tk => tk.status === 'pending' || tk.status === 'in_progress').length
+
+  if (openTasks === 0) {
+    logger.info('agent', `→ Background command finished (${summaryParts.join(', ')}) — no open tracker tasks, NOT waking (report was final)`)
+    void import('../../../stores/chatStore').then(({ useChatStore }) => {
+      useChatStore.getState().addSystemMessage(
+        t('backgroundWake.finishedNoResume').replace('{command}', shortCmd),
+        failed > 0 ? 'warn' : 'info',
+      )
+    }).catch(() => { /* announcement is best-effort */ })
+    return
+  }
+
+  const wakeMessage = `[System: Background command ${summaryParts.join(', ')}: ${ids}. Call the check_background_commands TOOL (never via shell/execute_command) once to read the result; do not poll. Then continue ONLY the tracker tasks that are still open.]`
+
+  logger.info('agent', `→ Background command auto-wake: ${summaryParts.join(', ')} (${openTasks} open tasks)`)
+
+  // Anuncia a retoma NO CHAT antes do run arrancar — sem isto o wake corre
+  // com addUserMessage:false e a continuação aparece "do nada", lendo como
+  // uma tarefa nova a auto-iniciar.
+  import('../../../stores/chatStore').then(({ useChatStore }) => {
+    useChatStore.getState().addSystemMessage(
+      t('backgroundWake.resuming').replace('{command}', shortCmd).replace('{count}', String(openTasks)),
+      'info',
+    )
+  }).catch(() => { /* announcement is best-effort */ })
 
   import('../agentRunner').then(({ runAgentWithCallbacks }) => {
     runAgentWithCallbacks(wakeMessage, {

@@ -16,10 +16,11 @@ import type OpenAI from 'openai'
 import FirebaseAuthService from '../../auth/firebaseAuth'
 import { createSubAgentClient } from '../sdkClient'
 import {
-  resolveActiveByokSnapshot,
+  resolveByokSnapshotForSession,
   buildByokClientFromSnapshot,
   buildByokThinkingConfig,
 } from '../byokRouting'
+import { useParallelTaskStore } from '../../../stores/parallelTaskStore'
 import { QueryEngine } from '../queryEngine'
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from '../query'
 import ToolExecutor from '../toolExecutor'
@@ -41,6 +42,8 @@ export interface SubAgentRunOptions {
   filteredTools: import('../toolExecutor').OpenAIToolDefinition[]
   /** Worker routing header inherited from the parent run. Omitted for BYOK. */
   requestType?: string
+  /** Tarefa paralela dona desta delegação (Fase 3) — roteia a entrega. */
+  ownerTaskId?: string
 }
 
 function buildPartialSubAgentResult(runId: string, reason: string, partialText = ''): string {
@@ -72,7 +75,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   // Create the run in the store — gets a runId and completionPromise.
   // Returns null if the concurrent limit (4) is reached.
   const store = useSubAgentStore.getState()
-  const runResult = store.startRun(definition, prompt, description, parentMessageId)
+  const runResult = store.startRun(definition, prompt, description, parentMessageId, options.ownerTaskId)
   if (!runResult) {
     throw new Error('Maximum concurrent sub-agents reached (4). Wait for some to complete before spawning more.')
   }
@@ -89,8 +92,12 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   }
   // BYOK: sub-agents are coding too — route them through the user's provider
   // direct (the conversation's frozen snapshot), never the TM worker. Falls
-  // back to the managed sub-agent client when BYOK is off.
-  const { snapshot: byokSnapshot, byokActive } = resolveActiveByokSnapshot()
+  // back to the managed sub-agent client when BYOK is off. Herança: sub-agent
+  // de uma TAREFA usa o snapshot da sessão do DONO (não o da sessão visível).
+  const ownerSessionId = options.ownerTaskId
+    ? useParallelTaskStore.getState().runs.get(options.ownerTaskId)?.sessionId
+    : undefined
+  const { snapshot: byokSnapshot, byokActive } = resolveByokSnapshotForSession(ownerSessionId)
   let client: OpenAI
   let refreshClient: () => Promise<OpenAI | null>
   let model = 'tm-active-model'
@@ -210,7 +217,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
           dedupKey: `subagent-timeout-${runId}`,
         })
       })
-      maybeWakeMainAgent()
+      maybeWakeMainAgent(options.ownerTaskId)
     }
   }, definition.maxWallClockMs)
 
@@ -241,7 +248,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
             dedupKey: `subagent-stale-${runId}`,
           })
         })
-        maybeWakeMainAgent()
+        maybeWakeMainAgent(options.ownerTaskId)
       }
       clearInterval(staleTimer)
     }
@@ -367,7 +374,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
             dedupKey: `subagent-error-${runId}`,
           })
         })
-        maybeWakeMainAgent()
+        maybeWakeMainAgent(options.ownerTaskId)
         return
       }
 
@@ -386,7 +393,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
           dedupKey: `subagent-done-${runId}`,
         })
       })
-      maybeWakeMainAgent()
+      maybeWakeMainAgent(options.ownerTaskId)
     } catch (err) {
       clearTimeout(wallClockTimer)
       clearInterval(staleTimer)
@@ -402,7 +409,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
           dedupKey: `subagent-error-${runId}`,
         })
       })
-      maybeWakeMainAgent()
+      maybeWakeMainAgent(options.ownerTaskId)
     } finally {
       clearTimeout(wallClockTimer)
       clearInterval(staleTimer)

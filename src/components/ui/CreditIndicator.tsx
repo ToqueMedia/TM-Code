@@ -3,7 +3,7 @@ import { Box, Flex, Text, HStack, VStack } from '@chakra-ui/react'
 import { FiChevronDown } from 'react-icons/fi'
 import { tokens } from '../../theme/tokens'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { isInOverageState, extraConsumptionPct, useBillingStore, type UserPlanName, type CostBudgetStatus } from '../../stores/billingStore'
+import { isInOverageState, extraConsumptionPct, useBillingStore, isTeamCollabActive, type UserPlanName, type CostBudgetStatus } from '../../stores/billingStore'
 import { t } from '../../i18n'
 
 export const PLAN_DISPLAY: Record<UserPlanName, { label: string; color: string }> = {
@@ -39,7 +39,12 @@ function CreditIndicatorInner(props: CreditIndicatorProps) {
   // Plano de Equipas: quando o user é membro, o billing principal já reflete a
   // FATIA do membro (control-plane projeta mySliceTokens/myConsumedPct). Aqui só
   // mudamos o ENQUADRAMENTO (badge "Equipa", "a tua fatia") e o CTA de bloqueio.
-  const team = useBillingStore(s => s.team)
+  // Quando o plano de equipa expira e não é renovado, o enquadramento de equipa
+  // some (o badge "Equipa" volta a plano pessoal) — mesmo que a cache de arranque
+  // ainda traga `team`, o gate por DATA em isTeamCollabActive anula-o.
+  const rawTeam = useBillingStore(s => s.team)
+  const teamCollabActive = useBillingStore(isTeamCollabActive)
+  const team = teamCollabActive ? rawTeam : null
   const planInfo = PLAN_DISPLAY[props.plan] || PLAN_DISPLAY.explorer
   const badgeLabel = team ? t('chat.teamBadge') : planInfo.label
   const badgeColor = team ? tokens.colors.accent.purple : planInfo.color

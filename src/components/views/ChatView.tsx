@@ -1,17 +1,16 @@
 import { memo, useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react'
 import { Flex, Box, HStack, Text, VStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiZap, FiShield, FiChevronDown, FiCheck, FiAlertCircle, FiEye, FiMoreHorizontal } from 'react-icons/fi'
+import { FiShield, FiCheck, FiAlertCircle, FiEye, FiMoreHorizontal } from 'react-icons/fi'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { useChatStore } from '../../stores/chatStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore } from '../../stores/layoutStore'
-import { useMcpStore } from '../../stores/mcpStore'
 import { activatePreview } from '../../services/previewActivation'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useBillingStore, extraConsumptionPct } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
-import { canShareCode, useCollabStore } from '../../stores/collabStore'
+import { useCollabStore } from '../../stores/collabStore'
 import { useByokState } from '../../hooks/useByokState'
 import MessageBubble from '../chat/MessageBubble'
 import { useMessageWindow } from '../../hooks/useMessageWindow'
@@ -19,11 +18,12 @@ import AgentActivityIndicator from '../chat/AgentActivityIndicator'
 import PostCompactSurvey from '../chat/PostCompactSurvey'
 import ChatSkeleton from '../chat/ChatSkeleton'
 import ChatWorkingTips from '../chat/ChatWorkingTips'
-import ModelIndicator from '../chat/ModelIndicator'
-import TmSpeedIndicator from '../chat/TmSpeedIndicator'
-import SessionDropdown from './SessionDropdown'
 import ChatSuggestions from './ChatSuggestions'
 import { CollabShareControls } from '../collab/CollabShareControls'
+// Direct file import (NOT the '../welcome' barrel): the barrel pulls in
+// WelcomeSidebar → @tauri-apps/api/menu, which breaks jsdom tests that mount
+// ChatView. PromoBanner itself has no Tauri deps.
+import PromoBanner from '../welcome/PromoBanner'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -39,8 +39,6 @@ function ChatView() {
   const isPlanViewerOpen = useLayoutStore(s => s.isPlanViewerOpen)
   const isCheckpointDrawerOpen = useLayoutStore(s => s.isCheckpointDrawerOpen)
   const isSidebarMode = viewMode === 'preview' || isPlanViewerOpen || isCheckpointDrawerOpen
-  const mcpServers = useMcpStore(s => s.servers)
-  const mcpIsInitializing = useMcpStore(s => s.isInitializing)
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
   const chatTextFontSize = useSettingsStore(s => s.chatTextFontSize)
   const scaffoldPhase = useLayoutStore(s => s.scaffoldPhase)
@@ -50,12 +48,8 @@ function ChatView() {
   // second dev server (port collision) — disable the Preview button until the
   // share stops.
   const isSharingLivePreview = useCollabStore(s => s.sharingPreview)
-  const noCredits = useBillingStore(s => s.noCredits)
   const consumedPct = useBillingStore(s => s.consumedPct)
-  const tokensConsumed = useBillingStore(s => s.tokensConsumed)
   const tokenBudget = useBillingStore(s => s.tokenBudget)
-  const cycleEnd = useBillingStore(s => s.cycleEnd)
-  const billingStatus = useBillingStore(s => s.status)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
   const { byokInPlay: showModelIndicator } = useByokState()
   // Last terminal error from the agent loop. The ServiceError thrown for 402
@@ -312,7 +306,12 @@ function ChatView() {
       '& [data-chat-toolbar-overflow-trigger]': {
         display: 'none',
       },
-      '@container (max-width: 1180px)': {
+      // Sessions + billing/model indicators moved UP to the MinimalTitleBar, so
+      // this toolbar now holds only a few small actions (Sandbox / Live Preview
+      // share / Preview). The old 1180px collapse fired way too early for that —
+      // it only needs to fold into the "…" menu when the chat column is genuinely
+      // tight (side drawer open + narrow window). Collapse only near collision.
+      '@container (max-width: 480px)': {
         '& [data-chat-toolbar-wide-only]': {
           display: 'none !important',
         },
@@ -346,19 +345,14 @@ function ChatView() {
           position="relative"
         >
         <Flex align="center" gap={2} minW={0} flex="1" overflow="visible">
-          <Box flex={1} minW={0}>
-            <SessionDropdown
-              projectPath={projectPath}
-              activeSessionId={activeSessionId}
-              isStreaming={isStreaming}
-            />
-          </Box>
+          {/* Sessions + New Chat moved UP to the MinimalTitleBar. */}
+          <Box flex={1} minW={0} />
           {/* In preview/sidebar mode the right-hand indicator cluster (which
               normally hosts the team controls) is hidden, so the user loses
               the Live Preview + Chat affordances. Surface them here, next to
               the session dropdown, so sharing stays reachable while the
               preview is open. */}
-          {isSidebarMode && <CollabShareControls compact />}
+          {isSidebarMode && <CollabShareControls compact previewOnly />}
         </Flex>
 
         {/* Isolation + MCP + team indicators — hidden in sidebar mode because
@@ -368,8 +362,7 @@ function ChatView() {
         {!isSidebarMode && (
           <>
             <HStack data-chat-toolbar-wide-only gap={1.5} flexShrink={0} overflow="visible">
-              <TmSpeedIndicator />
-              <ModelIndicator />
+              {/* TM Speed / model indicators moved UP to the MinimalTitleBar. */}
               {sandboxEnabled && (
                 <IsolationPill
                   icon={FiShield}
@@ -378,13 +371,10 @@ function ChatView() {
                   onClick={() => useLayoutStore.getState().setViewMode('settings')}
                 />
               )}
-              <McpIndicator
-                servers={mcpServers}
-                isInitializing={mcpIsInitializing}
-              />
-              {/* Team collaboration — presence + share live preview + chat.
-                  Renders nothing for non-team-members. */}
-              <CollabShareControls />
+              {/* MCP moved to the prompt actions row (PromptActions). */}
+              {/* Project-scoped Live Preview share only — chat/presence moved to
+                  the persistent WelcomeSidebar team section (previewOnly). */}
+              <CollabShareControls previewOnly />
               <Box
                 as="button"
                 data-chat-toolbar-action
@@ -412,28 +402,7 @@ function ChatView() {
           </>
         )}
 
-        {/* Créditos SEMPRE visíveis — deliberadamente FORA do cluster
-            data-chat-toolbar-wide-only (que a container query esconde a
-            ≤1180px, empurrando tudo para o menu ⋯) e fora do gate de
-            isSidebarMode: o consumo do ciclo é a informação de billing que
-            o user nunca pode perder de vista, em nenhuma largura. O gate
-            showModelIndicator mantém-se — em BYOK o billing é a chave do
-            próprio user (decisão de produto, não responsividade). */}
-        {!showModelIndicator && (
-          <Box flexShrink={0}>
-            <CreditIndicator
-              plan={billingPlan}
-              noCredits={noCredits}
-              isStreaming={isStreaming}
-              consumedPct={consumedPct}
-              tokensConsumed={tokensConsumed}
-              tokenBudget={tokenBudget}
-              cycleEnd={cycleEnd}
-              status={billingStatus}
-              tmsRemaining={tmsRemaining}
-            />
-          </Box>
-        )}
+        {/* Credits / model indicators moved UP to the MinimalTitleBar. */}
         </Flex>
       )}
 
@@ -633,7 +602,16 @@ function ChatView() {
               // an async glob_files invoke; when that resolved to null/true (or
               // its callback was dropped on a dev reload) an empty session
               // showed a blank pane instead of the suggestions.
-              <ChatSuggestions />
+              // PromoBanner rides here: it shows while there's an active promotion
+              // and vanishes the moment the chat opens (messages > 0 swaps this
+              // whole branch out). Returns null when there's no promo, so it's
+              // invisible otherwise.
+              <>
+                <Box px={4} pt={4} w="100%" flexShrink={0}>
+                  <PromoBanner />
+                </Box>
+                <ChatSuggestions />
+              </>
             ) : (
               <Box
                 maxW="980px"
@@ -707,7 +685,11 @@ function ChatView() {
                   <MessageBubble
                     key={msg.id}
                     message={msg}
-                    isStreaming={msg.id === streamingMessageId}
+                    // msg.isStreaming cobre bolhas de TAREFAS PARALELAS
+                    // (Fase 4: mutadas in-place na sessão delas) — sem isto o
+                    // memo do MessageBubble bloqueava o re-render e o
+                    // streaming da tarefa ficava invisível até ao fim.
+                    isStreaming={msg.id === streamingMessageId || msg.isStreaming === true}
                   />
                 ))}
                 <AgentActivityIndicator />
@@ -762,10 +744,6 @@ function HeaderOverflowMenu() {
   const projectPath = currentProject?.path || ''
   const isSharingLivePreview = useCollabStore(s => s.sharingPreview)
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
-  const mcpServers = useMcpStore(s => s.servers)
-  const mcpIsInitializing = useMcpStore(s => s.isInitializing)
-  const shouldShowMcp = mcpIsInitializing || mcpServers.some(server => server.status === 'running' || server.status === 'error')
-  const shouldShowCollab = canShareCode()
 
   useEffect(() => {
     if (!isOpen) return
@@ -845,62 +823,9 @@ function HeaderOverflowMenu() {
               onClick={() => runAndClose(() => useLayoutStore.getState().setViewMode('settings'))}
             />
           )}
-
-          <Flex
-            align="center"
-            justify="space-between"
-            gap={2}
-            px={2.5}
-            py={2}
-            borderTop={`1px solid ${tokens.colors.border.panel}`}
-            mt={1}
-            minH="34px"
-          >
-            <Text fontSize="10px" color={tokens.colors.text.muted} fontWeight="700" textTransform="uppercase">
-              Status
-            </Text>
-            {/* CreditIndicator já não vive aqui — está sempre visível na
-                toolbar (fora do cluster wide-only), portanto duplicá-lo no
-                menu seria redundante. */}
-            <HStack gap={1.5} justify="flex-end" minW={0} overflow="visible">
-              <TmSpeedIndicator />
-              <ModelIndicator />
-            </HStack>
-          </Flex>
-
-          {shouldShowMcp && (
-            <Flex
-              align="center"
-              justify="space-between"
-              gap={2}
-              px={2.5}
-              py={2}
-              minH="34px"
-            >
-              <Text fontSize="10px" color={tokens.colors.text.muted} fontWeight="700" textTransform="uppercase">
-                MCP
-              </Text>
-              <McpIndicator servers={mcpServers} isInitializing={mcpIsInitializing} />
-            </Flex>
-          )}
-
-          {shouldShowCollab && (
-            <Flex
-              align="center"
-              justify="space-between"
-              gap={2}
-              px={2.5}
-              py={2}
-              borderTop={`1px solid ${tokens.colors.border.panel}`}
-              mt={1}
-              minH="34px"
-            >
-              <Text fontSize="10px" color={tokens.colors.text.muted} fontWeight="700" textTransform="uppercase">
-                Team
-              </Text>
-              <CollabShareControls compact />
-            </Flex>
-          )}
+          {/* MCP + TEAM rows removed: MCP moved to the prompt actions row
+              (PromptActions), team collaboration moved to the WelcomeSidebar.
+              This menu is now purely actions (Preview / Sandbox). */}
         </VStack>
       )}
     </Box>
@@ -1028,7 +953,6 @@ function PlanExpiryNotice() {
 // ─── Credit Indicator (imported from shared component) ─────────────────────
 // The full CreditIndicator lives in ui/CreditIndicator.tsx to avoid
 // duplication. Re-exported here for backward-compat with ChatView imports.
-import { CreditIndicator } from '../ui/CreditIndicator'
 
 // ─── Isolation Pill ──────────────────────────────────────────────────────────
 
@@ -1062,149 +986,5 @@ function IsolationPill({ icon: Icon, label, color, onClick }: {
 
 const SPIN_KEYFRAMES = { animation: 'spin 0.8s linear infinite', '@keyframes spin': { to: { transform: 'rotate(360deg)' } } }
 
-// ─── MCP Indicator (collapsed pill with dropdown) ────────────────────────────
-
-interface McpServer {
-  name: string
-  status: string
-  tools: unknown[]
-}
-
-function McpIndicator(props: { servers: McpServer[]; isInitializing: boolean }) {
-  const [isOpen, setIsOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  const running = props.servers.filter(s => s.status === 'running')
-  const errored = props.servers.filter(s => s.status === 'error')
-  const totalTools = running.reduce((sum, s) => sum + s.tools.length, 0)
-
-  // Close on click outside
-  useEffect(() => {
-    if (!isOpen) return
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setIsOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [isOpen])
-
-  // Nothing to show
-  if (!props.isInitializing && running.length === 0 && errored.length === 0) {
-    return null
-  }
-
-  // Determine pill appearance
-  let pillColor: string = tokens.colors.accent.green
-  let pillLabel = `MCP ${running.length}`
-  if (props.isInitializing) {
-    pillColor = tokens.colors.accent.orange
-    pillLabel = 'MCP...'
-  } else if (errored.length > 0 && running.length === 0) {
-    pillColor = tokens.colors.accent.red
-    pillLabel = `MCP ${errored.length}`
-  } else if (running.length > 0) {
-    pillLabel = `MCP ${running.length} (${totalTools})`
-  }
-
-  return (
-    <Box position="relative" ref={ref}>
-      <HStack
-        gap={1}
-        px={2}
-        py="3px"
-        borderRadius={tokens.radius.full}
-        bg="rgba(255, 255, 255, 0.04)"
-        border="1px solid"
-        borderColor={isOpen ? 'rgba(255, 255, 255, 0.15)' : 'rgba(255, 255, 255, 0.06)'}
-        cursor="pointer"
-        transition={`all ${tokens.transition.fast}`}
-        _hover={{ bg: 'rgba(255, 255, 255, 0.08)', borderColor: 'rgba(255, 255, 255, 0.12)' }}
-        onClick={() => setIsOpen(!isOpen)}
-      >
-        <FiZap size={10} color={pillColor} />
-        <Text fontSize="10px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
-          {pillLabel}
-        </Text>
-        <FiChevronDown
-          size={9}
-          color={tokens.colors.text.disabled}
-          style={{
-            transition: 'transform 0.15s',
-            transform: isOpen ? 'rotate(180deg)' : 'rotate(0deg)',
-          }}
-        />
-      </HStack>
-
-      {/* Dropdown */}
-      {isOpen && (
-        <VStack
-          position="absolute"
-          top="calc(100% + 4px)"
-          right={0}
-          minW="200px"
-          bg={tokens.colors.bg.overlay}
-          border="1px solid"
-          borderColor={tokens.colors.border.panel}
-          borderRadius="8px"
-          boxShadow="0 8px 24px rgba(0,0,0,0.4)"
-          py={1}
-          gap={0}
-          zIndex={tokens.zIndex.dropdown}
-        >
-          {props.isInitializing && (
-            <McpDropdownItem name="MCP" detail="A iniciar..." color={tokens.colors.accent.orange} />
-          )}
-          {running.map(server => (
-            <McpDropdownItem
-              key={server.name}
-              name={server.name}
-              detail={`${server.tools.length} tools`}
-              color={tokens.colors.accent.green}
-            />
-          ))}
-          {errored.map(server => (
-            <McpDropdownItem
-              key={server.name}
-              name={server.name}
-              detail={t("misc.error")}
-              color={tokens.colors.accent.red}
-            />
-          ))}
-          {running.length === 0 && errored.length === 0 && !props.isInitializing && (
-            <Text fontSize="11px" color={tokens.colors.text.disabled} px={3} py={2}>
-              Sem servidores MCP
-            </Text>
-          )}
-        </VStack>
-      )}
-    </Box>
-  )
-}
-
-function McpDropdownItem(props: { name: string; detail: string; color: string }) {
-  return (
-    <Flex
-      align="center"
-      gap={2}
-      px={3}
-      py="6px"
-      w="100%"
-      cursor="pointer"
-      transition={`all ${tokens.transition.fast}`}
-      _hover={{ bg: 'rgba(255, 255, 255, 0.05)' }}
-      onClick={() => useLayoutStore.getState().setViewMode('settings')}
-    >
-      <Box w="6px" h="6px" borderRadius="full" bg={props.color} flexShrink={0} />
-      <Text fontSize="11px" color={tokens.colors.text.primary} fontWeight="500" flex={1}>
-        {props.name}
-      </Text>
-      <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
-        {props.detail}
-      </Text>
-    </Flex>
-  )
-}
 
 export default memo(ChatView)

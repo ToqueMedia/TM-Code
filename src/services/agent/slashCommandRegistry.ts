@@ -5,8 +5,12 @@ import { executePayments } from './commands/paymentsCommand'
 import { executeE2E } from './commands/e2eCommand'
 import { executeReview } from './commands/reviewCommand'
 import { executeCompact } from './commands/compactCommand'
-import { executeSpeed } from './commands/speedCommand'
-import { useTmSpeedStore, isSpeedModelEligible } from '../../stores/tmSpeedStore'
+// /speed RETIRADO da UI em 2026-07-16 (decisão do user: guardar como código
+// morto para reativação futura). Para o repor: descomentar estes imports e o
+// bloco de registo em registerDefaults(), voltar a montar o TmSpeedIndicator
+// na MinimalTitleBar e desligar TM_SPEED_RETIRED no tmSpeedStore.
+// import { executeSpeed } from './commands/speedCommand'
+// import { useTmSpeedStore, isSpeedModelEligible } from '../../stores/tmSpeedStore'
 import type { UserPlanName } from '../../stores/billingStore'
 import { t, type TranslationKey } from '../../i18n'
 
@@ -153,20 +157,24 @@ class SlashCommandRegistry {
       argHint: '[optional: custom instructions for summarization]',
     })
 
-    this.register({
-      name: '/speed',
-      description: t('slashCmd.speed.desc'),
-      enabled: true,
-      execute: executeSpeed,
-      requiresPaidPlan: true,
-      allowedPlans: ['pro', 'max'],
-      planGateMessageKey: 'speed.planRequired',
-      requiresProject: false,
-      // Oculto quando o modelo ativo não é a família MiMo V2.5 Pro — o TM
-      // Speed é uma variante desse modelo; com outro modelo publicado na
-      // config ativa o toggle seria um no-op enganador (2026-06-11).
-      visibleWhen: () => isSpeedModelEligible(useTmSpeedStore.getState().activeModelId),
-    })
+    // /speed RETIRADO em 2026-07-16 — código morto deliberado, será reusado.
+    // A implementação (speedCommand.ts, tmSpeedStore.ts, TmSpeedIndicator.tsx,
+    // header X-TM-Speed no agentService) fica intacta; só o registo, o badge da
+    // titlebar e o honrar do flag de perfil (TM_SPEED_RETIRED) estão desligados.
+    // this.register({
+    //   name: '/speed',
+    //   description: t('slashCmd.speed.desc'),
+    //   enabled: true,
+    //   execute: executeSpeed,
+    //   requiresPaidPlan: true,
+    //   allowedPlans: ['pro', 'max'],
+    //   planGateMessageKey: 'speed.planRequired',
+    //   requiresProject: false,
+    //   // Oculto quando o modelo ativo não é a família MiMo V2.5 Pro — o TM
+    //   // Speed é uma variante desse modelo; com outro modelo publicado na
+    //   // config ativa o toggle seria um no-op enganador (2026-06-11).
+    //   visibleWhen: () => isSpeedModelEligible(useTmSpeedStore.getState().activeModelId),
+    // })
 
     // Note: `/auth` (and later the `#auth-*` hashtag triggers that replaced
     // it) were removed with the MANAGED-PLATFORM layer — managed auth

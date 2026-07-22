@@ -17,6 +17,8 @@ export interface Question {
 export interface PendingAskUserQuestion {
   id: string
   questions: Question[]
+  /** Tarefa paralela que perguntou (badge "Pergunta" nas task rows). */
+  origin?: { taskId: string; label: string }
   resolve: (answers: Record<string, string | string[]>) => void
 }
 
@@ -32,14 +34,16 @@ interface AskUserQuestionActions {
    * Returns the synchronously-generated request id and a promise that
    * resolves when the user submits all answers.
    */
-  request: (questions: Question[]) => {
+  request: (questions: Question[], origin?: { taskId: string; label: string }) => {
     id: string
     promise: Promise<Record<string, string | string[]>>
   }
   submit: (id: string, answers: Record<string, string | string[]>) => void
   cancel: (id: string) => void
-  /** Reject any in-flight requests — called when the agent loop is cancelled. */
+  /** Reject the MAIN run's in-flight requests (task-owned survive). */
   clearAll: () => void
+  /** Cancela as perguntas pendentes de UMA tarefa paralela parada. */
+  cancelByOrigin: (taskId: string) => void
 }
 
 // ─── Generator ───
@@ -57,7 +61,7 @@ export const useAskUserQuestionStore = create<
 >((set, get) => ({
   pending: new Map(),
 
-  request: (questions) => {
+  request: (questions, origin) => {
     const id = generateQuestionId()
     let resolveFn: (r: Record<string, string | string[]>) => void = () => {}
     const promise = new Promise<Record<string, string | string[]>>((resolve) => {
@@ -66,6 +70,7 @@ export const useAskUserQuestionStore = create<
     const entry: PendingAskUserQuestion = {
       id,
       questions,
+      ...(origin ? { origin } : {}),
       resolve: resolveFn,
     }
     set((state) => {
@@ -100,10 +105,24 @@ export const useAskUserQuestionStore = create<
   },
 
   clearAll: () => {
+    // Só as perguntas do RUN PRINCIPAL — as de tarefas paralelas (origin)
+    // sobrevivem ao stop do main e caem via cancelByOrigin.
     const { pending } = get()
-    for (const entry of pending.values()) {
-      entry.resolve({})
+    const keep = new Map<string, PendingAskUserQuestion>()
+    for (const [id, entry] of pending) {
+      if (entry.origin) keep.set(id, entry)
+      else entry.resolve({})
     }
-    set({ pending: new Map() })
+    set({ pending: keep })
+  },
+
+  cancelByOrigin: (taskId) => {
+    const { pending } = get()
+    const keep = new Map<string, PendingAskUserQuestion>()
+    for (const [id, entry] of pending) {
+      if (entry.origin?.taskId === taskId) entry.resolve({})
+      else keep.set(id, entry)
+    }
+    set({ pending: keep })
   },
 }))

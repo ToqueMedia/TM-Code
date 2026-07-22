@@ -408,7 +408,7 @@ function SkillsTab(): React.ReactElement {
       {/* Project */}
       <Box>
         <Text fontSize="sm" fontWeight="600" color={tokens.colors.text.primary} mb={2}>
-          Project (.tms/skills/)
+          Project (.toquemedia-studio/skills/)
         </Text>
         {projectSkills.length === 0 ? (
           <Text fontSize="12px" color={tokens.colors.text.muted}>{t("misc.noProjectSkills")}</Text>

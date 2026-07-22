@@ -70,14 +70,15 @@ describe('SkillService', () => {
       expect(skills[0].name).toBe('general-coding')
     })
 
-    it('loads project skills from .tms/skills/', async () => {
+    it('loads project skills from .toquemedia-studio/skills/', async () => {
       mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
         if (cmd === 'list_skills_bundled') return []
         if (cmd === 'get_home_directory') return '/home/user'
+        if (cmd === 'create_directories_all') return undefined
         if (cmd === 'glob_files') {
           const dir = (args as Record<string, unknown>)?.directory as string
-          if (dir === '/project/.tms/skills') {
-            return ['/project/.tms/skills/my-rules/SKILL.md']
+          if (dir === '/project/.toquemedia-studio/skills') {
+            return ['/project/.toquemedia-studio/skills/my-rules/SKILL.md']
           }
           return []
         }
@@ -92,6 +93,66 @@ describe('SkillService', () => {
       expect(projectSkills).toHaveLength(1)
       expect(projectSkills[0].name).toBe('my-rules')
       expect(projectSkills[0].content).toContain('semicolons')
+    })
+
+    // v1.0.1 skills-discovery fix: canonical dir + flat single-file + lowercase skill.md.
+    it('loads project skills from the canonical .toquemedia-studio/skills/', async () => {
+      mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'list_skills_bundled') return []
+        if (cmd === 'get_home_directory') return '/home/user'
+        if (cmd === 'glob_files') {
+          const { directory, pattern } = args as { directory: string; pattern: string }
+          if (directory === '/project/.toquemedia-studio/skills' && pattern === '*/*.md') {
+            return ['/project/.toquemedia-studio/skills/deploy/SKILL.md']
+          }
+          return []
+        }
+        if (cmd === 'read_file') return '---\nname: deploy\ndescription: Deploy recipe\n---\nSteps'
+        throw new Error('Not found')
+      })
+
+      const skills = await service.loadSkills('/project')
+      expect(skills.filter(s => s.scope === 'project').map(s => s.name)).toContain('deploy')
+    })
+
+    it('loads a flat single-file project skill (<name>.md) with path = the file', async () => {
+      mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'list_skills_bundled') return []
+        if (cmd === 'get_home_directory') return '/home/user'
+        if (cmd === 'glob_files') {
+          const { directory, pattern } = args as { directory: string; pattern: string }
+          if (directory === '/project/.toquemedia-studio/skills' && pattern === '*.md') {
+            return ['/project/.toquemedia-studio/skills/my-skill.md']
+          }
+          return []
+        }
+        if (cmd === 'read_file') return '---\nname: my-skill\ndescription: Flat skill\n---\nBody'
+        throw new Error('Not found')
+      })
+
+      const proj = (await service.loadSkills('/project')).filter(s => s.scope === 'project')
+      expect(proj).toHaveLength(1)
+      expect(proj[0].name).toBe('my-skill')
+      // A single-file skill's path must be the file itself so deleteSkill never nukes the dir.
+      expect(proj[0].path).toBe('/project/.toquemedia-studio/skills/my-skill.md')
+    })
+
+    it('discovers a nested skill with lowercase skill.md (case-insensitive)', async () => {
+      mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'list_skills_bundled') return []
+        if (cmd === 'get_home_directory') return '/home/user'
+        if (cmd === 'glob_files') {
+          const { directory, pattern } = args as { directory: string; pattern: string }
+          if (directory === '/home/user/.toquemedia-studio/skills' && pattern === '*/*.md') {
+            return ['/home/user/.toquemedia-studio/skills/foo/skill.md']
+          }
+          return []
+        }
+        if (cmd === 'read_file') return '---\nname: foo\ndescription: Foo\n---\nBody'
+        throw new Error('Not found')
+      })
+
+      expect((await service.loadSkills('/project')).filter(s => s.scope === 'global').map(s => s.name)).toContain('foo')
     })
 
     it('caches results within TTL', async () => {
@@ -282,7 +343,8 @@ license: MIT
       await service.createProjectSkill('/project', 'My Conventions', '# Rules')
 
       expect(writtenPaths).toHaveLength(1)
-      expect(writtenPaths[0]).toBe('/project/.tms/skills/my-conventions/SKILL.md')
+      // Canonical project-skill dir mirrors the global ~/.toquemedia-studio/skills.
+      expect(writtenPaths[0]).toBe('/project/.toquemedia-studio/skills/my-conventions/SKILL.md')
     })
 
     it('sanitizes skill name', async () => {
@@ -324,11 +386,11 @@ license: MIT
       })
 
       await service.deleteSkill({
-        id: 'project:rules', name: 'rules', description: 'Project rules', path: '/project/.tms/skills/rules',
+        id: 'project:rules', name: 'rules', description: 'Project rules', path: '/project/.toquemedia-studio/skills/rules',
         content: '', references: [], scope: 'project',
       })
 
-      expect(deletedPath).toBe('/project/.tms/skills/rules')
+      expect(deletedPath).toBe('/project/.toquemedia-studio/skills/rules')
     })
   })
 })

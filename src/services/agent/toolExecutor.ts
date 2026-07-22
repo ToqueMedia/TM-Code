@@ -1,3 +1,4 @@
+import { checkRepoOwnership, ensureGitInfoExclude } from '../repoOwnership'
 import { invoke } from '@/utils/invokeMetrics'
 import { listen } from '@tauri-apps/api/event'
 import { t } from '@/i18n'
@@ -5,6 +6,7 @@ import { useFileTreeRepository } from '../../stores/fileTreeStore'
 import { useEditorRepository } from '../../stores/editorStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { usePermissionStore } from '../../stores/permissionStore'
+import { findBlockingClaim, registerFileClaim, MAIN_CLAIM_OWNER } from './fileClaims'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
@@ -24,9 +26,17 @@ import {
   STATE_MUTATING_COMMANDS,
   normalizePath,
 } from './toolExecutor/checks'
-import { tauriFetch } from '../tauriFetch'
 import { devServerManager } from '../devServerManager'
-import { resolveWorkerUrl, resolveAIWorkerUrl } from '../../utils/devUrls'
+import { resolveAIWorkerUrl } from '../../utils/devUrls'
+import { htmlToText, looksLikeHtml } from '../../utils/htmlToText'
+
+// Browser-like UA for web_fetch — many docs/CDN sites 403 a bot-looking UA.
+const WEB_FETCH_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+// Appended to fetch-failure messages so the model doesn't wrongly conclude a
+// page is permanently unreachable after one transient/blocked fetch.
+const WEB_FETCH_FALLBACK_HINT =
+  'Do not conclude the page is inaccessible from this single failure. Retry once, try web_search for a canonical/alternate URL, or (if shell access is available) fetch it with `curl -L -A "Mozilla/5.0" <url>` and extract the text locally before reporting it unavailable.'
 import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import {
@@ -37,8 +47,14 @@ import {
   READ_ALIAS,
   WRITE_FILE,
   EDIT_FILE,
+  CREATE_FILE,
+  DELETE_FILE,
+  RENAME_FILE,
+  CREATE_DIRECTORY,
   STOP_DEV_SERVER,
   LSP,
+  CAPTURE_URL_DESIGN,
+  SEND_AGENT_MESSAGE,
   ENTER_WORKTREE,
   EXIT_WORKTREE,
   canonicalToolName,
@@ -394,6 +410,17 @@ class ToolExecutor {
     this.requestType = type
   }
 
+  /**
+   * Attribution for permission prompts raised by THIS executor. Set by the
+   * parallel-task runner on its isolated child so the dialog + task rows can
+   * say WHICH task is asking ("Autorização" badge). Null for the main agent.
+   */
+  private permissionOrigin: import('../../stores/permissionStore').PermissionOrigin | null = null
+
+  setPermissionOrigin(origin: import('../../stores/permissionStore').PermissionOrigin | null): void {
+    this.permissionOrigin = origin
+  }
+
   clearDelegateTelemetry(): void {
     this.lastDelegateInfo = null
   }
@@ -419,6 +446,7 @@ class ToolExecutor {
       largeResults: this.largeResults,
       readLargeResultFromDisk: (id) => this.readLargeResultFromDisk(id),
       getCmdModeCwd: () => this.cmdModeCwd,
+      getTaskOrigin: () => this.permissionOrigin,
       getMemoryScopeAgentType: () => this.memoryScopeAgentType,
       getPlanMode: () => this.planMode,
       getPlanFileWritten: () => this.planFileWritten,
@@ -804,6 +832,35 @@ class ToolExecutor {
     }
   }
 
+  /** Tools de escrita sujeitas ao registry de claims (Fase 4b/6b). */
+  private static readonly CLAIM_WRITE_TOOLS = new Set<string>([
+    WRITE_FILE, EDIT_FILE, CREATE_FILE, DELETE_FILE, RENAME_FILE, CREATE_DIRECTORY,
+  ])
+
+  /** Alvos de escrita relativizados à raiz do agente (worktree/cmd-cwd ou
+   *  projecto) — a MESMA chave para todos os agentes, para os claims baterem. */
+  private relWriteTargets(input: Record<string, unknown>): string[] {
+    const roots: string[] = []
+    if (this.cmdModeCwd) roots.push(this.cmdModeCwd)
+    const project = useProjectStore.getState().currentProject?.path
+    if (project) roots.push(project)
+    const out: string[] = []
+    for (const key of ['file_path', 'path', 'old_path', 'new_path', 'source', 'destination']) {
+      const v = input[key]
+      if (typeof v !== 'string' || !v.trim()) continue
+      let rel = v.trim()
+      for (const root of roots) {
+        if (rel.startsWith(root + '/')) {
+          rel = rel.slice(root.length + 1)
+          break
+        }
+      }
+      rel = rel.replace(/^\.\//, '')
+      if (rel) out.push(rel)
+    }
+    return out
+  }
+
   async execute(
     toolName: string,
     input: Record<string, unknown>,
@@ -833,6 +890,25 @@ class ToolExecutor {
     // again mid-execution via input._abortSignal — that's their job.
     if (signal?.aborted) {
       return `Tool ${toolName} aborted before execution (user cancelled).`
+    }
+
+    // ── Claims de propriedade (registry ÚNICO main+tarefas — fileClaims.ts).
+    // Verificado AQUI para todos os agentes: main a tentar mexer no ficheiro
+    // de uma tarefa viva, ou tarefa a mexer no do main/de outra tarefa. Antes
+    // das permissões: não vale a pena pedir autorização para algo bloqueado.
+    if (ToolExecutor.CLAIM_WRITE_TOOLS.has(toolName)) {
+      const claimOwner = this.permissionOrigin?.taskId ?? MAIN_CLAIM_OWNER
+      for (const rel of this.relWriteTargets(input)) {
+        const blocking = findBlockingClaim(rel, claimOwner)
+        if (blocking) {
+          const guidance = claimOwner === MAIN_CLAIM_OWNER
+            ? `Do NOT modify it now — steer that task if the change belongs to it, or wait for it to finish, and tell the developer why this part was skipped.`
+            : `Do NOT modify it or work around the block. Skip this part of the task and explain it in your final report.`
+          throw new Error(
+            `BLOCKED (file ownership): "${rel}" is being modified by ${blocking.owner === MAIN_CLAIM_OWNER ? blocking.label : `another parallel task ("${blocking.label}")`}. ${guidance}`,
+          )
+        }
+      }
     }
 
     // PAUSA GLOBAL (2026-06-11, pedido do user): enquanto houver QUALQUER
@@ -923,7 +999,9 @@ class ToolExecutor {
         // ── fim TEMP ──
         this.recordPermission(toolCallId, decision)
         if (!decision.approved) {
-          const reason = decision.denyReason
+          const reason = decision.source === 'auto_classifier'
+            ? ` ${decision.denyReason ?? 'Blocked by the auto-mode security classifier.'} This was an automated policy decision, NOT the developer — adjust your approach (safer alternative, narrower scope) or ask the developer to run it manually.`
+            : decision.denyReason
             ? ` User says: ${decision.denyReason}`
             : ' Ask the user how to proceed.'
           return `Blocked: "${pathForScope}" is outside the ${scopeCheck.scopeName}.${reason}`
@@ -978,10 +1056,12 @@ class ToolExecutor {
           return `Blocked: "${dangerousMatch}" is blocked in your Settings. The developer disabled this command. Ask the developer to unblock it in Settings > Sandbox if needed.`
         }
         // Not blocked but dangerous → always ask (forcePrompt bypasses Accept All)
-        const decision = await usePermissionStore.getState().requestPermission(toolName, input, 'dangerous_command')
+        const decision = await usePermissionStore.getState().requestPermission(toolName, input, 'dangerous_command', this.permissionOrigin ?? undefined)
         this.recordPermission(toolCallId, decision)
         if (!decision.approved) {
-          const reason = decision.denyReason
+          const reason = decision.source === 'auto_classifier'
+            ? ` ${decision.denyReason ?? 'Blocked by the auto-mode security classifier.'} This was an automated policy decision, NOT the developer — adjust your approach (safer alternative, narrower scope) or ask the developer to run it manually.`
+            : decision.denyReason
             ? ` User says: ${decision.denyReason}`
             : ' Ask the user what they want instead.'
           return `Permission denied by user for ${dangerousMatch}.${reason}`
@@ -1014,11 +1094,13 @@ class ToolExecutor {
     ])
 
     if (!dangerousAlreadyApproved && !PERMISSION_EXEMPT_TOOLS.has(toolName)) {
-      const decision = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive ? 'sensitive_file' : false)
+      const decision = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive ? 'sensitive_file' : false, this.permissionOrigin ?? undefined)
       this.recordPermission(toolCallId, decision)
       if (!decision.approved) {
         const target = (input.file_path || input.command || input.name || '') as string
-        const reason = decision.denyReason
+        const reason = decision.source === 'auto_classifier'
+          ? ` ${decision.denyReason ?? 'Blocked by the auto-mode security classifier.'} This was an automated policy decision, NOT the developer — adjust your approach (safer alternative, narrower scope) or ask the developer to run it manually.`
+          : decision.denyReason
           ? ` User says: ${decision.denyReason}`
           : ' Ask the user what they want instead or suggest an alternative approach.'
         return `Permission denied by user for ${toolName}${target ? ` (${target})` : ''}.${reason}`
@@ -1046,6 +1128,14 @@ class ToolExecutor {
     if (memoryScope) execInput._memoryScope = memoryScope
 
     const result = await tool.execute(execInput)
+
+    // Claim de propriedade após aplicação sem throw — main e tarefas entram
+    // no MESMO registry (fileClaims); tarefas são espelhadas em
+    // run.modifiedFiles para UI/persistência.
+    if (ToolExecutor.CLAIM_WRITE_TOOLS.has(toolName)) {
+      const claimOwner = this.permissionOrigin?.taskId ?? MAIN_CLAIM_OWNER
+      for (const rel of this.relWriteTargets(input)) registerFileClaim(claimOwner, rel)
+    }
 
     // Reactive git refresh — see GIT_MUTATING_TOOLS. Fire-and-forget; blocked
     // and permission-denied calls returned earlier, so this only fires for
@@ -1208,6 +1298,9 @@ class ToolExecutor {
       case 'write_file':
       case 'create_file':
         return 12_000
+      case CAPTURE_URL_DESIGN:
+        // Design handoffs are long on purpose (layout + palette + verbatim text).
+        return 24_000
       default:
         return 12_000
     }
@@ -2434,6 +2527,21 @@ ${preview}
   }
 
   private validateCommand(command: string, options: { allowDevServer?: boolean } = {}): void {
+    // Nome de TOOL interna usado como binário de shell — alucinação observada
+    // no wake pós-background-command (2026-07-16): o modelo correu
+    // `check_background_commands --id …` no shell em vez de chamar a tool.
+    // O shell devolveria "command not found" mascarado (o modelo tinha até
+    // metido um `|| echo` para engolir o erro) e o resultado real nunca era
+    // lido. Redireciona explicitamente para a tool.
+    const internalToolAsShell = command.trim().match(
+      /^(check_background_commands|update_tasks|read_dev_server_logs|read_large_result|collect_results|update_session_memory|read_session_memory|web_fetch|web_search)\b/,
+    )
+    if (internalToolAsShell) {
+      throw new Error(
+        `"${internalToolAsShell[1]}" is a TOOL, not a shell command. Call the ${internalToolAsShell[1]} tool directly (function call), never through execute_command/shell.`,
+      )
+    }
+
     // Read-only mode: block file-writing shell operations (verification agents).
     if (this.readOnlyMode) {
       // Strip common prefixes that don't affect read/write nature: cd ../ &&, env VAR=val, etc.
@@ -3023,16 +3131,20 @@ ${preview}
         if (!head.ok) {
           return `Error: enter_worktree requires a git repository with at least one commit. git said: ${head.out || 'not a git repository'}`
         }
+        // Ancestor-repo trap (2026-07-17): with no repo at the project ROOT
+        // but a repo somewhere ABOVE it (~/dev was one), HEAD resolves against
+        // the PARENT and the worktree would be a checkout of ANOTHER project.
+        if ((await checkRepoOwnership(root)) !== 'own') {
+          return 'Error: this project has no git repository of its own — the folder sits inside an ancestor repo, so enter_worktree would create a worktree of the WRONG repository. Initialize a local repo first (git init + an initial commit), or run the work as a parallel task (tasks set up a local repo automatically).'
+        }
         const { sanitizeWorktreeName, worktreeBranch, WORKTREES_REL_DIR } = await import('./toolExecutor/worktrees')
         const name = sanitizeWorktreeName(input.name) ?? `wt-${Date.now().toString(36)}`
         const branch = worktreeBranch(name)
         const dir = `${root}/${WORKTREES_REL_DIR}/${name}`
-        // Keep the worktrees dir out of the MAIN checkout's git status via the
-        // repo-local (never versioned) exclude file. Best-effort.
-        await this.runGit(
-          `mkdir -p .git/info && { grep -qxF '${WORKTREES_REL_DIR}/' .git/info/exclude 2>/dev/null || echo '${WORKTREES_REL_DIR}/' >> .git/info/exclude; }`,
-          root,
-        )
+        // Keep the worktrees dir (and the local identity file) out of the MAIN
+        // checkout's git status via the repo-local exclude. Best-effort, fs
+        // based — the old shell one-liner was POSIX-only (broken on cmd /C).
+        await ensureGitInfoExclude(root, [`${WORKTREES_REL_DIR}/`, '.toquemedia-id'])
         const add = await this.runGit(`git worktree add "${dir}" -b "${branch}"`, root)
         if (!add.ok) {
           return `Error: git worktree add failed — ${add.out}`
@@ -3810,127 +3922,281 @@ ${preview}
     this.tools.set('web_fetch', {
       definition: {
         name: 'web_fetch',
-        description: 'Fetch the contents of a web URL. Returns the text content of the page. Use this to read documentation, check API endpoints, look up package information on npm, or research technical topics. Cannot access localhost or internal URLs.',
+        description: 'Fetch a web URL (http/https). Default mode returns readable text — HTML is stripped to article text and the page\'s stylesheet URLs are listed; JSON/plaintext/CSS is returned as-is. mode:"raw" returns the raw response body (full HTML markup with classes/inline styles). Use it to read documentation, npm/package pages, API responses, changelogs, or any URL the user pastes. DESIGN-COPY FLOW (user asks to see/copy a site\'s design): 1) fetch the page (text mode) for content/structure + the stylesheet list, 2) fetch the stylesheet URLs for colors/fonts/spacing, 3) fetch mode:"raw" when you need the actual markup, and 4) use capture_url_design for a visual screenshot description. Follows redirects. Can reach the local dev server (localhost); cloud-metadata and internal network addresses are blocked.',
         input_schema: {
           type: 'object',
           properties: {
             url: { type: 'string', description: 'The URL to fetch (must be http or https)' },
-            maxLength: { type: 'number', description: 'Maximum characters to return. Default: 50000' }
+            maxLength: { type: 'number', description: 'Maximum characters to return. Default: 50000' },
+            mode: {
+              type: 'string',
+              enum: ['text', 'raw'],
+              description: 'text (default): HTML stripped to readable text + stylesheet list. raw: the raw response body as-is (full HTML/CSS/JSON) — use to inspect real markup, classes and inline styles.'
+            }
           },
           required: ['url']
         },
         concurrencySafe: true,
       },
       execute: async (input) => {
-        const url = input.url as string
-        const maxLength = (input.maxLength as number) || 50000
+        const rawUrl = String(input.url ?? '').trim()
+        const maxLength =
+          typeof input.maxLength === 'number' && input.maxLength > 0 ? input.maxLength : 50000
         const signal = input._abortSignal as AbortSignal | undefined
 
-        const firebaseAuth = FirebaseAuthService.getInstance()
-        const idToken = await firebaseAuth.getIdToken()
-
-        if (!idToken) {
-          return t('tool.notAuthenticated')
-        }
-
-        const workerUrl = resolveWorkerUrl()
-
-        const callWebFetch = async (token: string) =>
-          tauriFetch(`${workerUrl}/v1/web-fetch`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${token}`,
-            },
-            body: JSON.stringify({ url, maxLength }),
-            signal,
-          })
-
-        let response: Awaited<ReturnType<typeof tauriFetch>>
+        // Validate up front — a clear message beats a confusing Rust proxy error.
+        let parsed: URL
         try {
-          response = await callWebFetch(idToken)
-        } catch (err) {
-          if (err instanceof DOMException && err.name === 'AbortError') {
-            return `Web fetch cancelled by user (${url}).`
-          }
-          throw err
+          parsed = new URL(rawUrl)
+        } catch {
+          return `Error: "${rawUrl}" is not a valid absolute URL. Provide a full http(s) URL (e.g. https://example.com/path).`
         }
-
-        // 401 retry with a force-refreshed token — covers the case where the
-        // SDK's cached token was stale (e.g. wake-from-sleep). Mirrors the
-        // same pattern used in agentService for /v1/chat/completions.
-        if (response.status === 401) {
-          const refreshed = await firebaseAuth.getIdToken(true)
-          if (refreshed) {
-            try {
-              response = await callWebFetch(refreshed)
-            } catch (err) {
-              if (err instanceof DOMException && err.name === 'AbortError') {
-                return `Web fetch cancelled by user (${url}).`
-              }
-              throw err
-            }
-          }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          return `Error: web_fetch only supports http/https URLs (got "${parsed.protocol}").`
         }
+        if (signal?.aborted) return `Web fetch cancelled by user (${rawUrl}).`
 
-        if (!response.ok) {
-          return `Error: Failed to fetch ${url} (status: ${response.status})\n\nDo not conclude the page is inaccessible from this fetch failure alone. If this is an official/current documentation page, try web_search for the canonical URL or an alternate docs path. If terminal access is available, use a browser-like fetch such as curl -L -A Mozilla/5.0 against the URL and extract the relevant text locally before reporting the docs as unavailable.`
-        }
-
-        const result = await response.json() as {
-          url: string
+        // Fetch DIRECTLY through the CORS-free Rust reqwest proxy (follows up to 5
+        // redirects, SSRF-guards internal/metadata addresses, 30s timeout). This
+        // replaces the old POST /v1/web-fetch to the control-plane worker, which
+        // required a Firebase login and silently dead-ended ("Not authenticated")
+        // for BYOK/offline users and was subject to that worker's outages. A
+        // browser-like UA gets past sites that 403 obvious bots.
+        const invokePromise = invoke<{
           status: number
-          contentType?: string
-          strategy?: string
-          attempts?: Array<{
-            strategy: string
-            status: number
-            contentType?: string
-            finalUrl?: string
-            error?: string
-          }>
-          content: string
-          truncated: boolean
-          error?: string
+          statusText: string
+          headers: [string, string][]
+          body: string
+          sizeBytes: number
+        }>('http_client_request', {
+          input: {
+            method: 'GET',
+            url: parsed.toString(),
+            headers: {
+              'User-Agent': WEB_FETCH_UA,
+              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7',
+              'Accept-Language': 'en,*;q=0.5',
+            },
+            body: null,
+            timeoutSecs: 30,
+          },
+        })
+
+        let result: { status: number; statusText: string; headers: [string, string][]; body: string; sizeBytes: number }
+        try {
+          // The Rust call can't be cancelled mid-flight, but we let the caller's
+          // await return immediately on abort (the request finishes in the
+          // background, capped by its 30s timeout — same trade-off as tauriFetch).
+          result = signal
+            ? await Promise.race([
+                invokePromise,
+                new Promise<never>((_, reject) =>
+                  signal.addEventListener(
+                    'abort',
+                    () => reject(new DOMException('Request aborted', 'AbortError')),
+                    { once: true },
+                  ),
+                ),
+              ])
+            : await invokePromise
+        } catch (err) {
+          if (signal) invokePromise.catch(() => {}) // swallow late rejection if abort won
+          if (err instanceof DOMException && err.name === 'AbortError') {
+            return `Web fetch cancelled by user (${rawUrl}).`
+          }
+          const msg = err instanceof Error ? err.message : String(err)
+          return `Error fetching ${rawUrl}: ${msg}\n\n${WEB_FETCH_FALLBACK_HINT}`
         }
 
-        const attemptsSummary = Array.isArray(result.attempts) && result.attempts.length > 0
-          ? result.attempts
-            .map((attempt) => {
-              const outcome = attempt.error ? `error=${attempt.error}` : `status=${attempt.status}`
-              const finalUrl = attempt.finalUrl && attempt.finalUrl !== result.url ? ` url=${attempt.finalUrl}` : ''
-              return `${attempt.strategy}(${outcome}${finalUrl})`
-            })
-            .join(' -> ')
-          : ''
-
-        if (result.error) {
-          const attempts = attemptsSummary ? `\nFetch attempts: ${attemptsSummary}` : ''
-          return `Error fetching ${url}: ${result.error}${attempts}\n\nDo not conclude the page is inaccessible from this fetch failure alone. If this is an official/current documentation page, try web_search for the canonical URL or an alternate docs path. If terminal access is available, use a browser-like fetch such as curl -L -A Mozilla/5.0 against the URL and extract the relevant text locally before reporting the docs as unavailable.`
-        }
-
-        let output = `URL: ${result.url}\nStatus: ${result.status}`
-
-        if (result.strategy) {
-          output += `\nFetch strategy: ${result.strategy}`
-        }
-
-        if (attemptsSummary) {
-          output += `\nFetch attempts: ${attemptsSummary}`
-        }
-
-        output += `\n\n${result.content}`
+        const contentType = (
+          result.headers.find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? ''
+        ).toLowerCase()
 
         if (result.status >= 400) {
-          output += `\n\n[Fetch returned HTTP ${result.status}. For official/current documentation, verify with web_search for a canonical URL or a browser-like terminal fetch before concluding the page is unavailable.]`
+          return `Error: fetching ${parsed.toString()} returned HTTP ${result.status} ${result.statusText}.\n\n${WEB_FETCH_FALLBACK_HINT}`
         }
 
-        if (result.truncated) {
-          output += '\n\n[Content was truncated to fit context window]'
+        // Cap the RAW body before parsing: the Rust proxy has no response-size
+        // limit, and handing a multi-MB page to DOMParser (below) would build a
+        // giant DOM and can jank/OOM the renderer. 3 MB is far more markup than
+        // any readable page; extraction + the output cap shrink it further.
+        const MAX_FETCH_BODY_CHARS = 3_000_000
+        let body = result.body
+        let bodyTruncated = false
+        if (body.length > MAX_FETCH_BODY_CHARS) {
+          body = body.slice(0, MAX_FETCH_BODY_CHARS)
+          bodyTruncated = true
         }
 
+        const isHtml =
+          contentType.includes('text/html') ||
+          contentType.includes('application/xhtml') ||
+          (!contentType && looksLikeHtml(body))
+
+        // mode:'raw' bypasses extraction entirely — the agent gets the real
+        // markup (classes, inline styles, attributes). Still subject to the
+        // 3MB parse cap above and the maxLength cap below.
+        const rawMode = input.mode === 'raw'
+
+        let title = ''
+        let content: string
+        let designFooter = ''
+        if (isHtml && !rawMode) {
+          const page = htmlToText(body, parsed.toString())
+          title = page.title
+          content = page.text
+          // Design signals: stylesheet URLs (fetch them for colors/fonts/
+          // spacing) + inline <style> presence (fetch mode:'raw' to read it).
+          // Capped at 15 — past that it's bundler noise, not design intent.
+          const parts: string[] = []
+          if (page.stylesheets.length > 0) {
+            const shown = page.stylesheets.slice(0, 15)
+            parts.push(
+              `Stylesheets (fetch these URLs to read the page's CSS — colors, fonts, spacing):\n${shown.map(u => `- ${u}`).join('\n')}` +
+              (page.stylesheets.length > shown.length ? `\n(+${page.stylesheets.length - shown.length} more)` : ''),
+            )
+          }
+          if (page.inlineStyleChars > 0) {
+            parts.push(`Inline <style> blocks: ~${page.inlineStyleChars} chars of CSS are inlined in the page — fetch with mode:"raw" to read them.`)
+          }
+          if (parts.length > 0) designFooter = `\n\n${parts.join('\n\n')}`
+        } else {
+          // raw mode, or JSON / plain text / CSS / markdown — return as-is
+          // (normalized only by size cap).
+          content = body
+        }
+
+        // truncated = the raw body was over the parse cap OR the extracted text
+        // is over the caller's maxLength.
+        let truncated = bodyTruncated
+        if (content.length > maxLength) {
+          content = content.slice(0, maxLength)
+          truncated = true
+        }
+
+        const header = [
+          `URL: ${parsed.toString()}`,
+          `Status: ${result.status} ${result.statusText}`,
+          contentType ? `Content-Type: ${contentType}` : '',
+          title ? `Title: ${title}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n')
+
+        // designFooter carries stylesheet URLs + inline-style signal — append
+        // AFTER the body so the model sees content first, then the design-copy
+        // affordances. Truncation notice comes last so it is never buried.
+        let output = `${header}\n\n${content}${designFooter}`
+        if (truncated) {
+          output += `\n\n[Content truncated at ${maxLength} chars. Re-fetch with a higher maxLength, or a more specific URL/anchor, if you need more.]`
+        }
         return output
       }
+    })
+
+    // === capture_url_design ===
+    // Conversational "see this URL and copy the design": boot the Playwright
+    // browser, screenshot, describe via vision sidecar. Complements web_fetch
+    // (structure/CSS) with a visual handoff. See captureUrlDesign.ts.
+    this.tools.set(CAPTURE_URL_DESIGN, {
+      definition: {
+        name: CAPTURE_URL_DESIGN,
+        description:
+          'Open a public http(s) URL in a real browser, take a screenshot, and return a detailed visual design description (layout, colors, typography, components, all visible text). Use when the user asks to see/copy/recreate a website design or a section of it. Pair with web_fetch (text + stylesheet list + mode:"raw") for markup/CSS tokens. Requires Node.js + Chrome/Edge/Brave on the machine (same stack as /te2e). Optional focus narrows the description (e.g. "hero only", "pricing cards").',
+        input_schema: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'Full http(s) URL to capture' },
+            focus: {
+              type: 'string',
+              description: 'Optional focus hint, e.g. "hero section", "nav + footer", "pricing cards only"',
+            },
+            full_page: {
+              type: 'boolean',
+              description: 'Capture the full scrollable page (default true). Set false for viewport only.',
+            },
+          },
+          required: ['url'],
+        },
+        // Serial: shares one browser session; concurrent captures would race.
+        concurrencySafe: false,
+      },
+      execute: async (input) => {
+        const { captureUrlDesign, withBrowserExclusive } = await import('./captureUrlDesign')
+        // Mutex GLOBAL do browser singleton: com multi-agentes (main + até 4
+        // tarefas) capturas concorrentes serializam em vez de interlear na
+        // mesma tab — concurrencySafe:false só serializa DENTRO de um run.
+        return withBrowserExclusive(() => captureUrlDesign({
+          url: String(input.url ?? ''),
+          focus: typeof input.focus === 'string' ? input.focus : undefined,
+          fullPage: input.full_page !== false && input.fullPage !== false,
+          signal: input._abortSignal as AbortSignal | undefined,
+        }))
+      },
+    })
+
+    // === send_agent_message (Fase 6b — mensagens agente↔agente) ===
+    // Doutrina "sem deus": N developers no mesmo projecto falam entre si.
+    // Entrega pela MESMA máquina das entregas de sub-agents (autoWake
+    // pendingDeliveriesByOwner → steering no turn boundary do alvo; main
+    // idle → wake/announce) ou pela steerQueue da tarefa alva.
+    this.tools.set(SEND_AGENT_MESSAGE, {
+      definition: {
+        name: SEND_AGENT_MESSAGE,
+        description:
+          'Send a short message to another LIVE agent working on this project: the interactive agent (target "main") or a parallel task (target = its task id or a distinctive part of its description). Use it to coordinate — e.g. warn about a shared file, hand over a finding, or ask the other agent to cover something. The message is delivered at the target\'s next step. Do NOT use it to delegate new work to yourself or to poll for replies; agents answer by messaging back when relevant.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            target: { type: 'string', description: '"main", a task id (e.g. "task-2"), or a unique fragment of the task description' },
+            message: { type: 'string', description: 'The message to deliver (keep it short and actionable)' },
+          },
+          required: ['target', 'message'],
+        },
+        concurrencySafe: true,
+      },
+      execute: async (input) => {
+        const target = String(input.target ?? '').trim()
+        const message = String(input.message ?? '').trim()
+        if (!target || !message) return 'Error: target and message are required.'
+        const senderLabel = this.permissionOrigin
+          ? `parallel task "${this.permissionOrigin.label}" (${this.permissionOrigin.taskId})`
+          : 'the main interactive agent'
+        const wrapped = `<system-reminder>Message from ${senderLabel}: ${message}</system-reminder>`
+
+        const { useParallelTaskStore } = await import('../../stores/parallelTaskStore')
+        const runs = useParallelTaskStore.getState().runs
+        const live = Array.from(runs.values()).filter(r => r.status === 'running' || r.status === 'queued')
+
+        if (target.toLowerCase() === 'main') {
+          if (this.permissionOrigin === null) return 'Error: you ARE the main agent — pick a task target.'
+          const { queueAgentMessage } = await import('./subAgents/autoWake')
+          queueAgentMessage(undefined, wrapped)
+          return 'Message queued for the main agent (delivered at its next step; if idle, it is woken/announced).'
+        }
+        const match = live.find(r => r.id === target)
+          ?? live.find(r => r.description.toLowerCase().includes(target.toLowerCase()))
+        if (!match) {
+          const list = live.length
+            ? live.map(r => `${r.id}: "${r.description}"`).join('; ')
+            : '(none)'
+          return `Error: no LIVE task matches "${target}". Live tasks: ${list}. Main agent target: "main".`
+        }
+        if (this.permissionOrigin?.taskId === match.id) return 'Error: that target is yourself.'
+        useParallelTaskStore.getState().enqueueSteer(match.id, wrapped)
+        // Nota visível no transcript da tarefa alva (o steer chega ao modelo;
+        // o developer vê a mensagem no chat dela).
+        if (match.sessionId) {
+          try {
+            const { useChatStore } = await import('../../stores/chatStore')
+            useChatStore.getState().appendMessageToSession(match.sessionId, {
+              role: 'system',
+              content: `📨 ${senderLabel} → "${match.description}": ${message}`,
+            })
+          } catch { /* transcript é espelho — nunca falha o envio */ }
+        }
+        return `Message queued for task ${match.id} ("${match.description}") — delivered at its next turn.`
+      },
     })
 
     // === execute_command ===
@@ -4410,17 +4676,24 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         const settingsStore = (await import('../../stores/settingsStore')).useSettingsStore.getState()
         const parentCtx = {
           cmdOnlyMode: !!this.ctx.getCmdModeCwd(),
-          workingPath: this.ctx.getProjectRoot(),
+          // Tarefa isolada em worktree (Fase 5): a equipa delegada explora a
+          // ÁRVORE DA TAREFA (com as edições dela), não o checkout principal
+          // desatualizado — cmdModeCwd é o worktree quando ativo.
+          workingPath: this.ctx.getCmdModeCwd() ?? this.ctx.getProjectRoot(),
           agentLanguage: settingsStore.agentLanguage ?? 'en',
           thoroughness,
         }
 
         // Get parent message ID — find the USER message that triggered
         // this turn, not the streaming assistant message (which is last).
+        // Delegação de TAREFA PARALELA (Fase 3): ancora o SubAgentCard na
+        // SESSÃO DA TAREFA (o user vê a equipa dela no chat dela), nunca na
+        // sessão que o user está a ver.
         const { useChatStore } = await import('../../stores/chatStore')
         const chatState = useChatStore.getState()
-        const activeSessionId = chatState.activeSessionId
-        const session = activeSessionId ? chatState.sessions.get(activeSessionId) : null
+        const taskOwner = this.permissionOrigin
+        const anchorSessionId = taskOwner?.sessionId ?? chatState.activeSessionId
+        const session = anchorSessionId ? chatState.sessions.get(anchorSessionId) : null
         const messages = session?.messages || []
         let parentMessageId: string | undefined
         for (let i = messages.length - 1; i >= 0; i--) {
@@ -4442,6 +4715,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
             parentCtx,
             filteredTools,
             requestType: this.requestType ?? undefined,
+            ownerTaskId: taskOwner?.taskId,
           })
         } catch (e) {
           throw new Error(`Failed to start ${subagentType} sub-agent: ${e instanceof Error ? e.message : String(e)}`)
@@ -4471,15 +4745,22 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         const { useSubAgentStore } = await import('../../stores/subAgentStore')
         const store = useSubAgentStore.getState()
 
+        // Owner scoping (Fase 3): uma tarefa só vê a SUA equipa; o main só a
+        // dele — resultados nunca cruzam donos.
+        const ownerTaskId = this.permissionOrigin?.taskId
+        const ownedSummaries = store
+          .getRunSummaries()
+          .filter(s => (s.ownerTaskId ?? undefined) === ownerTaskId)
+
         // Nothing to check
-        if (store.runs.size === 0) {
+        if (ownedSummaries.length === 0) {
           return 'No team tasks are active. Use the delegate tool to assign work to team members first.'
         }
 
         const { buildTeamResultsReport } = await import('./subAgents/resultsReport')
         const { markSubAgentResultsDelivered } = await import('./subAgents/autoWake')
 
-        const report = buildTeamResultsReport(store.getRunSummaries(), {
+        const report = buildTeamResultsReport(ownedSummaries, {
           includeRunning: true,
           lastActionFor: (id) => {
             // Last tool call so the model can see the sub-agent is progressing.
@@ -4505,8 +4786,14 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         // Only clear completed runs when ALL runs are done (no running left).
         // If some are still running, keep completed ones so the model can still
         // reference them in its next turn (deliveries fire again as the
-        // remaining ones finish).
-        if (report.runningCount === 0) {
+        // remaining ones finish). OWNER GUARD (Fase 3): clearCompleted é
+        // owner-blind — só limpa quando não existem runs de OUTROS donos,
+        // senão o collect_results de uma tarefa apagava resultados do main
+        // (ou vice-versa) antes de serem entregues.
+        const hasOtherOwners = store
+          .getRunSummaries()
+          .some(s => (s.ownerTaskId ?? undefined) !== ownerTaskId)
+        if (report.runningCount === 0 && !hasOtherOwners) {
           store.clearCompleted()
         }
 

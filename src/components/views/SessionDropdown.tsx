@@ -21,9 +21,12 @@ interface SessionDropdownProps {
   projectPath: string
   activeSessionId: string | null
   isStreaming: boolean
+  /** Icon-only mode — hides the New Chat / Sessions text labels (used by the
+   *  titlebar's collision-based collapse when the bar runs out of room). */
+  compact?: boolean
 }
 
-function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionDropdownProps) {
+function SessionDropdown({ projectPath, activeSessionId, isStreaming, compact = false }: SessionDropdownProps) {
   const [showSessions, setShowSessions] = useState(false)
   const [sessionList, setSessionList] = useState<SessionSummary[]>([])
   const [loadingSessions, setLoadingSessions] = useState(false)
@@ -51,7 +54,12 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
       setLoadingSessions(true)
       try {
         const list = await useChatStore.getState().listProjectSessions(projectPath)
-        setSessionList(list)
+        // Doutrina multi-agent: chats de TAREFA vivem nas rows da sidebar/
+        // ProjectMenu (com estado, Stop e fecho próprios) — o menu de Sessões
+        // é dos chats principais. Listá-los aqui duplicava a superfície e
+        // mantinha "acessível" o que o user acabara de fechar (report
+        // 2026-07-17).
+        setSessionList(list.filter(s => s.isParallelTask !== true))
       } finally {
         setLoadingSessions(false)
       }
@@ -60,9 +68,24 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
   }, [projectPath, showSessions, loadingSessions])
 
   const handleSwitchSession = useCallback(async (sessionId: string) => {
-    if (!projectPath || isStreaming) return
+    if (!projectPath) return
     setShowSessions(false)
-    await useChatStore.getState().switchSession(projectPath, sessionId)
+    const chat = useChatStore.getState()
+    if (isStreaming) {
+      // MID-RUN: troca só a VISTA — o streaming está preso à sessão do run
+      // (streamingSessionId), por isso ver outra sessão é seguro. NÃO usar
+      // switchSession aqui: ele finaliza a bolha viva e limpa a fila (é um
+      // caminho de idle). Era este bloqueio que impedia alternar entre os
+      // chats das tarefas com o main a trabalhar (feedback 2026-07-16).
+      if (chat.activeSessionId === sessionId) return
+      if (chat.sessions.has(sessionId)) {
+        chat.setActiveSession(sessionId)
+      } else {
+        await chat.loadSessionFromDisk(projectPath, sessionId)
+      }
+      return
+    }
+    await chat.switchSession(projectPath, sessionId)
   }, [projectPath, isStreaming])
 
   const handleDeleteSession = useCallback(async (e: React.MouseEvent, sessionId: string) => {
@@ -117,7 +140,11 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
     // content overflow the flex-1 wrapper and paint OVER the neighbouring
     // toolbar buttons (Data Manager / billing pills).
     <Flex align="center" gap={2} minW={0} maxW="100%">
-      {/* New Chat button */}
+      {/* New Chat button — VISUAL PAR do chip de Projecto/Branch da titlebar
+          (MinimalTitleBar/BranchMenu: h26 px9 radius8 bg white-5% border
+          default, 12px/600, ícone 12). Estes botões vivem na MESMA fila que
+          os chips; o estilo antigo (h34, transparente, 13px) vinha da
+          toolbar do ChatView e destoava — report do user 2026-07-16. */}
       <Box
         as="button"
         aria-label={t("view.newChat")}
@@ -127,13 +154,14 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
         minW="32px"
         overflow="hidden"
         gap="6px"
-        h="34px"
-        px={2.5}
-        bg="transparent"
-        border={`1px solid ${tokens.colors.border.panel}`}
+        h="26px"
+        px="9px"
+        bg="rgba(255, 255, 255, 0.05)"
+        border={`1px solid ${tokens.colors.border.default}`}
         borderRadius="8px"
         color={tokens.colors.text.secondary}
-        fontSize={tokens.fontSize.sm}
+        fontSize="12px"
+        fontWeight="600"
         whiteSpace="nowrap"
         cursor={isStreaming ? 'not-allowed' : 'pointer'}
         opacity={isStreaming ? 0.5 : 1}
@@ -145,10 +173,12 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
         } : {}}
         onClick={handleNewChat}
       >
-        <Box as="span" flexShrink={0} display="flex" alignItems="center"><FiPlus size={13} /></Box>
-        <Text as="span" whiteSpace="nowrap" lineHeight="1" overflow="hidden" textOverflow="ellipsis" minW={0}>
-          {t("view.newChat")}
-        </Text>
+        <Box as="span" flexShrink={0} display="flex" alignItems="center"><FiPlus size={12} /></Box>
+        {!compact && (
+          <Text as="span" whiteSpace="nowrap" lineHeight="1" overflow="hidden" textOverflow="ellipsis" minW={0}>
+            {t("view.newChat")}
+          </Text>
+        )}
       </Box>
 
       {/* Sessions dropdown */}
@@ -163,13 +193,14 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
           maxW="100%"
           overflow="hidden"
           gap="6px"
-          h="34px"
-          px={2.5}
-          bg="transparent"
-          border={`1px solid ${tokens.colors.border.panel}`}
+          h="26px"
+          px="9px"
+          bg="rgba(255, 255, 255, 0.05)"
+          border={`1px solid ${tokens.colors.border.default}`}
           borderRadius="8px"
           color={tokens.colors.text.secondary}
-          fontSize={tokens.fontSize.sm}
+          fontSize="12px"
+          fontWeight="600"
           whiteSpace="nowrap"
           cursor="pointer"
           transition={`all ${tokens.transition.fast}`}
@@ -180,10 +211,12 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming }: SessionD
           }}
           onClick={handleToggleSessions}
         >
-          <Box as="span" flexShrink={0} display="flex" alignItems="center"><FiClock size={13} /></Box>
-          <Text as="span" whiteSpace="nowrap" lineHeight="1" overflow="hidden" textOverflow="ellipsis" minW={0}>
-            Sessions
-          </Text>
+          <Box as="span" flexShrink={0} display="flex" alignItems="center"><FiClock size={12} /></Box>
+          {!compact && (
+            <Text as="span" whiteSpace="nowrap" lineHeight="1" overflow="hidden" textOverflow="ellipsis" minW={0}>
+              {t('view.sessions')}
+            </Text>
+          )}
           <Box as="span" flexShrink={0} display="flex" alignItems="center"><FiChevronDown size={11} /></Box>
         </Box>
 

@@ -1,8 +1,9 @@
 import { memo, useMemo, type MouseEvent, type ReactNode } from 'react'
 import { Box, Flex, IconButton, Text } from '@chakra-ui/react'
-import { FiSend, FiSquare, FiCode, FiImage, FiClock, FiTerminal, FiServer, FiCornerDownRight, FiLayers } from 'react-icons/fi'
-import { VscDiscard, VscLoading, VscWand } from 'react-icons/vsc'
+import { FiSend, FiSquare, FiCode, FiImage, FiClock, FiTerminal, FiServer, FiCornerDownRight, FiLayers, FiFastForward } from 'react-icons/fi'
+import { VscDiscard } from 'react-icons/vsc'
 import { useBillingStore } from '../../stores/billingStore'
+import { usePermissionStore } from '../../stores/permissionStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useByokStore } from '../../stores/byokStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
@@ -16,20 +17,21 @@ interface PromptActionsProps {
   viewMode: string
   isStreaming: boolean
   /** QueryGuard-level busy (covers dispatching + tool turns, not just token
-   *  streaming) — drives the Steer/Task toggle visibility. */
+   *  streaming) OU tarefas paralelas vivas — drives the Steer/Task toggle. */
   isAgentBusy: boolean
+  /** A sessão visível pertence a uma tarefa paralela em curso — o botão Stop
+   *  aparece (posicional) mesmo com o run principal idle. */
+  viewedTaskBusy?: boolean
   /** Steer/Task toggle state — what Enter does while the agent is busy. */
   queueAsTask: boolean
   onQueueModeChange: (asTask: boolean) => void
   hasInput: boolean
   onToggleEditor: () => void
-  onImprovePrompt: () => void
   onUndoImprovePrompt: () => void
   onToggleDevServer: () => void
   canToggleDevServer: boolean
   isDevServerActive: boolean
   isDevServerStarting: boolean
-  isImprovingPrompt: boolean
   canUndoImprovePrompt: boolean
   onSend: () => void
   onStop: () => void
@@ -41,17 +43,16 @@ function PromptActions({
   viewMode,
   isStreaming,
   isAgentBusy,
+  viewedTaskBusy = false,
   queueAsTask,
   onQueueModeChange,
   hasInput,
   onToggleEditor,
-  onImprovePrompt,
   onUndoImprovePrompt,
   onToggleDevServer,
   canToggleDevServer,
   isDevServerActive,
   isDevServerStarting,
-  isImprovingPrompt,
   canUndoImprovePrompt,
   onSend,
   onStop,
@@ -62,6 +63,8 @@ function PromptActions({
   const checkpointCount = useCheckpointStore(s => s.checkpoints.length)
   const isCheckpointDrawerOpen = useLayoutStore(s => s.isCheckpointDrawerOpen)
   const toggleCheckpointDrawer = useLayoutStore(s => s.toggleCheckpointDrawer)
+  const autoModePermissions = usePermissionStore(st => st.autoModePermissions)
+  const setAutoModePermissions = usePermissionStore(st => st.setAutoModePermissions)
   const setCheckpointDrawerOpen = useLayoutStore(s => s.setCheckpointDrawerOpen)
   const setPlanViewerOpen = useLayoutStore(s => s.setPlanViewerOpen)
   const isTerminalOpen = useTerminalPanelStore(s => s.isOpen)
@@ -203,6 +206,16 @@ function PromptActions({
           </IconButton>
         )}
 
+        {/* Modo Auto (classificador de permissões) — porte claude-vaz */}
+        <PromptToolButton
+          icon={<FiFastForward size={14} />}
+          label={t('autoMode.title')}
+          active={autoModePermissions}
+          ariaLabel={t('autoMode.chipTooltip')}
+          title={t('autoMode.chipTooltip')}
+          onClick={() => setAutoModePermissions(!autoModePermissions)}
+        />
+
         {/* Editor toggle */}
         <PromptToolButton
           icon={<FiCode size={14} />}
@@ -252,20 +265,6 @@ function PromptActions({
           onClick={event => {
             event.stopPropagation()
             onToggleDevServer()
-          }}
-        />
-
-        <PromptToolButton
-          icon={isImprovingPrompt ? <VscLoading size={14} /> : <VscWand size={14} />}
-          label={t('prompt.improvePrompt')}
-          active={isImprovingPrompt}
-          disabled={isImprovingPrompt || !hasInput}
-          loading={isImprovingPrompt}
-          ariaLabel={t('prompt.improvePrompt')}
-          title={t('prompt.improvePromptTitle')}
-          onClick={event => {
-            event.stopPropagation()
-            onImprovePrompt()
           }}
         />
 
@@ -322,8 +321,11 @@ function PromptActions({
             />
           </Flex>
         )}
-        {isStreaming && hasInput ? (
-          // Agent working + user typed → send to queue
+        {(isStreaming || viewedTaskBusy) && hasInput ? (
+          // Run desta vista em curso + user escreveu → ENVIAR ganha ao Stop
+          // (main: fila/steer; tarefa em foco: steer da tarefa). Sem o
+          // viewedTaskBusy aqui, escrever um steer para uma tarefa mostrava
+          // o botão Stop no lugar do Enviar (H38, ronda crítica 2026-07-16).
           <IconButton
             aria-label={t("prompt.sendToQueue")}
             size="sm"
@@ -335,8 +337,9 @@ function PromptActions({
           >
             <FiSend size={14} />
           </IconButton>
-        ) : isStreaming ? (
-          // Agent working + no input → stop
+        ) : (isStreaming || viewedTaskBusy) ? (
+          // Run desta vista em curso (main OU tarefa) + sem input → Stop
+          // posicional (usePromptBar.handleStop decide o alvo).
           <IconButton
             aria-label={t("prompt.stopGeneration")}
             size="sm"

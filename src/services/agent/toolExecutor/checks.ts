@@ -43,12 +43,21 @@ export function normalizePath(p: string): string {
   return prefix + resolved.join('/')
 }
 
+/** Convenções de TEMPLATE de env — documentação, não segredos. Isenção
+ *  PARTILHADA por isEnvFile e isSensitiveFile: estavam dessincronizadas
+ *  (isEnvFile isentava .env.example; o padrão de sensíveis não) e um
+ *  read_file de .env.example caía em forcePrompt='sensitive_file' — que
+ *  salta o Modo Auto POR DESENHO. Resultado: diálogo humano para um
+ *  ficheiro de exemplo, com auto mode ligado (report do user 2026-07-18). */
+export const ENV_TEMPLATE_FILES: ReadonlySet<string> = new Set([
+  '.env.example', '.env.sample', '.env.template', '.env.dist',
+])
+
 export function isEnvFile(filePath: string): boolean {
   if (!filePath) return false
   const filename = filePath.replace(/\\/g, '/').split('/').pop() || ''
-  // Block all .env files EXCEPT exactly ".env.example"
   if (!filename.startsWith('.env')) return false
-  return filename !== '.env.example'
+  return !ENV_TEMPLATE_FILES.has(filename)
 }
 
 /**
@@ -65,6 +74,8 @@ export const SENSITIVE_FILE_PATTERNS: readonly RegExp[] = [
 
 export function isSensitiveFile(filePath: string): boolean {
   const filename = filePath.replace(/\\/g, '/').split('/').pop() || ''
+  // Templates de env são documentação — nunca sensíveis (ver ENV_TEMPLATE_FILES).
+  if (ENV_TEMPLATE_FILES.has(filename)) return false
   return SENSITIVE_FILE_PATTERNS.some(p => p.test(filename))
 }
 

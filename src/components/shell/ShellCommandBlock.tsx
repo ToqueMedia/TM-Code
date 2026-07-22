@@ -407,7 +407,13 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
   const animateReveal = witnessedRunRef.current
   const revealCount = useProgressiveReveal(resultLines.length, animateReveal)
   const revealing = animateReveal && revealCount < resultLines.length
-  const { expanded, toggle } = useAutoExpand(isRunning, revealing, isError)
+  // Contrato 2026-07-17 (pedido do user): comandos one-shot ABREM e FICAM
+  // abertos — o output sobe tipo créditos de filme numa janela BAIXA (maxH
+  // compacto + pinned scroll, mesma velocidade de reveal) e o user pode
+  // scrollar quando quiser. Só o histórico re-montado continua fechado
+  // (witnessed=false). O auto-fecho ficou EXCLUSIVO das sessões longas de
+  // terminal (ShellSessionBlock: ssh/agent shell).
+  const { expanded, toggle } = useAutoExpand(isRunning, revealing, true)
 
   const visibleResultLines = animateReveal ? resultLines.slice(0, revealCount) : resultLines
   const visibleLogLines = logLines
@@ -556,7 +562,9 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
             ref={outputScroll.ref}
             onScroll={outputScroll.onScroll}
             mt="8px"
-            maxH={mode === 'terminal' ? '420px' : '320px'}
+            // Janela de "créditos": ~7 linhas — presença viva sem engolir o
+            // transcript; o conteúdo desliza por dentro (pinned scroll).
+            maxH={mode === 'terminal' ? '188px' : '156px'}
             overflowY="auto"
             overflowX="hidden"
             px={2}

@@ -201,7 +201,13 @@ function connectEmulatorsIfNeeded() {
   if (emulatorsConnected || !shouldUseEmulators()) return
   emulatorsConnected = true
   try {
-    connectAuthEmulator(getFirebaseAuth(), `http://${EMULATOR_CONFIG.AUTH.HOST}:${EMULATOR_CONFIG.AUTH.PORT}`, {
+    // Route the Auth emulator through the Vite dev proxy (localhost:1420), the
+    // SAME same-origin trick used for Firestore below. Hitting the emulator
+    // directly (127.0.0.1:9999) was cross-origin from the WebView → every
+    // securetoken token refresh was CORS-blocked on reload
+    // (auth/network-request-failed → no token → /v1/me couldn't authenticate).
+    // Vite forwards /identitytoolkit.* + /securetoken.* to the emulator (9999).
+    connectAuthEmulator(getFirebaseAuth(), 'http://localhost:1420', {
       disableWarnings: true,
     })
     // In dev, route Firestore through Vite proxy (localhost:1420) to avoid
@@ -675,7 +681,7 @@ class FirebaseAuthService {
             await new Promise(r => setTimeout(r, RETRY_DELAY))
             continue
           }
-          return
+          break // total failure — handled by the post-loop terminal fallback
         }
         if (targetGen !== this.authGeneration) return
 
@@ -713,7 +719,7 @@ class FirebaseAuthService {
             await new Promise(r => setTimeout(r, RETRY_DELAY))
             continue
           }
-          return
+          break // total failure — handled by the post-loop terminal fallback
         }
         if (targetGen !== this.authGeneration) return
 
@@ -813,6 +819,23 @@ class FirebaseAuthService {
           await new Promise(r => setTimeout(r, RETRY_DELAY))
         }
       }
+    }
+
+    // Terminal fallback for a TOTAL /v1/me failure (network / 5xx / 401 / no
+    // token — NOT a signup gate, which returns 403 and is handled above). Without
+    // this, `signupComplete` stayed `null` and the app hung on the "A entrar…"
+    // spinner FOREVER: there was no code path out of that state on backend
+    // failure. Firebase sign-in already succeeded and billing has a cache +
+    // defaults + an event-driven refetch on window focus, so we enter the IDE
+    // optimistically rather than trap the user. A genuinely incomplete signup is
+    // a 403 (handled), and a later focus refetch self-corrects if needed. Guard
+    // on the generation so a superseded fetch (account switch mid-flight) never
+    // forces this, and only act while still null (a refetch after a prior success
+    // must not downgrade anything).
+    if (targetGen === this.authGeneration && useAuthStore.getState().signupComplete === null) {
+      console.warn('[billing] /v1/me unreachable after retries — entering IDE with cached/default billing; will refetch on focus')
+      useAuthStore.getState().setSignupComplete(true)
+      useBillingStore.setState({ isLoaded: true })
     }
   }
 

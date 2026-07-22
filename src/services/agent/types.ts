@@ -38,6 +38,14 @@ export type { InternalMessage } from './messageUtils'
  * lifecycle signal flows through these callbacks.
  */
 export interface AgentCallbacks {
+  /**
+   * Generation do queryGuard capturada no INÍCIO do dispatch (agentRunner).
+   * Um Stop durante a preparação faz forceEnd → generation avança; nada mais
+   * a toca nessa janela. runAgentLoop compara ANTES de criar o controller /
+   * tryStart — se mudou, houve Stop no meio e o run NÃO pode nascer
+   * (anti-ressurreição, bug 2026-07-17).
+   */
+  dispatchGeneration?: number;
   /** Streaming text (token by token). */
   onTextDelta: (text: string) => void
 

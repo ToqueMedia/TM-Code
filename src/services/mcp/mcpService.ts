@@ -35,6 +35,57 @@ export interface MCPTool {
   readOnlyHint?: boolean
 }
 
+/** One image block from an MCP tool result (e.g. Playwright screenshot). */
+export interface MCPImageContent {
+  mimeType: string
+  /** Raw base64 (no data: URI prefix). */
+  data: string
+}
+
+export interface MCPToolResult {
+  text: string
+  images: MCPImageContent[]
+}
+
+/**
+ * Parse a tools/call JSON-RPC result into text + images. Shared by the
+ * text-only and detailed call paths so screenshot tools don't silently
+ * drop image blocks.
+ */
+export function parseMcpToolResult(result: unknown): MCPToolResult {
+  const mcpContent = result as {
+    content?: Array<{
+      type?: string
+      text?: string
+      data?: string
+      mimeType?: string
+      // Some servers nest image payload under `source` / `resource`.
+      source?: { type?: string; data?: string; media_type?: string; mimeType?: string }
+    }>
+  }
+  if (!mcpContent?.content || !Array.isArray(mcpContent.content)) {
+    return { text: typeof result === 'string' ? result : JSON.stringify(result), images: [] }
+  }
+
+  const textParts: string[] = []
+  const images: MCPImageContent[] = []
+  for (const c of mcpContent.content) {
+    if (c.type === 'text' && c.text) {
+      textParts.push(c.text)
+      continue
+    }
+    if (c.type === 'image') {
+      const data = c.data ?? c.source?.data
+      const mimeType = c.mimeType ?? c.source?.mimeType ?? c.source?.media_type ?? 'image/png'
+      if (data) images.push({ mimeType, data })
+    }
+  }
+  return {
+    text: textParts.join('\n') || (images.length > 0 ? '' : JSON.stringify(result)),
+    images,
+  }
+}
+
 interface MCPConfigFile {
   mcpServers?: Record<string, MCPServerConfig>
 }
@@ -199,9 +250,25 @@ class MCPService {
   }
 
   /**
-   * Call a tool on a specific server.
+   * Call a tool on a specific server. Text-only (legacy agent path) — image
+   * blocks are dropped. Prefer `callToolDetailed` when the tool may return
+   * screenshots (e.g. Playwright `browser_take_screenshot`).
    */
   async callTool(serverName: string, toolName: string, args: Record<string, unknown>): Promise<string> {
+    const detailed = await this.callToolDetailed(serverName, toolName, args)
+    return detailed.text
+  }
+
+  /**
+   * Call a tool and return both text and image blocks from the MCP response.
+   * Used by capture_url_design so Playwright screenshots reach the vision
+   * sidecar instead of being silently discarded by the text-only path.
+   */
+  async callToolDetailed(
+    serverName: string,
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<MCPToolResult> {
     const server = useMcpStore.getState().servers.find((s) => s.name === serverName)
 
     if (!server || server.status !== 'running') {
@@ -211,7 +278,9 @@ class MCPService {
     if (server.transport === 'remote') {
       const serverUrl = this.serverUrls.get(serverName)
       if (!serverUrl) throw new Error(t('mcp.noUrl').replace('{name}', serverName))
-      return callRemote(serverUrl, toolName, args)
+      // Remote transport is text-only today (Worker proxy strips images).
+      const text = await callRemote(serverUrl, toolName, args)
+      return { text, images: [] }
     }
 
     const result = await invoke<Record<string, unknown>>('mcp_send_request', {
@@ -220,18 +289,7 @@ class MCPService {
       params: { name: toolName, arguments: args },
     })
 
-    // Extract text content from MCP response.
-    // Raw text is returned here — XSS prevention is handled at the React render
-    // layer (React escapes text by default; tool results use <pre> not innerHTML).
-    const mcpContent = result as { content?: Array<{ type: string; text?: string }> }
-    if (mcpContent?.content) {
-      return mcpContent.content
-        .filter((c) => c.type === 'text' && c.text)
-        .map((c) => c.text)
-        .join('\n')
-    }
-
-    return JSON.stringify(result)
+    return parseMcpToolResult(result)
   }
 
   /**

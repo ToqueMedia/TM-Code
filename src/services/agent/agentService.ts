@@ -30,22 +30,24 @@ import { invoke } from "@/utils/invokeMetrics";
 import { logger } from "../../utils/logger";
 import { FALLBACK_CONTEXT_WINDOW } from "../../utils/contextWindow";
 import { getQueryGuard } from "./queryGuard";
+import { beginMainRunClaims, endMainRunClaims } from "./fileClaims";
 import type { ContentPart, ByokSessionSnapshot } from "../../types/chat";
 
 // ── Query engine ──
 
 import type OpenAI from "openai";
-import { createAgentClient, createSubAgentClient } from "./sdkClient";
+import { createAgentClient } from "./sdkClient";
+import { buildRunClient } from "./runClient";
 import { useByokStore } from "../../stores/byokStore";
 import { buildByokClientFromSnapshot, buildByokThinkingConfig } from "./byokRouting";
 import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
-import { ToolsetSelector, REQUEST_TOOLS_NAME, REQUEST_CONTEXT_NAME } from "./toolsetSelector";
+import { ToolsetSelector, REQUEST_TOOLS_NAME, REQUEST_CONTEXT_NAME, requestContextDefinition } from "./toolsetSelector";
 import type { ToolsetGroupName } from "./toolsetSelector";
 import type { PromptProfile } from "./contextBuilder/auxiliaryRegistry";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 import { classifyExecuteCommandPurpose, convertShellReadCommand } from "./commandPurpose";
-import { EDIT_FILE, canonicalToolName } from "./toolNames";
+import { EDIT_FILE, WEB_FETCH, canonicalToolName } from "./toolNames";
 import { formatShellReadRedirect } from "./shellReadRedirect";
 import {
   decorateTmsRequestUsage,
@@ -299,6 +301,37 @@ class AgentService {
     callbacks: AgentCallbacks,
   ): Promise<void> {
     if (this.isRunning && !this.lightweightOptions) this.cancelLoop();
+    // ANTI-RESSURREIÇÃO (par da guarda do agentRunner): o Stop pode aterrar
+    // na fronteira await entre a verificação do runner e esta entrada. Antes
+    // de criar o controller NOVO (que o cancelLoop já não apanharia) e do
+    // tryStart, confirma que a generation não avançou desde o dispatch.
+    if (
+      !this.lightweightOptions &&
+      callbacks.dispatchGeneration !== undefined &&
+      getQueryGuard().generation !== callbacks.dispatchGeneration
+    ) {
+      // Stop durante a prep (ou na fronteira await runner→service): a generation
+      // avançou via forceEnd. NÃO criar controller/tryStart. O stopAgentRun já
+      // limpou UI na maior parte dos casos; re-aplicar status/finalize é
+      // idempotente e evita tips/`awaiting_response` presos se a corrida
+      // só aterra aqui.
+      logger.info(
+        "agent",
+        "Stop durante a preparação — loop não arranca (zombie morto na entrada)",
+      );
+      // Limpeza de UI SÓ se nenhum run mais novo ocupou o guard — um reenvio
+      // já em prep/streaming é o dono do status e da bolha; este zombie não
+      // pode fechá-los por cima dele.
+      if (!getQueryGuard().isActive) {
+        try {
+          useAgentStore.getState().setStatus("cancelled");
+          useChatStore.getState().finalizeAssistantMessage();
+        } catch {
+          /* non-critical */
+        }
+      }
+      return;
+    }
     this.isRunning = true;
     if (!this.lightweightOptions) {
       useAgentStore.getState().setWorkerStatus(null);
@@ -308,6 +341,11 @@ class AgentService {
     if (!this.lightweightOptions) {
       this.abortController = new AbortController();
       myGeneration = getQueryGuard().tryStart();
+      if (myGeneration !== null) {
+        // Registry único de claims (Fase 4b): o run principal regista e
+        // respeita propriedade de ficheiros como qualquer tarefa.
+        beginMainRunClaims();
+      }
       if (myGeneration === null) {
         logger.warn(
           "agent",
@@ -343,11 +381,11 @@ class AgentService {
     const isMainAgentNewSession =
       !this.lightweightOptions && conversationHistory.length === 0;
     if (conversationHistory.length === 0) {
-      try {
-        useAgentStore.getState().clearTasks();
-      } catch {
-        /* non-critical */
-      }
+      // TRACKER POR-SESSÃO: nada a limpar — cada sessão tem o seu balde e um
+      // run de história vazia é uma sessão nova, cujo balde já nasce vazio.
+      // O antigo clearTasks() global aqui APAGARIA o tracker da sessão FOCADA
+      // (que pode ainda ser a anterior se o foco não migrou), destruindo o
+      // trabalho dela. O foco/hidratação vivem no trackerFocusSync.
       this.sessionState.resetForNewSession();
       this.toolExecutor.resetSessionState();
     } else if (!this.lightweightOptions) {
@@ -421,8 +459,10 @@ class AgentService {
       if (!this.lightweightOptions) {
         useAgentStore.getState().setWorkerStatus(null);
       }
-      if (!this.lightweightOptions && myGeneration !== null)
+      if (!this.lightweightOptions && myGeneration !== null) {
         getQueryGuard().end(myGeneration);
+        endMainRunClaims();
+      }
     }
   }
 
@@ -457,35 +497,34 @@ class AgentService {
     this.byokActive = byokActive;
     this.byokSnapshot = snapshot;
 
-    let client: OpenAI;
-    let refreshClient: () => Promise<OpenAI | null>;
+    // FUSÃO F3: cliente + closure de refresh no NÚCLEO partilhado (runClient.ts)
+    // — a mesma função que serve as tarefas paralelas e os sub-agentes. Só os
+    // efeitos colaterais ESPECÍFICOS do principal ficam aqui (seed de model-info
+    // BYOK; limpar o marcador BYOK preso numa rota gerida).
+    const runClient = await buildRunClient({
+      authToken,
+      snapshot,
+      byokActive,
+      lightweight: !!this.lightweightOptions,
+      onByokKeyMissing: () =>
+        callbacks.onError(
+          new ServiceError(
+            `BYOK: no API key set for "${snapshot?.providerId ?? "provider"}". Add it in Settings → API Keys.`,
+            "BYOK_KEY_MISSING",
+            false,
+          ),
+        ),
+    });
+    if (!runClient) return; // BYOK key missing — erro já reportado via onError
+    const { client, refreshClient } = runClient;
     if (byokActive && snapshot) {
-      const byokClient = await this.buildByokClient(snapshot, callbacks);
-      if (!byokClient) return; // key missing for a cloud provider — error surfaced
-      client = byokClient;
-      // The BYOK key is static (no JWT to refresh); rebuild from the snapshot so
-      // a user who fixes a bad key mid-session recovers on the next turn.
-      refreshClient = async () => this.buildByokClient(snapshot, callbacks);
-      // No X-Model-* headers exist under BYOK (the worker is bypassed) — seed
-      // model info from the snapshot so the context pill, thinking toggle and
-      // auto-compact have real values.
+      // Sem headers X-Model-* em BYOK (worker bypassed) — semeia model info do
+      // snapshot para o ctx pill / toggle de thinking / auto-compact.
       if (!this.lightweightOptions) this.seedByokModelInfo(snapshot);
-    } else {
-      client = this.lightweightOptions
-        ? createSubAgentClient(authToken)
-        : createAgentClient(authToken);
-      refreshClient = async (): Promise<OpenAI | null> => {
-        const auth = FirebaseAuthService.getInstance();
-        const refreshed = await auth.getIdToken(true)
-          ?? (await auth.refreshLogin() ? await auth.getIdToken(true) : null);
-        if (!refreshed) return null;
-        return this.lightweightOptions
-          ? createSubAgentClient(refreshed)
-          : createAgentClient(refreshed);
-      };
-      // Managed run — clear any sticky BYOK marker left by a prior BYOK session
-      // (the worker never emits X-BYOK-Active, so nothing else resets it).
-      if (!this.lightweightOptions) useAgentStore.getState().setByokActive(false);
+    } else if (!this.lightweightOptions) {
+      // Rota gerida — limpa marcador BYOK preso de uma sessão BYOK anterior
+      // (o worker nunca emite X-BYOK-Active, nada mais o reset­aria).
+      useAgentStore.getState().setByokActive(false);
     }
 
     // 3. Build tool definitions in OpenAI format
@@ -539,7 +578,15 @@ class AgentService {
       !enforceReadOnly &&
       auxiliarySelection?.requiresMutation === true;
 
-    const toolsetSelector = this.lightweightOptions
+    // FASE A (recalibração de cache 2026-07-17): toolset CONGELADO por run —
+    // schemas completos e estáveis do 1º ao último turno. A seleção dinâmica
+    // custava caro em cadeia: cada request_tools invalidava o PREFIXO inteiro
+    // do cache do provider (tools→system→histórico re-faturados a 100%) e
+    // cada misclassificação do router custava turnos de auto-correção. Com a
+    // cobrança de cache a 50%, o conjunto estável vence. A seleção só
+    // sobrevive no caso de SEGURANÇA: enforceReadOnly (keyword do user)
+    // mantém a negação de mutações ao nível do schema.
+    const toolsetSelector = (this.lightweightOptions || !enforceReadOnly)
       ? null
       : new ToolsetSelector(
         openaiTools.map((t) => t.function.name),
@@ -563,6 +610,38 @@ class AgentService {
     }
     if (mutableTask && toolsetSelector && !toolsetSelector.isActive(EDIT_FILE)) {
       toolsetSelector.requestTools([EDIT_FILE]);
+    }
+
+    // Deterministic web_fetch pre-activation: if the user pasted a URL, activate
+    // web_fetch from turn 1 so the agent can read it immediately, instead of
+    // relying on the Intent Router to plan the `web` group or on a request_tools
+    // round-trip. Mirrors the mutableTask→EDIT_FILE guarantee above. The fetch
+    // itself is CORS-free and login-free (Rust reqwest proxy), so activating it
+    // is pure upside. Sub-agents (lightweight) are skipped — they get their own set.
+    if (toolsetSelector && !toolsetSelector.isActive(WEB_FETCH)) {
+      const userText = typeof userMessage === "string"
+        ? userMessage
+        : userMessage
+          .map((p) => (p && typeof p === "object" && "text" in p ? String((p as { text?: unknown }).text ?? "") : ""))
+          .join(" ");
+      if (/\bhttps?:\/\/[^\s)<>"']+/i.test(userText)) {
+        toolsetSelector.requestTools([WEB_FETCH]);
+      }
+    }
+
+    // REGRESSÃO APANHADA NA RONDA CRÍTICA (2026-07-18): o schema do
+    // request_context era injetado pelo ToolsetSelector — que, sem
+    // classificador, nunca mais é criado. Sem isto o índice on-demand
+    // (513 tokens no prompt) prometia uma tool INEXISTENTE e as secções
+    // omitidas (tms.*, design system, …) ficavam inalcançáveis. A lista de
+    // omitidos é fixa no build do prompt → o def é estável o run inteiro
+    // (prefixo de cache intacto). A intercepção já existia (REQUEST_CONTEXT_NAME
+    // no bridge) e funciona com selector null.
+    if (!this.lightweightOptions && !toolsetSelector) {
+      const omittedIds = auxiliarySelection?.omitted.map((o) => o.id) ?? [];
+      if (omittedIds.length > 0) {
+        openaiTools.push(requestContextDefinition(omittedIds));
+      }
     }
 
     // 5. Create tool executor bridge
@@ -1191,7 +1270,7 @@ class AgentService {
         if (result.added.length) parts.push(`Activated for next model step: ${result.added.join(', ')}.`);
         if (result.alreadyActive.length) parts.push(`Already active: ${result.alreadyActive.join(', ')}.`);
         if (result.unknown.length) parts.push(`Unknown (not in registry): ${result.unknown.join(', ')}.`);
-        if (result.denied.length) parts.push(`Denied by explicit read-only/no-edit policy: ${result.denied.join(', ')}.`);
+        if (result.denied.length) parts.push(`Denied: ${result.denied.join(', ')} — this RUN was classified as read-only from the wording of the USER'S REQUEST (an explicit no-edit instruction), not by any project/settings policy. If the task genuinely requires edits, say so plainly and ask the developer to resend/confirm (e.g. "aplica as alterações") — do NOT send them hunting for a settings toggle.`);
         if (parts.length === 0) parts.push('No tools requested.');
         return { content: parts.join(' '), isError: false };
       }

@@ -81,6 +81,12 @@ let getSelf: (() => { uid: string; name: string }) | null = null
 let screenStream: MediaStream | null = null
 /** peerIds that opted in to watch while WE present. */
 const watchers = new Set<string>()
+/** Watchers whose link dropped mid-share (usually a transient P2P rebuild).
+ *  Kept apart from `watchers` so a reconnect can re-arm the screen track for
+ *  them: the presenter forgets a watcher on disconnect (onScreenPeerGone) and
+ *  nothing else re-added it, which is exactly what left a watcher's video
+ *  PERMANENTLY frozen after any ICE blip (the v1.0.1 freeze). */
+const pausedWatchers = new Set<string>()
 /** Remote video streams by peerId — tracks arrive at mesh negotiation (frozen
  *  until fed); surfaced to the UI only when the user watches that presenter. */
 const remoteStreams = new Map<string, MediaStream>()
@@ -119,6 +125,7 @@ export function attachScreenTransport(
 export function resetScreenService(): void {
   stopScreenShare({ broadcast: false })
   watchers.clear()
+  pausedWatchers.clear()
   remoteStreams.clear()
   warnedNoPath.clear()
   transport = null
@@ -134,12 +141,41 @@ export function replayScreenStateTo(peerId: string): void {
   }
 }
 
-/** A peer left the mesh — forget its watch opt-in and its stream. */
+/** A peer's mesh link dropped — forget its watch opt-in and its stream. If we're
+ *  presenting and it was a watcher, PARK it (not just forget): the drop is
+ *  usually a transient P2P rebuild, and onScreenPeerReconnected re-arms the track
+ *  when the link recovers. A genuine departure just leaves a harmless parked id
+ *  (re-feed no-ops; cleared on stop/reset). */
 export function onScreenPeerGone(peerId: string): void {
-  watchers.delete(peerId)
+  if (watchers.delete(peerId) && useCollabStore.getState().screenSharing) {
+    pausedWatchers.add(peerId)
+  }
   remoteStreams.delete(peerId)
   // The presenter-gone case (clearing presenter/watching/stream) is handled
   // by the store's presence pruning, keyed by uid.
+}
+
+/** A peer's mesh link (re)connected. Restores screen media across a transient
+ *  ICE drop → relay → rebuild — which otherwise froze the video permanently
+ *  because neither side re-established the track:
+ *    - PRESENTER: re-feed the screen track to a watcher whose link recovered.
+ *    - WATCHER: re-request the stream from the presenter we're still watching.
+ *  Both sides act idempotently (Set add / replaceTrack), so it's safe when both
+ *  fire. No-op on a peer's FIRST connect (nothing parked, not yet watching). */
+export function onScreenPeerReconnected(peerId: string): void {
+  const store = useCollabStore.getState()
+  if (store.screenSharing && pausedWatchers.delete(peerId)) {
+    watchers.add(peerId)
+    transport?.setScreenTrackForPeer(peerId, screenTrack(), screenBitrateBps())
+    warnIfNoScreenPath(peerId)
+  }
+  if (store.screenWatching && presenterPeerId() === peerId) {
+    transport?.sendControl(peerId, {
+      t: 'screen-watch',
+      uid: getSelf?.().uid ?? '',
+      watching: true,
+    })
+  }
 }
 
 /** The mesh delivered a peer's (pre-negotiated) remote video track. */
@@ -286,6 +322,7 @@ export function stopScreenShare(opts: { broadcast?: boolean } = {}): void {
     for (const peerId of watchers) transport.setScreenTrackForPeer(peerId, null)
   }
   watchers.clear()
+  pausedWatchers.clear() // nothing to re-arm once we stop presenting
   const track = screenTrack()
   if (track) track.onended = null // our own stop must not re-enter via onended
   screenStream?.getTracks().forEach((tr) => tr.stop())

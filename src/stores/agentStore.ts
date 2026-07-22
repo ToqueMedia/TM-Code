@@ -31,7 +31,23 @@ interface AgentState {
   error: string | null;
   /** Latest non-model status emitted by the proxy/worker while awaiting upstream progress. */
   workerStatus: string | null;
-  /** Tasks the agent is tracking for the current message. Displayed in the chat UI. */
+  /**
+   * TRACKER POR-SESSÃO (sem-deus, 2026-07-18): cada sessão tem o SEU tracker —
+   * o "main" é apenas mais um sessionId, sem estatuto especial. Uma tarefa
+   * paralela que chama update_tasks escreve no SEU balde, nunca no do chat
+   * principal (era por isso que update_tasks estava excluída das tarefas).
+   * Fonte de verdade única. `tasks` abaixo é só um espelho da sessão focada.
+   */
+  tasksBySession: Record<string, AgentTask[]>;
+  /** Sessão cujo tracker está EM FOCO (a que o user está a ver). O espelho
+   *  `tasks` segue-a; muda em focusTrackerSession (troca de sessão/vista). */
+  focusedTrackerSessionId: string | null;
+  /**
+   * Espelho SÓ-LEITURA do tracker da sessão focada (= tasksBySession[focused]).
+   * Existe para os leitores da UI (AgentTasksPanel/StatusBar/ToolCallDisplay)
+   * continuarem a subscrever `s.tasks` sem saberem de sessões — mostram sempre
+   * a sessão em foco. NÃO escrever aqui diretamente: usar setTasksForSession.
+   */
   tasks: AgentTask[];
   /** Model name reported by the backend via X-Model-Name header. */
   modelName: string | null;
@@ -105,7 +121,16 @@ interface AgentActions {
   ) => void;
   setByokActive: (active: boolean) => void;
   setTeamByokActive: (active: boolean) => void;
-  // Task management
+  // Task management (per-sessão)
+  /** Foca o tracker de uma sessão (troca de vista); re-espelha `tasks`. */
+  focusTrackerSession: (sessionId: string | null) => void;
+  /** Escreve o tracker de UMA sessão; re-espelha `tasks` se for a focada. */
+  setTasksForSession: (sessionId: string, tasks: AgentTask[]) => void;
+  /** Lê o tracker de uma sessão (não-reativo — use getState). */
+  getTasksForSession: (sessionId: string) => AgentTask[];
+  /** Remove o tracker de uma sessão (novo run/sessão limpa). */
+  clearTasksForSession: (sessionId: string) => void;
+  /** Atalhos ligados à sessão FOCADA (compat + main). */
   setTasks: (tasks: AgentTask[]) => void;
   clearTasks: () => void;
   // Phase A telemetry mirror
@@ -119,11 +144,13 @@ interface AgentActions {
   reset: () => void;
 }
 
-export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
+export const useAgentStore = create<AgentState & AgentActions>()((set, get) => ({
   status: "idle",
   compactPhase: "idle",
   error: null,
   workerStatus: null,
+  tasksBySession: {},
+  focusedTrackerSessionId: null,
   tasks: [],
   modelName: null,
   modelProvider: null,
@@ -178,12 +205,52 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
     set({ teamByokActive: active });
   },
 
+  focusTrackerSession: (sessionId: string | null) => {
+    set((state) => ({
+      focusedTrackerSessionId: sessionId,
+      tasks: sessionId ? state.tasksBySession[sessionId] ?? [] : [],
+    }));
+  },
+
+  setTasksForSession: (sessionId: string, tasks: AgentTask[]) => {
+    if (!sessionId) return;
+    set((state) => ({
+      tasksBySession: { ...state.tasksBySession, [sessionId]: tasks },
+      // Espelha só quando a sessão escrita é a que está em foco — escrever no
+      // balde de uma tarefa de fundo não deve mexer no que o user vê.
+      ...(sessionId === state.focusedTrackerSessionId ? { tasks } : {}),
+    }));
+  },
+
+  getTasksForSession: (sessionId: string) => {
+    return get().tasksBySession[sessionId] ?? [];
+  },
+
+  clearTasksForSession: (sessionId: string) => {
+    if (!sessionId) return;
+    set((state) => {
+      const next = { ...state.tasksBySession };
+      delete next[sessionId];
+      return {
+        tasksBySession: next,
+        ...(sessionId === state.focusedTrackerSessionId ? { tasks: [] } : {}),
+      };
+    });
+  },
+
+  // Atalhos ligados à sessão focada (compat: main + caminhos que não passam
+  // sessionId explícito). No-op silencioso sem foco — o foco é sempre posto
+  // no carregamento do projeto / troca de sessão.
   setTasks: (tasks: AgentTask[]) => {
-    set({ tasks });
+    const sid = get().focusedTrackerSessionId;
+    if (sid) get().setTasksForSession(sid, tasks);
+    else set({ tasks });
   },
 
   clearTasks: () => {
-    set({ tasks: [] });
+    const sid = get().focusedTrackerSessionId;
+    if (sid) get().clearTasksForSession(sid);
+    else set({ tasks: [] });
   },
 
   bumpPoolConflictsAvoided: (delta: number) => {
@@ -237,6 +304,8 @@ export const useAgentStore = create<AgentState & AgentActions>()((set) => ({
       compactPhase: "idle",
       error: null,
       workerStatus: null,
+      tasksBySession: {},
+      focusedTrackerSessionId: null,
       tasks: [],
       modelName: null,
       modelProvider: null,

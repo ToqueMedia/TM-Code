@@ -20,6 +20,7 @@ interface SubAgentStoreState {
     prompt: string,
     description: string,
     parentMessageId?: string,
+    ownerTaskId?: string,
   ) => { runId: string; completionPromise: Promise<void> } | null
 
   /** Record a new tool call in the run's toolCalls list. */
@@ -43,6 +44,9 @@ interface SubAgentStoreState {
   /** Abort ALL running sub-agents (cascade from parent Stop). */
   abortAll: () => void
 
+  /** Abort os sub-agents de UMA tarefa paralela parada/terminada (cascade). */
+  abortByOwner: (ownerTaskId: string) => void
+
   /** Get count of currently running sub-agents. */
   getPendingCount: () => number
 
@@ -64,7 +68,7 @@ let nextRunId = 1
 export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
   runs: new Map(),
 
-  startRun: (def, prompt, description, parentMessageId) => {
+  startRun: (def, prompt, description, parentMessageId, ownerTaskId) => {
     // Atomic limit check — prevents TOCTOU race when multiple task()
     // calls run in parallel (concurrencySafe).
     const MAX_CONCURRENT_SUBAGENTS = 4
@@ -84,6 +88,7 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
     const run: SubAgentRun = {
       id: runId,
       parentMessageId,
+      ...(ownerTaskId ? { ownerTaskId } : {}),
       definition: def,
       prompt,
       description,
@@ -207,6 +212,27 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
     })
   },
 
+  abortByOwner: (ownerTaskId) => {
+    const { runs } = get()
+    for (const [, run] of runs) {
+      if (run.ownerTaskId === ownerTaskId && run.status === 'running') {
+        run.abortController.abort()
+        run._resolveCompletion()
+      }
+    }
+    set((state) => {
+      const next = new Map<string, SubAgentRun>()
+      for (const [id, run] of state.runs) {
+        if (run.ownerTaskId === ownerTaskId && run.status === 'running') {
+          next.set(id, { ...run, status: 'aborted', endedAt: Date.now() })
+        } else {
+          next.set(id, run)
+        }
+      }
+      return { runs: next }
+    })
+  },
+
   getPendingCount: () => {
     let count = 0
     for (const run of get().runs.values()) {
@@ -220,6 +246,7 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
     for (const run of get().runs.values()) {
       summaries.push({
         id: run.id,
+        ...(run.ownerTaskId ? { ownerTaskId: run.ownerTaskId } : {}),
         agentType: run.definition.agentType,
         description: run.description,
         status: run.status,
