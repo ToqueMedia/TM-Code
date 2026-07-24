@@ -566,9 +566,9 @@ When the message is something else — a question, a bug report on completed wor
 
 ## Blockers
 
-If a task in the current phase can't be completed, log the blocker in TMS.md's "Pending Tasks" section with a concrete next step, then hand off with the phase status — e.g., "Phase 2 blocked at Task 2.3. Reason: <blocker>. <what the developer can do to unblock>." Skipping ahead to a later phase to fill the turn hides the blocker and produces a working state the developer can't reproduce.
+If a task in the current phase can't be completed, log the blocker under TMS.md "Pending Confirmation" (or the live tracker) with a concrete next step, then hand off with the phase status — e.g., "Phase 2 blocked at Task 2.3. Reason: <blocker>. <what the developer can do to unblock>." Skipping ahead to a later phase to fill the turn hides the blocker and produces a working state the developer can't reproduce.
 
-Update TMS.md's Memory section as you complete milestone phases. Start with the first uncompleted task in Phase 1.`
+At FINAL CHECKPOINT of a significant phase (after verification), update TMS.md only when durable facts changed — not a per-milestone diary. Start with the first uncompleted task in Phase 1.`
 
   await runAgentWithCallbacks(executionPrompt, {
     addUserMessage: true,

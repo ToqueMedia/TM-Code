@@ -180,36 +180,12 @@ export function classifyPromptIntent(
 }
 
 const cx = (meta: AuxiliaryMeta): AuxiliaryMeta => meta
-const tmsCx = (
-  key: string,
-  name: string,
-  description: string,
-  estTokens: number,
-  aliases: string[] = [],
-): AuxiliaryMeta => cx({
-  id: `tms.${key}`,
-  domain: 'project/tms',
-  capability: key,
-  name,
-  description,
-  scope: 'project-doc',
-  costTier: 'low',
-  granularity: 'summary',
-  whenToUse: 'Use when the task needs this specific TMS.md section; prefer this over project.docs_full.',
-  whenNotToUse: 'Do not use as source code or as permission to edit; verify exact code with Read before mutating files.',
-  dependencies: [],
-  fallbackTo: ['project.docs_full'],
-  sourceResolver: `tms_${key}`,
-  freshnessPolicy: 'snapshot at turn start from TMS.md',
-  expectedFiles: ['TMS.md'],
-  summaryAvailable: true,
-  fullAvailable: true,
-  estTokens,
-  type: 'project-doc',
-  profiles: [],
-  aliases,
-  phase: 1,
-})
+
+// NOTE: per-section tms.* auxiliaries (tms.commands, tms.agent_rules, …) were
+// removed. TMS.md is injected in full in the static system prompt (provider
+// prompt-cache). Section-level request_context was redundant and taught the
+// model to re-fetch content it already has. Prefer project.docs_full when
+// README/PLAN/TODO (or dual-case foreign instructions) are needed.
 
 export const AUXILIARY_METAS: AuxiliaryMeta[] = [
   cx({
@@ -727,92 +703,25 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     aliases: ['vision_rules'],
     phase: 1,
   }),
-  tmsCx(
-    'overview',
-    'TMS overview',
-    'Only the Overview section from TMS.md: project purpose and related repos.',
-    140,
-    ['tms_overview', 'project.tms_overview'],
-  ),
-  tmsCx(
-    'stack',
-    'TMS stack',
-    'Only the Stack section from TMS.md: frameworks, languages, package manager, and key dependencies.',
-    180,
-    ['tms_stack', 'project.tms_stack'],
-  ),
-  tmsCx(
-    'commands',
-    'TMS commands',
-    'Only the Commands section from TMS.md: install, dev, test, build, worker, and release commands.',
-    220,
-    ['tms_commands', 'project.tms_commands'],
-  ),
-  tmsCx(
-    'structure',
-    'TMS structure',
-    'Only the Structure section from TMS.md: compact directory map and ownership boundaries.',
-    240,
-    ['tms_structure', 'project.tms_structure'],
-  ),
-  tmsCx(
-    'entrypoints',
-    'TMS entrypoints',
-    'Only the EntryPoints section from TMS.md: app, service, worker, and native entry files.',
-    240,
-    ['tms_entrypoints', 'project.tms_entrypoints'],
-  ),
-  tmsCx(
-    'project_patterns',
-    'TMS project patterns',
-    'Only the Project Patterns section from TMS.md: local conventions and implementation patterns.',
-    280,
-    ['tms_project_patterns', 'project.tms_project_patterns'],
-  ),
-  tmsCx(
-    'agent_rules',
-    'TMS agent rules',
-    'Only the Agent Rules section from TMS.md: repo-specific rules for agent behavior.',
-    260,
-    ['tms_agent_rules', 'project.tms_agent_rules'],
-  ),
-  tmsCx(
-    'confirmed',
-    'TMS confirmed facts',
-    'Only the Confirmed section from TMS.md: verified project facts and recent durable decisions.',
-    260,
-    ['tms_confirmed', 'project.tms_confirmed'],
-  ),
-  tmsCx(
-    'inferred',
-    'TMS inferred facts',
-    'Only the Inferred section from TMS.md: non-authoritative assumptions that need verification.',
-    120,
-    ['tms_inferred', 'project.tms_inferred'],
-  ),
-  tmsCx(
-    'pending_confirmation',
-    'TMS pending confirmation',
-    'Only the Pending Confirmation section from TMS.md: open questions and facts that require user/source confirmation.',
-    120,
-    ['tms_pending_confirmation', 'project.tms_pending_confirmation'],
-  ),
   cx({
     id: 'project.docs_full',
     domain: 'project',
     capability: 'project_docs',
     name: 'Project docs',
-    description: 'Full README/TMS/PLAN/TODO bodies. Use only when docs themselves are needed.',
+    description:
+      'README + PLAN + TODO. When TMS.md exists, foreign AGENTS/CLAUDE may also appear (dual-case). TMS itself is already in the static system prompt — not repeated here.',
     scope: 'project-doc',
     costTier: 'high',
     granularity: 'full',
-    whenToUse: 'Use when README/TMS/PLAN/TODO content is explicitly needed.',
-    whenNotToUse: 'Do not use as general project orientation or when an index/read_file is enough.',
+    whenToUse:
+      'Use when README, PLAN.md, or TODO.md content is needed (or dual-case foreign instructions not already in the system prompt).',
+    whenNotToUse:
+      'Do not use only to re-read TMS.md or sole AGENTS/CLAUDE (already in system prompt). Do not use as general project orientation when structure/git is enough.',
     dependencies: [],
     fallbackTo: ['project.structure_overview'],
     sourceResolver: 'project_docs_full',
     freshnessPolicy: 'snapshot at turn start',
-    expectedFiles: ['README.md', 'TMS.md', 'PLAN.md', 'TODO.md'],
+    expectedFiles: ['README.md', 'TMS.md', 'AGENTS.md', 'CLAUDE.md', 'PLAN.md', 'TODO.md'],
     summaryAvailable: true,
     fullAvailable: true,
     estTokens: 2000,

@@ -3,6 +3,7 @@ import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiCheck, FiChevronDown, FiChevronRight, FiLoader, FiTerminal, FiX } from 'react-icons/fi'
 import type { ToolCallDisplay } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
+import { normalizeTerminalText } from '@/utils/stripAnsi'
 
 interface ShellCommandBlockProps {
   toolCall: ToolCallDisplay
@@ -41,29 +42,74 @@ export function isAgentShellTool(toolName: string): boolean {
   return AGENT_SHELL_TOOLS.has(toolName)
 }
 
+/**
+ * Resolve the persistent PTY session id for an agent_shell_* tool call.
+ * start may only expose the id in `result` until later writes carry it in input.
+ */
+export function resolveAgentShellSessionId(toolCall: ToolCallDisplay): string | null {
+  const fromInput = toolCall.input?.session_id
+  if (typeof fromInput === 'string' && fromInput.trim()) return fromInput.trim()
+
+  const result = toolCall.result || ''
+  const match = result.match(/session_id:\s*(\S+)/i)
+  if (match?.[1]) return match[1]
+
+  // start before result lands — use toolCall id as a stable provisional key
+  if (toolCall.toolName === 'agent_shell_start') return `pending:${toolCall.id}`
+  return null
+}
+
 export type AgentShellDisplayGroup =
-  | { kind: 'agent_shell_session'; calls: ToolCallDisplay[] }
+  | { kind: 'agent_shell_session'; calls: ToolCallDisplay[]; sessionId: string }
   | { kind: 'single'; call: ToolCallDisplay }
 
-export function groupConsecutiveAgentShellCalls(calls: ToolCallDisplay[]): AgentShellDisplayGroup[] {
-  const groups: AgentShellDisplayGroup[] = []
+/**
+ * Group agent_shell_* tools by session_id (not mere adjacency).
+ * Reasoning/text between write/read used to split one PTY into dozens of
+ * "agent shell · 1 step" cards during long deploys (session 2026-07-24).
+ * Non-shell tools keep their place as `single` in first-seen order.
+ */
+export function groupAgentShellBySession(calls: ToolCallDisplay[]): AgentShellDisplayGroup[] {
+  const sessionOrder: string[] = []
+  const bySession = new Map<string, ToolCallDisplay[]>()
+  for (const call of calls) {
+    if (!isAgentShellTool(call.toolName)) continue
+    const sid = resolveAgentShellSessionId(call) || `orphan:${call.id}`
+    if (!bySession.has(sid)) {
+      bySession.set(sid, [])
+      sessionOrder.push(sid)
+    }
+    bySession.get(sid)!.push(call)
+  }
 
-  for (let i = 0; i < calls.length; i++) {
-    const call = calls[i]
+  // Promote provisional start keys once a real session_id appears in a later call.
+  // (start: pending:X, write: agent-shell-… — merge if start is first and only provisional)
+  // Keep simple: already keyed by best-available id per call at walk time.
+
+  const groups: AgentShellDisplayGroup[] = []
+  const emittedSessions = new Set<string>()
+
+  for (const call of calls) {
     if (!isAgentShellTool(call.toolName)) {
       groups.push({ kind: 'single', call })
       continue
     }
-
-    const sessionCalls = [call]
-    while (i + 1 < calls.length && isAgentShellTool(calls[i + 1].toolName)) {
-      sessionCalls.push(calls[i + 1])
-      i++
-    }
-    groups.push({ kind: 'agent_shell_session', calls: sessionCalls })
+    const sid = resolveAgentShellSessionId(call) || `orphan:${call.id}`
+    if (emittedSessions.has(sid)) continue
+    emittedSessions.add(sid)
+    groups.push({
+      kind: 'agent_shell_session',
+      sessionId: sid,
+      calls: bySession.get(sid) || [call],
+    })
   }
 
   return groups
+}
+
+/** @deprecated use groupAgentShellBySession — kept for callers that only need consecutive. */
+export function groupConsecutiveAgentShellCalls(calls: ToolCallDisplay[]): AgentShellDisplayGroup[] {
+  return groupAgentShellBySession(calls)
 }
 
 function getDisplayCommand(toolCall: ToolCallDisplay): string {
@@ -110,25 +156,6 @@ function getResultWithoutExitCode(result: string | undefined): string {
 function splitResultLines(result: string): string[] {
   if (!result) return []
   return result.split('\n')
-}
-
-function applyBackspaces(text: string): string {
-  const chars: string[] = []
-  for (const ch of text) {
-    if (ch === '\b') chars.pop()
-    else chars.push(ch)
-  }
-  return chars.join('')
-}
-
-function normalizeTerminalText(text: string): string {
-  return applyBackspaces(text)
-    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '')
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    .split('\n')
-    .map(line => line.replace(/[ \t]+$/g, ''))
-    .join('\n')
 }
 
 function compactForEchoCompare(text: string): string {
@@ -395,9 +422,15 @@ export const ShellCommandBlock = memo(function ShellCommandBlock({
   const isRunning = toolCall.status === 'running'
   const isError = toolCall.isError || toolCall.status === 'failed'
   const exitCode = getExitCode(toolCall.result)
-  const resultText = getResultWithoutExitCode(toolCall.result)
+  // ALWAYS strip ANSI before paint — execute_command results and live
+  // commandLogs carry SGR color codes; without strip the chat shows noise
+  // like `[38;5;246m` (xterm would interpret them; plain Text does not).
+  const resultText = normalizeTerminalText(getResultWithoutExitCode(toolCall.result))
   const resultLines = useMemo(() => splitResultLines(resultText), [resultText])
-  const logLines = toolCall.commandLogs || []
+  const logLines = useMemo(
+    () => (toolCall.commandLogs || []).map(line => normalizeTerminalText(line)),
+    [toolCall.commandLogs],
+  )
 
   // Revelação progressiva do resultado (só quando vimos o comando a correr
   // neste mount) + bloco auto-gerido: aberto durante a execução, fecha
@@ -801,7 +834,12 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
           lineHeight="1"
           fontWeight="700"
         >
-          {toolCalls.length} step{toolCalls.length === 1 ? '' : 's'}
+          {(() => {
+            const commands = toolCalls.filter(tc => tc.toolName === 'agent_shell_write').length
+            if (isRunning) return 'live'
+            if (commands > 0) return `${commands} command${commands === 1 ? '' : 's'}`
+            return `${toolCalls.length} step${toolCalls.length === 1 ? '' : 's'}`
+          })()}
         </Text>
         {last?.toolName === 'agent_shell_stop' && (
           <Text

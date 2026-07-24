@@ -297,16 +297,20 @@ export function sharedThinkingEfficiencyReminder(): string {
  * for localized fixes WITHOUT cutting corners on correctness. Goes in the
  * static block (cacheable) so the guidance is stable across turns.
  *
- * The meta is "3-4 requests for a localized fix, not a hard limit": the
- * agent should preserve correction quality above turn reduction, but a
- * simple bugfix burning 7 turns without a technical reason is a defect.
- * The loop measures turns and logs a continuation reason when it exceeds
- * the target — it never blocks.
+ * DELIBERADAMENTE sem thresholds numéricos ("3-4 requests", "when you exceed
+ * 4 requests") desde 2026-07-22: a auditoria da sessão momenu-fact mostrou o
+ * modelo a ignorar a secção numérica 24 vezes num run de 151 requests, e o
+ * claude-vaz não usa pacing numérico no prompt (âncoras numéricas lá são um
+ * experimento ant-only, ~1,2% de ganho). O número vive agora no RUNTIME:
+ * turnEfficiency.ts mede as rondas e injeta um system-reminder inter-turn
+ * quando a continuação não tem razão técnica (query.ts). O prompt fica com a
+ * doutrina qualitativa + as regras mecânicas de batching, que são acionáveis
+ * por si.
  */
 export function sharedTurnEfficiency(): string {
   return `# Turn efficiency
 
-A localized fix (bugfix, small refactor, single-file change) should resolve in **3-4 provider requests** — not a hard limit, but an efficiency target. Quality of the correction ALWAYS comes first; do not rush or skip diagnosis to hit the number. But burning 7 turns on a one-line fix without a technical reason is a defect, not thoroughness.
+Go straight to the point: try the simplest approach first, without going in circles. Quality ALWAYS comes first — never rush or skip diagnosis — but continuing when you already have what you need is a defect, not thoroughness: re-reading files you have read, re-verifying what already passed, or exploring beyond the task wastes the developer's time. When your investigation stops producing new information, act on what you have or ask the developer.
 
 ## Batch within a turn
  - **Group edits in the same file**: when a fix touches 2+ spots in one file, make ALL changes in a single \`${EDIT_FILE}\` call (sequential \`old_string\`→\`new_string\` pairs) instead of multiple calls. Multiple round-trips to edit one file waste turns and risk intermediate broken states.
@@ -316,18 +320,7 @@ A localized fix (bugfix, small refactor, single-file change) should resolve in *
 
 ## Skip expensive verification when it's low-risk
  - For **purely visual / structural / low-risk changes** (formatting, renaming a local variable, adjusting spacing, reordering imports), do NOT run a full build/typecheck/test cycle unless you suspect a type error. A single \`edit_file\` + brief note is sufficient.
- - DO verify when: the change touches types/APIs/logic, you're unsure it compiles, or the fix is in a hot path. "Expensive verification" = running the full test suite or build for a one-line cosmetic fix. Targeted verification (one test file, \`tsc --noEmit\`) is cheap and always acceptable when in doubt.
-
-## When you exceed 4 requests
-Continuing past 4 requests is fine when there's a **clear technical reason**. Valid reasons:
- - **Insufficient context**: you needed to read more files to understand the change.
- - **Build/type error**: your first edit broke something and you're fixing the cascade.
- - **Tool failure**: a tool call errored and you're recovering.
- - **Real ambiguity**: the task had multiple valid interpretations and you needed \`ask_user_question\`.
- - **Dependency discovered**: the fix required touching a file you didn't initially know about.
- - **Edit failed**: the \`old_string\` didn't match (file changed) and you're retrying with corrected content.
-
-If you're past 4 requests and NONE of these apply, you're likely over-working a simple task — wrap up and hand off. The loop logs your continuation reason automatically; you don't need to justify each turn, just make sure there IS a reason.`
+ - DO verify when: the change touches types/APIs/logic, you're unsure it compiles, or the fix is in a hot path. "Expensive verification" = running the full test suite or build for a one-line cosmetic fix. Targeted verification (one test file, \`tsc --noEmit\`) is cheap and always acceptable when in doubt.`
 }
 
 export function sharedDoingTasksCore(actor: 'developer' | 'user', scopeDescription: string): string {

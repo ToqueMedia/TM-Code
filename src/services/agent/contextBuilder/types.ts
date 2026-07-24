@@ -70,7 +70,15 @@ export interface PromptContext {
   /** Import path aliases from tsconfig/jsconfig. Empty when none. */
   pathAliases: PathAlias[]
   readme: string | null
+  /** Real TMS.md body only. Null when the project has no structured TM memory. */
   tmsContent: string | null
+  /**
+   * Primary foreign project instructions (AGENTS.md / CLAUDE.md / .claude/CLAUDE.md)
+   * when present. Always set if the file exists — even alongside TMS — so
+   * project.docs_full can append dual-case content. Default system prompt
+   * injects foreign full body only when tmsContent is null (see getProjectMemorySection).
+   */
+  foreignInstructions: import('../projectInstructions').ForeignInstructionSource | null
   planContent: string | null
   todoContent: string | null
   templateManifest: TemplateManifest | null

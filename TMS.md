@@ -59,9 +59,10 @@
 - React components are PascalCase; hooks are named `useSomething`; services use `somethingService.ts`.
 - Keep tests focused and close to the changed feature.
 - Agent context should use small indexed/on-demand sections before broad project context.
-- `request_context` exposes auxiliary ids such as `project.symbol_index`, `project.structure_overview`, `project.docs_full`, and TMS section ids like `tms.commands` and `tms.agent_rules`.
-- `project.docs_full` is a high-cost fallback; prefer `tms.*` sections or direct file reads when only one part of project memory is needed.
-- `TMS.md` is operational memory, not a milestone log. Keep it short and update only durable facts.
+- `TMS.md` is injected in full in the static system prompt (provider prompt-cache); do not re-request it via `request_context`.
+- `request_context` covers auxiliaries such as `project.symbol_index`, `project.structure_overview`, design-system blocks, and `project.docs_full` (README/PLAN/TODO — not a substitute for re-reading TMS).
+- `TMS.md` is operational memory, not a milestone log. Keep it short; update durable facts at FINAL CHECKPOINT of a significant task.
+- Update `TMS.md` only when durable commands, entrypoints, patterns, agent rules, confirmed facts, or pending confirmations change.
 
 ## Agent Rules
 - Before editing an existing file, inspect the relevant current file/range first.
@@ -72,7 +73,6 @@
 - Use `apply_patch` for manual file edits.
 - Run focused tests for agent/runtime changes; run `yarn build` for broad TypeScript or frontend changes when feasible.
 - For `workers/ai-pass-through`, run `yarn test:ai-worker` and `yarn --cwd workers/ai-pass-through typecheck` when changing worker logic.
-- Update `TMS.md` only when durable commands, entrypoints, patterns, agent rules, confirmed facts, or pending confirmations change.
 
 ## Confirmed
 - `/init` expects the compact TMS structure used in this file.

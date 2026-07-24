@@ -92,6 +92,18 @@ const mockGetState_permission = jest.fn(() => ({
   additionalDirectories: [] as string[],
 }))
 
+// Per-project grants resolver (in-window multi-project migration). getAllowedRoots
+// now reads additionalDirectories from HERE (per the run's project) instead of the
+// flat usePermissionStore state, so the mock must export it.
+const mockGetProjectGrants = jest.fn((_projectId?: string | null) => ({
+  projectPath: '/projects/test-app',
+  approvedScopes: new Set<string>(),
+  projectToolAllowlist: new Set<string>(),
+  projectCommandAllowlist: new Set<string>(),
+  additionalDirectories: [] as string[],
+  autoModePermissions: false,
+}))
+
 const mockCurrentProject = { path: '/projects/test-app' }
 const mockGetState_project = jest.fn(() => ({
   currentProject: mockCurrentProject,
@@ -131,6 +143,7 @@ const mockGetState_chat = jest.fn(() => ({
 
 jest.mock('../../../stores/permissionStore', () => ({
   usePermissionStore: { getState: mockGetState_permission },
+  getProjectGrants: mockGetProjectGrants,
 }))
 
 jest.mock('../../../stores/projectStore', () => ({

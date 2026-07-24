@@ -13,8 +13,7 @@ import HashtagMenu from './prompt/HashtagMenu'
 import QueuedMessagesPreview from './prompt/QueuedMessagesPreview'
 import AgentTasksPanel from './chat/AgentTasksPanel'
 import SubAgentStatusBar from './chat/SubAgentStatusBar'
-// ParallelTasksDock: retirado do composer (tarefas paralelas → ProjectMenu).
-// O ficheiro do componente fica como referência caso o dock volte noutro sítio.
+import ParallelTasksDock from './chat/ParallelTasksDock'
 import { usePromptBar } from './prompt/usePromptBar'
 import KeyBindingDisplay from './ui/KeyBindingDisplay'
 
@@ -27,8 +26,7 @@ function PromptBar() {
     isAgentBusy,
     anyLiveTask,
     viewedTaskBusy,
-    queueAsTask,
-    setQueueAsTask,
+
     isScaffolding,
     isSendBlocked,
     isDisabled,
@@ -190,8 +188,6 @@ function PromptBar() {
             isStreaming={isStreaming}
             isAgentBusy={isAgentBusy || anyLiveTask}
             viewedTaskBusy={viewedTaskBusy}
-            queueAsTask={queueAsTask}
-            onQueueModeChange={setQueueAsTask}
             hasInput={(hasInputContent || draftAttachments.length > 0) && !isSendBlocked}
             onToggleEditor={toggleEditor}
             onUndoImprovePrompt={handleUndoImprovePrompt}
@@ -217,7 +213,7 @@ function PromptBar() {
             <>
               <KeyBindingDisplay binding={{ key: 'Enter' }} size="sm" />
               <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>
-                {queueAsTask ? t('prompt.queueTaskHint') : t('prompt.queueHint')}
+                {t('prompt.queueHint')}
               </Text>
               <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>·</Text>
               <KeyBindingDisplay binding={{ key: 'Enter', shift: true }} size="sm" />
@@ -235,9 +231,10 @@ function PromptBar() {
         </Flex>
 
         <SubAgentStatusBar />
-        {/* ParallelTasksDock REMOVIDO daqui (decisão do user 2026-07-16): as
-            tarefas paralelas vivem no dropdown do ProjectMenu (titlebar),
-            aninhadas no projecto, com clique → chat da tarefa. */}
+        {/* Multi-project agents (F2/F3): one agent per project. ProjectMenu
+            was removed; the dock under the composer is the control surface
+            again — project name + task title + Stop. */}
+        <ParallelTasksDock />
       </Box>
     </Box>
   )

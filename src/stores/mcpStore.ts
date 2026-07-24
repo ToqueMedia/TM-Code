@@ -6,6 +6,8 @@ export interface McpServerState {
   error?: string
   tools: McpToolInfo[]
   transport: 'stdio' | 'remote'
+  /** F4: project path scope, or `'__global__'` for app-wide servers. */
+  scope?: string
 }
 
 export interface McpToolInfo {

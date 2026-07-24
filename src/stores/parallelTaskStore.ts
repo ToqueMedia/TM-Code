@@ -11,6 +11,22 @@
 
 import { create } from 'zustand'
 import type { SubAgentToolCallSummary } from '../services/agent/subAgents/types'
+import type { PromptBlock } from '../types/chat'
+
+/**
+ * Composer steer payload for a parallel/session agent run.
+ * Text-only is the common case; `blocks` carries multimodal parity with main
+ * (images/files interleaved with text).
+ */
+export type ParallelSteerItem = {
+  text: string
+  blocks?: PromptBlock[]
+}
+
+export function normalizeSteerItem(item: string | ParallelSteerItem): ParallelSteerItem {
+  if (typeof item === 'string') return { text: item }
+  return { text: item.text, blocks: item.blocks }
+}
 
 /**
  * Parar uma tarefa leva consigo os pedidos interativos DELA (permissão,
@@ -92,8 +108,15 @@ export interface ParallelTaskRun {
   tokenUsage: { input: number; output: number }
   abortController: AbortController
   /** Mensagens do composer à espera do próximo turn boundary DESTA tarefa
-   *  (Fase 3: com a sessão da tarefa em foco, o composer steera-a). */
-  steerQueue: string[]
+   *  (Fase 3: com a sessão da tarefa em foco, o composer steera-a).
+   *  Supports text + optional PromptBlocks (attachments) — main parity. */
+  steerQueue: ParallelSteerItem[]
+  /**
+   * Initial multimodal blocks for the first model turn (session-agent spawn).
+   * The runner builds firstMessage from this so attachments are not lost when
+   * history pops the last user bubble and resubmits `run.prompt` as plain text.
+   */
+  initialBlocks?: PromptBlock[]
 }
 
 interface ParallelTaskState {
@@ -101,7 +124,13 @@ interface ParallelTaskState {
 
   /** Enqueue a new task (status 'queued'). Returns its id. Promotion to
    *  'running' is the manager's job (markRunning) once a slot is free. */
-  createQueued: (prompt: string, description: string, sessionId?: string, projectPath?: string, opts?: { continuation?: boolean }) => string
+  createQueued: (
+    prompt: string,
+    description: string,
+    sessionId?: string,
+    projectPath?: string,
+    opts?: { continuation?: boolean; initialBlocks?: PromptBlock[] },
+  ) => string
   /** Flip a queued task to running (called by the manager when a slot frees). */
   markRunning: (id: string) => void
   addToolCall: (id: string, tc: SubAgentToolCallSummary) => void
@@ -118,9 +147,9 @@ interface ParallelTaskState {
    *  (a sessão em disco é apagada pelo caller). Tarefas só desaparecem assim. */
   removeClosed: (id: string) => void
   /** Enfileira uma orientação do user para esta tarefa (composer em foco). */
-  enqueueSteer: (id: string, text: string) => void
+  enqueueSteer: (id: string, item: string | ParallelSteerItem) => void
   /** Drena (e limpa) a fila de steering — chamado pelo runner por turno. */
-  drainSteer: (id: string) => string[]
+  drainSteer: (id: string) => ParallelSteerItem[]
   /** Abort one task (queued or running). */
   abort: (id: string) => void
   /** Abort everything (queued + running). */
@@ -148,6 +177,7 @@ export const useParallelTaskStore = create<ParallelTaskState>((set, get) => ({
       sessionId,
       projectPath,
       continuation: opts?.continuation === true,
+      initialBlocks: opts?.initialBlocks,
       status: 'queued',
       toolCalls: [],
       finalText: '',
@@ -259,19 +289,19 @@ export const useParallelTaskStore = create<ParallelTaskState>((set, get) => ({
       return { runs }
     }),
 
-  enqueueSteer: (id, text) =>
+  enqueueSteer: (id, item) =>
     set((s) => {
       const run = s.runs.get(id)
       if (!run || (run.status !== 'running' && run.status !== 'queued')) return s
       const runs = new Map(s.runs)
-      runs.set(id, { ...run, steerQueue: [...run.steerQueue, text] })
+      runs.set(id, { ...run, steerQueue: [...run.steerQueue, normalizeSteerItem(item)] })
       return { runs }
     }),
 
   drainSteer: (id) => {
     const run = get().runs.get(id)
     if (!run || run.steerQueue.length === 0) return []
-    const drained = run.steerQueue
+    const drained = run.steerQueue.map(normalizeSteerItem)
     set((s) => {
       const current = s.runs.get(id)
       if (!current) return s

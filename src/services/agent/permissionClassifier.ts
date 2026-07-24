@@ -29,7 +29,6 @@
  */
 import { logger } from '../../utils/logger'
 import { resolveAIWorkerUrl } from '../../utils/devUrls'
-import { invoke } from '@/utils/invokeMetrics'
 import FirebaseAuthService, { getAppCheckHeader } from '../auth/firebaseAuth'
 
 export interface PermissionClassifierVerdict {
@@ -40,7 +39,6 @@ export interface PermissionClassifierVerdict {
 const CLASSIFIER_TIMEOUT_MS = 12_000
 const TRANSCRIPT_CHAR_BUDGET = 7_000
 const ACTION_CHAR_BUDGET = 1_500
-const TMS_CHAR_BUDGET = 4_000
 
 // Sufixos do classificador 2-STAGE (porte 1:1 do claude-vaz XML_S1/S2_SUFFIX):
 // o stage 1 é rápido e enviesado para bloquear; um bloqueio (ou resposta
@@ -198,15 +196,16 @@ async function callClassifierStage(
   }
 }
 
-/** TMS.md como CONTEXTO DE INTENÇÃO do developer (porte do CLAUDE.md-message
- *  do claude-vaz): o que está escrito nas notas do projecto conta como
- *  intenção do developer ao julgar ações. Best-effort — sem TMS.md, segue. */
+/** Project notes as developer intent (porte do CLAUDE.md-message do claude-vaz).
+ *  Prefers TMS.md; falls back to AGENTS.md / CLAUDE.md via the compat loader.
+ *  Best-effort — without any instructions file, continues without notes. */
 async function buildProjectNotesBlock(projectPath: string | undefined): Promise<string> {
   if (!projectPath) return ''
   try {
-    const raw = await invoke<string>('read_file', { path: `${projectPath}/TMS.md` })
-    if (!raw || !raw.trim()) return ''
-    return `The following are the developer's project notes (TMS.md). Treat them as part of the developer's intent when evaluating actions.\n<project_notes>\n${raw.slice(0, TMS_CHAR_BUDGET)}\n</project_notes>\n\n`
+    const { loadProjectInstructions, buildProjectNotesFromBundle, PROJECT_NOTES_CHAR_BUDGET } =
+      await import('./projectInstructions')
+    const bundle = await loadProjectInstructions(projectPath)
+    return buildProjectNotesFromBundle(bundle, PROJECT_NOTES_CHAR_BUDGET)
   } catch {
     return ''
   }

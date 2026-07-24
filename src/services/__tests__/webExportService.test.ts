@@ -6,9 +6,11 @@ jest.mock('../auth/firebaseAuth', () => ({
 }))
 
 import {
+  collectMigrationStatements,
   detectBackendDir,
   detectDatabase,
   detectFramework,
+  rewriteDbFileToManaged,
   shouldSkipPortableExportPath,
   type PackageJson,
 } from '../webExportService'
@@ -134,5 +136,91 @@ describe('fullstack detection contract (parity fixtures)', () => {
       { dependencies: {} },
     )).toBe(true)
     expect(detectDatabase(asFiles({ 'src/App.tsx': '' }), { dependencies: { react: '^18' } })).toBe(false)
+  })
+
+  it('database detection: deps only in server/package.json (pre-Turso multi-package)', () => {
+    expect(detectDatabase(
+      asFiles({
+        'package.json': JSON.stringify({ dependencies: { concurrently: '^8' } }),
+        'server/package.json': JSON.stringify({
+          dependencies: { 'drizzle-orm': '^0.45', '@libsql/client': '^0.17', express: '^4' },
+        }),
+      }),
+      { dependencies: { concurrently: '^8' } },
+    )).toBe(true)
+  })
+})
+
+describe('collectMigrationStatements', () => {
+  it('splits drizzle statement-breakpoint files', () => {
+    const files = asFiles({
+      'server/drizzle/0000_init.sql':
+        'CREATE TABLE users (id text PRIMARY KEY);\n--> statement-breakpoint\nCREATE TABLE posts (id text);',
+    })
+    const stmts = collectMigrationStatements(files)
+    expect(stmts).toHaveLength(2)
+    expect(stmts[0]).toMatch(/CREATE TABLE users/)
+    expect(stmts[1]).toMatch(/CREATE TABLE posts/)
+  })
+})
+
+describe('rewriteDbFileToManaged (pre-Turso local-only entry)', () => {
+  const localOnlyDb = `import { drizzle } from 'drizzle-orm/libsql';
+import { createClient } from '@libsql/client';
+import * as schema from './schema.js';
+
+const databaseUrl = process.env.DATABASE_URL || 'file:./dev.db';
+const client = createClient({ url: databaseUrl });
+export const db = drizzle(client, { schema });
+`
+
+  function makePayload(files: Record<string, string>) {
+    return {
+      schemaVersion: 1 as const,
+      source: 'tm-code-ide' as const,
+      exportedAt: new Date().toISOString(),
+      projectName: 'my-project',
+      rootPath: '.',
+      files: asFiles(files),
+      directories: [{ path: 'server' }],
+      compatibility: {
+        importable: true,
+        framework: 'react-vite-fullstack' as const,
+        capabilities: ['edit' as const, 'deploy' as const],
+        entryRoot: '.',
+        backendDir: 'server',
+        hasDatabase: true,
+        blockers: [] as string[],
+        warnings: [] as string[],
+      },
+      metadata: {},
+    }
+  }
+
+  it('rewrites server/src/db/index.ts used by pre-Turso multi-package projects', () => {
+    const payload = makePayload({
+      'server/src/db/index.ts': localOnlyDb,
+      'server/src/db/schema.ts': "export const users = sqliteTable('users', {})",
+    })
+    const result = rewriteDbFileToManaged(payload)
+    expect(result.rewritten).toBe(true)
+    expect(result.path).toBe('server/src/db/index.ts')
+    const rewritten = payload.files.find(f => f.path === 'server/src/db/index.ts')!
+    expect(rewritten.content).toContain('TMDB_URL')
+    expect(rewritten.content).toContain('sqlite-proxy')
+    expect(rewritten.content).not.toContain('file:./dev.db')
+  })
+
+  it('still rewrites classic server/db.ts dual-branch scaffold', () => {
+    const payload = makePayload({
+      'server/db.ts': `// dual branch
+if (process.env.TMDB_URL) { /* managed */ }
+else { createClient({ url: process.env.DATABASE_URL || 'file:./dev.db' }) }
+`,
+      'server/schema.ts': "export const users = sqliteTable('users', {})",
+    })
+    const result = rewriteDbFileToManaged(payload)
+    expect(result.rewritten).toBe(true)
+    expect(result.path).toBe('server/db.ts')
   })
 })

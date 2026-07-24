@@ -59,6 +59,28 @@ const EDIT_TOOLS = new Set([
   'edit_file', 'write_file', 'create_file',
 ])
 
+/** Research/external-context gathering — legítimo como o READ local, mas contra
+ *  fontes externas. Sem isto, uma ronda de pesquisa caía no fallback "sem razão
+ *  técnica" (falso positivo — a auditoria momenu). */
+const RESEARCH_TOOLS = new Set([
+  'web_fetch', 'web_search', 'capture_url_design',
+])
+
+/** Monitorização de trabalho assíncrono (comandos/agentes em background) —
+ *  verificação legítima, equivalente ao execute_command síncrono. */
+const MONITOR_TOOLS = new Set([
+  'agent_shell_start', 'agent_shell_read', 'agent_shell_stop',
+  'check_background_commands', 'check_background_agents',
+])
+
+/** Bookkeeping — marcar progresso no tracker ou na memória. É progresso real
+ *  (não giro improdutivo); classificá-lo como "sem razão" treinava o modelo a
+ *  ignorar o nudge. */
+const PROGRESS_TOOLS = new Set([
+  'update_tasks',
+  'update_session_memory', 'write_memory', 'update_memory', 'save_memory',
+])
+
 /**
  * Infer the technical reason the loop continued past the efficiency target.
  *
@@ -95,14 +117,37 @@ export function inferContinuationReason(snapshot: TurnSnapshot): string {
     return 'insufficient context — gathering information'
   }
 
-  // 4. Ambiguity — the agent asked the developer a question.
-  if (toolNames.includes('ask_user_question')) {
+  // 3b. Research — gathering external context (web/design). Legítimo como o
+  //     READ local; sem este ramo caía no fallback (falso positivo).
+  if (toolNames.some((n) => RESEARCH_TOOLS.has(n))) {
+    return 'researching — gathering external context'
+  }
+
+  // 3c. Monitoring — checking background commands/agents. Verificação legítima
+  //     de trabalho assíncrono (equivalente ao execute_command síncrono).
+  if (toolNames.some((n) => MONITOR_TOOLS.has(n))) {
+    return 'monitoring background work'
+  }
+
+  // 4. Ambiguity — the agent asked the developer a question OR requested a
+  //    credential (ambos ficam à espera do humano — não é giro improdutivo).
+  if (toolNames.includes('ask_user_question') || toolNames.includes('request_credentials')) {
     return 'ambiguity — clarifying with developer'
   }
 
   // 5. Sub-agent dispatched — delegate/collect_results.
   if (toolNames.includes('delegate') || toolNames.includes('collect_results')) {
     return 'sub-agent dispatched — collecting results'
+  }
+
+  // 5b. Bookkeeping — tracker/memória. Progresso real, não giro.
+  if (toolNames.some((n) => PROGRESS_TOOLS.has(n))) {
+    return 'bookkeeping — tracking progress'
+  }
+
+  // 5c. External tool action — MCP ou browser. Ação legítima fora do editor.
+  if (toolNames.some((n) => n.startsWith('mcp__') || n === 'browser_action')) {
+    return 'external tool action'
   }
 
   // 6. No tool calls at all (continuation via steering/max_tokens) — unusual
@@ -112,7 +157,10 @@ export function inferContinuationReason(snapshot: TurnSnapshot): string {
   }
 
   // Fallback: the turn produced tool calls but none fit a recognized
-  // continuation pattern. This is the "consider wrapping up" signal.
+  // continuation pattern (progress, recovery, research, verification, waiting
+  // on a human, delegation, bookkeeping, external action). This narrowed
+  // fallback is the "consider wrapping up" signal — after 3b–5c, a turn here is
+  // genuinely spinning, not a misclassified productive category.
   return 'no clear technical reason — consider wrapping up'
 }
 
@@ -124,4 +172,83 @@ export function inferContinuationReason(snapshot: TurnSnapshot): string {
 export function isLegitimateContinuationReason(reason: string): boolean {
   return !reason.startsWith('no clear technical reason') &&
     !reason.startsWith('no tool calls')
+}
+
+// ── Nudge de eficiência (inter-turn) ─────────────────────────────────────────
+//
+// PORQUÊ: na auditoria de 2026-07-22 (sessão momenu-fact) o loop marcou
+// "no clear technical reason" 24 vezes num run de 151 requests — e o modelo
+// nunca viu nenhuma delas, porque o sinal ia só para console.debug. O prompt
+// tinha uma secção "When you exceed 4 requests" que o modelo ignorou; o
+// claude-vaz não tem NENHUM pacing numérico no prompt (a única âncora
+// numérica é um experimento ant-only) — o padrão dele é feedback ESTRUTURAL
+// injetado no contexto entre turnos (system-reminder isMeta, canal dos
+// stop-hooks/todo-reminders). Este módulo decide QUANDO injetar; o query loop
+// injeta via o mesmo caminho dos inter-turn attachments.
+//
+// Disciplina de throttle (porte do todo-reminder do claude-vaz, que exige
+// ≥10 turnos desde o último TodoWrite E ≥10 desde o último reminder):
+//   - só dispara após CONSECUTIVE_NO_REASON rondas seguidas sem razão
+//     técnica (uma ronda legítima zera a contagem — um build error no meio
+//     de exploração improdutiva ainda é progresso);
+//   - nudges seguintes exigem TURNS_BETWEEN_NUDGES rondas de distância
+//     (anti-spam; repetir o reminder todos os turnos só queima contexto).
+// Continua a NUNCA bloquear — o nudge informa, o modelo decide.
+
+export const EFFICIENCY_NUDGE_CONFIG = {
+  /** Rondas consecutivas sem razão técnica clara antes de nudgar. */
+  CONSECUTIVE_NO_REASON: 3,
+  /** Distância mínima (em rondas) entre nudges. */
+  TURNS_BETWEEN_NUDGES: 10,
+} as const
+
+export interface EfficiencyNudgeState {
+  consecutiveNoReason: number
+  lastNudgeTurn: number
+  nudgeCount: number
+}
+
+export function createEfficiencyNudgeState(): EfficiencyNudgeState {
+  return { consecutiveNoReason: 0, lastNudgeTurn: 0, nudgeCount: 0 }
+}
+
+/**
+ * Regista a razão de continuação desta ronda e decide se ela dispara o
+ * nudge. Muta `state` (contadores) e devolve true exatamente na ronda em
+ * que o caller deve injetar `buildEfficiencyNudgeText`. Sem side-effects
+ * além do estado passado — testável em isolamento.
+ */
+export function trackEfficiencyNudge(
+  state: EfficiencyNudgeState,
+  reason: string,
+  turnCount: number,
+): boolean {
+  if (isLegitimateContinuationReason(reason)) {
+    state.consecutiveNoReason = 0
+    return false
+  }
+  state.consecutiveNoReason += 1
+  if (state.consecutiveNoReason < EFFICIENCY_NUDGE_CONFIG.CONSECUTIVE_NO_REASON) return false
+  // O primeiro nudge não espera pela distância (lastNudgeTurn=0 tornaria a
+  // condição vazia em runs curtos); os seguintes respeitam o intervalo.
+  const farEnough = state.nudgeCount === 0 ||
+    turnCount - state.lastNudgeTurn >= EFFICIENCY_NUDGE_CONFIG.TURNS_BETWEEN_NUDGES
+  if (!farEnough) return false
+  state.consecutiveNoReason = 0
+  state.lastNudgeTurn = turnCount
+  state.nudgeCount += 1
+  return true
+}
+
+/**
+ * Texto do nudge — factos estruturais + instrução de consolidar, no formato
+ * system-reminder que o system prompt já explica ao modelo. Maneirismos do
+ * claude-vaz preservados de propósito: "ignore if not applicable" (o sinal é
+ * heurístico, trabalho legítimo pode continuar) e "never mention" (o
+ * developer não deve ver o mecanismo refletido na prosa do agente).
+ */
+export function buildEfficiencyNudgeText(turnCount: number): string {
+  return `<system-reminder>
+Turn-efficiency check: this run is now ${turnCount} provider rounds in, and the last ${EFFICIENCY_NUDGE_CONFIG.CONSECUTIVE_NO_REASON} rounds had no clear technical reason to continue (no error being fixed, no verification pending, no new information required). If you already know what the outcome is, consolidate and finish now — apply the change or deliver your conclusion. If you are stuck or the task is ambiguous, ask the developer instead of exploring further. This is an automated structural signal, not a message from the developer — ignore it if the continued work is genuinely necessary, and never mention this reminder in your user-facing text.
+</system-reminder>`
 }

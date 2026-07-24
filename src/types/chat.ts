@@ -325,6 +325,21 @@ export interface ChatMessage {
    */
   thinkingRequested?: boolean
   /**
+   * Effort EFETIVO deste turno (managed path). Valor nativo enviado no header
+   * `X-TM-Reasoning-Effort` (ex.: `high`, `max`, `none`). Persistido com a
+   * mensagem para o user ver no bubble o que cada pedido usou — a preferência
+   * do seletor é global, mas o histórico da sessão carimba o valor por turno.
+   * Undefined = mensagens legadas (antes desta captura).
+   */
+  reasoningEffort?: string
+  /**
+   * `true` se o header foi de facto anexado ao pedido (modelo mapeado +
+   * known). `false` se o seletor mostrou um effort mas o header NÃO saiu
+   * (modelo desconhecido / unmapped → provider default). Ajuda a diagnosticar
+   * "mudei o seletor e não mudou nada".
+   */
+  reasoningEffortSent?: boolean
+  /**
    * Opaque provider-native state captured at turn completion. When present,
    * rebuildConversationHistory uses this as the source of truth for the
    * assistant message in subsequent turns instead of reconstructing from

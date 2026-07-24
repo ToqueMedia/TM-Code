@@ -19,6 +19,7 @@
  */
 
 import type { ChatSession, ChatMessage, ToolCallDisplay, Attachment, ByokSessionSnapshot, RequestUsageEntry } from '../types/chat'
+import { getPromptSerializeStats } from '../services/agent/promptSerialize'
 import { t } from '@/i18n'
 
 /**
@@ -177,6 +178,17 @@ function sanitizeByokSnapshot(snap: ByokSessionSnapshot | null | undefined): Byo
 export function sessionToJson(session: ChatSession, opts: ExportOptions = {}): string {
   const stripImageData = opts.stripImageData !== false
   const requestUsageLog = session.requestUsageLog ?? []
+  // Process-local structured-serialize counters (MCP TOON/mini path). Snapshot
+  // at export time so bug reports can show whether TOON ever won this session.
+  const promptSerializeStats = getPromptSerializeStats()
+  const hasSerializeActivity =
+    promptSerializeStats.stringPassthrough
+    + promptSerializeStats.jsonMini
+    + promptSerializeStats.toonWins
+    + promptSerializeStats.toonNoWin
+    + promptSerializeStats.toonUnavailable
+    > 0
+
   const payload = {
     schemaVersion: 2,
     exportedAt: new Date().toISOString(),
@@ -190,6 +202,7 @@ export function sessionToJson(session: ChatSession, opts: ExportOptions = {}): s
       byokSnapshot: sanitizeByokSnapshot(session.byokSnapshot),
       requestUsageLog,
       requestEfficiencyReport: buildRequestEfficiencyReport(requestUsageLog),
+      ...(hasSerializeActivity ? { promptSerializeStats } : {}),
       messages: session.messages.map(m => sanitizeMessage(m, stripImageData)),
     },
     environment: opts.envSnapshot ?? null,
@@ -260,8 +273,16 @@ function renderToolCallMd(tc: ToolCallDisplay): string {
 function renderMessageMd(msg: ChatMessage): string {
   const stamp = isoTimestamp(msg.timestamp)
   const roleLabel = msg.role === 'user' ? `👤 ${t('export.user')}` : msg.role === 'assistant' ? `🤖 ${t('export.assistant')}` : `⚙️ ${t('export.system')}`
+  // Effort carimbado neste turno (managed) — prova no export se Low/High/Max
+  // saiu no pedido. Ausente em mensagens legadas.
+  const effortLine =
+    msg.role === 'assistant' && msg.reasoningEffort
+      ? ` · effort \`${msg.reasoningEffort}\`${
+          msg.reasoningEffortSent === false ? ' (not sent → provider default)' : ' (sent)'
+        }`
+      : ''
   const lines: string[] = []
-  lines.push(`### ${roleLabel} — ${stamp}`)
+  lines.push(`### ${roleLabel} — ${stamp}${effortLine}`)
   lines.push(``)
 
   // When the message uses the modern block-based representation, walk it

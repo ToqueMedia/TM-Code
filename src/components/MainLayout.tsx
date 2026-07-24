@@ -28,6 +28,7 @@ import { useCodeEditorState } from '../hooks/useEditorState'
 import { usePermissionStore } from '../stores/permissionStore'
 import { useBillingStore, isTeamCollabActive } from '../stores/billingStore'
 import { devServerManager } from '../services/devServerManager'
+import { closePreviewWebview } from './ui/TauriWebview'
 import DevServerStatus from './chat/DevServerStatus'
 import { TeamChatPanel } from './collab/TeamChatPanel'
 import { ScreenShareViewer } from './collab/ScreenShareViewer'
@@ -295,13 +296,19 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
-  // Stop dev server when project changes
+  // F5 multi-slot: never stop/clear the dev server from MainLayout lifecycle.
+  // WelcomeScreen swaps MainLayout out for a spinner while openProject runs
+  // (and for Settings), so unmount is NOT "leave project". Process lifecycle
+  // is owned by projectStore (park on switch, stopAll on close) and the
+  // window onCloseRequested handler below.
+  //
+  // We only close the native preview webview on unmount so a ghost WKWebView
+  // does not keep retrying the previous project's URL while the spinner shows.
   useEffect(() => {
     return () => {
-      devServerManager.stop().catch(() => {})
-      useLayoutStore.getState().clearDevServer()
+      closePreviewWebview()
     }
-  }, [currentProject?.path])
+  }, [])
 
   // Cleanup dev server on window close. Flow: preventDefault → run stop()
   // (with 1.5s watchdog) → destroy(). destroy() requires the
@@ -466,6 +473,7 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
                             promptReason={pendingPermission.promptReason ?? null}
                             pathAccessTarget={pendingPermission.pathAccessTarget}
                             originLabel={pendingPermission.origin?.label}
+                            classifierReason={pendingPermission.classifierReason}
                             approve={approve}
                             approveAlwaysInProject={approveAlwaysInProject}
                             approveAlwaysGlobal={approveAlwaysGlobal}
@@ -524,6 +532,7 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
                   promptReason={pendingPermission.promptReason ?? null}
                   pathAccessTarget={pendingPermission.pathAccessTarget}
                   originLabel={pendingPermission.origin?.label}
+                  classifierReason={pendingPermission.classifierReason}
                   approve={approve}
                   approveAlwaysInProject={approveAlwaysInProject}
                   approveAlwaysGlobal={approveAlwaysGlobal}

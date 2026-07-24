@@ -13,6 +13,7 @@ import { useAgentStore } from '../../stores/agentStore'
 import { useCollabStore } from '../../stores/collabStore'
 import { useByokState } from '../../hooks/useByokState'
 import MessageBubble from '../chat/MessageBubble'
+import ContextWindowIndicator from '../chat/ContextWindowIndicator'
 import { useMessageWindow } from '../../hooks/useMessageWindow'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
 import PostCompactSurvey from '../chat/PostCompactSurvey'
@@ -311,11 +312,19 @@ function ChatView() {
       // share / Preview). The old 1180px collapse fired way too early for that —
       // it only needs to fold into the "…" menu when the chat column is genuinely
       // tight (side drawer open + narrow window). Collapse only near collision.
+      // Context pill lives inside the wide-only cluster next to Preview; when
+      // that cluster collapses, show the fallback pill so pressure stays visible.
+      '& [data-chat-toolbar-ctx-fallback]': {
+        display: 'none',
+      },
       '@container (max-width: 480px)': {
         '& [data-chat-toolbar-wide-only]': {
           display: 'none !important',
         },
         '& [data-chat-toolbar-overflow-trigger]': {
+          display: 'flex !important',
+        },
+        '& [data-chat-toolbar-ctx-fallback]': {
           display: 'flex !important',
         },
       },
@@ -397,9 +406,24 @@ function ChatView() {
                 <FiEye size={13} />
                 <Text data-chat-toolbar-secondary-label fontSize="11px" fontWeight="500">{t('view.preview')}</Text>
               </Box>
+              {/* Next to Live Preview + Preview (wide toolbar). */}
+              <Box flexShrink={0} overflow="visible">
+                <ContextWindowIndicator popoverPlacement="bottom" />
+              </Box>
             </HStack>
+            {/* When wide-only collapses (≤480px container), still show ctx. */}
+            <Box data-chat-toolbar-ctx-fallback flexShrink={0} overflow="visible" alignItems="center">
+              <ContextWindowIndicator popoverPlacement="bottom" />
+            </Box>
             <HeaderOverflowMenu />
           </>
+        )}
+
+        {/* Sidebar / preview mode: wide cluster unmounted — keep the pill. */}
+        {isSidebarMode && (
+          <Box flexShrink={0} overflow="visible">
+            <ContextWindowIndicator popoverPlacement="bottom" />
+          </Box>
         )}
 
         {/* Credits / model indicators moved UP to the MinimalTitleBar. */}

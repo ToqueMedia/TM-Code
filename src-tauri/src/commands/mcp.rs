@@ -9,6 +9,24 @@ use tokio::sync::{oneshot, Mutex};
 
 // === State ===
 
+/// F4 multi-project: servers are keyed by (scope, name) where `scope` is the
+/// project path (or `"__global__"` for app-wide servers). Two projects can
+/// each run an MCP server named "filesystem" without colliding, and switching
+/// projects does not kill the other project's processes.
+const GLOBAL_SCOPE: &str = "__global__";
+
+fn normalize_scope(scope: &Option<String>) -> String {
+    match scope {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => GLOBAL_SCOPE.to_string(),
+    }
+}
+
+fn server_key(scope: &str, name: &str) -> String {
+    // Unit separator — not valid in Unix paths and rare on Windows.
+    format!("{scope}\u{1f}{name}")
+}
+
 /// Each server's stdin and pending_requests are behind their own Arc<Mutex>
 /// so we can release the global `servers` lock before doing I/O.
 ///
@@ -23,6 +41,8 @@ struct McpServerInner {
     next_id: Arc<Mutex<u64>>,
     alive: Arc<AtomicBool>,
     name: String,
+    /// Project path or `"__global__"`.
+    scope: String,
     status: McpServerStatus,
 }
 
@@ -37,6 +57,7 @@ pub enum McpServerStatus {
 }
 
 pub struct McpState {
+    /// Key = `server_key(scope, name)`.
     servers: Mutex<HashMap<String, McpServerInner>>,
 }
 
@@ -53,6 +74,8 @@ pub struct McpServerInfo {
     pub name: String,
     pub status: McpServerStatus,
     pub error: Option<String>,
+    /// Project path scope, or `"__global__"`.
+    pub scope: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,11 +93,15 @@ pub async fn mcp_start_server(
     command: String,
     args: Vec<String>,
     env: Vec<McpEnvVar>,
+    // Project path scope. Omit / null → global (app-wide) servers.
+    scope: Option<String>,
 ) -> Result<(), String> {
+    let scope = normalize_scope(&scope);
+    let key = server_key(&scope, &name);
     let mut servers = state.servers.lock().await;
 
-    // Stop existing server with the same name
-    if let Some(mut existing) = servers.remove(&name) {
+    // Stop existing server with the same (scope, name)
+    if let Some(mut existing) = servers.remove(&key) {
         existing.alive.store(false, Ordering::SeqCst);
         let _ = existing.child.kill().await;
         let mut pending = existing.pending_requests.lock().await;
@@ -209,7 +236,7 @@ pub async fn mcp_start_server(
     });
 
     servers.insert(
-        name.clone(),
+        key,
         McpServerInner {
             child,
             stdin: Arc::new(Mutex::new(stdin)),
@@ -217,6 +244,7 @@ pub async fn mcp_start_server(
             next_id: Arc::new(Mutex::new(1)),
             alive,
             name,
+            scope,
             status: McpServerStatus::Running,
         },
     );
@@ -228,17 +256,23 @@ pub async fn mcp_start_server(
 pub async fn mcp_stop_server(
     state: tauri::State<'_, McpState>,
     name: String,
+    scope: Option<String>,
 ) -> Result<(), String> {
+    let scope = normalize_scope(&scope);
+    let key = server_key(&scope, &name);
     let mut servers = state.servers.lock().await;
 
-    if let Some(mut server) = servers.remove(&name) {
+    if let Some(mut server) = servers.remove(&key) {
         server.alive.store(false, Ordering::SeqCst);
         let _ = server.child.kill().await;
         let mut pending = server.pending_requests.lock().await;
         pending.clear();
         Ok(())
     } else {
-        Err(format!("MCP server '{}' not found", name))
+        Err(format!(
+            "MCP server '{}' not found in scope '{}'",
+            name, scope
+        ))
     }
 }
 
@@ -248,15 +282,21 @@ pub async fn mcp_send_request(
     name: String,
     method: String,
     params: Value,
+    scope: Option<String>,
 ) -> Result<Value, String> {
+    let scope = normalize_scope(&scope);
+    let key = server_key(&scope, &name);
     // Phase 1: Acquire global lock ONLY to clone the Arc handles + increment id.
     // Release it BEFORE any I/O.
     let (stdin_handle, pending_handle, alive_handle, id) = {
         let mut servers = state.servers.lock().await;
 
-        let server = servers
-            .get_mut(&name)
-            .ok_or_else(|| format!("MCP server '{}' not found or not running", name))?;
+        let server = servers.get_mut(&key).ok_or_else(|| {
+            format!(
+                "MCP server '{}' not found or not running (scope '{}')",
+                name, scope
+            )
+        })?;
 
         // Check alive flag BEFORE doing anything — rejects requests to dead servers
         // even if they haven't been removed from the HashMap yet.
@@ -348,13 +388,19 @@ pub async fn mcp_send_notification(
     name: String,
     method: String,
     params: Value,
+    scope: Option<String>,
 ) -> Result<(), String> {
+    let scope = normalize_scope(&scope);
+    let key = server_key(&scope, &name);
     // Acquire global lock only to clone handles
     let (stdin_handle, alive_handle) = {
         let servers = state.servers.lock().await;
-        let server = servers
-            .get(&name)
-            .ok_or_else(|| format!("MCP server '{}' not found or not running", name))?;
+        let server = servers.get(&key).ok_or_else(|| {
+            format!(
+                "MCP server '{}' not found or not running (scope '{}')",
+                name, scope
+            )
+        })?;
 
         if !server.alive.load(Ordering::SeqCst) {
             return Err(format!("MCP server '{}' has exited", name));
@@ -400,11 +446,15 @@ pub async fn mcp_send_notification(
 #[tauri::command]
 pub async fn mcp_list_servers(
     state: tauri::State<'_, McpState>,
+    // When set, only servers in this project scope. Omit for all scopes.
+    scope: Option<String>,
 ) -> Result<Vec<McpServerInfo>, String> {
     let servers = state.servers.lock().await;
+    let filter = scope.as_ref().map(|s| normalize_scope(&Some(s.clone())));
 
     let infos: Vec<McpServerInfo> = servers
         .values()
+        .filter(|s| filter.as_ref().map(|f| s.scope == *f).unwrap_or(true))
         .map(|s| McpServerInfo {
             name: s.name.clone(),
             status: if s.alive.load(Ordering::SeqCst) {
@@ -413,21 +463,45 @@ pub async fn mcp_list_servers(
                 McpServerStatus::Stopped
             },
             error: None,
+            scope: s.scope.clone(),
         })
         .collect();
 
     Ok(infos)
 }
 
+/// Stop MCP servers. When `scope` is set, only that project (or global) is
+/// drained — other open projects keep their agents' MCP processes alive.
+/// When omitted, every server in the window is killed (close / expel).
 #[tauri::command]
-pub async fn mcp_stop_all_servers(state: tauri::State<'_, McpState>) -> Result<(), String> {
+pub async fn mcp_stop_all_servers(
+    state: tauri::State<'_, McpState>,
+    scope: Option<String>,
+) -> Result<(), String> {
     let mut servers = state.servers.lock().await;
 
-    for (_, mut server) in servers.drain() {
-        server.alive.store(false, Ordering::SeqCst);
-        let _ = server.child.kill().await;
-        let mut pending = server.pending_requests.lock().await;
-        pending.clear();
+    if let Some(raw) = scope {
+        let target = normalize_scope(&Some(raw));
+        let keys: Vec<String> = servers
+            .iter()
+            .filter(|(_, s)| s.scope == target)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in keys {
+            if let Some(mut server) = servers.remove(&key) {
+                server.alive.store(false, Ordering::SeqCst);
+                let _ = server.child.kill().await;
+                let mut pending = server.pending_requests.lock().await;
+                pending.clear();
+            }
+        }
+    } else {
+        for (_, mut server) in servers.drain() {
+            server.alive.store(false, Ordering::SeqCst);
+            let _ = server.child.kill().await;
+            let mut pending = server.pending_requests.lock().await;
+            pending.clear();
+        }
     }
 
     Ok(())

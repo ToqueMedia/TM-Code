@@ -1,6 +1,7 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { useMcpStore, McpToolInfo } from '../../stores/mcpStore'
 import { discoverRemoteTools as discoverRemote, callRemoteTool as callRemote } from './remoteTransport'
+import { serializeStructuredForPromptDetailed } from '@/services/agent/promptSerialize'
 import { t } from '@/i18n'
 
 // === Types ===
@@ -59,12 +60,15 @@ export function parseMcpToolResult(result: unknown): MCPToolResult {
       text?: string
       data?: string
       mimeType?: string
-      // Some servers nest image payload under `source` / `resource`.
       source?: { type?: string; data?: string; media_type?: string; mimeType?: string }
     }>
   }
   if (!mcpContent?.content || !Array.isArray(mcpContent.content)) {
-    return { text: typeof result === 'string' ? result : JSON.stringify(result), images: [] }
+    // Structured MCP payloads: TOON only when it wins on size vs JSON mini.
+    return {
+      text: typeof result === 'string' ? result : serializeStructuredForPromptDetailed(result).text,
+      images: [],
+    }
   }
 
   const textParts: string[] = []
@@ -81,7 +85,8 @@ export function parseMcpToolResult(result: unknown): MCPToolResult {
     }
   }
   return {
-    text: textParts.join('\n') || (images.length > 0 ? '' : JSON.stringify(result)),
+    text: textParts.join('\n')
+      || (images.length > 0 ? '' : serializeStructuredForPromptDetailed(result).text),
     images,
   }
 }
@@ -90,12 +95,19 @@ interface MCPConfigFile {
   mcpServers?: Record<string, MCPServerConfig>
 }
 
+/** Scope for global (non-project) MCP servers — mirrors Rust GLOBAL_SCOPE. */
+export const MCP_GLOBAL_SCOPE = '__global__'
+
 // === Service ===
 
 class MCPService {
   private static instance: MCPService
-  private tools: Map<string, MCPTool> = new Map()
+  /** Tools keyed by scope → (`${server}__${tool}` → MCPTool). */
+  private toolsByScope: Map<string, Map<string, MCPTool>> = new Map()
+  /** Remote server URLs keyed by `${scope}\u001f${name}`. */
   private serverUrls: Map<string, string> = new Map()
+  /** Scope currently mirrored into useMcpStore (UI / status bar). */
+  private viewScope: string = MCP_GLOBAL_SCOPE
   private initPromise: Promise<void> | null = null
 
   static getInstance(): MCPService {
@@ -105,14 +117,32 @@ class MCPService {
     return MCPService.instance
   }
 
+  /** Normalize project path → scope key (or global). */
+  scopeOf(projectPath?: string | null): string {
+    if (projectPath && projectPath.length > 0) return projectPath
+    return MCP_GLOBAL_SCOPE
+  }
+
+  private urlKey(scope: string, name: string): string {
+    return `${scope}\u001f${name}`
+  }
+
+  private toolsOf(scope: string): Map<string, MCPTool> {
+    let m = this.toolsByScope.get(scope)
+    if (!m) {
+      m = new Map()
+      this.toolsByScope.set(scope, m)
+    }
+    return m
+  }
+
   /**
    * Initialize MCP servers from global config (and optionally project config).
-   * When called without projectPath, only global servers are loaded.
-   * Skips servers that are already running to avoid restarting on project switch.
+   * F4: each projectPath is an isolated scope — switching projects does NOT
+   * stop another project's servers. Global init uses scope `__global__`.
    * Serialized: concurrent calls wait for the previous one to finish.
    */
   async initialize(projectPath?: string): Promise<void> {
-    // Serialize: wait for any in-flight initialize to finish before starting
     if (this.initPromise) {
       await this.initPromise
     }
@@ -126,39 +156,46 @@ class MCPService {
   }
 
   private async _doInitialize(projectPath?: string): Promise<void> {
+    const scope = this.scopeOf(projectPath)
+    // Focused project (or global) becomes the UI view.
+    this.viewScope = scope
     useMcpStore.getState().setInitializing(true)
 
     try {
       const config = await this.loadConfig(projectPath)
       const desiredServers = new Set(Object.keys(config.mcpServers || {}))
 
-      // Stop servers that were from a previous project but are not in the new config
-      if (projectPath) {
-        const running = useMcpStore.getState().servers.filter(s => s.status === 'running')
-        for (const server of running) {
-          if (!desiredServers.has(server.name)) {
-            await this.stopServer(server.name)
-            useMcpStore.getState().removeServer(server.name)
-          }
+      // Stop only THIS scope's servers that are no longer desired — never
+      // touch other open projects' MCP processes.
+      const runningInScope = useMcpStore.getState().servers
+        .filter(s => s.status === 'running' && (s.scope ?? MCP_GLOBAL_SCOPE) === scope)
+      for (const server of runningInScope) {
+        if (!desiredServers.has(server.name)) {
+          await this.stopServer(server.name, scope)
+          useMcpStore.getState().removeServer(server.name)
         }
       }
 
       if (!config.mcpServers || desiredServers.size === 0) {
+        this.syncStoreFromScope(scope)
         return
       }
 
-      // Start servers concurrently — skip servers that are already running
-      const runningServers = new Set(
+      const runningNames = new Set(
         useMcpStore.getState().servers
-          .filter(s => s.status === 'running')
-          .map(s => s.name)
+          .filter(s => s.status === 'running' && (s.scope ?? MCP_GLOBAL_SCOPE) === scope)
+          .map(s => s.name),
       )
+      // Also treat tools map as evidence of already-started server in this scope.
+      for (const tool of this.toolsOf(scope).values()) {
+        runningNames.add(tool.serverName)
+      }
 
       const startPromises = Object.entries(config.mcpServers)
-        .filter(([name]) => !runningServers.has(name))
+        .filter(([name]) => !runningNames.has(name))
         .map(async ([name, serverConfig]) => {
           try {
-            await this.startServer(name, serverConfig)
+            await this.startServer(name, serverConfig, scope)
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error)
             useMcpStore.getState().addServer({
@@ -167,11 +204,13 @@ class MCPService {
               error: msg,
               tools: [],
               transport: inferTransport(serverConfig),
+              scope,
             })
           }
         })
 
       await Promise.allSettled(startPromises)
+      this.syncStoreFromScope(scope)
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       useMcpStore.getState().setError(msg)
@@ -181,9 +220,57 @@ class MCPService {
   }
 
   /**
-   * Start a single MCP server.
+   * Rebuild the flat mcpStore view for a scope (UI). Called after init and
+   * when the focused project changes without re-init.
    */
-  async startServer(name: string, config: MCPServerConfig): Promise<void> {
+  setViewScope(projectPath?: string | null): void {
+    const scope = this.scopeOf(projectPath)
+    this.viewScope = scope
+    this.syncStoreFromScope(scope)
+  }
+
+  private syncStoreFromScope(scope: string): void {
+    // Rebuild from tools map + existing store entries for this scope.
+    const byName = new Map<string, { tools: McpToolInfo[]; transport: 'stdio' | 'remote' }>()
+    for (const tool of this.toolsOf(scope).values()) {
+      let entry = byName.get(tool.serverName)
+      if (!entry) {
+        entry = { tools: [], transport: this.serverUrls.has(this.urlKey(scope, tool.serverName)) ? 'remote' : 'stdio' }
+        byName.set(tool.serverName, entry)
+      }
+      entry.tools.push({
+        name: tool.name,
+        description: tool.description,
+        serverName: tool.serverName,
+      })
+    }
+    // Preserve error/starting entries already in store for this scope.
+    const prev = useMcpStore.getState().servers.filter(s => (s.scope ?? MCP_GLOBAL_SCOPE) === scope)
+    const servers: import('../../stores/mcpStore').McpServerState[] = Array.from(byName.entries()).map(
+      ([name, { tools, transport }]) => {
+        const old = prev.find(s => s.name === name)
+        return {
+          name,
+          status: 'running' as const,
+          tools,
+          transport: old?.transport ?? transport,
+          scope,
+        }
+      },
+    )
+    for (const s of prev) {
+      if (s.status !== 'running' && !byName.has(s.name)) {
+        servers.push({ ...s, scope })
+      }
+    }
+    useMcpStore.getState().setServers(servers)
+  }
+
+  /**
+   * Start a single MCP server in a scope (default: current view scope).
+   */
+  async startServer(name: string, config: MCPServerConfig, scope?: string): Promise<void> {
+    const sc = scope ?? this.viewScope
     const transport = inferTransport(config)
     const store = useMcpStore.getState()
 
@@ -192,52 +279,53 @@ class MCPService {
       status: 'starting',
       tools: [],
       transport,
+      scope: sc,
     })
 
     if (transport === 'stdio') {
-      await this.startStdioServer(name, config)
+      await this.startStdioServer(name, config, sc)
     } else {
-      await this.startRemoteServer(name, config)
+      await this.startRemoteServer(name, config, sc)
     }
   }
 
   /**
-   * Stop a running server.
+   * Stop a running server in a scope.
    */
-  async stopServer(name: string): Promise<void> {
+  async stopServer(name: string, scope?: string): Promise<void> {
+    const sc = scope ?? this.viewScope
     try {
-      await invoke('mcp_stop_server', { name })
+      await invoke('mcp_stop_server', { name, scope: sc === MCP_GLOBAL_SCOPE ? null : sc })
     } catch {
       // Server may already be stopped
     }
 
-    // Remove tools for this server
-    for (const [toolKey, tool] of this.tools) {
-      if (tool.serverName === name) {
-        this.tools.delete(toolKey)
-      }
+    const tools = this.toolsOf(sc)
+    for (const [toolKey, tool] of tools) {
+      if (tool.serverName === name) tools.delete(toolKey)
     }
+    this.serverUrls.delete(this.urlKey(sc, name))
 
-    useMcpStore.getState().updateServer(name, { status: 'stopped', tools: [] })
+    if (this.viewScope === sc) {
+      useMcpStore.getState().updateServer(name, { status: 'stopped', tools: [] })
+    }
   }
 
   /**
-   * List tools available from a specific server.
-   * Throws on failure so callers can surface the error.
+   * List tools available from a specific server in a scope.
    */
-  async listTools(serverName: string): Promise<MCPTool[]> {
+  async listTools(serverName: string, scope?: string): Promise<MCPTool[]> {
+    const sc = scope ?? this.viewScope
     const result = await invoke<Record<string, unknown>>('mcp_send_request', {
       name: serverName,
       method: 'tools/list',
       params: {},
+      scope: sc === MCP_GLOBAL_SCOPE ? null : sc,
     })
 
     const toolList = (result as { tools?: Array<Record<string, unknown>> })?.tools || []
 
     return toolList.map((t) => {
-      // MCP spec: annotations.readOnlyHint is optional. Capture it so the agent's
-      // safe-tool pool can run multiple read-only MCP tools in parallel without
-      // regressing today's Promise.all behavior to serial.
       const annotations = (t.annotations as { readOnlyHint?: boolean } | undefined)
       return {
         name: (t.name as string) || '',
@@ -249,68 +337,79 @@ class MCPService {
     })
   }
 
-  /**
-   * Call a tool on a specific server. Text-only (legacy agent path) — image
-   * blocks are dropped. Prefer `callToolDetailed` when the tool may return
-   * screenshots (e.g. Playwright `browser_take_screenshot`).
-   */
-  async callTool(serverName: string, toolName: string, args: Record<string, unknown>): Promise<string> {
-    const detailed = await this.callToolDetailed(serverName, toolName, args)
+  async callTool(serverName: string, toolName: string, args: Record<string, unknown>, projectPath?: string): Promise<string> {
+    const detailed = await this.callToolDetailed(serverName, toolName, args, projectPath)
     return detailed.text
   }
 
-  /**
-   * Call a tool and return both text and image blocks from the MCP response.
-   * Used by capture_url_design so Playwright screenshots reach the vision
-   * sidecar instead of being silently discarded by the text-only path.
-   */
   async callToolDetailed(
     serverName: string,
     toolName: string,
     args: Record<string, unknown>,
+    projectPath?: string,
   ): Promise<MCPToolResult> {
-    const server = useMcpStore.getState().servers.find((s) => s.name === serverName)
+    const sc = this.resolveScopeForServer(serverName, projectPath)
 
-    if (!server || server.status !== 'running') {
-      throw new Error(t('mcp.serverNotRunning').replace('{name}', serverName))
+    // Prefer remote if we have a URL for this scope.
+    const url = this.serverUrls.get(this.urlKey(sc, serverName))
+    if (url) {
+      const text = await callRemote(url, toolName, args)
+      return { text, images: [] }
     }
 
-    if (server.transport === 'remote') {
-      const serverUrl = this.serverUrls.get(serverName)
-      if (!serverUrl) throw new Error(t('mcp.noUrl').replace('{name}', serverName))
-      // Remote transport is text-only today (Worker proxy strips images).
-      const text = await callRemote(serverUrl, toolName, args)
-      return { text, images: [] }
+    // Fall back: view-store check for running (legacy path when only UI knows).
+    if (this.viewScope === sc) {
+      const server = useMcpStore.getState().servers.find((s) => s.name === serverName)
+      if (server && server.status !== 'running' && server.transport === 'remote') {
+        throw new Error(t('mcp.serverNotRunning').replace('{name}', serverName))
+      }
     }
 
     const result = await invoke<Record<string, unknown>>('mcp_send_request', {
       name: serverName,
       method: 'tools/call',
       params: { name: toolName, arguments: args },
+      scope: sc === MCP_GLOBAL_SCOPE ? null : sc,
     })
 
     return parseMcpToolResult(result)
   }
 
   /**
-   * Add and start a single server without restarting existing ones.
-   * Reads config from disk, starts only the named server.
+   * Prefer project scope if the server is registered there; else global; else
+   * the requested project path / view scope.
    */
+  private resolveScopeForServer(serverName: string, projectPath?: string): string {
+    const preferred = this.scopeOf(projectPath ?? (this.viewScope === MCP_GLOBAL_SCOPE ? null : this.viewScope))
+    if (this.scopeHasServer(preferred, serverName)) return preferred
+    if (preferred !== MCP_GLOBAL_SCOPE && this.scopeHasServer(MCP_GLOBAL_SCOPE, serverName)) {
+      return MCP_GLOBAL_SCOPE
+    }
+    return preferred
+  }
+
+  private scopeHasServer(scope: string, serverName: string): boolean {
+    for (const tool of this.toolsOf(scope).values()) {
+      if (tool.serverName === serverName) return true
+    }
+    if (this.serverUrls.has(this.urlKey(scope, serverName))) return true
+    return false
+  }
+
   async addSingleServer(projectPath: string | undefined, serverName: string): Promise<void> {
+    const scope = this.scopeOf(projectPath)
     const config = await this.loadConfig(projectPath)
     const serverConfig = config.mcpServers?.[serverName]
     if (!serverConfig) {
       throw new Error(`Server '${serverName}' not found in config`)
     }
 
-    // Stop if already exists
-    const existing = useMcpStore.getState().servers.find(s => s.name === serverName)
-    if (existing) {
-      await this.stopServer(serverName)
+    if (this.scopeHasServer(scope, serverName)) {
+      await this.stopServer(serverName, scope)
     }
 
     try {
-      await this.startServer(serverName, serverConfig)
+      await this.startServer(serverName, serverConfig, scope)
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       useMcpStore.getState().addServer({
@@ -319,22 +418,19 @@ class MCPService {
         error: msg,
         tools: [],
         transport: inferTransport(serverConfig),
+        scope,
       })
     }
-
+    if (this.viewScope === scope) this.syncStoreFromScope(scope)
   }
 
-  /**
-   * Remove a server: stop it, remove from config file, clean up state.
-   */
   async removeServer(_projectPath: string | undefined, serverName: string): Promise<void> {
-    // 1. Remove from config file FIRST (so re-init won't resurrect it)
+    const scope = this.scopeOf(_projectPath)
     const configPaths: string[] = []
     try {
       const homeDir = await invoke<string>('get_home_directory')
       configPaths.push(`${homeDir}/.toquemedia-studio/mcp.json`)
     } catch { /* */ }
-    // Also check project config
     if (_projectPath) {
       configPaths.push(`${_projectPath}/.tms/mcp.json`)
     }
@@ -352,63 +448,70 @@ class MCPService {
       }
     }
 
-    // 2. Stop the server process
-    await this.stopServer(serverName)
-
-    // 3. Remove from store (UI updates)
+    await this.stopServer(serverName, scope)
     useMcpStore.getState().removeServer(serverName)
-
-    // 4. Clean up internal state
-    this.serverUrls.delete(serverName)
+    this.serverUrls.delete(this.urlKey(scope, serverName))
   }
 
   /**
-   * Get all tools from all running servers.
-   * Filters out tools whose server is no longer running to prevent the
-   * agent from seeing stale tools in its system prompt and getting
-   * "MCP server 'X' is not running" errors at call time.
+   * Tools for a project run: project-scope servers + global servers
+   * (project tools win on name collision for the same tool key).
+   * When projectPath is omitted, returns the current UI view scope only.
    */
-  getAllTools(): MCPTool[] {
-    const runningNames = new Set(
-      useMcpStore.getState().servers
-        .filter(s => s.status === 'running')
-        .map(s => s.name)
-    )
-    return Array.from(this.tools.values()).filter(t => runningNames.has(t.serverName))
-  }
-
-  /**
-   * Returns the stored URL for a remote MCP server, or undefined for stdio servers
-   * (which don't have URLs). Consumers can use this to disambiguate "a server named
-   * X" from "the specific remote server at URL Y" — essential for integration-detection
-   * heuristics that must not false-positive on user-renamed servers.
-   */
-  getServerUrl(name: string): string | undefined {
-    return this.serverUrls.get(name)
-  }
-
-  /**
-   * Shutdown all running servers.
-   */
-  async shutdown(): Promise<void> {
-    try {
-      await invoke('mcp_stop_all_servers')
-    } catch {
-      // Best effort
+  getAllTools(projectPath?: string): MCPTool[] {
+    if (projectPath === undefined && this.viewScope === MCP_GLOBAL_SCOPE) {
+      return Array.from(this.toolsOf(MCP_GLOBAL_SCOPE).values())
     }
-    this.tools.clear()
+    const projectScope = this.scopeOf(projectPath ?? (this.viewScope === MCP_GLOBAL_SCOPE ? null : this.viewScope))
+    const merged = new Map<string, MCPTool>()
+    // Global first, then project overrides.
+    if (projectScope !== MCP_GLOBAL_SCOPE) {
+      for (const [k, t] of this.toolsOf(MCP_GLOBAL_SCOPE)) merged.set(k, t)
+    }
+    for (const [k, t] of this.toolsOf(projectScope)) merged.set(k, t)
+    return Array.from(merged.values())
+  }
+
+  getServerUrl(name: string, projectPath?: string): string | undefined {
+    const sc = this.resolveScopeForServer(name, projectPath)
+    return this.serverUrls.get(this.urlKey(sc, name))
+  }
+
+  /**
+   * Shutdown MCP servers. With projectPath: only that project scope (F4 —
+   * close project while others keep running). Without: kill everything
+   * (expel / app teardown).
+   */
+  async shutdown(projectPath?: string): Promise<void> {
+    if (projectPath) {
+      const scope = this.scopeOf(projectPath)
+      try {
+        await invoke('mcp_stop_all_servers', { scope })
+      } catch { /* best effort */ }
+      this.toolsByScope.delete(scope)
+      for (const key of Array.from(this.serverUrls.keys())) {
+        if (key.startsWith(`${scope}\u001f`)) this.serverUrls.delete(key)
+      }
+      if (this.viewScope === scope) {
+        useMcpStore.getState().reset()
+      }
+      return
+    }
+    try {
+      await invoke('mcp_stop_all_servers', { scope: null })
+    } catch { /* best effort */ }
+    this.toolsByScope.clear()
     this.serverUrls.clear()
     useMcpStore.getState().reset()
   }
 
   // === Private Methods ===
 
-  private async startStdioServer(name: string, config: MCPServerConfig): Promise<void> {
+  private async startStdioServer(name: string, config: MCPServerConfig, scope: string): Promise<void> {
     if (!config.command) {
       throw new Error(t('mcp.needsCommand').replace('{name}', name))
     }
 
-    // Resolve environment variables
     const envVars = config.env
       ? Object.entries(config.env).map(([key, value]) => ({ key, value }))
       : []
@@ -418,9 +521,9 @@ class MCPService {
       command: config.command,
       args: config.args || [],
       env: envVars,
+      scope: scope === MCP_GLOBAL_SCOPE ? null : scope,
     })
 
-    // Send initialize request (JSON-RPC request with id — expects response)
     try {
       await invoke('mcp_send_request', {
         name,
@@ -430,26 +533,24 @@ class MCPService {
           capabilities: {},
           clientInfo: { name: 'tm-code', version: '0.1.0' },
         },
+        scope: scope === MCP_GLOBAL_SCOPE ? null : scope,
       })
 
-      // Send initialized notification (no id, no response — fire and forget)
       await invoke('mcp_send_notification', {
         name,
         method: 'notifications/initialized',
         params: {},
-      }).catch(() => {
-        // Best effort — some servers don't need this
-      })
+        scope: scope === MCP_GLOBAL_SCOPE ? null : scope,
+      }).catch(() => { /* best effort */ })
     } catch (error) {
-      // Some servers don't require initialize, continue
       console.warn(`MCP initialize for '${name}' failed:`, error)
     }
 
-    // Discover tools — if this fails, server started but tools are unknown
     try {
-      const tools = await this.listTools(name)
+      const tools = await this.listTools(name, scope)
+      const map = this.toolsOf(scope)
       for (const tool of tools) {
-        this.tools.set(`${name}__${tool.name}`, tool)
+        map.set(`${name}__${tool.name}`, tool)
       }
 
       const toolInfos: McpToolInfo[] = tools.map((t) => ({
@@ -458,31 +559,30 @@ class MCPService {
         serverName: name,
       }))
 
-      useMcpStore.getState().updateServer(name, {
-        status: 'running',
-        tools: toolInfos,
-      })
+      if (this.viewScope === scope) {
+        useMcpStore.getState().updateServer(name, {
+          status: 'running',
+          tools: toolInfos,
+        })
+      }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
-      useMcpStore.getState().updateServer(name, {
-        status: 'error',
-        error: t('mcp.discoveryFailed').replace('{message}', msg),
-      })
+      if (this.viewScope === scope) {
+        useMcpStore.getState().updateServer(name, {
+          status: 'error',
+          error: t('mcp.discoveryFailed').replace('{message}', msg),
+        })
+      }
     }
   }
 
-  private async startRemoteServer(name: string, config: MCPServerConfig): Promise<void> {
+  private async startRemoteServer(name: string, config: MCPServerConfig, scope: string): Promise<void> {
     if (!config.url) {
       throw new Error(t('mcp.needsUrl').replace('{name}', name))
     }
 
-    // Store the URL for later tool calls
-    this.serverUrls.set(name, config.url)
+    this.serverUrls.set(this.urlKey(scope, name), config.url)
 
-    // Keep status as 'starting' until tool discovery completes
-    // (addServer already set it to 'starting' in startServer)
-
-    // Discover tools via the remote transport proxy
     try {
       const remoteTools = await discoverRemote(config.url)
       const mcpTools: MCPTool[] = remoteTools.map((t) => ({
@@ -493,8 +593,9 @@ class MCPService {
         readOnlyHint: t.readOnlyHint,
       }))
 
+      const map = this.toolsOf(scope)
       for (const tool of mcpTools) {
-        this.tools.set(`${name}__${tool.name}`, tool)
+        map.set(`${name}__${tool.name}`, tool)
       }
 
       const toolInfos: McpToolInfo[] = mcpTools.map((t) => ({
@@ -503,18 +604,20 @@ class MCPService {
         serverName: name,
       }))
 
-      // Only now mark as 'running' — tools are discovered
-      useMcpStore.getState().updateServer(name, { status: 'running', tools: toolInfos })
+      if (this.viewScope === scope) {
+        useMcpStore.getState().updateServer(name, { status: 'running', tools: toolInfos })
+      }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
-      useMcpStore.getState().updateServer(name, { status: 'error', error: msg })
+      if (this.viewScope === scope) {
+        useMcpStore.getState().updateServer(name, { status: 'error', error: msg })
+      }
     }
   }
 
   private async loadConfig(projectPath?: string): Promise<MCPConfigFile> {
     const configs: MCPConfigFile[] = []
 
-    // Load global config
     try {
       const homeDir = await invoke<string>('get_home_directory')
       const globalConfigPath = `${homeDir}/.toquemedia-studio/mcp.json`
@@ -524,7 +627,6 @@ class MCPService {
       // No global config
     }
 
-    // Load project config (overrides global) — only when projectPath is provided
     if (projectPath) {
       try {
         const projectConfigPath = `${projectPath}/.tms/mcp.json`
@@ -535,7 +637,6 @@ class MCPService {
       }
     }
 
-    // Merge: project overrides global
     const merged: MCPConfigFile = { mcpServers: {} }
     for (const config of configs) {
       if (config.mcpServers) {

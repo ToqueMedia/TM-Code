@@ -152,7 +152,13 @@ async function isFullstackWrapper(command: string, projectPath: string): Promise
 
 class DevServerManager {
   private static instance: DevServerManager
-  private server: InternalSlot | null = null
+  /**
+   * F5 multi-project: one InternalSlot per project path. The focused project
+   * is the one mirrored into layoutStore; background slots keep their OS
+   * processes alive across in-window switches.
+   */
+  private slots = new Map<string, InternalSlot>()
+  private focusedPath: string | null = null
   /** EADDRINUSE auto-restart budget for the CURRENT bring-up operation. Lives
    *  on the manager (not the slot) because each restart builds a fresh slot —
    *  a per-slot counter reset to 0 every restart, making the "max 2" cap an
@@ -167,6 +173,50 @@ class DevServerManager {
       DevServerManager.instance = new DevServerManager()
     }
     return DevServerManager.instance
+  }
+
+  /** Focused project's slot (UI / start-default target). */
+  private get server(): InternalSlot | null {
+    if (this.focusedPath) return this.slots.get(this.focusedPath) ?? null
+    return null
+  }
+
+  private setSlot(slot: InternalSlot): void {
+    this.slots.set(slot.projectPath, slot)
+    this.focusedPath = slot.projectPath
+  }
+
+  private removeSlot(projectPath: string): void {
+    this.slots.delete(projectPath)
+    if (this.focusedPath === projectPath) {
+      this.focusedPath = this.slots.keys().next().value ?? null
+    }
+  }
+
+  private findByPid(pid: number): InternalSlot | null {
+    for (const s of this.slots.values()) {
+      if (s.pid === pid) return s
+    }
+    return null
+  }
+
+  /**
+   * F5: point the manager's "focused" slot at a project after switch without
+   * stopping other slots. Re-publishes the slot into layoutStore when one
+   * exists (layout park may already have restored the mirror).
+   */
+  setFocusedProject(projectPath: string | null): void {
+    this.focusedPath = projectPath
+    if (!projectPath) return
+    const slot = this.slots.get(projectPath)
+    if (!slot) return
+    // Only re-bind layout if park didn't already restore a matching mirror
+    // (pid match) — avoids double-flicker.
+    const layout = useLayoutStore.getState()
+    if (layout.devServer?.pid === slot.pid) return
+    layout.initDevServer({ pid: slot.pid, projectKind: slot.projectKind })
+    if (slot.frontendUrl) layout.setDevServerFrontendUrl(slot.frontendUrl)
+    if (slot.backendUrl) layout.setDevServerBackendUrl(slot.backendUrl)
   }
 
   /**
@@ -212,8 +262,8 @@ class DevServerManager {
     // down across the stop→start cycle instead of resetting every time.
     if (!opts.autoRestart) this.eaddrinuseRestarts = 0
 
-    // One server per project. Stop any existing before launching.
-    await this.stop()
+    // F5: only stop THIS project's slot — other open projects keep running.
+    await this.stop(projectPath)
 
     // Preemptive port cleanup for known framework defaults.
     // If a zombie process from a previous TM Code crash (or another app)
@@ -250,7 +300,7 @@ class DevServerManager {
       scriptErrorHintShown: false,
       gsiPopupHintShown: false,
     }
-    this.server = slot
+    this.setSlot(slot)
 
     useLayoutStore.getState().initDevServer({ pid: 0, projectKind })
 
@@ -268,7 +318,8 @@ class DevServerManager {
         skipPortEnv: true,
       })
 
-      if (this.server !== slot || slot.generation !== this.server.generation) {
+      const stillOurs = this.slots.get(projectPath) === slot && slot.generation === this.slots.get(projectPath)?.generation
+      if (!stillOurs) {
         try { await invoke('kill_process', { pid }) } catch {}
         return
       }
@@ -278,17 +329,22 @@ class DevServerManager {
       // once the URLs are detected). The guard reserves the IPv4 side of ONLY
       // these IDE-managed ports.
       this.syncGuardedPorts()
-      // Update store with real PID now that we have it.
-      useLayoutStore.setState(state =>
-        state.devServer ? { devServer: { ...state.devServer, pid } } : {}
-      )
+      // Update store with real PID now that we have it (only if still focused).
+      if (this.focusedPath === projectPath) {
+        useLayoutStore.setState(state =>
+          state.devServer ? { devServer: { ...state.devServer, pid } } : {}
+        )
+      }
       console.warn(`[dev-server] STARTED: kind=${projectKind}, PID=${pid}, command="${resolvedCommand}"`)
       logger.info('devServer', `Started ${projectKind} server (PID ${pid}): ${devCommand}`)
     } catch (error) {
-      if (this.server === slot) {
-        this.server = null
-        useLayoutStore.getState().clearDevServer()
-        this.cleanup()
+      if (this.slots.get(projectPath) === slot) {
+        this.removeSlot(projectPath)
+        if (this.focusedPath === projectPath || !this.focusedPath) {
+          useLayoutStore.getState().clearDevServer()
+        }
+        if (this.slots.size === 0) this.cleanup()
+        else this.syncGuardedPorts()
       }
       throw error
     }
@@ -307,13 +363,21 @@ class DevServerManager {
   }
 
   private handleOutput(payload: DevServerOutputPayload): void {
-    const slot = this.server
+    // F5: demux by PID across all open-project slots.
+    let slot = this.findByPid(payload.pid)
+    if (!slot) {
+      // During startup pid may still be 0 — accept on focused starting slot.
+      const focused = this.server
+      if (focused && focused.pid === 0) slot = focused
+    }
     if (!slot) return
-    // Demux by PID; during startup (pid=0) accept output from the single slot.
     if (slot.pid !== 0 && slot.pid !== payload.pid) return
 
     const lines = payload.data.split('\n')
-    const layoutStore = useLayoutStore.getState()
+    // Only mirror logs into layoutStore for the focused project.
+    const layoutStore = this.focusedPath === slot.projectPath
+      ? useLayoutStore.getState()
+      : null
 
     // ── Pass 1: per-line side-effects ──
     // URL detection, EADDRINUSE auto-recovery, Script-error hint. These run
@@ -380,17 +444,17 @@ class DevServerManager {
               text: `Port ${blockedPort} in use — killing and restarting (attempt ${this.eaddrinuseRestarts}/${MAX_EADDRINUSE_RETRIES})...`,
               level: 'warn',
             })
-            if (coalescedSoFar.length > 0) layoutStore.addDevServerLogs(coalescedSoFar)
+            if (coalescedSoFar.length > 0) layoutStore?.addDevServerLogs(coalescedSoFar)
             // Preserve frontendPortHint across the auto-restart (matches
             // restart()); `autoRestart` keeps the budget from resetting.
-            this.stop().then(async () => {
+            this.stop(projectPath).then(async () => {
               try { await invoke('kill_port', { port: blockedPort }) } catch {}
               await new Promise(r => setTimeout(r, 800))
               await this.start(projectPath, command, { projectKind, frontendPortHint: hint, autoRestart: true }).catch(() => {})
             })
             return
           }
-          // Budget exhausted. Stop cleanly so `this.server` is cleared —
+          // Budget exhausted. Stop cleanly so the slot is cleared —
           // otherwise the dead/looping slot stays non-null and
           // activatePreview()'s isActive() guard silently refuses to start on
           // the next preview-open ("dev server doesn't run again"). A clean
@@ -400,8 +464,8 @@ class DevServerManager {
             text: `Port ${blockedPort} still in use after ${MAX_EADDRINUSE_RETRIES} attempts. Close whatever is using it, then reopen the preview to retry.`,
             level: 'error',
           })
-          if (giveUp.length > 0) layoutStore.addDevServerLogs(giveUp)
-          void this.stop()
+          if (giveUp.length > 0) layoutStore?.addDevServerLogs(giveUp)
+          void this.stop(projectPath)
           return
         }
       }
@@ -443,7 +507,7 @@ class DevServerManager {
     // the whole object travels together.
     const coalesced = coalesceLogLines(lines).map((e) => ({ text: e.text, level: e.level }))
     const toLog = [...coalesced, ...synthetics]
-    if (toLog.length > 0) layoutStore.addDevServerLogs(toLog)
+    if (toLog.length > 0) layoutStore?.addDevServerLogs(toLog)
   }
 
   /**
@@ -455,13 +519,17 @@ class DevServerManager {
    * classifies as 'html' and goes to frontendUrl; backendUrl also gets the
    * same URL so the HTTP Client drawer has a baseUrl.
    */
+  private slotStillLive(slot: InternalSlot, gen: number): boolean {
+    return this.slots.get(slot.projectPath) === slot && slot.generation === gen
+  }
+
   private async probeAndClassify(url: string, slot: InternalSlot, lineRoleHint?: LineRoleHint): Promise<void> {
     const gen = slot.generation
     const start = Date.now()
     let probe: ServerProbeResult | null = null
     let ipcErrors = 0
     const MAX_IPC_ERRORS = 5
-    const layoutStore = useLayoutStore.getState()
+    const isFocused = () => this.focusedPath === slot.projectPath
 
     // Two-phase probe.
     // Phase 1 — reachability: poll until probe.ok (any HTTP response received).
@@ -475,7 +543,7 @@ class DevServerManager {
     //           look again, which assigned Express's 404 HTML to frontendUrl.
     let stabilizingSince: number | null = null
     while (Date.now() - start < READY_TIMEOUT) {
-      if (this.server !== slot || slot.generation !== gen) return
+      if (!this.slotStillLive(slot, gen)) return
       try {
         const next = await invoke<ServerProbeResult>('probe_server', { url })
         ipcErrors = 0
@@ -504,13 +572,13 @@ class DevServerManager {
     if (!probe || !probe.ok) {
       // Timed out without the server responding — don't promote the URL.
       // Another URL (or a later log line) may still succeed.
-      if (this.server === slot && slot.frontendUrl === null && slot.backendUrl === null) {
-        layoutStore.setPreviewServerTimedOut(true)
+      if (this.slotStillLive(slot, gen) && isFocused() && slot.frontendUrl === null && slot.backendUrl === null) {
+        useLayoutStore.getState().setPreviewServerTimedOut(true)
       }
       return
     }
 
-    if (this.server !== slot || slot.generation !== gen) return
+    if (!this.slotStillLive(slot, gen)) return
     // Re-classification policy:
     //   - With a line-role hint: always allowed (hint carries strong signal).
     //   - Without a hint: allowed only when the previous classification was
@@ -528,7 +596,12 @@ class DevServerManager {
     const kind = probe.kind || 'other'
     const kindLabel = kind === 'html' ? 'frontend' : kind === 'json' ? 'backend' : 'generic'
     const roleSuffix = lineRoleHint ? `, role=${lineRoleHint}` : ''
-    layoutStore.addDevServerLog(`Server ready at ${url} (${kindLabel}, ${probe.content_type ?? '?'}${roleSuffix})`, 'info')
+    if (isFocused()) {
+      useLayoutStore.getState().addDevServerLog(
+        `Server ready at ${url} (${kindLabel}, ${probe.content_type ?? '?'}${roleSuffix})`,
+        'info',
+      )
+    }
 
     // Delegate to the pure classifier — line role > port hint > content-type.
     const actions = classifyProbedUrl(
@@ -546,11 +619,11 @@ class DevServerManager {
     for (const action of actions) {
       if (action.type === 'assignFrontend') {
         slot.frontendUrl = action.url
-        layoutStore.setDevServerFrontendUrl(action.url)
+        if (isFocused()) useLayoutStore.getState().setDevServerFrontendUrl(action.url)
       } else if (action.type === 'assignBackend') {
         slot.backendUrl = action.url
         slot.backendUrlMirrored = action.mirrored
-        layoutStore.setDevServerBackendUrl(action.url)
+        if (isFocused()) useLayoutStore.getState().setDevServerBackendUrl(action.url)
       }
     }
 
@@ -572,7 +645,7 @@ class DevServerManager {
   }
 
   private handleExit(pid: number): void {
-    const slot = this.server
+    const slot = this.findByPid(pid) ?? (this.server?.pid === pid ? this.server : null)
     if (!slot || slot.pid !== pid) return
 
     const wasRunning = slot.status === 'running'
@@ -603,20 +676,30 @@ class DevServerManager {
       invoke('kill_port', { port }).catch(() => {})
     }
 
-    this.server = null
+    const wasFocused = this.focusedPath === slot.projectPath
+    this.removeSlot(slot.projectPath)
 
-    const layoutStore = useLayoutStore.getState()
-    if (wasStarting) {
-      layoutStore.addDevServerLog(`Dev server exited before becoming ready. Check your dev command and dependencies.`, 'error')
-    } else if (wasRunning) {
-      layoutStore.addDevServerLog(`Dev server stopped`, 'warn')
+    if (wasFocused) {
+      const layoutStore = useLayoutStore.getState()
+      if (wasStarting) {
+        layoutStore.addDevServerLog(`Dev server exited before becoming ready. Check your dev command and dependencies.`, 'error')
+      } else if (wasRunning) {
+        layoutStore.addDevServerLog(`Dev server stopped`, 'warn')
+      }
+      layoutStore.clearDevServer()
     }
-    layoutStore.clearDevServer()
-    this.cleanup()
+    if (this.slots.size === 0) this.cleanup()
+    else this.syncGuardedPorts()
   }
 
-  async stop(): Promise<void> {
-    const slot = this.server
+  /**
+   * Stop a project's dev server. F5: pass projectPath to stop one slot;
+   * omit to stop the focused project only.
+   */
+  async stop(projectPath?: string): Promise<void> {
+    const path = projectPath ?? this.focusedPath
+    if (!path) return
+    const slot = this.slots.get(path)
     if (!slot) return
 
     slot.generation = Date.now() + Math.random()
@@ -641,7 +724,8 @@ class DevServerManager {
     if (portsToClean.length === 0) {
       portsToClean.push(...slot.frameworkPorts)
     }
-    this.server = null
+    const wasFocused = this.focusedPath === path
+    this.removeSlot(path)
 
     // Kill the concurrently-parent tree.
     if (pid) {
@@ -657,8 +741,19 @@ class DevServerManager {
       )
     )
 
-    this.cleanup()
-    useLayoutStore.getState().clearDevServer()
+    if (wasFocused) {
+      useLayoutStore.getState().clearDevServer()
+    }
+    if (this.slots.size === 0) this.cleanup()
+    else this.syncGuardedPorts()
+  }
+
+  /** Stop every project slot (close / expel / window destroy). */
+  async stopAll(): Promise<void> {
+    const paths = [...this.slots.keys()]
+    for (const p of paths) {
+      await this.stop(p)
+    }
   }
 
   /**
@@ -667,11 +762,11 @@ class DevServerManager {
    * NEVER a dev server the user launched by hand in the PTY. Before this, the
    * guard held every common dev port (3000/3001/5173/…) inside the IDE process,
    * so the app showed up in `lsof:PORT` and a manual `lsof|kill` took it down.
+   * F5: UNION of all open-project slots.
    */
   private syncGuardedPorts(): void {
-    const slot = this.server
     const ports = new Set<number>()
-    if (slot) {
+    for (const slot of this.slots.values()) {
       for (const p of slot.frameworkPorts) ports.add(p)
       for (const url of [slot.frontendUrl, slot.backendUrl]) {
         const m = url?.match(/:(\d+)/)
@@ -685,8 +780,7 @@ class DevServerManager {
   }
 
   private cleanup(): void {
-    // Server is gone — stop guarding its ports (the guard no longer holds them,
-    // so they never appear under the IDE process in lsof).
+    // No slots left — stop guarding ports and drop event listeners.
     invoke('set_guarded_ports', { ports: [] }).catch(() => {})
     this.unlistenOutput?.()
     this.unlistenOutput = null
@@ -774,7 +868,7 @@ class DevServerManager {
     // override for content-type ambiguity, dropping it on restart would
     // re-trigger the bug the hint was set to fix.
     const { projectPath, command, projectKind, frontendPortHint } = slot
-    await this.stop()
+    await this.stop(projectPath)
     await this.start(projectPath, command, { projectKind, frontendPortHint })
   }
 
@@ -784,7 +878,7 @@ class DevServerManager {
   }
 
   getProjectPath(): string | null {
-    return this.server?.projectPath ?? null
+    return this.server?.projectPath ?? this.focusedPath
   }
 
   isRunning(): boolean {
@@ -793,6 +887,11 @@ class DevServerManager {
 
   isActive(): boolean {
     return !!this.server
+  }
+
+  /** True if any project in this window has a live slot (F5 multi-project). */
+  hasAnySlot(): boolean {
+    return this.slots.size > 0
   }
 }
 

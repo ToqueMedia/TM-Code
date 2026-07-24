@@ -1,6 +1,6 @@
 import { memo, useMemo, type MouseEvent, type ReactNode } from 'react'
 import { Box, Flex, IconButton, Text } from '@chakra-ui/react'
-import { FiSend, FiSquare, FiCode, FiImage, FiClock, FiTerminal, FiServer, FiCornerDownRight, FiLayers, FiFastForward } from 'react-icons/fi'
+import { FiSend, FiSquare, FiCode, FiImage, FiClock, FiTerminal, FiServer, FiFastForward } from 'react-icons/fi'
 import { VscDiscard } from 'react-icons/vsc'
 import { useBillingStore } from '../../stores/billingStore'
 import { usePermissionStore } from '../../stores/permissionStore'
@@ -9,7 +9,7 @@ import { useByokStore } from '../../stores/byokStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
-import ContextWindowIndicator from '../chat/ContextWindowIndicator'
+import { EffortSelector } from './EffortSelector'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -17,14 +17,11 @@ interface PromptActionsProps {
   viewMode: string
   isStreaming: boolean
   /** QueryGuard-level busy (covers dispatching + tool turns, not just token
-   *  streaming) OU tarefas paralelas vivas — drives the Steer/Task toggle. */
+   *  streaming) OU project-runs vivos (F2 multi-project). */
   isAgentBusy: boolean
-  /** A sessão visível pertence a uma tarefa paralela em curso — o botão Stop
+  /** A sessão visível pertence a um project-run em curso — o botão Stop
    *  aparece (posicional) mesmo com o run principal idle. */
   viewedTaskBusy?: boolean
-  /** Steer/Task toggle state — what Enter does while the agent is busy. */
-  queueAsTask: boolean
-  onQueueModeChange: (asTask: boolean) => void
   hasInput: boolean
   onToggleEditor: () => void
   onUndoImprovePrompt: () => void
@@ -42,10 +39,8 @@ interface PromptActionsProps {
 function PromptActions({
   viewMode,
   isStreaming,
-  isAgentBusy,
+  isAgentBusy: _isAgentBusy,
   viewedTaskBusy = false,
-  queueAsTask,
-  onQueueModeChange,
   hasInput,
   onToggleEditor,
   onUndoImprovePrompt,
@@ -70,8 +65,6 @@ function PromptActions({
   const isTerminalOpen = useTerminalPanelStore(s => s.isOpen)
   const toggleTerminal = useTerminalPanelStore(s => s.toggle)
   const closeTerminal = useTerminalPanelStore(s => s.close)
-  // Plan label via i18n — falls back to raw plan name for unknown plans.
-  const planLabel = t(`prompt.planLabel.${billingPlan}` as any) || billingPlan
 
   // ── Paperclip gate ──
   //
@@ -174,22 +167,8 @@ function PromptActions({
       }}
     >
       <Flex align="center" gap={1} minW={0} overflow="hidden">
-        {/* Plan badge — model is decided by the backend based on the user's plan */}
-        <Flex
-          align="center"
-          px={2.5}
-          h="28px"
-          borderRadius="8px"
-          color={tokens.colors.text.muted}
-          bg="rgba(255, 255, 255, 0.025)"
-          border="1px solid rgba(255, 255, 255, 0.045)"
-          flexShrink={0}
-        >
-          <Text fontSize="10.5px" fontWeight={700} letterSpacing="0.04em">
-            {planLabel}
-          </Text>
-        </Flex>
-
+        {/* Plan badge removido (07-23): o plano já aparece no CreditIndicator
+            (pill de créditos no statusbar) — sem redundância aqui. */}
         {showAttach && (
           <IconButton
             aria-label={attachHint ? `${t("prompt.attach")} (${attachHint})` : t("prompt.attach")}
@@ -215,6 +194,13 @@ function PromptActions({
           title={t('autoMode.chipTooltip')}
           onClick={() => setAutoModePermissions(!autoModePermissions)}
         />
+
+        {/* Reasoning effort — seletor DINÂMICO por-modelo (valores nativos do
+            provider vindos do header X-Model-Reasoning-Efforts). Só no caminho
+            gerido (o header X-TM-Reasoning-Effort só tem efeito aí; o BYOK usa
+            o seu próprio thinking config). O componente esconde-se sozinho
+            quando o modelo ativo não expõe effort. */}
+        {!byokInUse && <EffortSelector />}
 
         {/* Editor toggle */}
         <PromptToolButton
@@ -282,45 +268,11 @@ function PromptActions({
         )}
       </Flex>
 
-      {/* Per-turn context-pressure pill + Send / Stop / Queue button.
-          The context indicator lives here (not the header) so it sits on the
-          same line as the plan/source-code/checkpoint controls, next to send. */}
+      {/* Send / Stop / Queue — context-window pill lives in ChatView toolbar
+          next to Live Preview / Preview. */}
       <Flex align="center" gap={2} flexShrink={0}>
-        <ContextWindowIndicator popoverPlacement="top" />
-        {isAgentBusy && (
-          // Steer/Task segmented toggle — what Enter does while a run is
-          // live: steer the CURRENT task (parity default) or queue a NEW
-          // task that starts when this one finishes. Labels collapse under
-          // the same container query as the left-side tool buttons.
-          <Flex
-            h="28px"
-            borderRadius="8px"
-            border={`1px solid ${tokens.colors.border.default}`}
-            overflow="hidden"
-            flexShrink={0}
-            role="group"
-            aria-label={t('prompt.queueModeToggle')}
-          >
-            <QueueModeButton
-              icon={<FiCornerDownRight size={12} />}
-              label={t('prompt.steerMode')}
-              title={t('prompt.steerModeHint')}
-              active={!queueAsTask}
-              activeColor={tokens.colors.accent.primary}
-              activeBg={tokens.colors.accent.primarySubtle}
-              onClick={() => onQueueModeChange(false)}
-            />
-            <QueueModeButton
-              icon={<FiLayers size={12} />}
-              label={t('prompt.taskMode')}
-              title={t('prompt.taskModeHint')}
-              active={queueAsTask}
-              activeColor={tokens.colors.accent.purple}
-              activeBg={tokens.colors.accent.purpleSubtle}
-              onClick={() => onQueueModeChange(true)}
-            />
-          </Flex>
-        )}
+        {/* F3: Steer/Task toggle removed — one agent per project; Enter while
+            busy always steers/queues the same run (no concurrent asTask). */}
         {(isStreaming || viewedTaskBusy) && hasInput ? (
           // Run desta vista em curso + user escreveu → ENVIAR ganha ao Stop
           // (main: fila/steer; tarefa em foco: steer da tarefa). Sem o
@@ -369,55 +321,6 @@ function PromptActions({
         )}
       </Flex>
     </Flex>
-  )
-}
-
-function QueueModeButton({
-  icon,
-  label,
-  title,
-  active,
-  activeColor,
-  activeBg,
-  onClick,
-}: {
-  icon: ReactNode
-  label: string
-  title: string
-  active: boolean
-  activeColor: string
-  activeBg: string
-  onClick: () => void
-}) {
-  return (
-    <Box
-      as="button"
-      data-prompt-tool-button
-      display="flex"
-      alignItems="center"
-      gap="4px"
-      h="100%"
-      px="8px"
-      cursor="pointer"
-      color={active ? activeColor : tokens.colors.text.disabled}
-      bg={active ? activeBg : 'transparent'}
-      transition={`background ${tokens.transition.fast}, color ${tokens.transition.fast}`}
-      _hover={{ color: active ? activeColor : tokens.colors.text.secondary }}
-      onClick={event => {
-        event.stopPropagation()
-        onClick()
-      }}
-      aria-pressed={active}
-      aria-label={label}
-      title={title}
-    >
-      <Box display="flex" alignItems="center" flexShrink={0}>
-        {icon}
-      </Box>
-      <Text data-prompt-action-label fontSize="10.5px" fontWeight="700" whiteSpace="nowrap">
-        {label}
-      </Text>
-    </Box>
   )
 }
 

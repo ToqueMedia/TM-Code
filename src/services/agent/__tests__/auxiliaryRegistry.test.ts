@@ -382,5 +382,11 @@ describe('auxiliaryRegistry', () => {
       expect(new Set(ids).size).toBe(ids.length)
       for (const m of phase1) expect(m.estTokens).toBeGreaterThan(0)
     })
+
+    it('does not register redundant tms.* section auxiliaries (TMS is static full)', () => {
+      const tmsSectionIds = AUXILIARY_METAS.filter((m) => m.id.startsWith('tms.'))
+      expect(tmsSectionIds).toEqual([])
+      expect(AUXILIARY_METAS.some((m) => m.id === 'project.docs_full')).toBe(true)
+    })
   })
 })

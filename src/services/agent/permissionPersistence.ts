@@ -1,10 +1,15 @@
 /**
  * Per-project permission grants persistence.
  *
- * Tracks two kinds of trust:
+ * Tracks these kinds of trust:
  *  - **Scopes** (`'core'` / `'mcp'`): user clicked "Approve All" for a scope.
  *  - **Tools** (e.g. `'execute_command'`): user clicked "Always allow" for a
  *    specific tool in this project.
+ *  - **Command prefixes** (e.g. `'gcloud secrets versions add'`): user clicked
+ *    "Always allow" for a shell command — stored as the command PREFIX, not the
+ *    whole `execute_command` tool. Porte do claude-vaz (grants por prefixo):
+ *    aprovar um comando uma vez não pode dar carta-branca a todos os comandos
+ *    de shell. Ver `commandPrefix.ts`.
  *
  * The grants live in app-managed per-project state —
  * **project-scoped on purpose**: trust scales with the project, not
@@ -30,6 +35,9 @@ export interface PermissionsFileV2 {
   approvedScopes: ApprovedScope[]
   /** Tool names the user clicked "Always allow in this project" for. */
   approvedTools: string[]
+  /** Command prefixes the user clicked "Always allow" for (e.g.
+   *  `'gcloud secrets versions add'`). Narrow shell grants — ver commandPrefix.ts. */
+  approvedCommandPrefixes?: string[]
   /** Extra directories the user approved for agent file access. */
   additionalDirectories?: string[]
   /** Modo Auto (classificador de permissões) — POR PROJECTO, como qualquer
@@ -40,6 +48,7 @@ export interface PermissionsFileV2 {
 export interface LoadedPermissions {
   scopes: Set<ApprovedScope>
   tools: Set<string>
+  commandPrefixes: Set<string>
   directories: Set<string>
   autoMode: boolean
 }
@@ -53,7 +62,7 @@ export interface LoadedPermissions {
  * tool set. The next save will upgrade the file to v2.
  */
 export async function loadPermissionsFromDisk(projectPath: string): Promise<LoadedPermissions> {
-  const empty: LoadedPermissions = { scopes: new Set(), tools: new Set(), directories: new Set(), autoMode: false }
+  const empty: LoadedPermissions = { scopes: new Set(), tools: new Set(), commandPrefixes: new Set(), directories: new Set(), autoMode: false }
   if (!projectPath) return empty
   try {
     const raw = await invoke<string | null>('read_agent_state', {
@@ -64,15 +73,17 @@ export async function loadPermissionsFromDisk(projectPath: string): Promise<Load
     // Use a loose shape — the discriminated union of v1/v2 makes
     // Partial<...> collapse to `never` on shared keys with different
     // literal types. Parse generically then branch on schemaVersion.
-    const parsed = JSON.parse(raw) as { schemaVersion?: number; approvedScopes?: unknown; approvedTools?: unknown; additionalDirectories?: unknown; autoModePermissions?: unknown }
+    const parsed = JSON.parse(raw) as { schemaVersion?: number; approvedScopes?: unknown; approvedTools?: unknown; approvedCommandPrefixes?: unknown; additionalDirectories?: unknown; autoModePermissions?: unknown }
 
-    // v2 file — preferred
+    // v2 file — preferred. approvedCommandPrefixes é aditivo (v2 antigos não o
+    // têm) — ausência carrega set vazio, sem migração.
     if (parsed.schemaVersion === 2 && Array.isArray(parsed.approvedScopes)) {
       return {
         scopes: new Set(
           (parsed.approvedScopes as string[]).filter((s): s is ApprovedScope => s === 'core' || s === 'mcp'),
         ),
         tools: new Set(Array.isArray(parsed.approvedTools) ? (parsed.approvedTools as string[]) : []),
+        commandPrefixes: new Set(Array.isArray(parsed.approvedCommandPrefixes) ? (parsed.approvedCommandPrefixes as string[]) : []),
         directories: new Set(Array.isArray(parsed.additionalDirectories) ? (parsed.additionalDirectories as string[]) : []),
         autoMode: parsed.autoModePermissions === true,
       }
@@ -85,6 +96,7 @@ export async function loadPermissionsFromDisk(projectPath: string): Promise<Load
           (parsed.approvedScopes as string[]).filter((s): s is ApprovedScope => s === 'core' || s === 'mcp'),
         ),
         tools: new Set(),
+        commandPrefixes: new Set(),
         directories: new Set(),
         autoMode: false,
       }
@@ -110,6 +122,7 @@ export async function savePermissionsToDisk(
   approvedTools: Set<string>,
   additionalDirectories?: Set<string>,
   autoModePermissions?: boolean,
+  approvedCommandPrefixes?: Set<string>,
 ): Promise<void> {
   if (!projectPath) return
   const payload: PermissionsFileV2 = {
@@ -117,6 +130,7 @@ export async function savePermissionsToDisk(
     updatedAt: new Date().toISOString(),
     approvedScopes: Array.from(approvedScopes),
     approvedTools: Array.from(approvedTools),
+    approvedCommandPrefixes: approvedCommandPrefixes ? Array.from(approvedCommandPrefixes) : [],
     additionalDirectories: additionalDirectories ? Array.from(additionalDirectories) : [],
     autoModePermissions: autoModePermissions === true,
   }

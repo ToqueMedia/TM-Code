@@ -83,9 +83,29 @@ export function extractTmsSection(content: string | null | undefined, key: TmsSe
   return lines.slice(start, end).join('\n').trim()
 }
 
-export function buildTmsSectionContext(content: string | null | undefined, key: TmsSectionKey): string | null {
+/**
+ * @param foreignRelPath When TMS.md is missing, point the model at the
+ *   foreign instructions file (AGENTS.md / CLAUDE.md) already discovered
+ *   by the compat loader.
+ */
+export function buildTmsSectionContext(
+  content: string | null | undefined,
+  key: TmsSectionKey,
+  foreignRelPath?: string | null,
+): string | null {
   const spec = SPEC_BY_KEY.get(key)
   if (!spec) return null
+
+  if (!content) {
+    return [
+      `# TMS.md: ${spec.title}`,
+      'No TMS.md in this project — structured TMS sections are unavailable.',
+      foreignRelPath
+        ? `Use project.docs_full or Read ${foreignRelPath} for developer instructions (not structured TMS.md).`
+        : 'Use project.docs_full or Read TMS.md only if the exact project memory content is needed.',
+    ].join('\n')
+  }
+
   const body = extractTmsSection(content, key)
   if (body == null) {
     return [

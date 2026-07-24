@@ -1,8 +1,7 @@
 /**
- * Sino de atenção da titlebar (Fase 6a — inbox unificado, padrão Antigravity).
- * Só se renderiza quando HÁ itens: a presença do sino É o sinal. Cada item
- * navega para onde a decisão se toma (chat da tarefa / vista de chat do main)
- * — par dos badges âmbar das task rows, mas agregado num só ponto.
+ * Titlebar attention bell — shows when ANY agent in this process needs the
+ * developer (permissions, questions, credentials, finished tasks), including
+ * when the request belongs to a project that is not currently focused.
  */
 
 import { useEffect, useRef, useState } from 'react'
@@ -12,7 +11,7 @@ import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { useProjectStore } from '@/stores/projectStore'
 import { useLayoutStore } from '@/stores/layoutStore'
-import { useAttentionInbox, type AttentionKind } from '@/hooks/useAttentionInbox'
+import { useAttentionInbox, type AttentionItem, type AttentionKind } from '@/hooks/useAttentionInbox'
 import { openParallelTaskChat } from '@/hooks/useParallelTaskRows'
 
 const KIND_ICON: Record<AttentionKind, React.ReactNode> = {
@@ -41,6 +40,23 @@ function kindLabel(kind: AttentionKind): string {
   }
 }
 
+async function navigateToAttentionItem(item: AttentionItem, focusedPath: string | undefined): Promise<void> {
+  const targetPath = item.projectPath
+  const needsSwitch = !!(targetPath && focusedPath && targetPath !== focusedPath)
+
+  if (needsSwitch && targetPath) {
+    await useProjectStore.getState().openProject(targetPath)
+  }
+
+  if (item.sessionId && targetPath) {
+    await openParallelTaskChat(targetPath, item.sessionId)
+    return
+  }
+
+  // Main-run / focused-project interactive prompt — dialog lives in chat.
+  useLayoutStore.getState().setViewMode('chat')
+}
+
 export default function AttentionInbox() {
   const items = useAttentionInbox()
   const projectPath = useProjectStore(s => s.currentProject?.path)
@@ -56,13 +72,23 @@ export default function AttentionInbox() {
     return () => document.removeEventListener('mousedown', onPointerDown)
   }, [open])
 
-  // Sem itens = sem sino (a presença é o sinal). Fecha o painel se esvaziou.
   useEffect(() => {
     if (items.length === 0) setOpen(false)
   }, [items.length])
-  if (!projectPath || items.length === 0) return null
+
+  // Show the bell whenever there is attention work — even if no project is
+  // focused (edge) or the request is for a different project in the workspace.
+  if (items.length === 0) return null
 
   const interactive = items.filter(i => i.kind !== 'task_done' && i.kind !== 'task_error').length
+  // Cross-project auth: at least one interactive item belongs to another path.
+  const foreignAuth = items.some(
+    i =>
+      (i.kind === 'permission' || i.kind === 'question' || i.kind === 'credentials')
+      && i.projectPath
+      && projectPath
+      && i.projectPath !== projectPath,
+  )
 
   return (
     <Box position="relative" ref={panelRef} data-no-drag>
@@ -73,13 +99,13 @@ export default function AttentionInbox() {
         h="26px"
         px="9px"
         borderRadius="8px"
-        bg="rgba(255, 255, 255, 0.05)"
-        border={`1px solid ${tokens.colors.border.default}`}
+        bg={foreignAuth ? 'rgba(210, 153, 34, 0.12)' : 'rgba(255, 255, 255, 0.05)'}
+        border={`1px solid ${foreignAuth ? 'rgba(210, 153, 34, 0.35)' : tokens.colors.border.default}`}
         color={interactive > 0 ? tokens.colors.status.warning : tokens.colors.text.secondary}
         cursor="pointer"
-        title={t('inbox.tooltip')}
-        aria-label={t('inbox.tooltip')}
-        _hover={{ bg: 'rgba(255,255,255,0.08)' }}
+        title={foreignAuth ? t('inbox.tooltipOtherProject') : t('inbox.tooltip')}
+        aria-label={foreignAuth ? t('inbox.tooltipOtherProject') : t('inbox.tooltip')}
+        _hover={{ bg: foreignAuth ? 'rgba(210, 153, 34, 0.18)' : 'rgba(255,255,255,0.08)' }}
         onClick={() => setOpen(prev => !prev)}
         css={interactive > 0 ? {
           '@keyframes tmInboxPulse': {
@@ -114,38 +140,45 @@ export default function AttentionInbox() {
           <Text px={3} py={2} fontSize="10px" fontWeight="700" letterSpacing="0.08em" textTransform="uppercase" color={tokens.colors.text.muted}>
             {t('inbox.title')}
           </Text>
-          {items.map(item => (
-            <Flex
-              key={item.id}
-              as="button"
-              align="center"
-              gap={2}
-              w="100%"
-              px={3}
-              py="7px"
-              textAlign="left"
-              _hover={{ bg: tokens.colors.bg.hover }}
-              onClick={() => {
-                setOpen(false)
-                if (item.sessionId && projectPath) {
-                  void openParallelTaskChat(projectPath, item.sessionId)
-                } else {
-                  // Pedido do run principal — o diálogo/card vive no chat.
-                  useLayoutStore.getState().setViewMode('chat')
-                }
-              }}
-            >
-              <Box as="span" color={KIND_COLOR[item.kind]} display="flex" flexShrink={0}>
-                {KIND_ICON[item.kind]}
-              </Box>
-              <Text fontSize="12px" color={tokens.colors.text.primary} lineClamp={1} flex={1} minW={0}>
-                {item.label}
-              </Text>
-              <Text fontSize="9px" color={KIND_COLOR[item.kind]} flexShrink={0} textTransform="uppercase" letterSpacing="0.04em">
-                {kindLabel(item.kind)}
-              </Text>
-            </Flex>
-          ))}
+          {items.map(item => {
+            const otherProject =
+              !!(item.projectPath && projectPath && item.projectPath !== projectPath)
+            return (
+              <Flex
+                key={item.id}
+                as="button"
+                align="center"
+                gap={2}
+                w="100%"
+                px={3}
+                py="7px"
+                textAlign="left"
+                _hover={{ bg: tokens.colors.bg.hover }}
+                onClick={() => {
+                  setOpen(false)
+                  void navigateToAttentionItem(item, projectPath)
+                }}
+              >
+                <Box as="span" color={KIND_COLOR[item.kind]} display="flex" flexShrink={0}>
+                  {KIND_ICON[item.kind]}
+                </Box>
+                <Box flex={1} minW={0}>
+                  {(item.projectName || otherProject) && (
+                    <Text fontSize="10px" fontWeight="600" color={tokens.colors.text.muted} lineClamp={1}>
+                      {item.projectName || t('parallel.unknownProject')}
+                      {otherProject ? ` · ${t('inbox.otherProject')}` : ''}
+                    </Text>
+                  )}
+                  <Text fontSize="12px" color={tokens.colors.text.primary} lineClamp={1}>
+                    {item.label}
+                  </Text>
+                </Box>
+                <Text fontSize="9px" color={KIND_COLOR[item.kind]} flexShrink={0} textTransform="uppercase" letterSpacing="0.04em">
+                  {kindLabel(item.kind)}
+                </Text>
+              </Flex>
+            )
+          })}
         </Box>
       )}
     </Box>

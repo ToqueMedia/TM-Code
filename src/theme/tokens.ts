@@ -97,6 +97,8 @@ export const tokens = {
       greenMuted: 'rgba(46, 160, 67, 0.3)',
       orange: '#f77f00',
       orangeBright: '#fb8500',
+      orangeSubtle: 'rgba(247, 127, 0, 0.1)',
+      orangeMuted: 'rgba(247, 127, 0, 0.3)',
       red: '#f85149',
       redSubtle: 'rgba(248, 81, 73, 0.1)',
       redMuted: 'rgba(248, 81, 73, 0.3)',

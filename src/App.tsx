@@ -18,6 +18,8 @@ import MCPService from './services/mcp/mcpService';
 import { browserSession } from './services/browserSessionManager';
 import ToolExecutor from './services/agent/toolExecutor';
 import AgentService from './services/agent/agentService';
+import { getQueryGuard } from './services/agent/queryGuard';
+import { useParallelTaskStore } from './stores/parallelTaskStore';
 import { autoCheckForUpdate, stopAutoUpdateChecks } from './services/updateService';
 import { checkStartupRequirements, GLOBAL_REQUIREMENTS } from './services/startupRequirements';
 import type { EnvironmentCheckResult } from './services/environmentCheck';
@@ -605,15 +607,45 @@ function App() {
 			});
 		}
 
-		useChatStore.getState().clearAllSessions();
-		// Reset transient agent state so last-response model/provider and BYOK
-		// confirmation don't leak from the previous project. Keep the task
-		// tracker intact here: projectStore hydrates it from the
-		// new project's app-managed state, and clearing in this effect can
-		// race after hydration and make the task panel disappear.
-		useAgentStore.getState().resetTransientState();
+		// F2 MDI: if a main agent (or parallel tasks) are live, park their
+		// sessions instead of wiping — switching projects must not cancel or
+		// orphan mid-flight writers.
+		const agentStillRunning = (() => {
+			if (getQueryGuard().getSnapshot()) return true;
+			for (const r of useParallelTaskStore.getState().runs.values()) {
+				if (r.status === 'running' || r.status === 'queued') return true;
+			}
+			const chat = useChatStore.getState();
+			return chat.isStreaming === true && !!chat.streamingSessionId;
+		})();
+
+		useChatStore.getState().clearAllSessions(
+			agentStillRunning || !!prevPath ? { preserveLiveRuns: true } : undefined,
+		);
+		// Reset transient agent UI state ONLY when no run is parked — wiping
+		// status to idle while the main loop is still working would kill the
+		// projectAgentStatus badge heartbeat and lie about "idle".
+		if (!agentStillRunning) {
+			useAgentStore.getState().resetTransientState();
+		}
 
 		const chatStore = useChatStore.getState();
+		// Warm switch: prefer an in-memory main session for this project
+		// (kept by preserveLiveRuns) so A→B→A does not re-read disk.
+		let warmSessionId: string | null = null;
+		let bestUpdated = -1;
+		for (const [id, s] of chatStore.sessions) {
+			if (s.projectPath !== projectPath || s.isParallelTask === true) continue;
+			if (s.updatedAt > bestUpdated) {
+				bestUpdated = s.updatedAt;
+				warmSessionId = id;
+			}
+		}
+		if (warmSessionId) {
+			chatStore.setActiveSession(warmSessionId);
+			return;
+		}
+
 		chatStore.restoreLastSession(projectPath).then(restored => {
 			if (!restored) {
 				chatStore.createNewSession(projectPath);
@@ -693,24 +725,25 @@ function App() {
 		function handlePreviewConsole(e: Event) {
 			const detail = (e as CustomEvent<{ level: string; text: string }>).detail;
 			const { level, text } = detail || { level: '', text: '' };
-			// Diagnostic: confirms the CustomEvent reaches App.tsx. Strip after
-			// the capture pipeline is verified working in the field.
-			console.log('[preview-capture] event arrived:', { level, text: text?.slice(0, 80) });
 			if (!text) return;
-			if (isPreviewProtocolNoise(text)) {
-				console.log('[preview-capture] dropped — matched isPreviewProtocolNoise');
-				return;
-			}
+			if (isPreviewProtocolNoise(text)) return;
+
+			// Scope runtime logs to the focused project's active preview.
+			// A ghost macOS webview (or a page still retrying a dead port after
+			// project switch) must not pollute layoutStore / DevServerStatus.
+			const layout = useLayoutStore.getState();
+			const hasLivePreviewTarget = !!(
+				layout.devServer?.frontendUrl
+				|| layout.devServer?.backendUrl
+				|| (layout.previewMode === 'static' && layout.previewHtmlContent)
+				|| layout.isPreviewServerLoading
+			);
+			if (!hasLivePreviewTarget) return;
 
 			useLayoutStore.getState().addDevServerLog(
 				`[runtime] ${text}`,
 				level === 'info' ? 'info' : level === 'warn' ? 'warn' : 'error',
 			);
-			// Read back to verify the entry actually landed in the store —
-			// catches a HMR-split where two store instances exist.
-			const after = useLayoutStore.getState().devServerLogs;
-			const lastTwo = after.slice(-2).map(l => l.text);
-			console.log('[preview-capture] addDevServerLog called. store size:', after.length, 'last 2:', lastTwo);
 
 			// GIS-in-iframe detection — only on errors. Dedup is per-preview-reload
 			// (the ref resets via the effect above) so the user gets one toast
@@ -813,19 +846,19 @@ function App() {
 				logger.warn('app', 'Failed to preload skills:', error);
 			}
 
-			// Load project-specific MCP overrides (without restarting global servers)
+			// F4: start/refresh this project's MCP scope without stopping others.
 			try {
 				const mcpService = MCPService.getInstance();
 				await mcpService.initialize(projectPath);
-
+				// Mirror this project's (+ global) tools into the executor for UI/agent.
 				if (!cancelled) {
-					const mcpTools = mcpService.getAllTools();
+					const mcpTools = mcpService.getAllTools(projectPath);
 					if (mcpTools.length > 0) {
 						const toolExecutor = ToolExecutor.getInstance();
 						toolExecutor.registerMCPTools(
 							mcpTools,
 							browserSession.wrapCallTool((serverName, toolName, args) =>
-								mcpService.callTool(serverName, toolName, args),
+								mcpService.callTool(serverName, toolName, args, projectPath),
 							),
 						);
 						AgentService.getInstance().refreshTools();

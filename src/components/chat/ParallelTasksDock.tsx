@@ -1,24 +1,51 @@
 /**
- * ParallelTasksDock — compact panel below the composer showing the user's
- * parallel task agents (v1.0.1 multi-agent): up to 4 running concurrently, the
- * rest queued. Each row is a live card (status + latest tool call + tokens) with
- * a per-task Stop; the header carries Stop-all + Clear. Renders nothing when
- * there are no tasks. Reads parallelTaskStore only — never the chat transcript.
+ * ParallelTasksDock — compact strip under the composer for multi-project
+ * agents (F2/F3: one agent per project, several projects in this window).
+ *
+ * Each row: project monogram · task title · status · Stop.
+ * Reads parallelTaskStore only.
  */
 
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
-import { VscClose, VscLoading } from 'react-icons/vsc'
+import { FiSquare } from 'react-icons/fi'
+import { VscLoading } from 'react-icons/vsc'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import {
   useParallelTaskStore,
   type ParallelTaskRun,
   type ParallelTaskStatus,
 } from '@/stores/parallelTaskStore'
+import { openParallelTaskChat } from '@/hooks/useParallelTaskRows'
 
 const pulseCss = {
-  animation: 'ptSpin 1s linear infinite',
+  animation: 'ptSpin 0.85s linear infinite',
   '@keyframes ptSpin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } },
+}
+
+function projectNameFromPath(path?: string): string {
+  if (!path) return t('parallel.unknownProject')
+  const parts = path.replace(/\\/g, '/').replace(/\/+$/, '').split('/')
+  return parts[parts.length - 1] || path
+}
+
+function monogram(name: string): string {
+  const cleaned = name.trim()
+  if (!cleaned) return '?'
+  return cleaned.slice(0, 1).toUpperCase()
+}
+
+/** Human title: prefer session-style short label, never a raw multi-line dump. */
+function displayTitle(run: ParallelTaskRun): string {
+  const raw = (run.description || '').replace(/\s+/g, ' ').trim()
+  if (!raw) return t('parallel.untitledTask')
+  // Strip common noisy prefixes agents put in prompts.
+  const cleaned = raw
+    .replace(/^(please\s+|pls\s+|podes\s+|pode\s+|ajuda[- ]me\s+a\s+|help\s+me\s+)/i, '')
+    .trim()
+  if (cleaned.length <= 56) return cleaned
+  return cleaned.slice(0, 55).trimEnd() + '…'
 }
 
 function statusColor(status: ParallelTaskStatus): string {
@@ -26,17 +53,17 @@ function statusColor(status: ParallelTaskStatus): string {
     case 'running': return tokens.colors.accent.primary
     case 'completed': return tokens.colors.accent.greenBright
     case 'error': return tokens.colors.accent.red
-    default: return tokens.colors.text.muted // queued | aborted
+    default: return tokens.colors.text.muted
   }
 }
 
 function statusLabel(status: ParallelTaskStatus): string {
   switch (status) {
-    case 'running': return 'Running'
-    case 'queued': return 'Queued'
-    case 'completed': return 'Done'
-    case 'error': return 'Error'
-    case 'aborted': return 'Stopped'
+    case 'running': return t('welcome.agentWorking')
+    case 'queued': return t('parallel.queued')
+    case 'completed': return t('welcome.agentDone')
+    case 'error': return t('welcome.agentError')
+    case 'aborted': return t('parallel.taskStoppedShort')
   }
 }
 
@@ -45,19 +72,51 @@ function TaskRow({ run }: { run: ParallelTaskRun }) {
   const color = statusColor(run.status)
   const lastCall = run.toolCalls[run.toolCalls.length - 1]
   const active = run.status === 'running' || run.status === 'queued'
+  const projectName = projectNameFromPath(run.projectPath)
+  const title = displayTitle(run)
   const subtitle =
     run.status === 'error'
-      ? run.errorText ?? 'failed'
+      ? (run.errorText ?? t('welcome.agentError'))
       : run.status === 'completed'
-        ? run.finalText.split('\n')[0].slice(0, 80) || 'completed'
+        ? (run.finalText.split('\n')[0].replace(/\s+/g, ' ').trim().slice(0, 72) || t('welcome.agentDone'))
         : lastCall
-          ? `${lastCall.toolName}${lastCall.argPreview ? ` ${lastCall.argPreview}` : ''}`
+          ? `${lastCall.toolName}${lastCall.argPreview ? ` · ${lastCall.argPreview.slice(0, 40)}` : ''}`
           : run.status === 'queued'
-            ? 'waiting for a free slot'
-            : 'starting…'
+            ? t('parallel.waitingSlot')
+            : t('parallel.starting')
 
   return (
-    <Flex align="center" gap={2} px={2} py={1.5} borderRadius="5px" _hover={{ bg: 'rgba(255,255,255,0.03)' }}>
+    <Flex
+      align="center"
+      gap={2}
+      px={2}
+      py="7px"
+      borderRadius="7px"
+      _hover={{ bg: 'rgba(255,255,255,0.035)' }}
+      cursor={run.sessionId && run.projectPath ? 'pointer' : 'default'}
+      onClick={() => {
+        if (run.sessionId && run.projectPath) {
+          void openParallelTaskChat(run.projectPath, run.sessionId)
+        }
+      }}
+    >
+      {/* Project monogram */}
+      <Flex
+        w="22px"
+        h="22px"
+        borderRadius="6px"
+        align="center"
+        justify="center"
+        flexShrink={0}
+        bg="rgba(255,255,255,0.06)"
+        border="1px solid rgba(255,255,255,0.08)"
+        title={run.projectPath}
+      >
+        <Text fontSize="10px" fontWeight="700" color={tokens.colors.text.secondary} lineHeight="1">
+          {monogram(projectName)}
+        </Text>
+      </Flex>
+
       {run.status === 'running' ? (
         <Box as="span" css={pulseCss} color={color} flexShrink={0} display="flex">
           <VscLoading size={12} />
@@ -65,34 +124,57 @@ function TaskRow({ run }: { run: ParallelTaskRun }) {
       ) : (
         <Box w="7px" h="7px" borderRadius="full" bg={color} flexShrink={0} />
       )}
+
       <Box minW={0} flex={1}>
-        <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.primary} lineClamp={1}>
-          {run.description}
-        </Text>
+        <Flex align="baseline" gap={1.5} minW={0}>
+          <Text fontSize="11px" fontWeight="650" color={tokens.colors.text.muted} flexShrink={0} lineClamp={1}>
+            {projectName}
+          </Text>
+          <Text fontSize="11px" color={tokens.colors.text.disabled} flexShrink={0}>·</Text>
+          <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.primary} lineClamp={1} minW={0}>
+            {title}
+          </Text>
+        </Flex>
         <Text fontSize="10px" color={tokens.colors.text.muted} lineClamp={1} fontFamily={tokens.fontFamily.mono}>
           {subtitle}
         </Text>
       </Box>
-      <Text fontSize="9px" color={color} flexShrink={0} textTransform="uppercase" letterSpacing="0.04em">
+
+      <Text
+        fontSize="9px"
+        color={color}
+        flexShrink={0}
+        fontWeight="600"
+        letterSpacing="0.02em"
+      >
         {statusLabel(run.status)}
       </Text>
-      {run.tokenUsage.output > 0 && (
-        <Text fontSize="9px" color={tokens.colors.text.disabled} flexShrink={0} fontFamily={tokens.fontFamily.mono}>
-          {run.tokenUsage.output.toLocaleString()}t
-        </Text>
-      )}
+
       {active && (
-        <Box
+        <Flex
           as="button"
-          aria-label="Stop task"
-          title="Stop task"
-          color={tokens.colors.text.muted}
-          _hover={{ color: tokens.colors.accent.red }}
+          align="center"
+          gap="5px"
+          h="22px"
+          px="8px"
+          borderRadius="6px"
           flexShrink={0}
-          onClick={() => abort(run.id)}
+          bg="rgba(248, 81, 73, 0.1)"
+          border="1px solid rgba(248, 81, 73, 0.28)"
+          color={tokens.colors.accent.red}
+          fontSize="10px"
+          fontWeight="700"
+          aria-label={t('parallel.stopTask')}
+          title={t('parallel.stopTask')}
+          _hover={{ bg: 'rgba(248, 81, 73, 0.18)', borderColor: 'rgba(248, 81, 73, 0.45)' }}
+          onClick={(e: React.MouseEvent) => {
+            e.stopPropagation()
+            abort(run.id)
+          }}
         >
-          <VscClose size={13} />
-        </Box>
+          <FiSquare size={9} fill="currentColor" />
+          {t('parallel.stopShort')}
+        </Flex>
       )}
     </Flex>
   )
@@ -103,7 +185,10 @@ function ParallelTasksDock() {
   const abortAll = useParallelTaskStore((s) => s.abortAll)
   const clearFinished = useParallelTaskStore((s) => s.clearFinished)
 
-  const list = Array.from(runs.values()).sort((a, b) => a.createdAt - b.createdAt)
+  const list = useMemo(
+    () => Array.from(runs.values()).sort((a, b) => a.createdAt - b.createdAt),
+    [runs],
+  )
   if (list.length === 0) return null
 
   const running = list.filter((r) => r.status === 'running').length
@@ -114,29 +199,62 @@ function ParallelTasksDock() {
   return (
     <Box
       mt={1.5}
-      borderRadius="6px"
-      bg="rgba(255,255,255,0.02)"
-      border="1px solid"
-      borderColor="rgba(255,255,255,0.06)"
+      borderRadius="8px"
+      bg="rgba(255,255,255,0.025)"
+      border="1px solid rgba(255,255,255,0.07)"
       overflow="hidden"
     >
-      <Flex align="center" gap={2} px={2.5} py={1.5} borderBottom="1px solid" borderColor="rgba(255,255,255,0.05)">
-        <Text fontSize="10px" fontWeight="700" letterSpacing="0.06em" textTransform="uppercase" color={tokens.colors.text.muted}>
-          Parallel tasks
+      <Flex align="center" gap={2} px={2.5} py="7px" borderBottom="1px solid rgba(255,255,255,0.05)">
+        <Text
+          fontSize="10px"
+          fontWeight="700"
+          letterSpacing="0.06em"
+          textTransform="uppercase"
+          color={tokens.colors.text.muted}
+        >
+          {t('parallel.dockTitle')}
         </Text>
         <Text fontSize="10px" color={tokens.colors.text.disabled}>
-          {running} running{queued > 0 ? ` · ${queued} queued` : ''}
+          {running > 0
+            ? t('parallel.dockRunning').replace('{n}', String(running))
+            : t('parallel.dockIdle')}
+          {queued > 0 ? ` · ${t('parallel.dockQueued').replace('{n}', String(queued))}` : ''}
         </Text>
         <Box flex={1} />
         {anyFinished && (
-          <Box as="button" fontSize="10px" color={tokens.colors.text.muted} _hover={{ color: tokens.colors.text.primary }} onClick={() => clearFinished()}>
-            Clear
+          <Box
+            as="button"
+            fontSize="10px"
+            fontWeight="600"
+            color={tokens.colors.text.muted}
+            px="6px"
+            py="2px"
+            borderRadius="4px"
+            _hover={{ color: tokens.colors.text.primary, bg: 'rgba(255,255,255,0.05)' }}
+            onClick={() => clearFinished()}
+          >
+            {t('parallel.clearFinished')}
           </Box>
         )}
         {anyActive && (
-          <Box as="button" fontSize="10px" fontWeight="600" color={tokens.colors.accent.red} _hover={{ opacity: 0.8 }} onClick={() => abortAll()}>
-            Stop all
-          </Box>
+          <Flex
+            as="button"
+            align="center"
+            gap="4px"
+            h="22px"
+            px="8px"
+            borderRadius="6px"
+            fontSize="10px"
+            fontWeight="700"
+            color={tokens.colors.accent.red}
+            bg="rgba(248, 81, 73, 0.1)"
+            border="1px solid rgba(248, 81, 73, 0.28)"
+            _hover={{ bg: 'rgba(248, 81, 73, 0.18)' }}
+            onClick={() => abortAll()}
+          >
+            <FiSquare size={9} fill="currentColor" />
+            {t('parallel.stopAll')}
+          </Flex>
         )}
       </Flex>
       <Box px={1} py={1}>

@@ -2,6 +2,7 @@ import { Box, HStack, Text, IconButton } from '@chakra-ui/react'
 import { t } from '@/i18n'
 import { FiTrash2, FiChevronDown } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
+import { stripAnsi } from '@/utils/stripAnsi'
 import type { DebugConsoleProps } from './types'
 
 function DebugConsole({
@@ -56,7 +57,7 @@ function DebugConsole({
           ) : (
             debugConsole.map((line, index) => (
               <Text key={index} mb={1}>
-                {line}
+                {stripAnsi(line)}
               </Text>
             ))
           )}

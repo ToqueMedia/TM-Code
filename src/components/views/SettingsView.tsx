@@ -700,11 +700,11 @@ function UpdateSection() {
 function SandboxSection() {
   const t = useTranslation()
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
+  const hardBlockSecondProjectWindow = useSettingsStore(s => s.hardBlockSecondProjectWindow)
+  const setHardBlockSecondProjectWindow = useSettingsStore(s => s.setHardBlockSecondProjectWindow)
   const autoModePermissions = usePermissionStore(s => s.autoModePermissions)
   const setAutoModePermissions = usePermissionStore(s => s.setAutoModePermissions)
   const setSandboxEnabled = useSettingsStore(s => s.setSandboxEnabled)
-  const parallelTaskWorktrees = useSettingsStore(s => s.parallelTaskWorktrees)
-  const setParallelTaskWorktrees = useSettingsStore(s => s.setParallelTaskWorktrees)
   const [sandboxAvailable, setSandboxAvailable] = useState(false)
   const [platform, setPlatform] = useState('')
   const [depsOk, setDepsOk] = useState(true)
@@ -736,28 +736,29 @@ function SandboxSection() {
 
   return (
     <VStack align="stretch" gap={6}>
-      {/* Fase 5 (multi-agente): isolamento de tarefas paralelas em worktrees.
-          Vive nesta secção por ser, como o sandbox, uma política de EXECUÇÃO
-          do agente. */}
-      <SettingsGroup title={t('settings.taskWorktreesTitle')}>
-        <HStack justify="space-between">
-          <Box>
-            <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px">
-              {t('settings.taskWorktreesTitle')}
-            </Text>
-            <Text color={tokens.colors.text.secondary} fontSize="12px" mt="2px">
-              {t('settings.taskWorktreesDesc')}
-            </Text>
-          </Box>
-          <Switch.Root
-            checked={parallelTaskWorktrees}
-            onCheckedChange={(e) => setParallelTaskWorktrees(e.checked)}
-            colorPalette="green"
-          >
-            <Switch.HiddenInput />
-            <Switch.Control />
-          </Switch.Root>
-        </HStack>
+      {/* F3: task worktrees setting removed with intra-project multi-agent. */}
+
+      <SettingsGroup title={t('project.windowsGroup')}>
+        <Field.Root>
+          <HStack justify="space-between">
+            <Box>
+              <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px">
+                {t('project.hardBlockSecondWindow')}
+              </Text>
+              <Text color={tokens.colors.text.secondary} fontSize="12px" mt="2px">
+                {t('project.hardBlockSecondWindowDesc')}
+              </Text>
+            </Box>
+            <Switch.Root
+              checked={hardBlockSecondProjectWindow}
+              onCheckedChange={function (e) { setHardBlockSecondProjectWindow(e.checked) }}
+              colorPalette="pink"
+            >
+              <Switch.HiddenInput />
+              <Switch.Control />
+            </Switch.Root>
+          </HStack>
+        </Field.Root>
       </SettingsGroup>
 
       <SettingsGroup title={t('autoMode.title')}>

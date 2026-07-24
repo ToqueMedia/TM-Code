@@ -5,13 +5,19 @@
  * reaches a terminal state, this module wakes the main agent once so it can
  * inspect the result. There is no polling loop: if the agent is busy, a
  * Zustand subscription fires the wake when the status transitions to idle.
+ *
+ * Wake policy (2026-07-24 — momenu-fact deploy session):
+ *  - ALWAYS wake on failure (`error`) so the agent can read logs and fix.
+ *  - Wake on success/cancel only when the tracker still has open work
+ *    (pending/in_progress) — evidence the agent stopped mid-plan waiting.
+ *  - Success + empty tracker → announce only (avoids "ghost new task" spam).
  */
 
 import { useAgentStore } from '../../../stores/agentStore'
 import { t } from '../../../i18n'
 import { logger } from '../../../utils/logger'
 
-interface BackgroundCommandWake {
+export interface BackgroundCommandWake {
   id: string
   command: string
   status: 'completed' | 'error' | 'cancelled'
@@ -54,6 +60,17 @@ export function acknowledgeBackgroundCommandWake(id: string): void {
   }
 }
 
+/** Pure decision helper — exported for unit tests. */
+export function shouldWakeForBackgroundCommands(
+  commands: BackgroundCommandWake[],
+  openTaskCount: number,
+): { wake: boolean; reason: 'failure' | 'open_tasks' | 'no_open_tasks_success' } {
+  const failed = commands.some(c => c.status === 'error')
+  if (failed) return { wake: true, reason: 'failure' }
+  if (openTaskCount > 0) return { wake: true, reason: 'open_tasks' }
+  return { wake: false, reason: 'no_open_tasks_success' }
+}
+
 function doWake(): void {
   wakeTimer = null
   if (pendingCommands.size === 0) return
@@ -76,45 +93,68 @@ function doWake(): void {
   const completed = commands.filter(c => c.status === 'completed').length
   const failed = commands.filter(c => c.status === 'error').length
   const cancelled = commands.filter(c => c.status === 'cancelled').length
-  const ids = commands.map(c => `${c.id}: "${c.command.slice(0, 80)}"`).join(', ')
+  const ids = commands.map(c => {
+    const exit =
+      c.exitCode === null || c.exitCode === undefined ? '' : ` exit=${c.exitCode}`
+    return `${c.id}: "${c.command.slice(0, 80)}" (${c.status}${exit})`
+  }).join(', ')
   const summaryParts: string[] = []
   if (completed > 0) summaryParts.push(`${completed} completed`)
   if (failed > 0) summaryParts.push(`${failed} failed`)
   if (cancelled > 0) summaryParts.push(`${cancelled} cancelled`)
 
   const shortCmd = commands[0]?.command.slice(0, 60) ?? ''
+  const firstFailed = commands.find(c => c.status === 'error')
+  const exitHint =
+    firstFailed && firstFailed.exitCode !== null && firstFailed.exitCode !== undefined
+      ? ` (exit ${firstFailed.exitCode})`
+      : ''
 
-  // GATE (user report 2026-07-16 "após o relatório vejo uma nova tarefa a
-  // iniciar sozinha — está mal"): um run terminado SÓ é retomado sozinho se o
-  // task tracker tiver trabalho aberto (pending/in_progress) — é a única
-  // evidência objetiva de que o agente parou A MEIO à espera do comando.
-  // Tracker vazio/completo = o relatório foi mesmo o fim; o resultado do
-  // comando é anunciado no chat, mas NENHUM run arranca sozinho.
   const openTasks = useAgentStore.getState().tasks
     .filter(tk => tk.status === 'pending' || tk.status === 'in_progress').length
 
-  if (openTasks === 0) {
-    logger.info('agent', `→ Background command finished (${summaryParts.join(', ')}) — no open tracker tasks, NOT waking (report was final)`)
+  const decision = shouldWakeForBackgroundCommands(commands, openTasks)
+
+  if (!decision.wake) {
+    // Success (or pure cancel) with no open tracker work — report was final.
+    logger.info(
+      'agent',
+      `→ Background command finished (${summaryParts.join(', ')}) — no open tracker tasks, NOT waking (report was final)`,
+    )
     void import('../../../stores/chatStore').then(({ useChatStore }) => {
       useChatStore.getState().addSystemMessage(
         t('backgroundWake.finishedNoResume').replace('{command}', shortCmd),
-        failed > 0 ? 'warn' : 'info',
+        'info',
       )
     }).catch(() => { /* announcement is best-effort */ })
     return
   }
 
-  const wakeMessage = `[System: Background command ${summaryParts.join(', ')}: ${ids}. Call the check_background_commands TOOL (never via shell/execute_command) once to read the result; do not poll. Then continue ONLY the tracker tasks that are still open.]`
+  const wakeReason =
+    decision.reason === 'failure'
+      ? 'command failed — agent must inspect and fix'
+      : `${openTasks} open tracker task(s)`
 
-  logger.info('agent', `→ Background command auto-wake: ${summaryParts.join(', ')} (${openTasks} open tasks)`)
+  const wakeMessage = decision.reason === 'failure'
+    ? `[System: Background command FAILED${exitHint}: ${ids}. Call the check_background_commands TOOL (never via shell/execute_command) ONCE to read the error output. Do not poll. Fix the failure, then re-run the command if still needed. Continue only tracker tasks that are still open (or re-open the deploy/verify task if it was closed).]`
+    : `[System: Background command ${summaryParts.join(', ')}: ${ids}. Call the check_background_commands TOOL (never via shell/execute_command) once to read the result; do not poll. Then continue ONLY the tracker tasks that are still open.]`
+
+  logger.info('agent', `→ Background command auto-wake: ${summaryParts.join(', ')} (${wakeReason})`)
 
   // Anuncia a retoma NO CHAT antes do run arrancar — sem isto o wake corre
   // com addUserMessage:false e a continuação aparece "do nada", lendo como
   // uma tarefa nova a auto-iniciar.
   import('../../../stores/chatStore').then(({ useChatStore }) => {
+    const msg = decision.reason === 'failure'
+      ? t('backgroundWake.resumingFailure')
+          .replace('{command}', shortCmd)
+          .replace('{exit}', exitHint) // e.g. " (exit 1)" or ""
+      : t('backgroundWake.resuming')
+          .replace('{command}', shortCmd)
+          .replace('{count}', String(openTasks))
     useChatStore.getState().addSystemMessage(
-      t('backgroundWake.resuming').replace('{command}', shortCmd).replace('{count}', String(openTasks)),
-      'info',
+      msg,
+      decision.reason === 'failure' ? 'warn' : 'info',
     )
   }).catch(() => { /* announcement is best-effort */ })
 
@@ -127,4 +167,14 @@ function doWake(): void {
   }).catch((err) => {
     logger.warn('agent', `Background command auto-wake failed: ${err}`)
   })
+}
+
+/** Test-only: reset module state between tests. */
+export function __resetBackgroundAutoWakeForTests(): void {
+  if (wakeTimer) {
+    clearTimeout(wakeTimer)
+    wakeTimer = null
+  }
+  pendingCommands.clear()
+  pendingWake = false
 }

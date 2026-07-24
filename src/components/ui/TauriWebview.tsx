@@ -162,11 +162,6 @@ function fireResizePreviewInvoke(args?: Record<string, unknown>): void {
     })
 }
 
-function parkPreviewWebview(): void {
-  if (!nativePreviewUrl || pageIsUnloading) return
-  firePreviewInvoke('resize_preview_webview', { x: -9999, y: -9999, width: 1, height: 1 })
-}
-
 const MacWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function MacWebview({ url, html, reloadKey = 0, frozen = false, bottomReserveHeight = 0, onLocationChange }, ref) {
   const containerRef = useRef<HTMLDivElement>(null)
   const rafRef = useRef<number>(0)
@@ -247,7 +242,13 @@ const MacWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function Ma
   }, [syncPosition])
 
   useEffect(() => {
-    if (!resolvedUrl) return
+    // No URL for the focused project → fully close the native webview.
+    // Parking alone left a ghost page (e.g. dead localhost:5173) that kept
+    // retrying and flooding preview-console → DevServerStatus on other projects.
+    if (!resolvedUrl) {
+      closePreviewWebview()
+      return
+    }
 
     let active = true
     const timer = setTimeout(async () => {
@@ -273,7 +274,10 @@ const MacWebview = forwardRef<TauriWebviewHandle, TauriWebviewProps>(function Ma
   useEffect(() => {
     return () => {
       cancelAnimationFrame(rafRef.current)
-      parkPreviewWebview()
+      // Unmount (project switch without hasPreview, leave preview surface):
+      // close, don't park — a parked webview still runs network retries and
+      // emits [runtime] load-failed noise into the global log store.
+      closePreviewWebview()
     }
   }, [])
 

@@ -604,6 +604,15 @@ class SessionService {
     if (typeof msg.thinkingRequested === 'boolean') {
       sanitized.thinkingRequested = msg.thinkingRequested
     }
+    // Effort por turno (managed) — o seletor é global; o histórico precisa do
+    // valor carimbado em cada mensagem do assistente para o user ver o que
+    // cada pedido usou (e se o header saiu de facto).
+    if (typeof msg.reasoningEffort === 'string' && msg.reasoningEffort) {
+      sanitized.reasoningEffort = msg.reasoningEffort
+    }
+    if (typeof msg.reasoningEffortSent === 'boolean') {
+      sanitized.reasoningEffortSent = msg.reasoningEffortSent
+    }
     if (typeof msg.turnDurationMs === 'number') sanitized.turnDurationMs = msg.turnDurationMs
     if (typeof msg.turnInputTokens === 'number') sanitized.turnInputTokens = msg.turnInputTokens
     if (typeof msg.turnOutputTokens === 'number') sanitized.turnOutputTokens = msg.turnOutputTokens

@@ -431,8 +431,7 @@ fn open_preview_webview(
                     let safe_url = url
                         .replace('\\', "\\\\")
                         .replace('\'', "\\'")
-                        .replace('\n', "")
-                        .replace('\r', "");
+                        .replace(['\n', '\r'], "");
                     if let Some(win) = app_for_ipc.get_webview_window("main") {
                         let _ = win.eval(format!(
                             "window.dispatchEvent(new CustomEvent('preview-location',{{detail:{{url:'{}'}}}}));",
@@ -1312,7 +1311,12 @@ pub fn run() {
                     if let Some(ap) = window.try_state::<commands::container::ActiveProjectState>()
                     {
                         if let Ok(guard) = ap.lock() {
-                            if let Some(active) = guard.as_ref() {
+                            // In-window multi-project: this process owns the
+                            // background agent runs for EVERY open project, so on
+                            // close clear the badge + window-lock for all of them
+                            // (not just the foreground one) — otherwise other
+                            // windows wait out the staleness timeout on the rest.
+                            for active in guard.projects.values() {
                                 commands::project_state::clear_project_agent_status(
                                     &active.project_path,
                                 );
@@ -1478,6 +1482,7 @@ pub fn run() {
             delete_checkpoint_project,
             set_active_project,
             clear_active_project,
+            clear_all_active_projects,
             set_agent_allowed_directories,
             fim_completion,
             git_diff_lines,

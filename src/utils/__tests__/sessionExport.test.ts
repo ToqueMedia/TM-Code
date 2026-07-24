@@ -1,4 +1,8 @@
 import { buildRequestEfficiencyReport, sessionToJson, sessionToMarkdown } from '../sessionExport'
+import {
+  resetPromptSerializeStats,
+  serializeStructuredForPromptDetailed,
+} from '../../services/agent/promptSerialize'
 import type { ChatSession, RequestUsageEntry } from '@/types/chat'
 
 function usage(overrides: Partial<RequestUsageEntry>): RequestUsageEntry {
@@ -111,5 +115,23 @@ describe('sessionExport request efficiency report', () => {
     expect(markdown).toContain('**Agent reading efficiency:**')
     expect(markdown).toContain('| symbol index requests | 1 / 1 |')
     expect(markdown).toContain('| bounded ranges | 1 |')
+  })
+
+  it('includes promptSerializeStats only after structured serialize activity', () => {
+    resetPromptSerializeStats()
+    const empty = JSON.parse(sessionToJson(session([])))
+    expect(empty.session.promptSerializeStats).toBeUndefined()
+
+    serializeStructuredForPromptDetailed({
+      tools: [
+        { name: 'a', server: 's', description: 'da', inputCount: 1 },
+        { name: 'b', server: 's', description: 'db', inputCount: 2 },
+      ],
+    })
+    const withStats = JSON.parse(sessionToJson(session([])))
+    expect(withStats.session.promptSerializeStats).toMatchObject({
+      toonWins: 1,
+    })
+    expect(withStats.session.promptSerializeStats.charsSavedVsMini).toBeGreaterThan(0)
   })
 })

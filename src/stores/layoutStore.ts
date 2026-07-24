@@ -147,6 +147,13 @@ interface LayoutActions {
   setCheckpointDrawerOpen: (open: boolean) => void
   /** Drop the pending section so a subsequent Settings open defaults to Profile. */
   clearSettingsInitialSection: () => void
+  /**
+   * F5: snapshot project-scoped UI for park/restore on in-window switch.
+   * Does not include chrome that is global (sidebar visibility, overlays).
+   */
+  captureParkSnapshot: () => import('../services/projectWorkspacePark').LayoutParkSnapshot
+  /** Restore a previously parked layout for a project (or clear to defaults). */
+  restoreParkSnapshot: (snap: import('../services/projectWorkspacePark').LayoutParkSnapshot | null) => void
 }
 
 /** Derive preview mode from project kind. */
@@ -417,6 +424,71 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
 
   clearSettingsInitialSection: () => {
     set({ settingsInitialSection: null })
+  },
+
+  captureParkSnapshot: () => {
+    const s = get()
+    return {
+      viewMode: s.viewMode,
+      previousViewMode: s.previousViewMode,
+      devServer: s.devServer,
+      previewMode: s.previewMode,
+      isHttpDrawerOpen: s.isHttpDrawerOpen,
+      isPreviewFullscreen: s.isPreviewFullscreen,
+      previewHtmlContent: s.previewHtmlContent,
+      previewSourcePath: s.previewSourcePath,
+      previewReloadKey: s.previewReloadKey,
+      previewServerTimedOut: s.previewServerTimedOut,
+      devServerLogs: s.devServerLogs,
+      isConsoleVisible: s.isConsoleVisible,
+      isPreviewServerLoading: s.isPreviewServerLoading,
+      isInstallingDeps: s.isInstallingDeps,
+      scaffoldPhase: s.scaffoldPhase,
+      scaffoldMessage: s.scaffoldMessage,
+    }
+  },
+
+  restoreParkSnapshot: (snap) => {
+    if (!snap) {
+      // Fresh project — clean workspace chrome (keep sidebar prefs).
+      set({
+        viewMode: 'chat',
+        previousViewMode: null,
+        devServer: null,
+        previewMode: 'server',
+        isHttpDrawerOpen: false,
+        isPreviewFullscreen: false,
+        previewHtmlContent: null,
+        previewSourcePath: null,
+        previewReloadKey: 0,
+        previewServerTimedOut: false,
+        devServerLogs: [],
+        isConsoleVisible: false,
+        isPreviewServerLoading: false,
+        isInstallingDeps: false,
+        scaffoldPhase: null,
+        scaffoldMessage: '',
+      })
+      return
+    }
+    set({
+      viewMode: snap.viewMode,
+      previousViewMode: snap.previousViewMode,
+      devServer: snap.devServer,
+      previewMode: snap.previewMode,
+      isHttpDrawerOpen: snap.isHttpDrawerOpen,
+      isPreviewFullscreen: snap.isPreviewFullscreen,
+      previewHtmlContent: snap.previewHtmlContent,
+      previewSourcePath: snap.previewSourcePath,
+      previewReloadKey: snap.previewReloadKey,
+      previewServerTimedOut: snap.previewServerTimedOut,
+      devServerLogs: snap.devServerLogs,
+      isConsoleVisible: snap.isConsoleVisible,
+      isPreviewServerLoading: snap.isPreviewServerLoading,
+      isInstallingDeps: snap.isInstallingDeps,
+      scaffoldPhase: snap.scaffoldPhase,
+      scaffoldMessage: snap.scaffoldMessage,
+    })
   },
 }))
 

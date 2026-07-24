@@ -6,17 +6,18 @@ import { describeImagesViaSidecar } from '../../services/agent/visionSidecar'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore, selectIsPreviewServerRunning } from '../../stores/layoutStore'
 import { useBillingStore } from '../../stores/billingStore'
-import { useByokStore } from '../../stores/byokStore'
+
 import { useAuthStore } from '../../stores/authStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
 import { useToastStore } from '../../stores/toastStore'
-import { addParallelTask, addSessionAgentRun } from '../../services/agent/parallelTasks/parallelTaskManager'
+import { addSessionAgentRun } from '../../services/agent/parallelTasks/parallelTaskManager'
 import { useParallelTaskStore } from '../../stores/parallelTaskStore'
 import { activatePreview, detectDevCommand, ensureDevServerRunning } from '../../services/previewActivation'
 import { devServerManager } from '../../services/devServerManager'
 import { improveUserPrompt } from '../../services/promptImprovementService'
 import AgentService from '../../services/agent/agentService'
+import ToolExecutor from '../../services/agent/toolExecutor'
 import { refreshMcpForDispatch, buildMainSystemPrompt, appendVolatileToUserContent, buildMainLoopCallbacks, estimateTokensFromText, estimateTokensFromValue } from '../../services/agent/mainDispatch'
 import { browserSession } from '../../services/browserSessionManager'
 import { isSlashCommandAllowedForPlan, slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
@@ -48,7 +49,7 @@ import { getQueryGuard } from '../../services/agent/queryGuard'
 import { isAtBlockingLimit, totalContextTokens } from '../../utils/contextWindow'
 import { enqueueSerializedRun } from '../../services/agent/agentRunner'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
-import type { ByokSessionSnapshot, ConversationMessage } from '../../types/chat'
+import type { ConversationMessage } from '../../types/chat'
 import { useQueueProcessor } from '../../hooks/useQueueProcessor'
 import { classifyPendingPlanIntent } from '../../services/agent/planResumeIntent'
 import {
@@ -63,25 +64,7 @@ import { getTmsTurnTelemetry, markOriginalTaskFailed } from '../../services/agen
 // RECOVERABLE_UPSTREAM_CODES + a mensagem de erro recuperável migraram para o
 // núcleo único (mainDispatch.buildMainLoopCallbacks, FUSÃO F2).
 import { logger } from '../../utils/logger'
-
-function resolveByokNativeVision(snapshot: ByokSessionSnapshot | null): boolean | null {
-  if (!snapshot) return null
-  if (snapshot.capabilities?.images !== undefined) return snapshot.capabilities.images
-
-  const byokState = useByokStore.getState()
-  const provider = byokState.providers.find(p => p.id === snapshot.providerId)
-  const config = byokState.perProviderConfig[snapshot.providerId]
-  const registryModel = provider?.models.find(m => m.id === snapshot.modelId)
-  if (registryModel) return registryModel.capabilities.images
-
-  const dynamicModel = config?.dynamicCatalog?.models.find(m => m.id === snapshot.modelId)
-  if (dynamicModel) return dynamicModel.capabilities.images
-
-  const userDefined = config?.userDefinedModel
-  if (userDefined?.id === snapshot.modelId) return userDefined.capabilities.images
-
-  return false
-}
+import { resolveByokNativeVision } from '../../services/agent/byokVision'
 
 export function usePromptBar() {
   // Boolean-only selector. The full string used to live here (`s.draftInput`)
@@ -95,15 +78,7 @@ export function usePromptBar() {
   const [devCommand, setDevCommand] = useState<string | null>(null)
   const [isImprovingPrompt, setIsImprovingPrompt] = useState(false)
   const [promptImprovementBackup, setPromptImprovementBackup] = useState<string | null>(null)
-  /**
-   * Composer Steer/Task toggle (visible only while the agent is busy).
-   * false → Enter steers the running task (claude-vaz parity, the default);
-   * true → Enter queues the message as a SEPARATE task that runs when the
-   * current one finishes (QueuedCommand.asTask). Sticky while the run
-   * lasts so the user can queue several tasks in a row; reset when the
-   * agent goes idle so the next run starts back at the parity default.
-   */
-  const [queueAsTask, setQueueAsTask] = useState(false)
+  // F3: queueAsTask removed — one agent per project; busy Enter always steers/queues.
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const historyIndexRef = useRef(-1)
@@ -118,16 +93,15 @@ export function usePromptBar() {
   const queryGuard = getQueryGuard()
   const isAgentBusy = useSyncExternalStore(queryGuard.subscribe, queryGuard.getSnapshot)
 
-  // ── Fase 2 (modelo foreground) ──
-  // Há tarefas paralelas vivas? Mantém o toggle "Nova tarefa" disponível
-  // mesmo com o main idle (lançar a 2ª/3ª tarefa não exige um run principal).
+  // Project-runs vivos (F2 multi-project / continuações) — Stop posicional
+  // e indicador de busy no composer.
   const anyLiveTask = useParallelTaskStore(s => {
     for (const r of s.runs.values()) {
       if (r.status === 'running' || r.status === 'queued') return true
     }
     return false
   })
-  // A sessão VISÍVEL é de uma tarefa viva? O Stop do composer é posicional:
+  // A sessão VISÍVEL é de um project-run vivo? O Stop do composer é posicional:
   // para o run desta vista, não o global.
   const activeSessionIdForRun = useChatStore(s => s.activeSessionId)
   const viewedTaskBusy = useParallelTaskStore(s => {
@@ -137,32 +111,6 @@ export function usePromptBar() {
     }
     return false
   })
-
-  // Reset the Steer/Task toggle whenever the agent goes idle — the toggle
-  // only has meaning against a live run, and the parity default (steer)
-  // must be restored for the next one.
-  useEffect(() => {
-    if (!isAgentBusy && !anyLiveTask) setQueueAsTask(false)
-  }, [isAgentBusy, anyLiveTask])
-
-  // Sidebar "+ Nova tarefa" (and any other surface) can request task mode +
-  // focus without reaching into this hook's local state.
-  useEffect(() => {
-    const onNewTask = () => {
-      const tasksAlive = (() => {
-        for (const r of useParallelTaskStore.getState().runs.values()) {
-          if (r.status === 'running' || r.status === 'queued') return true
-        }
-        return false
-      })()
-      if (!getQueryGuard().getSnapshot() && !tasksAlive) return
-      setQueueAsTask(true)
-      // Defer focus so the composer re-render (toggle visible) lands first.
-      requestAnimationFrame(() => textareaRef.current?.focus())
-    }
-    window.addEventListener('app:new-task', onNewTask)
-    return () => window.removeEventListener('app:new-task', onNewTask)
-  }, [])
 
   const currentProject = useProjectStore(s => s.currentProject)
   const viewMode = useLayoutStore(s => s.viewMode)
@@ -650,6 +598,22 @@ export function usePromptBar() {
       chatStore.createSession(projectPath)
     }
 
+    // F2 (in-window multi-project): freeze the session + project THIS run owns
+    // BEFORE any await, mirroring agentRunner (200-204, 339-345). Without this
+    // the chat path was UNBOUND: a mid-prep/mid-run project switch moved
+    // activeSessionId (streaming A's reply into project B's transcript) and
+    // re-pointed getProjectRoot() / path-scope / permission grants at the newly
+    // focused project. Cleared in the finally around the run.
+    const boundSessionId = useChatStore.getState().activeSessionId
+    if (boundSessionId) useChatStore.getState().pinStreamingSession(boundSessionId)
+    const boundProjectContext =
+      currentProject?.id && currentProject.path
+        ? { projectId: currentProject.id, projectPath: currentProject.path }
+        : null
+    if (boundProjectContext) {
+      ToolExecutor.getInstance().setProjectContext(boundProjectContext)
+    }
+
     // Render the user's bubble + assistant placeholder BEFORE the async
     // augmentation step (mention resolution + attachment disk reads can
     // take 50–500ms). Display extraction is sync, so we can paint the
@@ -686,6 +650,8 @@ export function usePromptBar() {
     if (!runOptions?.reuseAssistantMessage) {
       chatStore.startAssistantMessage(
         AgentService.getInstance().isThinkingRequestedForNextTurn(),
+        AgentService.getInstance().getEffortStampForNextTurn(),
+        boundSessionId ?? undefined,
       )
     }
     if (bootstrapOnly) {
@@ -798,7 +764,7 @@ export function usePromptBar() {
       // (mainDispatch) — a mesma função que serve o agentRunner e as
       // tarefas. Este bloco era o gémeo que divergiu 3× (steering, volátil,
       // classificador); a doutrina vive no cabeçalho do módulo.
-      const mcpToolSummaries = refreshMcpForDispatch()
+      const mcpToolSummaries = refreshMcpForDispatch(projectPath || undefined)
       const userMessageText = bootstrapOnly && tmsPreflight
         ? buildTmsBootstrapOnlyPrompt(tmsPreflight, display.text)
         : display.text
@@ -858,6 +824,13 @@ export function usePromptBar() {
       logger.error('prompt', 'runAgentForPrompt failed:', error)
       useChatStore.getState().addSystemMessage(`A tarefa não pôde continuar: ${message}`, 'error')
       hadError = true
+    } finally {
+      // F2: unbind the run's project context so the next main run (possibly on
+      // a different project after a mid-run switch) re-binds cleanly. Mirror
+      // agentRunner:602-606.
+      if (boundProjectContext) {
+        try { ToolExecutor.getInstance().setProjectContext(null) } catch { /* best-effort */ }
+      }
     }
 
     // Restore the preview pane if a browser-driven session hid it (capture_url_design
@@ -1094,19 +1067,28 @@ export function usePromptBar() {
 
     // ── Fase 3 (modelo foreground): composer fala com a SESSÃO EM FOCO ──
     // Sessão de uma tarefa paralela viva ativa → a mensagem steera ESSA
-    // tarefa: bolha escrita já no chat dela, texto drenado pelo runner no
-    // próximo turn boundary (paridade com o steering do main). Corre ANTES
-    // do setQueuePaused(false): orientar uma tarefa não pode despausar a
-    // fila do MAIN. "Nova tarefa" (queueAsTask) tem precedência — lança
-    // outra tarefa em vez de steerar.
-    if (!queueAsTask) {
+    // tarefa: bolha escrita já no chat dela, payload drenado pelo runner no
+    // próximo turn boundary (paridade com o steering do main, incl. anexos).
+    // Corre ANTES do setQueuePaused(false): orientar um project-run não pode
+    // despausar a fila do MAIN.
+    {
       const activeId = useChatStore.getState().activeSessionId
       if (activeId) {
         const taskStore = useParallelTaskStore.getState()
         for (const r of taskStore.runs.values()) {
           if (r.sessionId === activeId && (r.status === 'running' || r.status === 'queued')) {
-            useChatStore.getState().appendMessageToSession(activeId, { role: 'user', content: prompt })
-            taskStore.enqueueSteer(r.id, prompt)
+            const draftAtts = [...useChatStore.getState().draftAttachments]
+            const blocks: import('../../types/chat').PromptBlock[] = []
+            if (prompt.trim()) blocks.push({ type: 'text', text: prompt })
+            for (const att of draftAtts) blocks.push({ type: 'attachment', attachment: att })
+            const promptBlocks = blocks.length > 0 ? blocks : undefined
+            useChatStore.getState().appendMessageToSession(activeId, {
+              role: 'user',
+              content: prompt,
+              attachments: draftAtts.length > 0 ? draftAtts : undefined,
+              promptBlocks,
+            })
+            taskStore.enqueueSteer(r.id, { text: prompt, blocks: promptBlocks })
             // RACE (H42, ronda crítica): a tarefa pode terminar entre o check
             // acima e o enqueue — o sweep do runner já correu e a orientação
             // ficaria órfã em silêncio. Se o run já não está vivo, drena o
@@ -1122,50 +1104,60 @@ export function usePromptBar() {
                 })
               }
             }
-            if (useChatStore.getState().draftAttachments.length > 0) {
-              // Steering de tarefa é (por agora) só texto — sê honesto sobre
-              // o que NÃO seguiu em vez de deixar anexos cair em silêncio.
-              useChatStore.getState().appendMessageToSession(activeId, {
-                role: 'system',
-                level: 'warn',
-                content: t('parallel.steerAttachmentsIgnored'),
-              })
-            }
             useChatStore.getState().setDraftInput('')
             clearDraftAttachments()
-            logger.info('queue', `Task steer enqueued for ${r.id}: "${prompt.slice(0, 50)}"`)
+            logger.info('queue', `Task steer enqueued for ${r.id}: "${prompt.slice(0, 50)}" atts=${draftAtts.length}`)
             return
           }
         }
       }
     }
 
-    // ── Doutrina "sem deus" (2026-07-17): sessão IDLE em foco + run
-    // interativo vivo NOUTRA sessão → esta mensagem lança o AGENTE DESTA
-    // sessão (continuação com histórico, via runner paralelo) em vez de ir
-    // para a fila — a fila drena como STEERING do run da OUTRA sessão, que
-    // era o buraco posicional (a tua mensagem na vista B orientava o run de
-    // A). Sessão do run em prep (streamingSessionId ainda null) cai na fila
-    // como antes — janela de milissegundos, residual documentado.
-    if (!queueAsTask) {
+    // ── F2 multi-project: sessão em foco + main run vivo NOUTRO projecto →
+    // lança o agente DESTA sessão via runner (1 por projecto). F3: se o
+    // projecto já tem agente, addSessionAgentRun steera em vez de spawnar.
+    {
       const chatNow = useChatStore.getState()
       const activeId = chatNow.activeSessionId
       const streamingId = chatNow.streamingSessionId
-      if (activeId && streamingId && streamingId !== activeId && getQueryGuard().getSnapshot()) {
-        if (chatNow.draftAttachments.length > 0) {
-          chatNow.appendMessageToSession(activeId, {
-            role: 'system',
-            level: 'warn',
-            content: t('parallel.steerAttachmentsIgnored'),
-          })
+      const guardBusy = getQueryGuard().getSnapshot()
+      let otherRunOwnsMain = false
+      if (activeId && guardBusy) {
+        if (streamingId && streamingId !== activeId) {
+          otherRunOwnsMain = true
+        } else if (!streamingId || streamingId === activeId) {
+          try {
+            const bound = ToolExecutor.getInstance().getProjectContext()
+            const activeSession = chatNow.sessions.get(activeId)
+            if (
+              bound?.projectPath
+              && activeSession?.projectPath
+              && bound.projectPath !== activeSession.projectPath
+            ) {
+              otherRunOwnsMain = true
+            }
+          } catch { /* ToolExecutor unavailable */ }
         }
-        const launched = addSessionAgentRun(activeId, prompt)
+      }
+      if (activeId && otherRunOwnsMain) {
+        const draftAtts = [...chatNow.draftAttachments]
+        const blocks: import('../../types/chat').PromptBlock[] = []
+        if (prompt.trim()) blocks.push({ type: 'text', text: prompt })
+        for (const att of draftAtts) blocks.push({ type: 'attachment', attachment: att })
+        const launched = addSessionAgentRun(activeId, prompt, {
+          blocks: blocks.length > 0 ? blocks : undefined,
+        })
         if (launched) {
           useChatStore.getState().setDraftInput('')
           clearDraftAttachments()
-          logger.info('queue', `Session agent launched on ${activeId}: "${prompt.slice(0, 50)}"`)
+          logger.info('queue', `Session agent launched on ${activeId}: "${prompt.slice(0, 50)}" atts=${draftAtts.length}`)
         }
-        // launched=null → billing recusou e o addSessionAgentRun já anotou.
+        // launched=null → billing recusou, ou F3 same-project (já anotou).
+        // Still clear draft when message was written to session.
+        if (!launched) {
+          useChatStore.getState().setDraftInput('')
+          clearDraftAttachments()
+        }
         return
       }
     }
@@ -1190,22 +1182,6 @@ export function usePromptBar() {
       value = blocks
     }
 
-    // "New task" toggle → launch a CONCURRENT parallel task agent (v1.0.1
-    // multi-agent) instead of enqueuing a serial run. Up to 4 run at once; the
-    // rest wait in the parallel-task queue. These are independent writable
-    // agents rendered as cards (ParallelTasksDock), so they run ALONGSIDE the
-    // main interactive chat without touching its transcript/streaming.
-    if (queueAsTask) {
-      const taskPrompt = typeof value === 'string' ? value : prompt
-      if (taskPrompt.trim()) {
-        addParallelTask(taskPrompt)
-        useChatStore.getState().setDraftInput('')
-        clearDraftAttachments()
-        logger.info('queue', `Parallel task launched: "${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}"`)
-      }
-      return
-    }
-
     // The queued message lives only in the queue (rendered by
     // QueuedMessagesPreview above the input). The chat bubble is created
     // freshly when executeQueuedInput dispatches via runAgentForPrompt —
@@ -1224,7 +1200,7 @@ export function usePromptBar() {
     clearDraftAttachments()
 
     logger.info('queue', `Message enqueued: "${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}"`)
-  }, [currentProject, devCommand, runAgentForPrompt, queueAsTask])
+  }, [currentProject, devCommand, runAgentForPrompt])
 
   // Shared implementation with the status-bar Stop (stopAgentRun): drops
   // steering, PARKS queued tasks (paused, not destroyed — this handler used
@@ -1591,9 +1567,6 @@ export function usePromptBar() {
     isAgentBusy,
     anyLiveTask,
     viewedTaskBusy,
-    // Steer/Task toggle (composer, visible while the agent is busy)
-    queueAsTask,
-    setQueueAsTask,
     isScaffolding,
     isSendBlocked,
     isDisabled,

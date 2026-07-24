@@ -300,9 +300,21 @@ export function detectBackendDir(paths: Set<string>, pkg?: PackageJson): string 
   return undefined
 }
 
+const SQLITE_DB_DEPS = ['drizzle-orm', '@libsql/client', 'better-sqlite3', 'sqlite3'] as const
+
 export function detectDatabase(files: PortableFile[], pkg?: PackageJson): boolean {
   const deps = pkg ? allDeps(pkg) : new Set<string>()
-  if (['drizzle-orm', '@libsql/client', 'better-sqlite3', 'sqlite3'].some(dep => deps.has(dep))) return true
+  if (SQLITE_DB_DEPS.some(dep => deps.has(dep))) return true
+  // Multi-package scaffolds (client/ + server/): deps live in server/package.json,
+  // not the root. Old pre-Turso projects almost always look like this.
+  for (const backend of BACKEND_DIR_CANDIDATES) {
+    const backendPkgFile = files.find(file => file.path === `${backend}/package.json` && file.encoding !== 'base64')
+    if (!backendPkgFile) continue
+    try {
+      const backendPkg = JSON.parse(backendPkgFile.content) as PackageJson
+      if (SQLITE_DB_DEPS.some(dep => allDeps(backendPkg).has(dep))) return true
+    } catch { /* ignore */ }
+  }
   return files.some(file => {
     if (file.encoding === 'base64') return false
     if (/(?:^|\/)schema\.(?:ts|js)$/i.test(file.path) && /\bsqliteTable\s*\(/.test(file.content)) return true
@@ -532,13 +544,40 @@ async function applyStatementsResumable(
  * to the local .env (same behaviour as the explicit `provision_database`
  * tool), so the exported env points the app at the managed DB instead of the
  * local .db file, and Web deploys reuse the SAME database via the app id.
+ *
+ * Pre-Turso projects (local .db only, no TMDB_*):
+ *  1. Read the local SQLite file → schema migration + data seed (INSERTs)
+ *  2. Provision Turso
+ *  3. Apply migration then seed on the managed DB
+ *  4. Caller rewrites the db entrypoint to managed-only and continues export
+ * The local .db itself is never uploaded.
  */
 async function provisionDatabaseForExport(
   project: { id: string; path: string },
   token: string,
   migrationStatements: string[],
   onProgress?: (progress: WebExportProgress) => void,
-): Promise<{ dbName: string; reused: boolean }> {
+  options?: { backendDir?: string },
+): Promise<{ dbName: string; reused: boolean; schemaSource: 'files' | 'local-db' | 'none'; seedRows: number }> {
+  // ── 1. Build migration + seed BEFORE provisioning ────────────────────
+  // Prefer committed drizzle/migration .sql files. When the project only has
+  // a local .db (older scaffolds that never ran drizzle generate, or data that
+  // drifted), derive CREATE TABLE / indexes from sqlite_master and seed from
+  // the rows. Local file is a source for SQL only — never shipped as-is.
+  const dump = await dumpLocalDatabaseData(project.path, options?.backendDir)
+
+  let schemaStatements = migrationStatements
+  let schemaSource: 'files' | 'local-db' | 'none' = migrationStatements.length > 0 ? 'files' : 'none'
+  if (schemaStatements.length === 0 && dump && dump.schemaStatements.length > 0) {
+    schemaStatements = dump.schemaStatements
+    schemaSource = 'local-db'
+  }
+  // Prefer file migrations for schema, but ALWAYS take seed rows from the
+  // live local DB so pre-Turso data is not left behind on the laptop.
+  const seedStatements = dump?.statements ?? []
+  const seedRows = dump?.rows ?? 0
+
+  // ── 2. Provision Turso (idempotent) ──────────────────────────────────
   const response = await tauriFetch(
     `${resolveWorkerUrl()}/v1/apps/${encodeURIComponent(project.id)}/database/provision`,
     {
@@ -560,41 +599,33 @@ async function provisionDatabaseForExport(
     throw new Error(`Database provisioning returned incomplete data: ${JSON.stringify(data)}`)
   }
 
-  // Apply the project's migrations to the MANAGED database right away, so it
-  // has tables before the project lands on Web. The migrate endpoint STOPS at
-  // the first failing statement — on a database with residue from previous
-  // exports/tests the early statements legitimately fail ("already exists",
-  // seed rows hitting UNIQUE), so we RESUME from the next statement instead
-  // of silently dropping the rest (or aborting on idempotent noise).
-  if (migrationStatements.length > 0) {
+  // ── 3. Apply migration then seed on the managed database ─────────────
+  // The migrate endpoint STOPS at the first failing statement — on a database
+  // with residue from previous exports the early statements legitimately fail
+  // ("already exists", seed rows hitting UNIQUE), so we RESUME from the next
+  // statement instead of silently dropping the rest.
+  if (schemaStatements.length > 0) {
     await applyStatementsResumable(
       project.id,
       token,
-      migrationStatements,
+      schemaStatements,
       /already exists|duplicate column|UNIQUE constraint|PRIMARY KEY constraint/i,
       'Applying migrations to the managed database',
     )
-    onProgress?.({ phase: 'db-migrated', statements: migrationStatements.length })
-
-    // DATA migration: the rows the developer already has in the local .db
-    // travel to the managed database too. INSERT OR IGNORE + tolerated
-    // constraint classes keep re-exports idempotent; the dump orders tables
-    // parents-first so FK-enforced databases accept them.
-    onProgress?.({ phase: 'db-data-start' })
-    const dump = await dumpLocalDatabaseData(project.path)
-    if (dump && dump.statements.length > 0) {
-      await applyStatementsResumable(
-        project.id,
-        token,
-        dump.statements,
-        /UNIQUE constraint|PRIMARY KEY constraint/i,
-        'Copying local data to the managed database',
-      )
-      onProgress?.({ phase: 'db-data', rows: dump.rows })
-    } else {
-      onProgress?.({ phase: 'db-data', rows: 0 })
-    }
+    onProgress?.({ phase: 'db-migrated', statements: schemaStatements.length })
   }
+
+  if (seedStatements.length > 0) {
+    onProgress?.({ phase: 'db-data-start' })
+    await applyStatementsResumable(
+      project.id,
+      token,
+      seedStatements,
+      /UNIQUE constraint|PRIMARY KEY constraint/i,
+      'Seeding local data into the managed database',
+    )
+  }
+  onProgress?.({ phase: 'db-data', rows: seedRows })
 
   // Positive proof of life, not just a 200 from the provision endpoint: ask
   // the database for its TABLES through the returned URL + token. This
@@ -621,7 +652,7 @@ async function provisionDatabaseForExport(
       `Export aborted — nothing was sent. ${body.slice(0, 200)}`,
     )
   }
-  if (migrationStatements.length > 0) {
+  if (schemaStatements.length > 0) {
     const probeData = await probe.json().catch(() => null) as { rows?: unknown[][] } | null
     const tableCount = Number(probeData?.rows?.[0]?.[0] ?? 0)
     if (!Number.isFinite(tableCount) || tableCount <= 0) {
@@ -638,7 +669,12 @@ async function provisionDatabaseForExport(
       { key: 'TMDB_TOKEN', value: data.tmdbToken },
     ],
   })
-  return { dbName: data.dbName, reused: data.reused === true }
+  return {
+    dbName: data.dbName,
+    reused: data.reused === true,
+    schemaSource,
+    seedRows,
+  }
 }
 
 export type WebExportProgress =
@@ -651,37 +687,49 @@ export type WebExportProgress =
   | { phase: 'db-linked' }
   | { phase: 'uploading'; envVarCount: number }
 
-// ── Migração de DADOS do .db local para a base gerida ────────────────────
+// ── Migration + seed a partir do .db local ───────────────────────────────
 //
-// Script executado DENTRO do projeto (cwd = raiz) com o Node do developer:
-// encontra o ficheiro SQLite local, abre-o com o @libsql/client do próprio
-// projeto (contrato dos scaffolds TM; fallback better-sqlite3) e imprime um
-// JSON com INSERT OR IGNORE idempotentes — re-exportar não duplica registos.
+// Pre-Turso projects keep data in a local SQLite file and deps often live in
+// server/node_modules (not the monorepo root). The dump script therefore:
+//   - runs with cwd = the package that owns @libsql/client / better-sqlite3
+//   - emits schemaStatements (CREATE TABLE/INDEX) + seed INSERTs
+//   - never ships the .db binary — only SQL for the managed Turso DB
 // A tabela de bookkeeping do drizzle fica de fora.
 const DB_DATA_DUMP_SCRIPT = `
 import fs from 'node:fs'
 import path from 'node:path'
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
 
 const MAX_SQL_BYTES = 8 * 1024 * 1024
+// Resolve packages from THIS file's directory (script is written into the
+// backend package root), so server/node_modules is found for multi-package
+// projects — never rely on monorepo root alone.
+const require = createRequire(import.meta.url)
 
 const candidates = []
-for (const dir of ['.', 'server', 'backend', 'data']) {
+for (const dir of ['.', 'data', 'server', 'backend', path.join('..', 'data')]) {
   try {
     for (const name of fs.readdirSync(dir)) {
-      if (/\\.(db|sqlite3?|db3)$/i.test(name)) candidates.push(dir === '.' ? name : path.join(dir, name))
+      if (/\\.(db|sqlite3?|db3)$/i.test(name)) candidates.push(path.join(dir, name))
     }
   } catch {}
 }
 const dbFile = candidates[0] ?? null
 if (!dbFile) {
-  console.log(JSON.stringify({ dbFile: null, rows: 0, statements: [] }))
+  console.log(JSON.stringify({ dbFile: null, rows: 0, statements: [], schemaStatements: [] }))
   process.exit(0)
 }
 
 async function openDb() {
+  const abs = path.resolve(dbFile)
+  const fileUrl = 'file:' + abs.split(path.sep).join('/')
+  // Prefer require.resolve so multi-package layouts (cwd = server/) find
+  // node_modules next to package.json even when the script is a temp file.
   try {
-    const { createClient } = await import('@libsql/client')
-    const client = createClient({ url: 'file:' + dbFile.split(path.sep).join('/') })
+    const libsqlPath = require.resolve('@libsql/client')
+    const { createClient } = await import(pathToFileURL(libsqlPath).href)
+    const client = createClient({ url: fileUrl })
     return {
       query: async (sql) => {
         const result = await client.execute(sql)
@@ -689,15 +737,26 @@ async function openDb() {
       },
       close: () => client.close(),
     }
-  } catch {}
-  const better = (await import('better-sqlite3')).default
-  const database = new better(dbFile, { readonly: true })
-  return {
-    query: async (sql) => {
-      const rows = database.prepare(sql).all()
-      return { columns: rows.length > 0 ? Object.keys(rows[0]) : [], rows }
-    },
-    close: () => database.close(),
+  } catch (libsqlErr) {
+    try {
+      const betterPath = require.resolve('better-sqlite3')
+      const better = (await import(pathToFileURL(betterPath).href)).default
+      const database = new better(abs, { readonly: true })
+      return {
+        query: async (sql) => {
+          const rows = database.prepare(sql).all()
+          return { columns: rows.length > 0 ? Object.keys(rows[0]) : [], rows }
+        },
+        close: () => database.close(),
+      }
+    } catch (betterErr) {
+      console.error(
+        'Could not open local SQLite. Install @libsql/client or better-sqlite3 in the backend package. ' +
+        'libsql: ' + String(libsqlErr && libsqlErr.message || libsqlErr) +
+        ' | better-sqlite3: ' + String(betterErr && betterErr.message || betterErr),
+      )
+      process.exit(1)
+    }
   }
 }
 
@@ -710,6 +769,16 @@ function sqlValue(value) {
     return "X'" + Buffer.from(value).toString('hex') + "'"
   }
   return "'" + String(value).replace(/'/g, "''") + "'"
+}
+
+function rowField(row, col, index) {
+  if (Array.isArray(row)) return row[index]
+  if (row && typeof row === 'object') {
+    if (col in row) return row[col]
+    // libsql Row is array-like with named props
+    if (typeof row[index] !== 'undefined') return row[index]
+  }
+  return null
 }
 
 const db = await openDb()
@@ -750,6 +819,27 @@ try {
   }
   for (const table of tables) if (!placed.has(table)) ordered.push(table)
 
+  // Schema migration derived from the live local DB (for projects without
+  // committed drizzle .sql, or as a fallback when file migrations are empty).
+  const schemaStatements = []
+  for (const table of ordered) {
+    const result = await db.query(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '" + String(table).replace(/'/g, "''") + "' AND sql IS NOT NULL",
+    )
+    const sql = result.rows[0]
+      ? (Array.isArray(result.rows[0]) ? result.rows[0][0] : result.rows[0].sql)
+      : null
+    if (sql) schemaStatements.push(String(sql))
+  }
+  const extras = await db.query(
+    "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND type IN ('index','trigger') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '__drizzle%'",
+  )
+  for (const row of extras.rows) {
+    const sql = Array.isArray(row) ? row[0] : row.sql
+    if (sql) schemaStatements.push(String(sql))
+  }
+
+  // Seed: idempotent INSERT OR IGNORE so re-exports do not duplicate rows.
   const statements = []
   let totalRows = 0
   let totalBytes = 0
@@ -757,53 +847,97 @@ try {
     const result = await db.query('SELECT * FROM "' + String(table).replace(/"/g, '""') + '"')
     if (result.rows.length === 0) continue
     const columns = result.columns
+    if (!columns || columns.length === 0) continue
     const columnSql = columns.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(', ')
     for (const row of result.rows) {
-      const values = columns.map((col, index) => sqlValue(Array.isArray(row) ? row[index] : row[col])).join(', ')
+      const values = columns.map((col, index) => sqlValue(rowField(row, col, index))).join(', ')
       const statement = 'INSERT OR IGNORE INTO "' + String(table).replace(/"/g, '""') + '" (' + columnSql + ') VALUES (' + values + ')'
       totalBytes += statement.length
       if (totalBytes > MAX_SQL_BYTES) {
-        console.log(JSON.stringify({ dbFile, error: 'too-large', rows: totalRows }))
+        console.log(JSON.stringify({ dbFile, error: 'too-large', rows: totalRows, schemaStatements }))
         process.exit(0)
       }
       statements.push(statement)
       totalRows += 1
     }
   }
-  console.log(JSON.stringify({ dbFile, rows: totalRows, statements }))
+  console.log(JSON.stringify({ dbFile, rows: totalRows, statements, schemaStatements }))
 } finally {
   try { db.close() } catch {}
 }
 `
 
-const DB_DUMP_SCRIPT_PATH = '.toquemedia/tm-export-db-dump.mjs'
+const DB_DUMP_SCRIPT_NAME = '.tm-export-db-dump.mjs'
 
 interface LocalDatabaseDump {
   dbFile: string
   rows: number
   statements: string[]
+  schemaStatements: string[]
 }
 
 /**
- * Dump the local SQLite data as idempotent INSERT statements, using the
- * project's own runtime (Node + @libsql/client from its node_modules).
- * Returns null when the project has no local database file.
+ * Pick the package directory that can resolve the SQLite client, and where
+ * the local .db usually lives. Multi-package (server/ + client/) projects
+ * keep deps under server/; single-package scaffolds keep them at the root.
  */
-async function dumpLocalDatabaseData(projectPath: string): Promise<LocalDatabaseDump | null> {
-  await invoke('write_file', { path: `${projectPath}/${DB_DUMP_SCRIPT_PATH}`, content: DB_DATA_DUMP_SCRIPT })
+async function resolveDumpWorkingDir(projectPath: string, backendDir?: string): Promise<string> {
+  const candidates = [
+    backendDir ? `${projectPath}/${backendDir}` : null,
+    `${projectPath}/server`,
+    `${projectPath}/backend`,
+    projectPath,
+  ].filter((value): value is string => Boolean(value))
+
+  for (const dir of candidates) {
+    for (const marker of [
+      'node_modules/@libsql/client/package.json',
+      'node_modules/better-sqlite3/package.json',
+    ]) {
+      try {
+        await invoke('read_file', { path: `${dir}/${marker}` })
+        return dir
+      } catch { /* try next */ }
+    }
+  }
+  // Fall back to backend (or root) even without install — the dump script
+  // will fail with a clear "run npm install" message.
+  return backendDir ? `${projectPath}/${backendDir}` : projectPath
+}
+
+/**
+ * Dump local SQLite as schema (CREATE) + seed (INSERT OR IGNORE) SQL, using
+ * the project's own Node + @libsql/client / better-sqlite3.
+ * Returns null when no local .db file is found.
+ */
+async function dumpLocalDatabaseData(
+  projectPath: string,
+  backendDir?: string,
+): Promise<LocalDatabaseDump | null> {
+  const cwd = await resolveDumpWorkingDir(projectPath, backendDir)
+  const scriptPath = `${cwd}/${DB_DUMP_SCRIPT_NAME}`
+  await invoke('write_file', { path: scriptPath, content: DB_DATA_DUMP_SCRIPT })
   try {
+    // Quote-free relative path: works on Windows cmd and POSIX shells.
+    // Script is written into cwd so node always finds it.
     const result = await invoke<{ stdout: string; stderr: string; success: boolean; exitCode: number }>(
       'execute_command',
-      { command: `node "${DB_DUMP_SCRIPT_PATH}"`, cwd: projectPath, timeoutSecs: 90 },
+      { command: `node ${DB_DUMP_SCRIPT_NAME}`, cwd, timeoutSecs: 90 },
     )
     if (!result.success) {
       throw new Error(
         `Reading the local database data failed (exit ${result.exitCode}): ${(result.stderr || result.stdout).slice(0, 300)}. ` +
-        'Export aborted — nothing was sent. Run "npm install" in the project and retry.',
+        'Export aborted — nothing was sent. Run "npm install" in the project (and server/ if present) and retry.',
       )
     }
     const jsonLine = result.stdout.trim().split('\n').pop() ?? ''
-    let parsed: { dbFile: string | null; rows?: number; statements?: string[]; error?: string }
+    let parsed: {
+      dbFile: string | null
+      rows?: number
+      statements?: string[]
+      schemaStatements?: string[]
+      error?: string
+    }
     try {
       parsed = JSON.parse(jsonLine)
     } catch {
@@ -815,14 +949,19 @@ async function dumpLocalDatabaseData(projectPath: string): Promise<LocalDatabase
         `The local database (${parsed.dbFile}) has too much data to migrate automatically (limit 8MB of SQL). Export aborted.`,
       )
     }
-    return { dbFile: parsed.dbFile, rows: parsed.rows ?? 0, statements: parsed.statements ?? [] }
+    return {
+      dbFile: parsed.dbFile,
+      rows: parsed.rows ?? 0,
+      statements: parsed.statements ?? [],
+      schemaStatements: parsed.schemaStatements ?? [],
+    }
   } finally {
-    try { await FileService.deleteFile(`${projectPath}/${DB_DUMP_SCRIPT_PATH}`) } catch { /* best-effort cleanup */ }
+    try { await FileService.deleteFile(scriptPath) } catch { /* best-effort cleanup */ }
   }
 }
 
 /** Drizzle migration .sql files → individual statements for the migrate endpoint. */
-function collectMigrationStatements(files: PortableFile[]): string[] {
+export function collectMigrationStatements(files: PortableFile[]): string[] {
   const sqlFiles = files
     .filter(file => file.encoding !== 'base64')
     .filter(file => /\.sql$/i.test(file.path))
@@ -899,24 +1038,64 @@ export { schema };
 `
 
 /**
- * Point the exported copy's db.ts at the managed database ONLY. Applies just
- * to the TM scaffold contract (a {server|backend}/db.ts that already has the
- * TMDB production branch plus a local-file dev branch) — anything else is
- * left untouched and reported via a compatibility warning.
+ * Point the exported copy's DB entry at the managed database ONLY.
+ *
+ * Covers:
+ *  - current TM scaffold: {server|backend}/db.ts with dual TMDB + local branch
+ *  - pre-Turso projects: {server|backend}/src/db/index.ts (or db.ts) that only
+ *    open file:./dev.db / DATABASE_URL — these must be rewritten so Web never
+ *    tries to open a local SQLite file that was not exported.
  */
-function rewriteDbFileToManaged(payload: ExportPackage): { rewritten: boolean; path?: string } {
+export function rewriteDbFileToManaged(payload: ExportPackage): { rewritten: boolean; path?: string } {
   const backendDir = payload.compatibility.backendDir
   if (!backendDir) return { rewritten: false }
-  const dbFile = payload.files.find(file => file.path === `${backendDir}/db.ts` || file.path === `${backendDir}/db.js`)
-  if (!dbFile) return { rewritten: false }
-  const matchesContract = dbFile.content.includes('TMDB_URL')
-    && (dbFile.content.includes('dev.db') || dbFile.content.includes('DATABASE_URL'))
-  if (!matchesContract) {
+
+  const candidates = [
+    `${backendDir}/db.ts`,
+    `${backendDir}/db.js`,
+    `${backendDir}/src/db.ts`,
+    `${backendDir}/src/db.js`,
+    `${backendDir}/src/db/index.ts`,
+    `${backendDir}/src/db/index.js`,
+  ]
+  const dbFile = candidates
+    .map(path => payload.files.find(file => file.path === path && file.encoding !== 'base64'))
+    .find((file): file is PortableFile => Boolean(file))
+
+  if (!dbFile) {
     payload.compatibility.warnings.push(
-      `Could not automatically point "${dbFile.path}" at the managed database — it does not follow the standard contract. Review it on Web.`,
+      'Could not find a database entry file to point at the managed database (looked for db.ts / src/db/index.ts under the backend). Review the DB setup on Web.',
     )
     return { rewritten: false }
   }
+
+  const looksLikeLocalDb =
+    /\b(DATABASE_URL|dev\.db|createClient|better-sqlite3|libsql|drizzle\s*\()/i.test(dbFile.content)
+    || dbFile.content.includes('TMDB_URL')
+  if (!looksLikeLocalDb) {
+    payload.compatibility.warnings.push(
+      `Could not automatically point "${dbFile.path}" at the managed database — it does not look like a SQLite/libSQL entry. Review it on Web.`,
+    )
+    return { rewritten: false }
+  }
+
+  // When the entry lives under src/db/, schema is a sibling (./schema.js).
+  // When it lives at backend/db.ts (scaffold), schema is also ./schema.js.
+  // MANAGED_DB_FILE already imports './schema.js' — matches both layouts when
+  // schema.ts sits next to the entry (or is re-exported from the same folder).
+  // For backend/db.ts that imports from './db/schema' we keep the managed file
+  // and warn if schema.js is not a sibling of the rewritten path.
+  const entryDir = dbFile.path.includes('/') ? dbFile.path.slice(0, dbFile.path.lastIndexOf('/')) : ''
+  const siblingSchema = payload.files.some(file =>
+    file.path === `${entryDir}/schema.ts` || file.path === `${entryDir}/schema.js`,
+  )
+  if (!siblingSchema) {
+    // Still rewrite — Web agent can fix the import — but surface a warning.
+    payload.compatibility.warnings.push(
+      `Rewrote "${dbFile.path}" to the managed database driver; no sibling schema.ts was found next to it. Confirm the schema import on Web.`,
+    )
+  }
+
   dbFile.content = MANAGED_DB_FILE
   return { rewritten: true, path: dbFile.path }
 }
@@ -937,7 +1116,8 @@ export async function sendProjectToTmCodeWeb(
   // DB-first: a project that uses a database must have its managed DB
   // provisioned BEFORE it lands on Web — blocking on purpose (user decision):
   // exporting an app that still points at file:./dev.db just ships a broken
-  // backend. Provisioning also rewrites .env to point at the managed DB.
+  // backend. For pre-Turso projects this also builds migration+seed from the
+  // local .db, applies them on Turso, then rewrites the entry to managed-only.
   if (payload.compatibility.hasDatabase) {
     // No silent skip: a database project without an app identity cannot be
     // provisioned, so it must not be exported at all.
@@ -951,8 +1131,15 @@ export async function sendProjectToTmCodeWeb(
       token,
       migrationStatements,
       onProgress,
+      { backendDir: payload.compatibility.backendDir },
     )
-    payload.metadata.database = { provisioned: true, dbName: provisioned.dbName, reused: provisioned.reused }
+    payload.metadata.database = {
+      provisioned: true,
+      dbName: provisioned.dbName,
+      reused: provisioned.reused,
+      schemaSource: provisioned.schemaSource,
+      seedRows: provisioned.seedRows,
+    }
     onProgress?.({ phase: 'db-ready', dbName: provisioned.dbName, reused: provisioned.reused })
     onProgress?.({ phase: 'db-verified' })
 

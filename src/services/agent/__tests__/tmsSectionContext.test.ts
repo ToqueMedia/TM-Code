@@ -38,9 +38,10 @@ describe('tmsSectionContext', () => {
     expect(context).not.toContain('Confirm release signing flow')
   })
 
-  it('recognizes registered tms.* auxiliary ids', () => {
+  it('parses well-formed tms.* section ids (legacy id shape; not request_context auxiliaries)', () => {
     expect(isTmsSectionContextId('tms.commands')).toBe(true)
     expect(tmsSectionContextKeyFromId('tms.pending_confirmation')).toBe('pending_confirmation')
     expect(isTmsSectionContextId('tms.unknown')).toBe(false)
   })
 })
+

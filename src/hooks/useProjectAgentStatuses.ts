@@ -6,6 +6,9 @@
  * only the statuses worth showing: `idle` entries and stale `running` entries
  * (dead writer — no heartbeat inside the staleness window) are filtered out
  * here so the UI never renders a lying badge.
+ *
+ * Poll cadence: see projectAgentStatusPoll.ts (~1.5s focused / 3s background)
+ * + immediate re-poll on focus/visibilitychange.
  */
 
 import { useEffect, useState } from 'react'
@@ -14,10 +17,18 @@ import {
   PROJECT_AGENT_STATUS_STALE_MS,
   type ProjectAgentStatus,
 } from '@/services/projectAgentStatusService'
+import {
+  projectAgentStatusPollIntervalMs,
+  PROJECT_AGENT_STATUS_POLL_FOCUSED_MS,
+  PROJECT_AGENT_STATUS_POLL_MS,
+} from '@/services/projectAgentStatusPoll'
 
 export type { ProjectAgentStatus } from '@/services/projectAgentStatusService'
-
-const POLL_INTERVAL_MS = 3_000
+export {
+  PROJECT_AGENT_STATUS_POLL_FOCUSED_MS,
+  PROJECT_AGENT_STATUS_POLL_MS,
+  projectAgentStatusPollIntervalMs,
+}
 
 export function useProjectAgentStatuses(
   paths: string[],
@@ -35,6 +46,7 @@ export function useProjectAgentStatuses(
     }
     const pollPaths = pathsKey.split('\n')
     let active = true
+    let timer: ReturnType<typeof setInterval> | null = null
 
     const poll = async () => {
       try {
@@ -61,11 +73,34 @@ export function useProjectAgentStatuses(
       }
     }
 
+    const arm = () => {
+      if (timer) {
+        clearInterval(timer)
+        timer = null
+      }
+      if (!active) return
+      timer = setInterval(() => void poll(), projectAgentStatusPollIntervalMs())
+    }
+
     void poll()
-    const timer = setInterval(() => void poll(), POLL_INTERVAL_MS)
+    arm()
+
+    const onVis = () => {
+      void poll() // immediate refresh on focus
+      arm()
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVis)
+      window.addEventListener('focus', onVis)
+    }
+
     return () => {
       active = false
-      clearInterval(timer)
+      if (timer) clearInterval(timer)
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVis)
+        window.removeEventListener('focus', onVis)
+      }
     }
   }, [pathsKey, enabled])
 

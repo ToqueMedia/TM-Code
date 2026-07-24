@@ -91,6 +91,12 @@ interface SettingsState {
    *  DEFAULT ON por design (decisão do user 2026-07-16: git é requisito da
    *  IDE; sem repo, o sistema cria um local). O toggle fica como escape. */
   parallelTaskWorktrees: boolean
+  /**
+   * When true, refuse to open a project that another TM Code window already
+   * holds a fresh lock for (no "Open anyway"). Default false — warning only.
+   * ARCHITECTURE Current parallel model: optional hard lock.
+   */
+  hardBlockSecondProjectWindow: boolean
   chatTextFontSize: ChatTextFontSize
   /** Commands that require explicit developer approval every time the agent uses them.
    *  Empty by default (nothing blocked). User selects which commands to flag in Settings. */
@@ -106,6 +112,7 @@ interface SettingsActions {
   setAutocompleteOllamaUrl: (url: string) => void
   setSandboxEnabled: (enabled: boolean) => void
   setParallelTaskWorktrees: (enabled: boolean) => void
+  setHardBlockSecondProjectWindow: (enabled: boolean) => void
   setFlaggedCommands: (commands: string[]) => void
   toggleFlaggedCommand: (command: string) => void
   setFormatOnSave: (value: boolean) => void
@@ -138,6 +145,7 @@ const DEFAULTS: SettingsState = {
   hasCompletedOnboarding: false,
   sandboxEnabled: false,
   parallelTaskWorktrees: true,
+  hardBlockSecondProjectWindow: false,
   chatTextFontSize: DEFAULT_CHAT_TEXT_FONT_SIZE,
   flaggedCommands: [],
 }
@@ -201,6 +209,10 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
 
       setParallelTaskWorktrees: (enabled: boolean) => {
         set(() => ({ parallelTaskWorktrees: enabled }))
+      },
+
+      setHardBlockSecondProjectWindow: (enabled: boolean) => {
+        set(() => ({ hardBlockSecondProjectWindow: enabled }))
       },
 
       setSandboxEnabled: (enabled: boolean) => {

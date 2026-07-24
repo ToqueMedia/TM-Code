@@ -14,7 +14,7 @@ interface PendingCredentialRequest {
   serviceName: string
   fields: CredentialField[]
   /** Tarefa paralela que pediu (badge "Credenciais" nas task rows). */
-  origin?: { taskId: string; label: string }
+  origin?: { taskId: string; label: string; sessionId?: string; projectId?: string }
   resolve: (result: { submitted: boolean; keys?: string[] }) => void
 }
 
@@ -37,7 +37,7 @@ interface CredentialRequestActions {
   request: (input: {
     serviceName: string
     fields: CredentialField[]
-    origin?: { taskId: string; label: string }
+    origin?: { taskId: string; label: string; sessionId?: string; projectId?: string }
   }) => { id: string; promise: Promise<{ submitted: boolean; keys?: string[] }> }
   submit: (id: string, projectPath: string, values: Record<string, string>) => Promise<void>
   cancel: (id: string) => void

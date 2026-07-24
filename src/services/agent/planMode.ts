@@ -12,7 +12,7 @@ import {
   READ_FILE, READ_AROUND, LIST_DIRECTORY, GLOB, SEARCH_FILES,
   READ_SKILL, READ_LARGE_RESULT,
   UPDATE_TASKS, COLLECT_RESULTS,
-  WEB_SEARCH, WEB_FETCH, DELEGATE,
+  WEB_SEARCH, WEB_FETCH, CAPTURE_URL_DESIGN, DELEGATE,
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
   ASK_USER_QUESTION,
   canonicalToolName,
@@ -27,7 +27,7 @@ export const PLAN_MODE_ALLOWED_TOOLS: ReadonlySet<string> = new Set<string>([
   // Internal task list (not project files)
   UPDATE_TASKS, COLLECT_RESULTS,
   // Delegation + research while drafting the plan
-  WEB_SEARCH, WEB_FETCH, DELEGATE,
+  WEB_SEARCH, WEB_FETCH, CAPTURE_URL_DESIGN, DELEGATE,
   // Writing the deliverable. Path-restricted to the active plan artefact / TODO.md below.
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
   // Structured clarifying questions — blocks the agent loop until the developer answers
@@ -92,7 +92,7 @@ export function checkPlanModeAccess(
   if (!PLAN_MODE_ALLOWED_TOOLS.has(toolName)) {
     const allowedList = [
       READ_FILE, READ_AROUND, LIST_DIRECTORY, GLOB, SEARCH_FILES, READ_SKILL,
-      UPDATE_TASKS, WEB_SEARCH, WEB_FETCH, ASK_USER_QUESTION,
+      UPDATE_TASKS, WEB_SEARCH, WEB_FETCH, CAPTURE_URL_DESIGN, ASK_USER_QUESTION,
     ].join(', ')
     return `Blocked in /plan architect mode: ${toolName} is an implementation tool. Document what this step would do in ${planLabel}'s Implementation Phases section — the coding agent will run it after the user approves the plan. Allowed in this mode: ${allowedList}, ${WRITE_FILE}/${CREATE_FILE}/${EDIT_FILE} (${planLabel} or TODO.md only).`
   }

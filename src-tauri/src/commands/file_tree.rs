@@ -1060,7 +1060,7 @@ pub async fn read_file_range_with_signature(
 
             if byte == b'\n' {
                 if in_range {
-                    if current_selected_line.ends_with(&[b'\r']) {
+                    if current_selected_line.ends_with(b"\r") {
                         current_selected_line.pop();
                     }
                     if selected_lines > 0 {
@@ -1075,17 +1075,15 @@ pub async fn read_file_range_with_signature(
         }
     }
 
-    if saw_any_byte {
-        if current_line >= start_line && current_line <= end_line {
-            if current_selected_line.ends_with(&[b'\r']) {
-                current_selected_line.pop();
-            }
-            if selected_lines > 0 {
-                selected.push(b'\n');
-            }
-            selected.extend_from_slice(&current_selected_line);
-            selected_lines += 1;
+    if saw_any_byte && current_line >= start_line && current_line <= end_line {
+        if current_selected_line.ends_with(b"\r") {
+            current_selected_line.pop();
         }
+        if selected_lines > 0 {
+            selected.push(b'\n');
+        }
+        selected.extend_from_slice(&current_selected_line);
+        selected_lines += 1;
     }
 
     let total_lines = if saw_any_byte { current_line } else { 0 };

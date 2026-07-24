@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
-import { Box, Flex, Text, Textarea } from '@chakra-ui/react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Box, Flex, Text, Textarea, Input } from '@chakra-ui/react'
 import { FiAlertTriangle, FiLock } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { usePermissionStore } from '../../stores/permissionStore'
+import { getCommandPrefix } from '@/services/agent/commandPrefix'
 import { t } from '@/i18n'
 
 /**
@@ -33,9 +34,12 @@ interface PermissionDialogProps {
   /** Descrição da tarefa paralela que originou o pedido (permissionStore
    *  origin) — o user tem de saber QUEM pergunta quando há multi-agentes. */
   originLabel?: string
+  /** Razão do classificador do Modo Auto quando o diálogo surge por escalada
+   *  (sinalizou risco em vez de negar) — mostrada para o developer ver PORQUÊ. */
+  classifierReason?: string
   approve: () => void
-  approveAlwaysInProject: () => void
-  approveAlwaysGlobal: () => void
+  approveAlwaysInProject: (commandPrefix?: string) => void
+  approveAlwaysGlobal: (commandPrefix?: string) => void
   deny: () => void
   denyWith: (reason: string) => void
 }
@@ -48,6 +52,7 @@ export default function PermissionDialog({
   promptReason,
   pathAccessTarget,
   originLabel,
+  classifierReason,
   approve,
   approveAlwaysInProject,
   approveAlwaysGlobal,
@@ -68,12 +73,29 @@ export default function PermissionDialog({
 
   const isPathAccess = promptReason === 'path_access'
 
+  // Grant por PREFIXO de comando (porte claude-vaz): para execute_command*, o
+  // "sempre permitir" concede o PREFIXO (`gcloud secrets versions add`), não a
+  // tool inteira. Sem prefixo extraível (composto/bare-shell/path) não há grant
+  // "sempre" — só "desta vez" (evita recriar o grant largo do incidente).
+  const command = typeof args.command === 'string' ? args.command : ''
+  const isCommandScoped = toolName === 'execute_command' || toolName === 'execute_command_background'
+  const extractedPrefix = useMemo(
+    () => (isCommandScoped ? getCommandPrefix(command) : null),
+    [isCommandScoped, command],
+  )
+  const [prefixDraft, setPrefixDraft] = useState(extractedPrefix ?? '')
+  // Grants "sempre" só existem quando há prefixo (ou a tool não é de shell).
+  const canGrantAlways = isCommandScoped ? extractedPrefix != null : true
+  // Esconde as opções "sempre" quando são perigosas OU sem prefixo concedível.
+  const hideAlways = isDangerous || !canGrantAlways
+
   // Reset on new permission
   useEffect(() => {
     setSelected('once')
     setShowReason(false)
     setReason('')
-  }, [toolName, JSON.stringify(args)])
+    setPrefixDraft(extractedPrefix ?? '')
+  }, [toolName, JSON.stringify(args), extractedPrefix])
 
   // Focus reason textarea when visible
   useEffect(() => {
@@ -94,9 +116,9 @@ export default function PermissionDialog({
       }
 
       if (e.key === '1') { e.preventDefault(); setSelected('once') }
-      if (!isDangerous && e.key === '2') { e.preventDefault(); setSelected(isPathAccess ? 'project' : 'project') }
-      if (!isDangerous && !isPathAccess && e.key === '3') { e.preventDefault(); setSelected('global') }
-      if (e.key === '4' || (isDangerous && e.key === '2') || (isPathAccess && e.key === '3')) {
+      if (!hideAlways && e.key === '2') { e.preventDefault(); setSelected('project') }
+      if (!hideAlways && !isPathAccess && e.key === '3') { e.preventDefault(); setSelected('global') }
+      if (e.key === '4' || (hideAlways && e.key === '2') || (isPathAccess && e.key === '3')) {
         e.preventDefault()
         setSelected('deny')
         setShowReason(true)
@@ -115,12 +137,15 @@ export default function PermissionDialog({
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, isDangerous, isPathAccess, showReason])
+  }, [selected, hideAlways, isPathAccess, showReason])
 
   const handleSubmit = () => {
+    // Para comandos, passa o prefixo (editado ou extraído); o store sanitiza e
+    // cai para o extraído se o input estiver vazio/inválido.
+    const prefixArg = isCommandScoped ? prefixDraft : undefined
     if (selected === 'once') approve()
-    else if (selected === 'project') approveAlwaysInProject()
-    else if (selected === 'global') approveAlwaysGlobal()
+    else if (selected === 'project') approveAlwaysInProject(prefixArg)
+    else if (selected === 'global') approveAlwaysGlobal(prefixArg)
     else if (selected === 'deny') {
       if (reason.trim()) denyWith(reason.trim())
       else deny()
@@ -138,14 +163,14 @@ export default function PermissionDialog({
     ? (pathAccessTarget || toolName)
     : toolName === 'browser_action'
       ? (typeof args.action === 'string' ? args.action : toolName)
-      : toolName === 'execute_command'
-        ? (typeof args.command === 'string' ? args.command : toolName)
+      : isCommandScoped
+        ? (command || toolName)
         : (typeof args.file_path === 'string' ? args.file_path
           : typeof args.path === 'string' ? args.path
           : typeof args.url === 'string' ? args.url
           : toolName)
 
-  const isCommand = toolName === 'execute_command' || promptReason === 'dangerous_command'
+  const isCommand = isCommandScoped || promptReason === 'dangerous_command'
 
   const reasonTag =
     promptReason === 'sensitive_file' ? t('perm.sensitiveFile') :
@@ -211,6 +236,30 @@ export default function PermissionDialog({
           )}
         </Flex>
 
+        {/* Razão do classificador do Modo Auto — quando o diálogo surge por
+            escalada, o developer vê AQUI porquê foi sinalizado (antes só ia
+            para o log do chat). */}
+        {classifierReason && (
+          <Flex
+            align="flex-start"
+            gap={1.5}
+            mb={3}
+            px={2}
+            py={1.5}
+            borderRadius="6px"
+            bg={tokens.colors.accent.orangeSubtle}
+            border={`1px solid ${tokens.colors.accent.orangeMuted}`}
+          >
+            <Box as="span" color={tokens.colors.accent.orange} flexShrink={0} mt="1px" fontSize="10px" fontWeight={700}>
+              {'⏵⏵'}
+            </Box>
+            <Text fontSize="11px" color={tokens.colors.text.secondary} lineHeight="1.4">
+              <Text as="span" color={tokens.colors.accent.orange} fontWeight={600}>{t('perm.autoFlagged')}</Text>
+              {' '}{classifierReason}
+            </Text>
+          </Flex>
+        )}
+
         {/* Options */}
         <Flex direction="column" gap={1} mb={2}>
           <OptionRow
@@ -219,18 +268,28 @@ export default function PermissionDialog({
             selected={selected === 'once'}
             onClick={() => { setSelected('once'); setShowReason(false) }}
           />
-          {!isDangerous && (
+          {!hideAlways && (
             <>
               <OptionRow
                 index={2}
-                label={isPathAccess ? t('perm.pathAccessProject') : t('perm.allowAlwaysProject').replace('{tool}', toolName)}
+                label={
+                  isPathAccess
+                    ? t('perm.pathAccessProject')
+                    : isCommandScoped
+                      ? t('perm.allowAlwaysPrefixProject')
+                      : t('perm.allowAlwaysProject').replace('{tool}', toolName)
+                }
                 selected={selected === 'project'}
                 onClick={() => { setSelected('project'); setShowReason(false) }}
               />
               {!isPathAccess && (
                 <OptionRow
                   index={3}
-                  label={t('perm.allowAlwaysGlobal').replace('{tool}', toolName)}
+                  label={
+                    isCommandScoped
+                      ? t('perm.allowAlwaysPrefixGlobal')
+                      : t('perm.allowAlwaysGlobal').replace('{tool}', toolName)
+                  }
                   selected={selected === 'global'}
                   onClick={() => { setSelected('global'); setShowReason(false) }}
                 />
@@ -238,12 +297,45 @@ export default function PermissionDialog({
             </>
           )}
           <OptionRow
-            index={(isDangerous || isPathAccess) ? (isDangerous ? 2 : 3) : 4}
+            index={hideAlways ? 2 : isPathAccess ? 3 : 4}
             label={t('perm.denyWithReason')}
             selected={selected === 'deny'}
             onClick={() => { setSelected('deny'); setShowReason(true) }}
           />
         </Flex>
+
+        {/* Campo de prefixo editável — só para comandos, quando "sempre" está
+            escolhido. O user pode estreitar/alargar o grant (paridade claude-vaz:
+            campo de prefixo editável no diálogo de Bash). */}
+        {isCommandScoped && canGrantAlways && (selected === 'project' || selected === 'global') && (
+          <Box mb={2}>
+            <Text fontSize="10px" color={tokens.colors.text.disabled} mb={1}>
+              {t('perm.prefixLabel')}
+            </Text>
+            <Input
+              value={prefixDraft}
+              onChange={e => setPrefixDraft(e.target.value)}
+              size="xs"
+              fontSize="12px"
+              fontFamily="mono"
+              bg="rgba(0,0,0,0.3)"
+              border="1px solid"
+              borderColor="rgba(255,255,255,0.06)"
+              borderRadius="6px"
+              color={tokens.colors.text.primary}
+              _focus={{ borderColor: tokens.colors.accent.purple, boxShadow: 'none' }}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !(e.metaKey || e.ctrlKey)) {
+                  e.preventDefault()
+                  handleSubmit()
+                }
+              }}
+            />
+            <Text fontSize="10px" color={tokens.colors.text.disabled} mt={1}>
+              {t('perm.prefixHint')}
+            </Text>
+          </Box>
+        )}
 
         {/* Reason textarea (shown when deny is selected) */}
         {showReason && selected === 'deny' && (

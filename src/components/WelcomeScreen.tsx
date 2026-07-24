@@ -6,6 +6,7 @@ import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { WelcomeSidebar, CloneDialog, StartupRequirementsBanner } from './welcome'
+import { SIDEBAR_COLLAPSED_W, SIDEBAR_EXPANDED_W } from './welcome/WelcomeSidebar'
 import { TeamChatPanel } from './collab/TeamChatPanel'
 import { useBillingStore, isTeamCollabActive } from '../stores/billingStore'
 import SettingsView from './views/SettingsView'
@@ -46,6 +47,13 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
   const viewMode = useLayoutStore(s => s.viewMode)
   const isPreviewFullscreen = useLayoutStore(s => s.isPreviewFullscreen)
   const [openingProjectPath, setOpeningProjectPath] = useState<string | null>(null)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('tm.welcomeSidebar.collapsed') === '1'
+    } catch {
+      return false
+    }
+  })
   const showSettings = welcomeScreen === 'settings'
   const previewOwnsWorkspace = Boolean(currentProject?.path) && !showSettings && viewMode === 'preview' && isPreviewFullscreen
   const editorOwnsWorkspace = Boolean(currentProject?.path) && !showSettings && viewMode === 'editor'
@@ -66,6 +74,20 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     }
   }, [welcomeScreen, setWelcomeScreen])
 
+  const openPathWithOptionalSpinner = useCallback(async (
+    path: string,
+    options?: { initGit?: boolean },
+  ) => {
+    // Full-page spinner unmounts MainLayout — only for cold open (no workspace).
+    const hadWorkspace = Boolean(useProjectStore.getState().currentProject?.path)
+    if (!hadWorkspace) setOpeningProjectPath(path)
+    try {
+      await onOpenProject(path, options)
+    } finally {
+      if (!hadWorkspace) setOpeningProjectPath(null)
+    }
+  }, [onOpenProject])
+
   const handleOpenFolder = useCallback(async () => {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog')
@@ -74,17 +96,12 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
         multiple: false,
         title: t('misc.selectProjectDir'),
       })
-      if (selected) {
-        const path = selected as string
-        setOpeningProjectPath(path)
-        await onOpenProject(path)
-      }
+      if (selected) await openPathWithOptionalSpinner(selected as string)
     } catch (error: unknown) {
       logger.error('ui', 'Failed to open directory dialog:', error)
-    } finally {
       setOpeningProjectPath(null)
     }
-  }, [onOpenProject])
+  }, [openPathWithOptionalSpinner])
 
   const handleNewProject = useCallback(async () => {
     // All projects start from scratch — open folder dialog directly
@@ -94,17 +111,12 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
         directory: true,
         title: t('misc.chooseFolder'),
       })
-      if (selected) {
-        const path = selected as string
-        setOpeningProjectPath(path)
-        await onOpenProject(path, { initGit: true })
-      }
+      if (selected) await openPathWithOptionalSpinner(selected as string, { initGit: true })
     } catch (error: unknown) {
       logger.error('ui', 'Failed to open directory dialog:', error)
-    } finally {
       setOpeningProjectPath(null)
     }
-  }, [onOpenProject])
+  }, [openPathWithOptionalSpinner])
 
   const handleOpenRecentProject = useCallback(async (path?: string) => {
     if (!path) return
@@ -114,11 +126,16 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
     // resetting the team "who's online" count (and churning the whole workspace)
     // for a project that never actually changed.
     if (path === useProjectStore.getState().currentProject?.path) return
-    setOpeningProjectPath(path)
+    // F2 multi-project: keep MainLayout mounted while switching between open
+    // projects. The full-page spinner unmounts the entire workspace (chat,
+    // preview webview, editor) and is only appropriate for a cold open from
+    // the Welcome hero (no current project).
+    const hadWorkspace = Boolean(useProjectStore.getState().currentProject?.path)
+    if (!hadWorkspace) setOpeningProjectPath(path)
     try {
       await onOpenProject(path)
     } finally {
-      setOpeningProjectPath(null)
+      if (!hadWorkspace) setOpeningProjectPath(null)
     }
   }, [onOpenProject])
 
@@ -140,7 +157,10 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
             <motion.div
               key="welcome-sidebar"
               initial={{ width: 0, opacity: 0 }}
-              animate={{ width: 'clamp(200px, 30vw, 300px)', opacity: 1 }}
+              animate={{
+                width: sidebarCollapsed ? SIDEBAR_COLLAPSED_W : SIDEBAR_EXPANDED_W,
+                opacity: 1,
+              }}
               exit={{ width: 0, opacity: 0 }}
               transition={{ duration: 0.22, ease: [0.32, 0.72, 0, 1] }}
               style={{ height: '100%', overflow: 'hidden', flexShrink: 0 }}
@@ -153,6 +173,8 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onOpenProject }) => {
                 onOpenProject={handleOpenRecentProject}
                 onClearRecent={clearAllRecent}
                 activeProjectPath={currentProject?.path ?? null}
+                collapsed={sidebarCollapsed}
+                onCollapsedChange={setSidebarCollapsed}
               />
             </motion.div>
           )}

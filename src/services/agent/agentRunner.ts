@@ -197,6 +197,12 @@ async function runAgentInternal(
   if (!sessionId) {
     sessionId = chatStore.createSession(cmdCwd || projectPath)
   }
+  // F2: freeze the session THIS run owns BEFORE any await. A project switch
+  // mid-prep would otherwise move activeSessionId and park would drop the
+  // session, or startAssistantMessage would write into the wrong project.
+  const boundSessionId = sessionId
+  useChatStore.getState().pinStreamingSession(boundSessionId)
+
   const historyBeforeCurrentUser = conversationHistoryOverride
     ?? useChatStore.getState().conversationHistory
 
@@ -301,12 +307,46 @@ async function runAgentInternal(
     // MessageBubble uses this to suppress reasoning blocks when the user
     // didn't ask for them (BYOK reasoning models sometimes keep emitting
     // chain-of-thought even when the disable param is set correctly).
-    chatStore.startAssistantMessage(agentService.isThinkingRequestedForNextTurn())
+    // boundSessionId: write into the session this run started on, not the
+    // currently focused one (F2 mid-run project switch).
+    chatStore.startAssistantMessage(
+      agentService.isThinkingRequestedForNextTurn(),
+      agentService.getEffortStampForNextTurn(),
+      boundSessionId,
+    )
   }
   if (bootstrapOnly) {
     appendUiTextDeltaBuffered(`${t(getTmsBootstrapStartMessageKey(tmsPreflight!))}\n\n`)
     flushBufferedDeltas()
   }
+
+  // FUSÃO F1: refresh MCP + summaries no núcleo único (mainDispatch).
+  const toolExecutor = ToolExecutor.getInstance()
+  // F4: register MCP tools for THIS run's project (not only the focused one).
+  const mcpToolSummaries = refreshMcpForDispatch(projectPath || undefined)
+  if (mcpToolSummaries.length > 0) {
+    logger.info('agent', `→ MCP tools: ${mcpToolSummaries.length} tools registered`)
+  }
+
+  // In-window multi-project (F2): bind THIS run to the project it started on
+  // so a later openProject switch does not re-point getProjectRoot() / path
+  // scope / permission grants at the newly focused project mid-flight.
+  // Cleared in finally / bailStopPrep. Null project leaves unbound.
+  //
+  // MUST run BEFORE setStatus('awaiting_response'): projectAgentStatusService
+  // stamps the cross-window badge on the busy transition, and it reads the
+  // bound project context first. Setting status first wrote the badge to a
+  // STALE context (previous project) or the focused project while a
+  // background project-run still owned the previous tree — two recents
+  // showed "running" for one agent (2026-07-24).
+  const boundProjectContext =
+    currentProject?.id && currentProject.path
+      ? { projectId: currentProject.id, projectPath: currentProject.path }
+      : null
+  if (boundProjectContext) {
+    toolExecutor.setProjectContext(boundProjectContext)
+  }
+
   // 'awaiting_response': prompt is about to be sent; nothing has streamed yet.
   // Flips to 'reasoning' or 'generating' once the first delta lands.
   agentStore.setStatus('awaiting_response')
@@ -326,18 +366,14 @@ async function runAgentInternal(
     if (cmdOnlyMode && cmdCwd) {
       try { ToolExecutor.getInstance().disableCmdMode() } catch { /* best-effort */ }
     }
+    if (boundProjectContext) {
+      try { ToolExecutor.getInstance().setProjectContext(null) } catch { /* best-effort */ }
+    }
     if (!getQueryGuard().isActive) {
       agentStore.setStatus('cancelled')
       useChatStore.getState().finalizeAssistantMessage()
     }
     return true
-  }
-
-  // FUSÃO F1: refresh MCP + summaries no núcleo único (mainDispatch).
-  const toolExecutor = ToolExecutor.getInstance()
-  const mcpToolSummaries = refreshMcpForDispatch()
-  if (mcpToolSummaries.length > 0) {
-    logger.info('agent', `→ MCP tools: ${mcpToolSummaries.length} tools registered`)
   }
 
   // Set disk directory for large result persistence (survives session reloads).
@@ -570,6 +606,11 @@ async function runAgentInternal(
     // Always restore IDE mode regardless of how the loop exited
     if (cmdOnlyMode && cmdCwd) {
       toolExecutor.disableCmdMode()
+    }
+    // Unbind multi-project context so the next main run (possibly on a
+    // different project after a mid-run switch) re-binds cleanly.
+    if (boundProjectContext) {
+      toolExecutor.setProjectContext(null)
     }
     // Reset compact phase in case compression was in-flight when the loop
     // exited (error, stop, or unexpected break). Without this, stale phases

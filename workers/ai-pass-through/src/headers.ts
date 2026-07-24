@@ -10,6 +10,7 @@ const DEFAULT_ALLOWED_HEADERS = [
   'X-Firebase-AppCheck',
   'X-Request-Type',
   'X-TM-Speed',
+  'X-TM-Reasoning-Effort',
   'X-Conversation-Id',
   'x-app',
   'x-stainless-lang',

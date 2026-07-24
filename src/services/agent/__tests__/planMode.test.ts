@@ -59,6 +59,7 @@ describe('checkPlanModeAccess', () => {
       // they have to update the test, forcing a conscious decision.
       expect([...PLAN_MODE_ALLOWED_TOOLS].sort()).toEqual([
         'ask_user_question',
+        'capture_url_design',
         'collect_results',
         'create_file',
         'delegate',

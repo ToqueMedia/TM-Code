@@ -8,6 +8,9 @@ import { useCheckpointStore } from './checkpointStore'
 import { useAgentStore } from './agentStore'
 import { usePermissionStore } from './permissionStore'
 import { useToastStore } from './toastStore'
+import { useActiveModelStore } from './activeModelStore'
+import { useReasoningEffortStore } from './reasoningEffortStore'
+import { resolveEffortModelId, resolveEffortTurnStamp } from '../services/agent/reasoningEffortModels'
 import { clearCommandQueue as clearMessageQueue } from '../services/agent/messageQueue'
 import { clearMentionContextTracker } from '../services/agent/mentionContextTracker'
 export { clearMessageQueue }
@@ -119,7 +122,14 @@ interface ChatActions {
    */
   appendMessageToSession: (
     sessionId: string,
-    message: { role: 'user' | 'assistant' | 'system'; content: string; level?: SystemMessageLevel },
+    message: {
+      role: 'user' | 'assistant' | 'system'
+      content: string
+      level?: SystemMessageLevel
+      /** User-message attachments (task steer / session agent parity with main). */
+      attachments?: import('../types/chat').Attachment[]
+      promptBlocks?: import('../types/chat').PromptBlock[]
+    },
   ) => void
   /**
    * Fase 4 (transcript unificado): bolha assistant AO VIVO numa sessão de
@@ -204,8 +214,22 @@ interface ChatActions {
    * (some BYOK reasoning models always do), the UI suppresses it.
    * Undefined preserves legacy behaviour (always render reasoning if
    * present), so older sessions don't change.
+   *
+   * `effortStamp` carimba o effort EFETIVO deste turno (valor + se o header
+   * saiu) para a sessão/UI — a preferência do seletor é global, o histórico
+   * precisa do valor por mensagem.
    */
-  startAssistantMessage: (thinkingRequested?: boolean) => string
+  startAssistantMessage: (
+    thinkingRequested?: boolean,
+    effortStamp?: { effort: string; sent: boolean } | null,
+    /** F2: pin the run to this session even if activeSessionId already moved. */
+    boundSessionId?: string | null,
+  ) => string
+  /**
+   * F2: pin streamingSessionId as soon as a main run owns a session — before
+   * the assistant bubble exists — so project-switch park can preserve it.
+   */
+  pinStreamingSession: (sessionId: string) => void
   finalizeAssistantMessage: () => void
   addCodeBlockToMessage: (messageId: string, block: CodeBlock) => void
   updateCodeBlockStatus: (messageId: string, blockId: string, status: 'applied' | 'rejected') => void
@@ -308,7 +332,14 @@ interface ChatActions {
   clearDraftAttachments: () => void
   setPostCompactSurveyPending: (value: boolean) => void
   setSessionMemory: (memory: string) => void
-  clearAllSessions: () => void
+  /**
+   * Clear chat view state for a project switch / teardown.
+   * When `preserveLiveRuns` is true (F2 in-window multi-project switch),
+   * keeps streaming + parallel-task sessions in the Map and leaves the
+   * streaming cursor intact so a background agent keeps writing its
+   * transcript. Full wipe remains the default (close / no project).
+   */
+  clearAllSessions: (opts?: { preserveLiveRuns?: boolean }) => void
   // Card messages (plan approval, todo list)
   addCardMessage: (
     type: ChatMessageCard['type'],
@@ -583,6 +614,29 @@ function stopStreamingSave() {
 const pendingDiffApprovals = new Map<string, (approved: boolean) => void>()
 
 /**
+ * Auto Mode / Accept-all: DiffService.acceptDiff promises keyed by toolCallId.
+ * createDiffApprovalPromise awaits these so the agent does not continue before
+ * the file is on disk — and updateToolCallWithResult never parks the diff in
+ * pendingDiffs (no Accept/Reject flash).
+ */
+const autoAcceptDiffPromises = new Map<string, Promise<void>>()
+
+/**
+ * Coalesce high-frequency shell/progress mutations into ≤1 streamingVersion
+ * bump per ~100ms. Without this, every cmd-output chunk re-renders ChatView
+ * + scrolls, freezing the UI during yarn build/deploy.
+ */
+let streamingBumpRaf: ReturnType<typeof setTimeout> | null = null
+const STREAMING_BUMP_MIN_MS = 100
+function scheduleStreamingVersionBump(): void {
+  if (streamingBumpRaf != null) return
+  streamingBumpRaf = setTimeout(() => {
+    streamingBumpRaf = null
+    useChatStore.setState(s => ({ streamingVersion: s.streamingVersion + 1 }))
+  }, STREAMING_BUMP_MIN_MS)
+}
+
+/**
  * Resolve a diff approval by its diffResultId (not toolCallId).
  * Used by GeneratingView which only has access to diffResultId.
  * Finds the associated toolCallId via the session or pendingDiffs store.
@@ -623,8 +677,21 @@ export async function createDiffApprovalPromise(toolCallId: string): Promise<boo
   //    path_access são forcePrompt — nunca passam pelo Modo Auto).
   const { autoApproveDiffs, autoModePermissions } = usePermissionStore.getState()
   if (autoApproveDiffs || autoModePermissions) {
-    // Primary path: search pendingDiffs for the diffResultId (race-safe —
-    // pendingDiffs is populated before the approval promise is created).
+    // Preferred path: updateToolCallWithResult already started acceptDiff
+    // without parking in pendingDiffs (no Accept/Reject flash).
+    const inflight = autoAcceptDiffPromises.get(toolCallId)
+    if (inflight) {
+      try {
+        await inflight
+      } catch (err) {
+        logger.error('chat', 'Auto-approve acceptDiff failed:', String(err))
+      } finally {
+        autoAcceptDiffPromises.delete(toolCallId)
+      }
+      return true
+    }
+
+    // Legacy path: pendingDiffs still has the entry (race / older callers).
     const pendingDiffs = useChatStore.getState().pendingDiffs
     const pending = pendingDiffs.find(d => d.toolCallId === toolCallId)
     if (pending) {
@@ -638,12 +705,12 @@ export async function createDiffApprovalPromise(toolCallId: string): Promise<boo
       return true
     }
 
-    // Fallback path: search session messages (timing edge case where
-    // pendingDiffs hasn't been added yet — very rare, < 1 frame).
+    // Fallback: session already shows approved (alreadyApplied writes).
     const session = useChatStore.getState().getActiveSession()
     if (session) {
       for (let i = session.messages.length - 1; i >= 0; i--) {
         const tc = session.messages[i].toolCalls?.find(t => t.id === toolCallId)
+        if (tc?.diffStatus === 'approved') return true
         if (tc?.diffResultId) {
           try {
             await DiffService.getInstance().acceptDiff(tc.diffResultId)
@@ -657,8 +724,6 @@ export async function createDiffApprovalPromise(toolCallId: string): Promise<boo
       }
     }
 
-    // Neither path found — the tool call may not have a diff yet (should
-    // not happen, but be safe: still return true to avoid blocking the agent).
     logger.warn('chat', `Auto-approve: no diff found for toolCallId ${toolCallId}`)
     return true
   }
@@ -1615,6 +1680,12 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           content: message.content,
           timestamp: Date.now(),
           ...(message.role === 'system' && message.level ? { level: message.level } : {}),
+          ...(message.role === 'user' && message.attachments?.length
+            ? { attachments: message.attachments }
+            : {}),
+          ...(message.role === 'user' && message.promptBlocks?.length
+            ? { promptBlocks: message.promptBlocks }
+            : {}),
         }
         const sessions = new Map(state.sessions)
         sessions.set(sessionId, {
@@ -1634,6 +1705,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
     startAssistantMessageInSession: (sessionId) => {
       const messageId = generateId('msg')
+      const stamp = resolveEffortTurnStamp(
+        resolveEffortModelId(
+          useActiveModelStore.getState().activeModelId,
+          useAgentStore.getState().modelName,
+        ),
+        useReasoningEffortStore.getState().selected,
+      )
       const message: ChatMessage = {
         id: messageId,
         role: 'assistant',
@@ -1643,6 +1721,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         toolCalls: [],
         contentBlocks: [],
         isStreaming: true,
+        reasoningEffort: stamp.effort,
+        reasoningEffortSent: stamp.sent,
       }
       let created = false
       set(state => {
@@ -2290,7 +2370,19 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       debouncedSave()
     },
 
-    startAssistantMessage: (thinkingRequested) => {
+    pinStreamingSession: (sessionId) => {
+      if (!sessionId) return
+      set(state => {
+        if (!state.sessions.has(sessionId)) return state
+        // Do not clobber an already-pinned different stream.
+        if (state.streamingSessionId && state.streamingSessionId !== sessionId && state.isStreaming) {
+          return state
+        }
+        return { streamingSessionId: sessionId }
+      })
+    },
+
+    startAssistantMessage: (thinkingRequested, effortStamp, boundSessionId) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
         id: messageId,
@@ -2302,13 +2394,21 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         contentBlocks: [],
         isStreaming: true,
         ...(thinkingRequested !== undefined && { thinkingRequested }),
+        ...(effortStamp?.effort
+          ? {
+              reasoningEffort: effortStamp.effort,
+              reasoningEffortSent: effortStamp.sent,
+            }
+          : {}),
       }
 
       set(state => {
-        const { activeSessionId, sessions } = state
-        if (!activeSessionId) return state
+        // F2: prefer the session this run captured at start — activeSessionId
+        // may already point at another project after an in-window switch.
+        const targetSessionId = boundSessionId || state.activeSessionId
+        if (!targetSessionId) return state
 
-        const session = sessions.get(activeSessionId)
+        const session = state.sessions.get(targetSessionId)
         if (!session) return state
 
         const updatedSession: ChatSession = {
@@ -2317,8 +2417,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           updatedAt: Date.now(),
         }
 
-        const updatedSessions = new Map(sessions)
-        updatedSessions.set(activeSessionId, updatedSession)
+        const updatedSessions = new Map(state.sessions)
+        updatedSessions.set(targetSessionId, updatedSession)
 
         return {
           sessions: updatedSessions,
@@ -2326,7 +2426,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           streamingMessageId: messageId,
           // Bind the run to ITS session — every streaming writer resolves
           // through this even if the user switches the view mid-run.
-          streamingSessionId: activeSessionId,
+          streamingSessionId: targetSessionId,
           agentStartTime: Date.now(),
         }
       })
@@ -2610,7 +2710,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       msg.toolCalls = newToolCalls
       session.updatedAt = Date.now()
 
-      set(s => ({ streamingVersion: s.streamingVersion + 1 }))
+      scheduleStreamingVersionBump()
     },
 
     appendToolCallCommandLog: (toolId: string, logChunk: string) => {
@@ -2646,7 +2746,10 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       msg.toolCalls = newToolCalls
       session.updatedAt = Date.now()
 
-      set(s => ({ streamingVersion: s.streamingVersion + 1 }))
+      // Throttle streamingVersion bumps: every shell chunk used to re-render
+      // the entire ChatView (and re-scroll), freezing the UI on verbose
+      // builds/deploys (user report 2026-07-24). Mutate in place; flush ≤10fps.
+      scheduleStreamingVersionBump()
     },
 
     recordToolPermission: (toolId, permission, targetMessageId) => {
@@ -2692,7 +2795,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       if (!targetSessionId || !session) return
       if (!session.messages.some(m => m.id === targetId)) return
 
-      let newDiff: DiffResult | null = null
+      // Collect outside the map callback — TS does not track outer assignments
+      // inside .map() for control-flow narrowing (would type newDiff as `never`).
+      const createdDiffs: DiffResult[] = []
 
       const messages = session.messages.map(msg => {
         if (msg.id !== targetId) return msg
@@ -2731,7 +2836,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
                   // Skipped for direct disk writes — there's no approval flow to drive.
                   const id = crypto.randomUUID()
                   diffResultId = id
-                  newDiff = {
+                  createdDiffs.push({
                     id,
                     filePath: parsed.path,
                     originalContent: parsed.oldContent || '',
@@ -2740,7 +2845,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
                     status: 'pending',
                     toolCallId: toolId,
                     toolName: toolCalls[i].toolName,
-                  }
+                  })
                 }
               }
             } catch {
@@ -2772,14 +2877,51 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       const updatedSessions = new Map(sessions)
       updatedSessions.set(targetSessionId, { ...session, messages, updatedAt: Date.now() })
 
-      // If a diff was created, register with DiffService and add to pendingDiffs
+      // If a diff was created, register with DiffService. Under Auto Mode /
+      // Accept-all, start acceptDiff immediately and NEVER park in pendingDiffs
+      // — that flash of Accept/Reject buttons was the bug (user 2026-07-24).
+      const newDiff = createdDiffs[0]
       if (newDiff) {
         DiffService.getInstance().registerDiff(newDiff)
-        set(s => ({
-          sessions: updatedSessions,
-          pendingDiffs: [...s.pendingDiffs, newDiff!],
-          streamingVersion: s.streamingVersion + 1,
-        }))
+        let autoAccept = false
+        try {
+          const perm = usePermissionStore.getState()
+          autoAccept = !!(perm.autoApproveDiffs || perm.autoModePermissions)
+        } catch { /* store unavailable */ }
+
+        if (autoAccept) {
+          const writePromise = DiffService.getInstance().acceptDiff(newDiff.id).then(() => undefined)
+          autoAcceptDiffPromises.set(toolId, writePromise)
+          writePromise.catch(err => {
+            logger.error('chat', 'Auto-mode acceptDiff failed:', String(err))
+          })
+          // Flip pending → approved in the same commit so UI never paints buttons.
+          const session2 = updatedSessions.get(targetSessionId)
+          if (session2) {
+            const msgs = session2.messages.map(msg => {
+              if (!msg.toolCalls?.some(tc => tc.id === toolId)) return msg
+              return {
+                ...msg,
+                toolCalls: msg.toolCalls!.map(tc =>
+                  tc.id === toolId
+                    ? { ...tc, diffStatus: 'approved' as const, diffResultId: newDiff!.id }
+                    : tc,
+                ),
+              }
+            })
+            updatedSessions.set(targetSessionId, { ...session2, messages: msgs, updatedAt: Date.now() })
+          }
+          set(s => ({
+            sessions: updatedSessions,
+            streamingVersion: s.streamingVersion + 1,
+          }))
+        } else {
+          set(s => ({
+            sessions: updatedSessions,
+            pendingDiffs: [...s.pendingDiffs, newDiff!],
+            streamingVersion: s.streamingVersion + 1,
+          }))
+        }
       } else {
         set(s => ({
           sessions: updatedSessions,
@@ -3657,11 +3799,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       const epoch = currentProjectEpoch()
       const isStale = () => currentProjectEpoch() !== epoch
 
-      // Reset auto-approve state from any previous session. Without this,
-      // approvedScopes (persisted in app-managed project state) and
-      // autoApproveDiffs (localStorage) survive across app restarts,
-      // causing the agent to skip ALL permission dialogs on boot.
-      usePermissionStore.getState().resetAutoApprove()
+      // Permissions are hydrated by projectStore.openProject into
+      // byProject[id] (F1#3). Do NOT resetAutoApprove here — on F2
+      // multi-project switch that would wipe the focused project's grants
+      // right after hydrate, and on cold boot openProject already loads
+      // disk grants before this restore runs.
 
       set({ isLoadingSession: true })
       try {
@@ -3711,8 +3853,12 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
               }
             : session
 
-        set(() => {
-          const sessions = new Map<string, ChatSession>()
+        set((prev) => {
+          // F2 MDI: merge the restored project session ON TOP of any parked
+          // live runs (streaming main + parallel tasks) left by clearAllSessions
+          // { preserveLiveRuns: true }. Replacing the Map wholesale would drop
+          // those writers' targets mid-flight.
+          const sessions = new Map(prev.sessions)
           sessions.set(restoredSession.id, restoredSession)
           return {
             sessions,
@@ -3722,7 +3868,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             totalTokensUsed: { input: 0, output: 0 },
             currentPromptTokens: bootSnapshot?.promptTokens ?? 0,
             currentResponseTokens: bootSnapshot?.responseTokens ?? 0,
-            pendingDiffs: [],
+            // Do not wipe pendingDiffs / streaming* — they belong to a parked
+            // background run when preserveLiveRuns left them intact.
             planResumePending: restoredSession.planResumePending ?? null,
           }
         })
@@ -3798,6 +3945,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const sessions = new Map<string, ChatSession>()
         try {
           const liveIds = new Set<string>()
+          // F2: also park the main streaming session when Novo Chat runs
+          // while a background project-run is still writing.
+          if (prev.streamingSessionId) liveIds.add(prev.streamingSessionId)
           for (const r of useParallelTaskStore.getState().runs.values()) {
             if (r.sessionId && (r.status === 'running' || r.status === 'queued')) liveIds.add(r.sessionId)
           }
@@ -3814,7 +3964,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           totalTokensUsed: { input: 0, output: 0 },
           currentPromptTokens: 0,
           currentResponseTokens: 0,
-          pendingDiffs: [],
+          // Keep pendingDiffs / streaming* for parked background runs —
+          // wiping them would orphan a mid-flight main stream.
           planResumePending: null,
         }
       })
@@ -3956,11 +4107,60 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       await sessionService.cleanupEmptySessions(projectPath)
     },
 
-    clearAllSessions: () => {
+    clearAllSessions: (opts) => {
       // Bumping the epoch invalidates any in-flight async session loader so
       // its `set()` is skipped — prevents the previous project's data from
       // landing in the new project's chat state on rapid A → B → C switches.
       bumpProjectEpoch()
+
+      // F2 MDI switch: park live runs instead of wiping them. A background
+      // main stream (streamingSessionId) and parallel-task sessions must stay
+      // in the Map so InSession / streaming writers keep landing, and we must
+      // NOT resolve pending diffs / clear the queue that still belong to them.
+      if (opts?.preserveLiveRuns) {
+        const prev = get()
+        // F2 multi-project: keep the ENTIRE session Map warm. Dropping
+        // non-live main sessions forced a disk restore on every A→B→A hop
+        // and made in-window switching feel heavy. N open projects is small.
+        const keepStreaming = !!prev.streamingSessionId && prev.sessions.has(prev.streamingSessionId)
+
+        // Timers for the VIEWED session save — not the background stream's
+        // own persist beat (parallel runner has its own interval).
+        if (saveTimeout) {
+          clearTimeout(saveTimeout)
+          saveTimeout = null
+        }
+        // Do NOT stopStreamingSave when a main stream is parked — it flushes
+        // the live assistant bubble to disk.
+        if (!keepStreaming) stopStreamingSave()
+
+        set({
+          sessions: prev.sessions,
+          activeSessionId: null,
+          conversationHistory: [],
+          isStreaming: keepStreaming ? prev.isStreaming : false,
+          isLoadingSession: false,
+          streamingMessageId: keepStreaming ? prev.streamingMessageId : null,
+          streamingSessionId: keepStreaming ? prev.streamingSessionId : null,
+          streamingVersion: keepStreaming ? prev.streamingVersion : 0,
+          conversationVersion: 0,
+          postCompactSurveyPending: false,
+          error: null,
+          // Keep agentStartTime for the parked run's elapsed timer.
+          agentStartTime: keepStreaming ? prev.agentStartTime : null,
+          currentTurnCount: 0,
+          totalTokensUsed: { input: 0, output: 0 },
+          currentPromptTokens: 0,
+          currentResponseTokens: 0,
+          // pendingDiffs for the focused view — keep if stream parked (diffs
+          // of the background run still need to render when user returns).
+          pendingDiffs: keepStreaming ? prev.pendingDiffs : [],
+          draftInput: '',
+          draftAttachments: [],
+        })
+        return
+      }
+
       // Reject any diff approval a run is still blocked on. The promise map
       // is module-level, so it SURVIVES the set() below — and not every
       // caller goes through cancelLoop() first (project switch paths). An
@@ -3993,6 +4193,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         isStreaming: false,
         isLoadingSession: false,
         streamingMessageId: null,
+        streamingSessionId: null,
         streamingVersion: 0,
         conversationVersion: 0,
         postCompactSurveyPending: false,

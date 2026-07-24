@@ -1,4 +1,4 @@
-use super::container::{clamp_to_allowed, ActiveProjectState};
+use super::container::ActiveProjectState;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -762,19 +762,20 @@ pub async fn execute_command(
     }
 
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(300));
-    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+    let registry = active_project.lock().map_err(|_| "Lock error")?.clone();
 
-    if let Some(ref ap) = project {
-        // App-level isolation: sandbox the command to the project directory
+    if !registry.is_empty() {
+        // App-level isolation: sandbox the command to whichever OPEN project
+        // owns the requested cwd (any of them), not only the active one.
         let working_dir = match &cwd {
-            Some(dir) => PathBuf::from(clamp_to_allowed(dir, ap)),
-            None => PathBuf::from(&ap.project_path),
+            Some(dir) => PathBuf::from(registry.clamp_cwd(dir)),
+            None => PathBuf::from(registry.default_cwd().unwrap_or_default()),
         };
         let cmd = build_sandboxed_host_command(&command, &working_dir);
         return run_command_with_timeout(cmd, timeout).await;
     }
 
-    // No active project: unrestricted host execution
+    // No open project: unrestricted host execution
     let working_dir = match cwd {
         Some(dir) => PathBuf::from(dir),
         None => {
@@ -892,10 +893,10 @@ pub async fn run_streaming_command(
         return Err("Empty command".to_string());
     }
 
-    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+    let registry = active_project.lock().map_err(|_| "Lock error")?.clone();
 
-    let mut cmd = if let Some(ref ap) = project {
-        let working_dir = PathBuf::from(clamp_to_allowed(&cwd, ap));
+    let mut cmd = if !registry.is_empty() {
+        let working_dir = PathBuf::from(registry.clamp_cwd(&cwd));
         build_sandboxed_host_command(&command, &working_dir)
     } else {
         build_host_command(&command, &PathBuf::from(&cwd))
@@ -958,7 +959,7 @@ pub async fn start_dev_server(
     let server_port = port.unwrap_or(7773);
     let port_str = server_port.to_string();
 
-    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+    let registry = active_project.lock().map_err(|_| "Lock error")?.clone();
 
     // Fullstack wrappers (concurrently, npm-run-all, turbo, pnpm -r, etc.)
     // inherit PORT and propagate to BOTH children — the backend grabs the
@@ -982,9 +983,9 @@ pub async fn start_dev_server(
             || cmd_lower.contains("nx run-many")
     });
 
-    let mut cmd = if let Some(ref ap) = project {
+    let mut cmd = if !registry.is_empty() {
         // App-level isolation: sandbox the dev server command
-        let clamped = clamp_to_allowed(&cwd, ap);
+        let clamped = registry.clamp_cwd(&cwd);
         let mut c = build_sandboxed_host_command(&command, &PathBuf::from(&clamped));
         c.env("FORCE_COLOR", "0")
             .env("NO_COLOR", "1")
@@ -1248,15 +1249,15 @@ pub async fn start_pty_shell(
         }
     }
 
-    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+    let registry = active_project.lock().map_err(|_| "Lock error")?.clone();
 
     let pty_system = native_pty_system();
 
-    let (shell_cmd, shell_args, working_dir) = if let Some(ref ap) = project {
-        // App-level isolation: clamp cwd to project directory
+    let (shell_cmd, shell_args, working_dir) = if !registry.is_empty() {
+        // App-level isolation: clamp cwd to whichever OPEN project owns it
         let working_dir = match &cwd {
-            Some(dir) => PathBuf::from(clamp_to_allowed(dir, ap)),
-            None => PathBuf::from(&ap.project_path),
+            Some(dir) => PathBuf::from(registry.clamp_cwd(dir)),
+            None => PathBuf::from(registry.default_cwd().unwrap_or_default()),
         };
 
         let (shell_cmd, shell_args) = pick_interactive_shell();
@@ -1890,10 +1891,10 @@ pub async fn change_directory(
     path: String,
     active_project: State<'_, ActiveProjectState>,
 ) -> Result<String, String> {
-    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+    let registry = active_project.lock().map_err(|_| "Lock error")?.clone();
 
-    let effective_path = if let Some(ref ap) = project {
-        clamp_to_allowed(&path, ap)
+    let effective_path = if !registry.is_empty() {
+        registry.clamp_cwd(&path)
     } else {
         path
     };
@@ -1911,9 +1912,9 @@ pub async fn change_directory(
     let canonical = super::canonicalize_path(&new_path)
         .map_err(|e| format!("Failed to resolve directory: {}", e))?;
 
-    // After canonicalization, re-check that we're still inside the project
-    if let Some(ref ap) = project {
-        let clamped = clamp_to_allowed(&canonical.to_string_lossy(), ap);
+    // After canonicalization, re-check that we're still inside an open project
+    if !registry.is_empty() {
+        let clamped = registry.clamp_cwd(&canonical.to_string_lossy());
         return Ok(clamped);
     }
 
@@ -1996,14 +1997,14 @@ pub async fn get_completions(
     cwd: Option<String>,
     active_project: State<'_, ActiveProjectState>,
 ) -> Result<Vec<String>, String> {
-    let project = active_project.lock().map_err(|_| "Lock error")?.clone();
+    let registry = active_project.lock().map_err(|_| "Lock error")?.clone();
 
-    // Resolve working directory
-    let working_dir = match (&cwd, &project) {
-        (Some(dir), Some(ap)) => PathBuf::from(clamp_to_allowed(dir, ap)),
-        (Some(dir), None) => PathBuf::from(dir),
-        (None, Some(ap)) => PathBuf::from(&ap.project_path),
-        (None, None) => env::current_dir().map_err(|e| format!("Failed to get cwd: {}", e))?,
+    // Resolve working directory against the union of open projects.
+    let working_dir = match &cwd {
+        Some(dir) if !registry.is_empty() => PathBuf::from(registry.clamp_cwd(dir)),
+        Some(dir) => PathBuf::from(dir),
+        None if !registry.is_empty() => PathBuf::from(registry.default_cwd().unwrap_or_default()),
+        None => env::current_dir().map_err(|e| format!("Failed to get cwd: {}", e))?,
     };
 
     // Host mode: resolve path-aware completion

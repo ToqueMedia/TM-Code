@@ -25,6 +25,7 @@
 
 import type OpenAI from 'openai'
 import FirebaseAuthService from '../../auth/firebaseAuth'
+import { writeProjectRunBadge } from '../../projectAgentStatusService'
 import { buildRunClient } from '../runClient'
 import {
   resolveByokSnapshotForSession,
@@ -48,17 +49,29 @@ import { useParallelTaskStore } from '../../../stores/parallelTaskStore'
 import { useChatStore, rebuildConversationHistory } from '../../../stores/chatStore'
 import { toQueryMessages } from '../queryEngine'
 import { withWriteLock } from './writeSerializer'
-import { createTaskWorktree, reuseTaskWorktree, finalizeTaskWorktree, autoMergeTaskBranch, dirtyFilesInMainCheckout, type TaskWorktree } from './taskWorktree'
+import { finalizeTaskWorktree, autoMergeTaskBranch, dirtyFilesInMainCheckout, type TaskWorktree } from './taskWorktree'
 import { makeTaskPathNormalizer } from './taskPaths'
 import { releaseOwnerClaims } from '../fileClaims'
-import { consumeTaskStopRequest } from './taskStopRequestService'
+import { consumeTaskStopRequest, consumeProjectAgentStop } from './taskStopRequestService'
 import { WORKTREES_REL_DIR } from '../toolExecutor/worktrees'
-import { useSettingsStore } from '../../../stores/settingsStore'
 import { useAgentStore } from '../../../stores/agentStore'
 import { getProfileForPlan, MODEL_PROFILES } from '../modelProfiles'
 import { pumpParallelTasks } from './parallelTaskManager'
 import { t } from '../../../i18n'
 import { logger } from '../../../utils/logger'
+
+/** Resolve a projectId for path-based binding (permission store / Rust registry).
+ *  Prefers the focused project when paths match, else recents. */
+function resolveProjectIdForPath(projectPath: string): string | undefined {
+  try {
+    const st = useProjectStore.getState()
+    if (st.currentProject?.path === projectPath) return st.currentProject.id
+    const recent = st.recentProjects.find((p) => p.path === projectPath)
+    return recent?.id
+  } catch {
+    return undefined
+  }
+}
 
 /** Write into the task's OWN chat session (created by addParallelTask) —
  *  the transcript the ProjectMenu opens when the user clicks the task. */
@@ -129,7 +142,8 @@ const TASK_WALL_CLOCK_MS = 30 * 60_000
 function buildTaskSystemPrompt(
   projectPath: string,
   worktree?: TaskWorktree | null,
-  tmsContent?: string | null,
+  /** Pre-built heading + body from TMS or foreign compat instructions. */
+  projectInstructions?: { heading: string; body: string } | null,
 ): string {
   return [
     'You are a TM Code parallel task agent — one of up to four agents the developer launched to work on this project AT THE SAME TIME.',
@@ -151,8 +165,8 @@ function buildTaskSystemPrompt(
     '- If you genuinely need the developer (a decision between options, or credentials for a service), use ask_user_question / request_credentials — the developer is notified on your task row and answers in your task chat. Prefer sensible defaults over asking.',
     '- FILE OWNERSHIP RULE: files being modified by ANOTHER parallel task, or with the developer\'s own uncommitted changes, are OFF-LIMITS — the system blocks writes to them. When a blocked file prevents part of your task, do NOT work around it: skip that part and EXPLAIN exactly which files were blocked and why in your final report.',
     '- When done, finish with a short summary of exactly what you changed (files + what/why), INCLUDING any files you skipped due to the ownership rule. That summary is shown on your task card.',
-    ...(tmsContent
-      ? ['', '# Project memory (TMS.md — conventions, commands, structure; follow it)', tmsContent]
+    ...(projectInstructions
+      ? ['', `# ${projectInstructions.heading}`, projectInstructions.body]
       : []),
   ].join('\n')
 }
@@ -191,7 +205,13 @@ export async function runParallelTask(runId: string): Promise<void> {
   if (!run || run.status !== 'running') return
 
   const { prompt, abortController } = run
-  const projectPath = useProjectStore.getState().currentProject?.path ?? null
+  // Prefer the run's own project (stamped at enqueue). After in-window
+  // multi-project switch, currentProject may be a DIFFERENT project — using
+  // it would contaminate the background run's cwd/paths.
+  const projectPath =
+    run.projectPath
+    ?? useProjectStore.getState().currentProject?.path
+    ?? null
 
   const fail = (msg: string) => {
     useParallelTaskStore.getState().error(runId, msg)
@@ -242,58 +262,13 @@ export async function runParallelTask(runId: string): Promise<void> {
     thinkingConfig = buildByokThinkingConfig(byokSnapshot)
   }
 
-  // ── Fase 5: isolamento opt-in em git worktree (padrão Cursor/claude-vaz).
-  // Falha de criação (sem git/commits) degrada para a working tree partilhada
-  // com nota honesta no chat da tarefa.
-  let worktree: TaskWorktree | null = null
-  // Continuação (doutrina sem-deus): o run corre SOBRE uma sessão existente.
-  //  - Sessão NORMAL (não-tarefa): semântica de PAR interativo — trabalha no
-  //    checkout principal, SEM worktree (claims + write-lock + serialização
-  //    protegem contra os outros agentes).
-  //  - Sessão de TAREFA: reutiliza o worktree do run anterior desta sessão
-  //    quando ainda existe neste processo (o trabalho anterior vive lá);
-  //    senão cria um novo (default por design).
+  // F3 (2026-07-23): worktrees-por-tarefa REMOVIDOS com o fan-out
+  // intra-projecto. Project-runs e continuações trabalham sempre no checkout
+  // do projecto (cmdModeCwd = projectPath). Isolação multi-agente no MESMO
+  // projecto já não existe — 1 agente/projecto.
+  const worktree: TaskWorktree | null = null
   const sessionForRun = run.sessionId ? useChatStore.getState().sessions.get(run.sessionId) : undefined
   const continuationOfPlainChat = run.continuation === true && sessionForRun?.isParallelTask !== true
-  if (!continuationOfPlainChat && useSettingsStore.getState().parallelTaskWorktrees) {
-    if (run.continuation && run.sessionId) {
-      for (const prev of useParallelTaskStore.getState().runs.values()) {
-        if (prev.id !== runId && prev.sessionId === run.sessionId && prev.worktree) {
-          worktree = await reuseTaskWorktree(projectPath, prev.worktree.path, prev.worktree.branch)
-          if (worktree) break
-        }
-      }
-    }
-    if (!worktree) {
-    const created = await createTaskWorktree(projectPath, runId)
-    worktree = created.worktree
-    if (created.repoInitialized) {
-      // Projecto sem repo/commits: o sistema criou um repositório LOCAL agora
-      // (worktree é o default por design; git é requisito da IDE).
-      appendToTaskSession(run.sessionId, {
-        role: 'system',
-        level: 'info',
-        content: t('parallel.repoInitialized'),
-      })
-    }
-    }
-    if (worktree) {
-      useParallelTaskStore.getState().setWorktree(runId, { path: worktree.path, branch: worktree.branch })
-      appendToTaskSession(run.sessionId, {
-        role: 'system',
-        level: 'info',
-        content: t('parallel.worktreeNote')
-          .replace('{branch}', worktree.branch)
-          .replace('{path}', worktree.path),
-      })
-    } else {
-      appendToTaskSession(run.sessionId, {
-        role: 'system',
-        level: 'warn',
-        content: t('parallel.worktreeUnavailable'),
-      })
-    }
-  }
 
   // Regra de propriedade — baseline: ficheiros com trabalho POR COMMITAR do
   // developer no checkout principal. A tarefa não lhes toca (em worktree, a
@@ -312,15 +287,43 @@ export async function runParallelTask(runId: string): Promise<void> {
     return
   }
 
-  const normalizeTaskPaths = makeTaskPathNormalizer(worktree, projectPath)
+  const normalizeTaskPaths = makeTaskPathNormalizer(null, projectPath)
 
   // ── Writable, cwd-scoped, isolated tool executor ──
   const toolExecutor = ToolExecutor.getInstance().createIsolatedChild()
-  // Com worktree, TODA a resolução de ficheiros/shell da tarefa vive lá.
-  toolExecutor.enableCmdMode(worktree ? worktree.path : projectPath)
+  // #13: the child inherited the MAIN run's worktree redirect from
+  // createIsolatedChild — clear it so a task NEVER resolves into the main
+  // agent's enter_worktree checkout (it uses enableCmdMode(projectPath) below).
+  toolExecutor.clearWorktreeState()
+
+  // F4: register MCP tools for THIS project on the CHILD executor — NEVER the
+  // shared singleton (that would delete/replace the concurrent main run's
+  // mcp__* tools). createIsolatedChild does not copy the parent tool map, so
+  // the task's own executor needs its MCP registered here to actually see them.
+  try {
+    const { refreshMcpForDispatch } = await import('../mainDispatch')
+    refreshMcpForDispatch(projectPath, toolExecutor)
+  } catch { /* MCP optional */ }
+  // F3: always the project checkout (no per-task worktree).
+  toolExecutor.enableCmdMode(projectPath)
+  // F2 multi-project: bind path resolution + permission grants to THIS
+  // run's project (not the focused one). projectId from the run stamp or
+  // a path match in recents / currentProject.
+  // ALWAYS bind the run's project PATH so getProjectRoot() returns THIS project,
+  // never the inherited/focused one. The id resolves from recents/currentProject
+  // when available, else a path-keyed fallback so permission grants fail-closed
+  // (re-prompt) instead of leaking another project's grants (#13 Finding B).
+  const projectId = resolveProjectIdForPath(projectPath) ?? `path:${projectPath}`
+  toolExecutor.setProjectContext({ projectId, projectPath })
   // Permission prompts raised by this task carry ITS identity — the dialog
   // says which task is asking and the task rows show the "Autorização" badge.
-  toolExecutor.setPermissionOrigin({ taskId: runId, label: run.description, sessionId: run.sessionId })
+  // projectId ensures approve* writes grants under the run's project.
+  toolExecutor.setPermissionOrigin({
+    taskId: runId,
+    label: run.description,
+    sessionId: run.sessionId,
+    projectId,
+  })
 
   // Full toolset minus the tools that don't belong in an independent, headless task.
   const openaiTools: OpenAI.ChatCompletionTool[] = toolExecutor
@@ -373,7 +376,7 @@ export async function runParallelTask(runId: string): Promise<void> {
     // Os claims agente↔agente vivem no registry ÚNICO (fileClaims.ts),
     // verificados dentro do toolExecutor.execute para TODOS os agentes.
     if (SERIALIZED_WRITE_TOOLS.has(canonical)) {
-      const roots = worktree ? [worktree.path, projectPath] : [projectPath]
+      const roots = [projectPath]
       for (const rel of writeTargetsOf(toolInput).map(tgt => toRelPath(tgt, roots))) {
         if (rel && userWipFiles.has(rel)) {
           return {
@@ -423,7 +426,7 @@ export async function runParallelTask(runId: string): Promise<void> {
     const builder = ContextBuilderClass.createEphemeral({ taskSurface: true })
     const projectType = useProjectStore.getState().currentProject?.projectType || 'unknown'
     const base = await buildMainSystemPrompt({
-      projectPath: worktree ? worktree.path : projectPath,
+      projectPath,
       projectType,
       userMessageText: prompt,
       bootstrapOnly: false,
@@ -442,13 +445,16 @@ export async function runParallelTask(runId: string): Promise<void> {
     systemPrompt = `${base}\n\n${buildTaskSystemPrompt(projectPath, worktree, null)}`
   } catch (err) {
     logger.warn('agent', `[parallel] ContextBuilder falhou para ${runId} — prompt degradado: ${formatError(err)}`)
-    let tmsContent: string | null = null
+    let projectInstructions: { heading: string; body: string } | null = null
     try {
-      const { invoke } = await import('@/utils/invokeMetrics')
-      const raw = await invoke<string>('read_file', { path: `${projectPath}/TMS.md` })
-      tmsContent = raw.length > 8_000 ? `${raw.slice(0, 8_000)}\n...[truncated]` : raw
-    } catch { /* sem TMS.md — segue sem memória */ }
-    systemPrompt = buildTaskSystemPrompt(projectPath, worktree, tmsContent)
+      const {
+        loadProjectInstructions,
+        buildParallelTaskInstructionsBody,
+      } = await import('../projectInstructions')
+      const bundle = await loadProjectInstructions(projectPath)
+      projectInstructions = buildParallelTaskInstructionsBody(bundle)
+    } catch { /* sem instruções de projecto — segue sem memória */ }
+    systemPrompt = buildTaskSystemPrompt(projectPath, worktree, projectInstructions)
   }
   // Guarda pré-voo (paridade com o main): Stop durante a montagem do prompt
   // (router+planner = segundos) não pode deixar o engine arrancar.
@@ -495,8 +501,24 @@ export async function runParallelTask(runId: string): Promise<void> {
     // desta tarefa em foco (a bolha do user já foi escrita pelo handleSend) e
     // (b) resultados da equipa delegada POR ESTA tarefa (roteados por dono).
     collectQueuedSteering: async () => {
-      // Cross-window Stop no turn boundary (latência ~1 turno em atividade).
-      if (chatSessionId && await consumeTaskStopRequest(projectPath, chatSessionId)) {
+      // Cross-window Stop no turn boundary (latência ~1 turno em atividade):
+      // session-scoped (task row X) or project-scoped (sidebar Stop).
+      const sessionStop = chatSessionId
+        ? await consumeTaskStopRequest(projectPath, chatSessionId)
+        : false
+      const projectStop = await consumeProjectAgentStop(projectPath)
+      if (sessionStop || projectStop) {
+        // Unified stop reason: Stop clicked in another window / sidebar.
+        if (chatSessionId) {
+          try {
+            const { t } = await import('../../../i18n')
+            useChatStore.getState().appendMessageToSession(chatSessionId, {
+              role: 'system',
+              level: 'info',
+              content: t('parallel.stoppedRemoteWindow'),
+            })
+          } catch { /* best-effort */ }
+        }
         useParallelTaskStore.getState().abort(runId)
         return null
       }
@@ -515,10 +537,20 @@ export async function runParallelTask(runId: string): Promise<void> {
           assistantMessageId = chat.startAssistantMessageInSession(chatSessionId)
         })
       }
-      const parts: string[] = []
-      if (deliveries) parts.push(deliveries)
-      if (steer.length > 0) parts.push(steer.join('\n\n'))
-      return parts.join('\n\n')
+      // Pacote 2: multimodal steer (images/files) — main parity via resolveSteerItemsToContent.
+      let steerPayload: string | import('../../../types/chat').ContentBlockAPI[] | null = null
+      if (steer.length > 0) {
+        const { resolveSteerItemsToContent } = await import('./steerContent')
+        steerPayload = await resolveSteerItemsToContent(steer, { sessionId: chatSessionId })
+      }
+      if (!steerPayload && !deliveries) return null
+      if (!steerPayload) return deliveries
+      if (!deliveries) return steerPayload
+      if (typeof steerPayload === 'string') return `${deliveries}\n\n${steerPayload}`
+      return [
+        { type: 'text' as const, text: deliveries },
+        ...steerPayload,
+      ]
     },
   })
 
@@ -557,17 +589,34 @@ export async function runParallelTask(runId: string): Promise<void> {
   }
   armWallClock()
 
+  // #9 B2: cross-window badge for this BACKGROUND project-run. The single-slot
+  // main-run writer only tracks the FOCUSED main run, so a background run on
+  // another project must drive its own 'running' badge (+ the heartbeat below),
+  // else it shows idle in every window's recents. Settled in the finally.
+  const badgeStartedAt = Date.now()
+  if (projectPath) {
+    writeProjectRunBadge(projectPath, 'running', { label: run.description, startedAt: badgeStartedAt })
+  }
+
   // Heartbeat de persistência (30s): mantém o updatedAt do índice fresco —
   // é a prova-de-vida que outras janelas usam para mostrar esta tarefa como
   // 'running' (limitação #3) — e protege o transcript contra crash (#2).
   const persistBeat = chatSessionId
     ? setInterval(() => {
         useChatStore.getState().persistSessionNow(chatSessionId)
-        // Canal cross-window: outra janela pediu Stop desta tarefa? O abort
-        // do store dispara o caminho normal (controller → engine.cancel →
+        // #9 B2: keep the cross-window badge fresh (>90s runs would go stale).
+        if (projectPath) {
+          writeProjectRunBadge(projectPath, 'running', { label: run.description, startedAt: badgeStartedAt })
+        }
+        // Canal cross-window: outra janela pediu Stop desta tarefa (session)
+        // ou do projecto inteiro (sidebar Stop só tem o path)? O abort do
+        // store dispara o caminho normal (controller → engine.cancel →
         // finally stampa 'aborted'). Teto de latência = este heartbeat.
-        void consumeTaskStopRequest(projectPath, chatSessionId).then((stop) => {
-          if (stop) useParallelTaskStore.getState().abort(runId)
+        void Promise.all([
+          consumeTaskStopRequest(projectPath, chatSessionId),
+          consumeProjectAgentStop(projectPath),
+        ]).then(([sessionStop, projectStop]) => {
+          if (sessionStop || projectStop) useParallelTaskStore.getState().abort(runId)
         })
       }, 30_000)
     : null
@@ -640,17 +689,50 @@ export async function runParallelTask(runId: string): Promise<void> {
   let inputTokens = 0
   let outputTokens = 0
 
+  // First user turn for the model. Priority:
+  //  1. run.initialBlocks (session-agent spawn with attachments) — resolve
+  //     via the same vision pipeline as mid-run steer (native / sidecar).
+  //  2. Last session user message promptBlocks (continuation safety net).
+  //  3. Plain prompt string (+ @-mention enrichment).
+  // Without (1)/(2), history pops the last user bubble and resubmits plain
+  // text only — attachments on the first turn were silently lost (review).
+  let firstMessage: string | ContentBlockAPI[] = prompt
+  try {
+    const { resolveSteerItemsToContent } = await import('./steerContent')
+    let blocks = run.initialBlocks
+    if ((!blocks || blocks.length === 0) && run.continuation && chatSessionId) {
+      const msgs = useChatStore.getState().sessions.get(chatSessionId)?.messages ?? []
+      const last = [...msgs].reverse().find(m => m.role === 'user')
+      if (last?.promptBlocks?.length) {
+        blocks = last.promptBlocks
+      } else if (last?.attachments?.length) {
+        const b: import('../../../types/chat').PromptBlock[] = []
+        if (last.content?.trim()) b.push({ type: 'text', text: last.content })
+        for (const att of last.attachments) b.push({ type: 'attachment', attachment: att })
+        blocks = b
+      }
+    }
+    if (blocks && blocks.length > 0) {
+      const resolved = await resolveSteerItemsToContent(
+        [{ text: prompt, blocks }],
+        { sessionId: chatSessionId },
+      )
+      if (resolved) firstMessage = resolved
+    }
+  } catch { /* multimodal is enrichment — never fail the task */ }
+
   // Fusão 4b: @-mentions no prompt da tarefa — MESMA resolução do main
   // (atMentions: snapshots em system-reminder + imagens multimodais). Os
   // caminhos resolvem contra o checkout principal: é o que o developer vê
   // quando escreve @ficheiro, e no arranque o worktree == HEAD. Best-effort.
-  let firstMessage: string | ContentBlockAPI[] = prompt
+  // Only enrich plain-string first messages; multimodal arrays already carry
+  // the user text + attachments.
   try {
-    if (/(^|\s)@\S/.test(prompt)) {
+    if (typeof firstMessage === 'string' && /(^|\s)@\S/.test(firstMessage)) {
       const { resolveMentionContext } = await import('../atMentions')
-      const mention = await resolveMentionContext(prompt)
+      const mention = await resolveMentionContext(firstMessage)
       if (mention.contextText || mention.imageParts.length > 0) {
-        const blocks: ContentBlockAPI[] = [{ type: 'text', text: prompt }]
+        const blocks: ContentBlockAPI[] = [{ type: 'text', text: firstMessage }]
         if (mention.contextText) blocks.push({ type: 'text', text: mention.contextText })
         for (const img of mention.imageParts) {
           blocks.push({ type: 'text', text: img.reminder })
@@ -673,7 +755,8 @@ export async function runParallelTask(runId: string): Promise<void> {
   // reconstrução do main (rebuildConversationHistory: tool-pairs, compact
   // boundaries, system omitidos). A bolha do prompt já está na sessão
   // (manager) e o submitMessage re-acrescenta o prompt — exclui-se a última
-  // user message do histórico para não duplicar.
+  // user message do histórico para não duplicar (rebuilt as firstMessage above,
+  // including attachments when present).
   let history: ReturnType<typeof toQueryMessages> = []
   if (run.continuation && chatSessionId) {
     try {
@@ -922,6 +1005,18 @@ export async function runParallelTask(runId: string): Promise<void> {
     void import('../subAgents/autoWake').then(({ dropSubAgentDeliveriesForOwner }) => {
       dropSubAgentDeliveriesForOwner(runId)
     }).catch(() => {})
+    // F2 MDI: kill THIS task's own background processes (owner = runId). The
+    // main run's cancel kills only owner 'main', so the task reaps its own here.
+    void import('../../../stores/backgroundCommandStore').then(async ({ useBackgroundCommandStore }) => {
+      const { invoke } = await import('@/utils/invokeMetrics')
+      const store = useBackgroundCommandStore.getState()
+      for (const c of store.getAll()) {
+        if (c.owner === runId && c.status === 'running') {
+          try { await invoke('kill_process', { pid: c.pid }) } catch { /* best effort */ }
+          store.cancelCommand(c.id)
+        }
+      }
+    }).catch(() => {})
     // User stop lands as status 'aborted' (store.abort), which the terminal
     // branches above deliberately skip — close the transcript here instead.
     if (useParallelTaskStore.getState().runs.get(runId)?.status === 'aborted') {
@@ -938,6 +1033,17 @@ export async function runParallelTask(runId: string): Promise<void> {
       stampTaskSessionStatus(run.sessionId, 'aborted')
     }
     releaseOwnerClaims(runId)
+    // #9 B2: settle this background project-run's cross-window badge (done /
+    // error / idle-on-abort). persistBeat is already cleared (833) so no
+    // 'running' heartbeat races this terminal write.
+    if (projectPath) {
+      const finalStatus = useParallelTaskStore.getState().runs.get(runId)?.status
+      writeProjectRunBadge(
+        projectPath,
+        finalStatus === 'error' ? 'error' : finalStatus === 'aborted' ? 'idle' : 'done',
+        { label: run.description },
+      )
+    }
     pumpParallelTasks() // a slot just freed — start the next queued task
   }
 }

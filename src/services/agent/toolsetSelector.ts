@@ -239,7 +239,8 @@ export function requestContextDefinition(omittedIds: string[]): OpenAI.ChatCompl
       name: REQUEST_CONTEXT_NAME,
       description:
         'Request a domain/capability context that was OMITTED from the system prompt to keep it lean. ' +
-        'Use the smallest specific context first (for example tms.commands, tms.entrypoints, design_system.semantic_tokens, agent_runtime.mcp_routing, delivery.dev_server, delivery.git_status). ' +
+        'Use the smallest specific context first (for example design_system.semantic_tokens, agent_runtime.mcp_routing, delivery.dev_server, delivery.git_status, project.docs_full for README/PLAN/TODO). ' +
+        'TMS.md is already in the system prompt when the project has one — do not re-request it. ' +
         'Use broad project/full contexts only when specific contexts are insufficient. ' +
         'The content is returned as a tool result for you to use this turn. ' +
         'Call ONCE per auxiliary; do not re-request one already returned.',

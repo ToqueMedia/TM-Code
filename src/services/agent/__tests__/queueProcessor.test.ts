@@ -221,55 +221,37 @@ describe('processQueueIfReady — block-valued commands', () => {
   })
 })
 
-describe('processQueueIfReady — queued tasks (asTask)', () => {
-  it('dispatches a task individually, never coalesced with steer messages', () => {
+describe('processQueueIfReady — asTask is legacy (F3: one agent per project)', () => {
+  // F3 doctrine (2026-07-23): intra-project concurrent tasks are removed — there
+  // is ONE agent per project. The `asTask` flag no longer forces an individual
+  // dispatch or a batch boundary; a stray asTask item is treated as a normal
+  // prompt and coalesces with same-mode items into a single agent turn (which
+  // steers/feeds the one run). Only slash/bash still dispatch individually.
+  it('coalesces a stray asTask item with normal prompts (no separate dispatch)', () => {
     enqueue(mk('task1', { asTask: true }))
     enqueue(mk('s1'))
 
     const exec = jest.fn().mockResolvedValue(undefined)
     processQueueIfReady({ executeInput: exec })
 
-    expect(exec.mock.calls[0]![0]).toHaveLength(1)
-    expect(exec.mock.calls[0]![0][0].value).toBe('task1')
-    expect(getCommandQueueSnapshot().map(c => c.value)).toEqual(['s1'])
-  })
-
-  it('steer batch stops at the first task — queue order is execution order', () => {
-    enqueue(mk('s1'))
-    enqueue(mk('s2'))
-    enqueue(mk('task1', { asTask: true }))
-    enqueue(mk('s3'))
-
-    const exec = jest.fn().mockResolvedValue(undefined)
-
-    // Without the batch boundary, s3 would ride the first batch and run
-    // BEFORE task1, silently violating the order the queue strip shows.
-    processQueueIfReady({ executeInput: exec })
-    expect(exec.mock.calls[0]![0].map((c: QueuedCommand) => c.value)).toEqual(['s1', 's2'])
-
-    processQueueIfReady({ executeInput: exec })
-    expect(exec.mock.calls[1]![0].map((c: QueuedCommand) => c.value)).toEqual(['task1'])
-
-    processQueueIfReady({ executeInput: exec })
-    expect(exec.mock.calls[2]![0].map((c: QueuedCommand) => c.value)).toEqual(['s3'])
-
+    // Both drain in ONE 'prompt'-mode batch — no task boundary any more.
+    expect(exec).toHaveBeenCalledTimes(1)
+    expect(exec.mock.calls[0]![0].map((c: QueuedCommand) => c.value)).toEqual(['task1', 's1'])
     expect(getCommandQueueSnapshot()).toHaveLength(0)
   })
 
-  it('two queued tasks are two separate dispatches, in order', () => {
+  it('coalesces multiple asTask items into a single dispatch, in order', () => {
     enqueue(mk('task1', { asTask: true }))
     enqueue(mk('task2', { asTask: true }))
 
     const exec = jest.fn().mockResolvedValue(undefined)
     processQueueIfReady({ executeInput: exec })
-    processQueueIfReady({ executeInput: exec })
 
-    expect(exec).toHaveBeenCalledTimes(2)
-    expect(exec.mock.calls[0]![0][0].value).toBe('task1')
-    expect(exec.mock.calls[1]![0][0].value).toBe('task2')
+    expect(exec).toHaveBeenCalledTimes(1)
+    expect(exec.mock.calls[0]![0].map((c: QueuedCommand) => c.value)).toEqual(['task1', 'task2'])
   })
 
-  it('a task that is also a slash command still dispatches alone', () => {
+  it('a slash command still dispatches alone even with the legacy asTask flag', () => {
     enqueue(mk('/review', { asTask: true }))
 
     const exec = jest.fn().mockResolvedValue(undefined)
@@ -279,22 +261,17 @@ describe('processQueueIfReady — queued tasks (asTask)', () => {
     expect(exec.mock.calls[0]![0][0].value).toBe('/review')
   })
 
-  it("a 'now'-priority item parked after a task still dispatches (no queue freeze)", () => {
-    // peek() picks by PRIORITY, the batch window by ARRAY order — a 'now'
-    // item behind a task is chosen as head but excluded from the window.
-    // Without the single-dispatch fallback this returned processed:false
-    // with a non-empty queue and the drain never re-fired.
+  it("a 'now'-priority item behind an asTask item coalesces (no queue freeze)", () => {
+    // peek() picks the 'now' item as head; dequeueAllMatching drains ALL
+    // same-mode items in array order, so both leave in one dispatch. The
+    // guarantee under test: the drain never freezes with a non-empty queue.
     enqueue(mk('task1', { asTask: true }))
     enqueue(mk('urgent', { priority: 'now' }))
 
     const exec = jest.fn().mockResolvedValue(undefined)
     const r1 = processQueueIfReady({ executeInput: exec })
     expect(r1.processed).toBe(true)
-    expect(exec.mock.calls[0]![0].map((c: QueuedCommand) => c.value)).toEqual(['urgent'])
-
-    const r2 = processQueueIfReady({ executeInput: exec })
-    expect(r2.processed).toBe(true)
-    expect(exec.mock.calls[1]![0].map((c: QueuedCommand) => c.value)).toEqual(['task1'])
+    expect(exec.mock.calls[0]![0].map((c: QueuedCommand) => c.value)).toEqual(['task1', 'urgent'])
     expect(getCommandQueueSnapshot()).toHaveLength(0)
   })
 })

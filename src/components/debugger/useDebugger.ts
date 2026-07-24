@@ -11,6 +11,7 @@ import { logger } from '../../utils/logger'
 import type { DebugConfigForm } from './types'
 import { useDebuggerActions } from './useDebuggerActions'
 import { useDebuggerEvents, useDebuggerShortcuts } from './useDebuggerEvents'
+import { stripAnsi } from '@/utils/stripAnsi'
 
 export function useDebugger() {
   const [debuggerService] = useState(() => DebuggerService.getInstance())
@@ -40,7 +41,8 @@ export function useDebugger() {
 
   const addConsoleMessage = useCallback((message: string) => {
     const timestamp = new Date().toLocaleTimeString()
-    setDebugConsole(prev => [...prev, `[${timestamp}] ${message}`])
+    // Strip ANSI so DAP/adapter noise like [38;5;246m never paints raw.
+    setDebugConsole(prev => [...prev, `[${timestamp}] ${stripAnsi(message)}`])
   }, [])
 
   const refreshSessions = useCallback(async () => {

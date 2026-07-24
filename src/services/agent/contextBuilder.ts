@@ -58,11 +58,7 @@ import {
   safeReadFile,
 } from './contextBuilder/projectUtils'
 import { buildProjectSymbolIndexSection } from './contextBuilder/projectSymbolIndex'
-import {
-  buildTmsSectionContext,
-  isTmsSectionContextId,
-  tmsSectionContextKeyFromId,
-} from './contextBuilder/tmsSectionContext'
+// tms.* per-section request_context removed — TMS full lives in static system prompt.
 import {
   sharedContextPreservation,
   sharedIdentity,
@@ -126,6 +122,11 @@ import {
   type RouterDiagnostics,
 } from './contextBuilder/auxiliaryRegistry'
 import { getTmsTurnTelemetry, markProjectSymbolIndexRequested } from './tmsContext'
+import {
+  buildInstructionsDocsFullPart,
+  loadProjectInstructions,
+  type InstructionSource,
+} from './projectInstructions'
 
 type IntentOverride = {
   profile: PromptProfile
@@ -237,10 +238,6 @@ class ContextBuilder {
   private async renderAuxiliaryContent(id: string): Promise<string | null> {
     const ctx = this.lastAuxiliaryCtx
     const resolvedId = resolveAuxiliaryId(id)
-    if (isTmsSectionContextId(resolvedId)) {
-      const key = tmsSectionContextKeyFromId(resolvedId)
-      return key && ctx?.promptCtx ? buildTmsSectionContext(ctx.promptCtx.tmsContent, key) : null
-    }
     switch (resolvedId) {
       case 'scaffold.workflow':
         return ctx ? getScaffoldingInstallSection({ pmDetected: ctx.pmDetected }) : null
@@ -319,9 +316,10 @@ class ContextBuilder {
         ].join('\n')
       case 'agent_runtime.memory_context':
         if (!ctx?.promptCtx) return null
+        // Intentionally omit getProjectMemorySection — TMS/foreign already
+        // live in the static system prompt; re-including them here doubles cost.
         return [
           getMemorySection(ctx.promptCtx),
-          getProjectMemorySection(ctx.promptCtx),
           getSessionMemorySection(ctx.promptCtx),
           getMemoryToolsGuidanceSection(),
         ].filter(Boolean).join('\n\n') || null
@@ -341,9 +339,31 @@ class ContextBuilder {
         return ctx?.promptCtx ? getRecentFilesSection(ctx.promptCtx) : null
       case 'project.docs_full':
         if (ctx?.promptCtx) {
+          // TMS (and sole-foreign AGENTS/CLAUDE) are already in the static
+          // system prompt — omit them here. Dual-case still appends foreign.
+          const tmsSrc: InstructionSource | null = ctx.promptCtx.tmsContent
+            ? {
+                kind: 'tms',
+                path: `${ctx.promptCtx.normalizedProjectPath}/TMS.md`,
+                relPath: 'TMS.md',
+                content: ctx.promptCtx.tmsContent,
+              }
+            : null
+          const foreignSrc: InstructionSource | null = ctx.promptCtx.foreignInstructions
+            ? {
+                kind: ctx.promptCtx.foreignInstructions.kind,
+                path: ctx.promptCtx.foreignInstructions.path,
+                relPath: ctx.promptCtx.foreignInstructions.relPath,
+                content: ctx.promptCtx.foreignInstructions.content,
+              }
+            : null
+          const instructionsPart = buildInstructionsDocsFullPart(tmsSrc, foreignSrc, {
+            omitTmsAlreadyInSystem: true,
+            omitForeignAlreadyInSystem: true,
+          })
           const parts = [
             ctx.promptCtx.readme ? `# README.md\n${ctx.promptCtx.readme}` : null,
-            ctx.promptCtx.tmsContent ? `# TMS.md\n${ctx.promptCtx.tmsContent}` : null,
+            instructionsPart,
             ctx.promptCtx.planContent ? `# PLAN.md\n${ctx.promptCtx.planContent}` : null,
             ctx.promptCtx.todoContent ? `# TODO.md\n${ctx.promptCtx.todoContent}` : null,
           ].filter(Boolean) as string[]
@@ -404,11 +424,12 @@ class ContextBuilder {
 
   /**
    * Invalidate cached prompts for a project (or all projects if omitted).
-   * Call after write operations that touch README.md, TMS.md, PLAN.md, TODO.md,
-   * package.json, .toquemedia/project.json, .toquemedia-template, or
-   * .toquemedia-id. The last one matters:
-   * if the agent writes .toquemedia-id mid-session (standardization pass), the
-   * next prompt must reflect tm_code_owned=true, not the cached false.
+   * Call after write operations that touch README.md, TMS.md, AGENTS.md,
+   * CLAUDE.md, .claude/CLAUDE.md, PLAN.md, TODO.md, package.json,
+   * .toquemedia/project.json, .toquemedia-template, or .toquemedia-id.
+   * The last one matters: if the agent writes .toquemedia-id mid-session
+   * (standardization pass), the next prompt must reflect tm_code_owned=true,
+   * not the cached false.
    */
   /**
    * Load persistent memory indexes, optionally filter via the per-plan
@@ -695,14 +716,16 @@ class ContextBuilder {
     // hides behind whichever I/O happens to be slowest.
     const memoryWorkPromise = this.runMemoryWork(projectPath, userMessage, accessedPaths)
 
-    // Gather context in parallel for speed
-    const [treeString, pkgSummary, readme, projectManifest, templateManifest, tmsContent, planContent, todoContent, toquemediaIdRaw, gitContext, recentFiles, pathAliases] = await Promise.all([
+    // Gather context in parallel for speed. Project instructions (TMS + foreign
+    // AGENTS/CLAUDE) go through loadProjectInstructions so compat repos without
+    // TMS.md still surface developer rules at runtime.
+    const [treeString, pkgSummary, readme, projectManifest, templateManifest, instructions, planContent, todoContent, toquemediaIdRaw, gitContext, recentFiles, pathAliases] = await Promise.all([
       buildFileTree(projectPath),
       extractPackageSummary(projectPath),
       safeReadFile(`${projectPath}/README.md`),
       readProjectManifest(projectPath),
       readTemplateManifest(projectPath),
-      safeReadFile(`${projectPath}/TMS.md`),
+      loadProjectInstructions(projectPath),
       safeReadFile(`${projectPath}/PLAN.md`),
       safeReadFile(`${projectPath}/TODO.md`),
       safeReadFile(`${projectPath}/.toquemedia-id`),
@@ -710,6 +733,8 @@ class ContextBuilder {
       gatherRecentFiles(projectPath),
       readPathAliases(projectPath),
     ])
+    const tmsContent = instructions.tms?.content ?? null
+    const foreignInstructions = instructions.foreignPrimary
     // Any non-null content means the marker exists. We don't care about the ID
     // itself for prompt decisions — only whether TM Code authored the project.
     const tmCodeOwned = toquemediaIdRaw !== null
@@ -810,6 +835,7 @@ class ContextBuilder {
       pathAliases,
       readme,
       tmsContent,
+      foreignInstructions,
       planContent,
       todoContent,
       projectManifest,
@@ -866,6 +892,16 @@ class ContextBuilder {
       projectManifest,
       templateManifest,
       tmsContent,
+      // Full foreign body (or a stable hash) — contentLen alone is insufficient:
+      // same-length rewrites of AGENTS.md would otherwise serve a stale promptCtx
+      // on cache hit (project.docs_full / foreign instructions).
+      foreignInstructions: foreignInstructions
+        ? {
+            kind: foreignInstructions.kind,
+            relPath: foreignInstructions.relPath,
+            contentHash: stablePromptHash(foreignInstructions.content),
+          }
+        : null,
       planContent,
       todoContent,
       toquemediaIdRaw,
@@ -933,9 +969,16 @@ class ContextBuilder {
       // Memory taxonomy + save/forget discipline. The rules of the
       // memory system are stable across sessions (the data on disk
       // mutates, but the schema/contract is fixed), so this guidance
-      // lives in the static block. The actual memory CONTENT is injected
-      // below the boundary via getMemorySection.
+      // lives in the static block. The actual MEMORY.md indexes are
+      // injected below the boundary (they mutate mid-session).
       getMemoryToolsGuidanceSection(),
+      // TMS.md full (or AGENTS/CLAUDE compat) — snapshot at run start.
+      // In the static prefix so provider prompt-cache reuses it on turns 2+.
+      // Agent updates TMS at FINAL CHECKPOINT (see reminder), not as mid-task
+      // bookkeeping. Late in the static block so a rare TMS change only
+      // invalidates the cache tail after this section.
+      getProjectMemorySection(ctx),
+      getMemoryGuidanceSection(ctx),
       // On-demand auxiliary index — lists context blocks omitted from this
       // prompt so the agent can fetch them via `request_context`. Null when
       // nothing is omitted (no index rendered). Stable per-intent-profile
@@ -1033,8 +1076,7 @@ class ContextBuilder {
         'mtime ordering changes on every save'),
       dynamicSection('readme', () => getReadmeSection(ctx),
         'README.md is developer-editable and used as primary intent signal'),
-      dynamicSection('project_memory', () => getProjectMemorySection(ctx),
-        'TMS.md/PLAN.md/TODO.md churn during normal IDE work'),
+      // project_memory (TMS full) is above the boundary — static snapshot.
       dynamicSection('active_plan', () => getActivePlanSection(ctx),
         'PLAN.md status flips DRAFT → PENDING APPROVAL → APPROVED mid-session'),
       // Live tracker BEFORE the static TODO.md because the live state is
@@ -1048,8 +1090,6 @@ class ContextBuilder {
         'live in-memory tracker mutated by every update_tasks call'),
       dynamicSection('task_list', () => this.taskSurface ? null : getTaskListSection(ctx),
         'TODO.md task statuses flip as the implementation agent progresses'),
-      dynamicSection('memory_guidance', () => getMemoryGuidanceSection(ctx),
-        'guidance is conditional on the presence of project memory files'),
       dynamicSection('skills', () => getSkillsSection(loadedSkills),
         'skill set depends on project-type detection + hashtag triggers'),
       // Reminder stays at the very end — U-Curve recency outweighs cache

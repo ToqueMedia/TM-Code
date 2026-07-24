@@ -16,6 +16,8 @@
 
 import { invoke } from '@/utils/invokeMetrics'
 import { useProjectStore } from '@/stores/projectStore'
+import { useParallelTaskStore } from '@/stores/parallelTaskStore'
+import { useAgentStore } from '@/stores/agentStore'
 import { logger } from '@/utils/logger'
 
 export interface ProjectWindowLock {
@@ -29,7 +31,11 @@ export const PROJECT_WINDOW_LOCK_STALE_MS = 90_000
 
 let started = false
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null
-let heldPath: string | null = null
+/** Multi-slot (F2 MDI): a lock per project this window has focused OR is
+ *  actively running an agent on — not just the focused one. A background
+ *  project-run writes its tree, so it must keep guarding against a second
+ *  window opening the same project unwarned. */
+const heldPaths = new Set<string>()
 
 function acquire(path: string): void {
   invoke('acquire_project_window_lock', { projectPath: path }).catch(err => {
@@ -48,9 +54,59 @@ function stopHeartbeat(): void {
   }
 }
 
-function startHeartbeat(path: string): void {
-  stopHeartbeat()
-  heartbeatTimer = setInterval(() => acquire(path), LOCK_HEARTBEAT_MS)
+function startHeartbeat(): void {
+  if (heartbeatTimer) return
+  heartbeatTimer = setInterval(() => {
+    for (const p of heldPaths) acquire(p)
+  }, LOCK_HEARTBEAT_MS)
+}
+
+/** The project the singleton main run is bound to (set while a main run is
+ *  live, cleared when it ends) — survives a focus switch, unlike currentProject.
+ *  Lazy require: toolExecutor pulls heavy deps we don't want at module load. */
+function mainRunProjectPath(): string | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const ToolExecutor = require('./agent/toolExecutor').default as {
+      getInstance: () => { getProjectContext: () => { projectPath: string } | null }
+    }
+    return ToolExecutor.getInstance().getProjectContext()?.projectPath ?? null
+  } catch {
+    return null
+  }
+}
+
+/** Recompute the set of projects THIS window must lock: the focused project,
+ *  the main run's bound project (if live), and every project with a live
+ *  parallel/project run. Acquire the new, release the gone. */
+function reconcile(): void {
+  const desired = new Set<string>()
+  const focused = useProjectStore.getState().currentProject?.path
+  if (focused) desired.add(focused)
+  const mainRun = mainRunProjectPath()
+  if (mainRun) desired.add(mainRun)
+  try {
+    for (const r of useParallelTaskStore.getState().runs.values()) {
+      if ((r.status === 'running' || r.status === 'queued') && r.projectPath) {
+        desired.add(r.projectPath)
+      }
+    }
+  } catch { /* store unavailable (tests) */ }
+
+  for (const p of Array.from(heldPaths)) {
+    if (!desired.has(p)) {
+      release(p)
+      heldPaths.delete(p)
+    }
+  }
+  for (const p of desired) {
+    if (!heldPaths.has(p)) {
+      acquire(p)
+      heldPaths.add(p)
+    }
+  }
+  if (heldPaths.size > 0) startHeartbeat()
+  else stopHeartbeat()
 }
 
 /**
@@ -75,19 +131,18 @@ export function initProjectWindowLock(): void {
   if (started) return
   started = true
 
+  // Reconcile the lock set on every signal that changes which projects this
+  // window is holding: focus change, a project-run starting/ending, and the
+  // main run starting/ending (agentStore.status is the proxy — the bound
+  // project is read fresh from the executor in reconcile).
   useProjectStore.subscribe((state, prev) => {
-    const prevPath = prev.currentProject?.path ?? null
-    const newPath = state.currentProject?.path ?? null
-    if (prevPath === newPath) return
-    if (prevPath && heldPath === prevPath) {
-      stopHeartbeat()
-      release(prevPath)
-      heldPath = null
-    }
-    if (newPath) {
-      heldPath = newPath
-      acquire(newPath)
-      startHeartbeat(newPath)
-    }
+    if (state.currentProject?.path !== prev.currentProject?.path) reconcile()
   })
+  try {
+    useParallelTaskStore.subscribe(() => reconcile())
+  } catch { /* store unavailable (tests) */ }
+  try {
+    useAgentStore.subscribe((s, p) => { if (s.status !== p.status) reconcile() })
+  } catch { /* store unavailable (tests) */ }
+  reconcile()
 }

@@ -1,107 +1,261 @@
 /**
- * Dispatcher for user-initiated parallel task agents (v1.0.1 "multi-agent").
+ * Project-bound agent runs (F2/F3 multi-project MDI).
  *
- * addParallelTask() enqueues a task; pump() promotes queued tasks to running as
- * long as fewer than MAX_CONCURRENT_TASKS are active, firing the runner for each.
- * The runner calls pump() again when it finishes, so the FIFO queue drains
- * automatically. Everything above the cap simply waits its turn (the user asked
- * for "up to 4 at once, the rest queue").
+ * Policy: `./policy.ts` + ARCHITECTURE.md "Current parallel model".
+ * When `ONE_AGENT_PER_PROJECT` (F3): no intra-project fan-out; steer or wait.
+ * This module still hosts the runner used when:
+ *   - the main agent is busy on project A and the user works on project B
+ *     (`addSessionAgentRun` / `addProjectRun`);
+ *   - a session needs continuation while another project holds the main loop.
  */
 
-// NOTA: nada de projectStore aqui — ele arrasta windowService → @tauri-apps
-// (rebenta o jsdom dos testes que importam o manager). O projectPath vem da
-// sessão ativa do chatStore, que é o mesmo projecto por construção.
+// NOTA: nada de projectStore estático aqui — arrasta windowService → tauri
+// (rebenta o jsdom dos testes). projectPath vem da sessão / argumento.
 import { useParallelTaskStore, MAX_CONCURRENT_TASKS } from '../../../stores/parallelTaskStore'
 import { useChatStore } from '../../../stores/chatStore'
 import { useBillingStore } from '../../../stores/billingStore'
 import { useByokStore } from '../../../stores/byokStore'
+import { getQueryGuard } from '../queryGuard'
 import { t } from '../../../i18n'
+import { ONE_AGENT_PER_PROJECT } from './policy'
+import type { PromptBlock, Attachment } from '../../../types/chat'
+import { extractDisplayFromValue } from '../promptValueHelpers'
 
-/** Derive a short card label from the task prompt. */
+/** Derive a short card label from the task prompt (never a multi-line dump). */
 function deriveDescription(prompt: string): string {
-  const firstLine = prompt.trim().split('\n')[0].replace(/\s+/g, ' ').trim()
-  if (firstLine.length <= 48) return firstLine || 'Task'
-  return firstLine.slice(0, 47).trimEnd() + '…'
+  const firstLine = prompt
+    .trim()
+    .split('\n')[0]
+    .replace(/\s+/g, ' ')
+    .replace(/^(please\s+|pls\s+|podes\s+|pode\s+|ajuda[- ]me\s+a\s+|help\s+me\s+(to\s+)?)/i, '')
+    .trim()
+  if (!firstLine) return 'Task'
+  if (firstLine.length <= 52) return firstLine
+  return firstLine.slice(0, 51).trimEnd() + '…'
+}
+
+function normalizeProjectPath(path: string | null | undefined): string {
+  if (!path) return ''
+  return path.replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+/** Live parallel-store run for a project path (running or queued). */
+export function findLiveParallelRunForProject(projectPath: string): string | null {
+  const target = normalizeProjectPath(projectPath)
+  if (!target) return null
+  for (const r of useParallelTaskStore.getState().runs.values()) {
+    if (
+      normalizeProjectPath(r.projectPath) === target
+      && (r.status === 'running' || r.status === 'queued')
+    ) {
+      return r.id
+    }
+  }
+  return null
 }
 
 /**
- * Queue a task and kick the pump. Returns the runId. The task starts immediately
- * if a slot is free, otherwise it waits in the FIFO queue.
- *
- * Each task gets its OWN chat session (created non-active so the user's live
- * conversation is untouched): the ProjectMenu lists the task under its project
- * and clicking it opens this session. The prompt is written now; the runner
- * appends the result/error when the task ends.
+ * True when the main agentService loop is streaming a session of this project.
+ * (ToolExecutor project context is checked lazily to avoid pulling the full
+ * executor graph into lightweight unit tests.)
  */
-export function addParallelTask(prompt: string): string | null {
-  // Pré-voo de billing (mesmo predicado do gate da fila em useQueueProcessor):
-  // sem budget, a tarefa arrancava na mesma e morria no worker com um erro
-  // críptico. Recusa à cabeça, com nota visível onde o user escreveu.
-  // BYOK herda o funcionamento do main: com chave própria ativa (snapshot da
-  // sessão de lançamento), o budget gerido não trava a tarefa — o dispatch do
-  // main também não trava (a chave é do user).
-  const byokExempt =
-    useByokStore.getState().enabled && !!useChatStore.getState().getActiveSession()?.byokSnapshot
-  const billing = useBillingStore.getState()
-  if (!byokExempt && (billing.noCredits || billing.status === 'rejected')) {
-    try {
-      useChatStore.getState().addSystemMessage(t('parallel.blockedNoBudget'), 'warn')
-    } catch { /* sem chat ativo — nada a anotar */ }
-    return null
+function isMainBusyOnProject(projectPath: string): boolean {
+  const target = normalizeProjectPath(projectPath)
+  if (!target) return false
+  try {
+    const chat = useChatStore.getState()
+    const sid = chat.streamingSessionId
+    if (sid) {
+      const session = chat.sessions.get(sid)
+      if (normalizeProjectPath(session?.projectPath) === target) {
+        if (getQueryGuard().getSnapshot() || chat.isStreaming) return true
+      }
+    }
+  } catch { /* tests / early boot */ }
+  try {
+    // Lazy: toolExecutor → heavy deps; only when chat pin is ambiguous.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const ToolExecutor = require('../toolExecutor').default as {
+      getInstance: () => { getProjectContext: () => { projectPath: string } | null }
+    }
+    const ctx = ToolExecutor.getInstance().getProjectContext()
+    if (normalizeProjectPath(ctx?.projectPath) !== target) return false
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const AgentService = require('../agentService').default as {
+      getInstance: () => { isAgentRunning: () => boolean }
+    }
+    return AgentService.getInstance().isAgentRunning()
+  } catch {
+    return false
   }
-  const description = deriveDescription(prompt)
-  let sessionId: string | undefined
-  const chat = useChatStore.getState()
-  // A tarefa nasce do composer com um run vivo → há sempre sessão ativa, e o
-  // projectPath dela É o projecto atual. Sem sessão (edge), a tarefa corre na
-  // mesma — só fica sem transcript clicável.
-  const projectPath = chat.getActiveSession()?.projectPath
-  // CONTRATO DURO (2026-07-17): sem sessão não há tarefa. O ramo "corre sem
-  // transcript clicável" produzia exatamente o pesadelo reportado — uma
-  // tarefa visível em memória, inabrível, que desaparecia no primeiro
-  // reload sem deixar rasto em disco. Recusa visível > fantasma.
-  if (!projectPath) {
-    try { chat.addSystemMessage(t('parallel.blockedNoSession'), 'error') } catch { /* sem chat */ }
-    return null
-  }
-  {
-    sessionId = chat.createBackgroundSession(projectPath, description)
-    chat.appendMessageToSession(sessionId, { role: 'user', content: prompt })
-    // Persistência À NASCENÇA: sem isto o chat da tarefa vivia só em memória
-    // até ao fim do 1º turno / heartbeat 30s — um reload (HMR em dev!), crash
-    // ou abort ainda em fila perdia-o para sempre ("o chat desapareceu da
-    // lista", feedback 2026-07-17). Doutrina: só o USER apaga chats de tarefa.
-    chat.persistSessionNow(sessionId)
-  }
-  const id = useParallelTaskStore.getState().createQueued(prompt, description, sessionId, projectPath)
-  pumpParallelTasks()
-  return id
+}
+
+/** F3: any live agent (main or parallel) for this project. */
+export function isProjectAgentBusy(projectPath: string): boolean {
+  if (!projectPath) return false
+  if (findLiveParallelRunForProject(projectPath)) return true
+  return isMainBusyOnProject(projectPath)
 }
 
 /**
- * Run de CONTINUAÇÃO — "o agente da sessão que estás a ver" (doutrina
- * sem-deus): corre o prompt SOBRE uma sessão existente, com o histórico dela,
- * enquanto o run interativo está ocupado noutra sessão. Não cria sessão nem
- * mexe na fila do main. Devolve o runId, ou null se recusado (billing).
+ * @deprecated F3: intra-project concurrent tasks are removed. Always refuses.
+ * Kept as a named export so stray call sites get a clear system message.
  */
-export function addSessionAgentRun(sessionId: string, prompt: string): string | null {
+export function addParallelTask(_prompt: string): string | null {
+  if (!ONE_AGENT_PER_PROJECT) {
+    // Fan-out path intentionally not re-wired while F3 is the product default.
+    // Re-enable requires ARCHITECTURE Current model + worktree spawn + tests.
+    return null
+  }
+  try {
+    useChatStore.getState().addSystemMessage(t('parallel.oneAgentPerProject'), 'warn')
+  } catch { /* no chat */ }
+  return null
+}
+
+/**
+ * Run de CONTINUAÇÃO — "o agente da sessão que estás a ver" enquanto o main
+ * está ocupado noutro projecto (F2). No MESMO projecto, se já há agente vivo,
+ * a mensagem vira STEER do run existente (F3: 1 agente/projecto).
+ */
+export type SessionAgentRunOpts = {
+  /** Multimodal prompt blocks (text + attachments). When set, bubble + steer carry them. */
+  blocks?: PromptBlock[]
+}
+
+function userBubbleFields(prompt: string, blocks?: PromptBlock[]): {
+  content: string
+  attachments?: Attachment[]
+  promptBlocks?: PromptBlock[]
+} {
+  if (!blocks?.length) return { content: prompt }
+  const display = extractDisplayFromValue(blocks)
+  return {
+    content: display.text || prompt,
+    attachments: display.attachments.length > 0 ? display.attachments : undefined,
+    promptBlocks: blocks,
+  }
+}
+
+export function addSessionAgentRun(
+  sessionId: string,
+  prompt: string,
+  opts?: SessionAgentRunOpts,
+): string | null {
   const chat = useChatStore.getState()
   const session = chat.sessions.get(sessionId)
   if (!session) return null
-  // Mesmo pré-voo de billing do addParallelTask; BYOK da SESSÃO ALVA isenta.
+  const projectPath = session.projectPath
+  const bubble = userBubbleFields(prompt, opts?.blocks)
+  const steerItem = { text: prompt, blocks: opts?.blocks }
+
+  // F3: already a parallel run on this project → steer it.
+  const liveId = findLiveParallelRunForProject(projectPath)
+  if (liveId) {
+    chat.appendMessageToSession(sessionId, { role: 'user', ...bubble })
+    chat.persistSessionNow(sessionId)
+    useParallelTaskStore.getState().enqueueSteer(liveId, steerItem)
+    return liveId
+  }
+
+  // F3: main already working on this project → do not spawn a second agent.
+  // Caller should have used the message queue; surface a clear note.
+  if (isMainBusyOnProject(projectPath)) {
+    try {
+      chat.addSystemMessage(t('parallel.oneAgentPerProjectSteer'), 'info')
+    } catch { /* */ }
+    // Still write the user bubble on the viewed session so nothing is lost;
+    // the user can switch to the streaming session to see the live run.
+    chat.appendMessageToSession(sessionId, { role: 'user', ...bubble })
+    chat.persistSessionNow(sessionId)
+    return null
+  }
+
   const byokExempt = useByokStore.getState().enabled && !!session.byokSnapshot
   const billing = useBillingStore.getState()
   if (!byokExempt && (billing.noCredits || billing.status === 'rejected')) {
     try { chat.addSystemMessage(t('parallel.blockedNoBudget'), 'warn') } catch { /* sem chat */ }
     return null
   }
-  // A bolha do user entra JÁ na sessão (o runner exclui-a do histórico que
-  // envia — o submitMessage re-acrescenta o prompt como user message).
-  chat.appendMessageToSession(sessionId, { role: 'user', content: prompt })
+  chat.appendMessageToSession(sessionId, { role: 'user', ...bubble })
   chat.persistSessionNow(sessionId)
+  // initialBlocks: first model turn rebuilds multimodal content (runner
+  // pops last user from history and would otherwise send plain text only).
   const id = useParallelTaskStore
     .getState()
-    .createQueued(prompt, deriveDescription(prompt), sessionId, session.projectPath, { continuation: true })
+    .createQueued(prompt, deriveDescription(prompt), sessionId, projectPath, {
+      continuation: true,
+      initialBlocks: opts?.blocks,
+    })
+  pumpParallelTasks()
+  return id
+}
+
+/**
+ * F2 — launch an agent bound to a SPECIFIC project, minting a background chat
+ * session when the focused session isn't that project's. This is the deliberate
+ * entry point for starting a run on a NON-focused project (e.g. a "run this
+ * project" action in the project switcher). The live composer path uses
+ * `addSessionAgentRun` for the FOCUSED session; both are kept on purpose — they
+ * share the steer/refuse/billing/createQueued logic but differ in whether a
+ * session must already exist.
+ * F3 — refuses if that project already has a live agent (steers it instead).
+ */
+export function addProjectRun(
+  project: { id: string; path: string },
+  prompt: string,
+  opts?: { sessionId?: string },
+): string | null {
+  const chat = useChatStore.getState()
+
+  const liveId = findLiveParallelRunForProject(project.path)
+  if (liveId) {
+    const run = useParallelTaskStore.getState().runs.get(liveId)
+    const sid = opts?.sessionId ?? run?.sessionId
+    if (sid) {
+      chat.appendMessageToSession(sid, { role: 'user', content: prompt })
+      chat.persistSessionNow(sid)
+    }
+    useParallelTaskStore.getState().enqueueSteer(liveId, prompt)
+    return liveId
+  }
+  if (isMainBusyOnProject(project.path)) {
+    try {
+      chat.addSystemMessage(t('parallel.oneAgentPerProjectSteer'), 'info')
+    } catch { /* */ }
+    return null
+  }
+
+  const byokExempt =
+    useByokStore.getState().enabled && !!chat.getActiveSession()?.byokSnapshot
+  const billing = useBillingStore.getState()
+  if (!byokExempt && (billing.noCredits || billing.status === 'rejected')) {
+    try { chat.addSystemMessage(t('parallel.blockedNoBudget'), 'warn') } catch { /* sem chat */ }
+    return null
+  }
+
+  let sessionId = opts?.sessionId
+  if (sessionId) {
+    const session = chat.sessions.get(sessionId)
+    if (!session || session.projectPath !== project.path) return null
+  } else {
+    const active = chat.getActiveSession()
+    if (active && active.projectPath === project.path) {
+      sessionId = active.id
+    } else {
+      sessionId = chat.createBackgroundSession(project.path, deriveDescription(prompt))
+    }
+  }
+
+  chat.appendMessageToSession(sessionId, { role: 'user', content: prompt })
+  chat.persistSessionNow(sessionId)
+  const id = useParallelTaskStore.getState().createQueued(
+    prompt,
+    deriveDescription(prompt),
+    sessionId,
+    project.path,
+    { continuation: true },
+  )
   pumpParallelTasks()
   return id
 }
@@ -109,24 +263,39 @@ export function addSessionAgentRun(sessionId: string, prompt: string): string | 
 let pumping = false
 
 /**
- * Promote queued tasks to running until the concurrency cap is hit. Re-entrancy
- * guarded (the runner calls this from its terminal handler, which can overlap a
- * fresh addParallelTask). Fire-and-forget: the runner owns each task's lifecycle.
+ * Promote queued project-runs to running. F3: never start two agents for the
+ * same projectPath — skip (leave queued) until the live one finishes.
  */
 export function pumpParallelTasks(): void {
   if (pumping) return
   pumping = true
   try {
     const store = useParallelTaskStore.getState()
+    // Collect project paths already running.
+    const busyProjects = new Set<string>()
+    for (const r of store.runs.values()) {
+      if (r.status === 'running' && r.projectPath) busyProjects.add(r.projectPath)
+    }
+
     while (store.runningCount() < MAX_CONCURRENT_TASKS) {
-      const nextId = store.nextQueuedId()
+      // Find next queued whose project is free (or has no path).
+      let nextId: string | null = null
+      for (const r of store.runs.values()) {
+        if (r.status !== 'queued') continue
+        if (r.projectPath && busyProjects.has(r.projectPath)) continue
+        if (r.projectPath && isMainBusyOnProject(r.projectPath)) continue
+        // FIFO among eligible: pick oldest createdAt
+        if (!nextId) {
+          nextId = r.id
+          continue
+        }
+        const cur = store.runs.get(nextId)!
+        if (r.createdAt < cur.createdAt) nextId = r.id
+      }
       if (!nextId) break
+      const run = store.runs.get(nextId)
       store.markRunning(nextId)
-      // Lazy import breaks the manager↔runner cycle; the runner re-enters pump()
-      // on completion to drain the rest of the queue. The .catch is load-bearing:
-      // a module-load failure OR an unexpected throw in the runner's setup (before
-      // its own try/finally) would otherwise leave the task stuck 'running' and
-      // leak its slot forever. Error it and keep draining.
+      if (run?.projectPath) busyProjects.add(run.projectPath)
       const id = nextId
       void import('./parallelTaskRunner')
         .then(({ runParallelTask }) => runParallelTask(id))

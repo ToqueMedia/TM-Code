@@ -23,6 +23,7 @@ import { injectStreamOptions, observeUsage } from './usage'
 import { withStreamIdleTimeout } from './streamWatchdog'
 import { ensureGeminiThoughtSummaries, ensureVertexPublisher } from './geminiThinking'
 import { applyDashScopePromptCache } from './dashscopePromptCache'
+import { applyReasoningEffort } from './applyReasoningEffort'
 import type { Env, Fetcher, WaitUntilContext } from './types'
 
 export interface HandlerOptions {
@@ -158,6 +159,15 @@ async function bodyWithActiveModel(
   // Gemini só transmite os resumos com include_thoughts — sem isto o reasoning
   // do Gemini nunca chegava à IDE enquanto os outros modelos apareciam.
   if (isGoogleOAuth) ensureGeminiThoughtSummaries(merged)
+
+  // Effort do utilizador — valor NATIVO do frontend (reasoningEffortModels.ts).
+  // DEPOIS do merge do extraBody. applyReasoningEffort escreve reasoning_effort
+  // e os companions por provider (DashScope enable_thinking, z.AI thinking.type;
+  // limpa thinking em Kimi/Grok). Ver applyReasoningEffort.ts + docs oficiais.
+  const effortHeader = request.headers.get('X-TM-Reasoning-Effort')?.trim()
+  if (effortHeader) {
+    applyReasoningEffort(merged, effortHeader, { provider, baseUrl, model })
+  }
 
   // `stream_options.include_usage` garante que providers OpenAI-compatible
   // devolvem o objeto `usage` no chunk final — é a fonte autoritativa da

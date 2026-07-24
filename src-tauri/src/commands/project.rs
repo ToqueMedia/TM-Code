@@ -831,10 +831,10 @@ pub fn get_recent_projects() -> Result<Vec<RecentProject>> {
     let mut settings: GlobalSettings = serde_json::from_str(&settings_content)?;
 
     // Filter out projects that no longer exist and normalize paths for frontend.
-    // Also dedupe by path: legacy settings.json files from before the path-dedup
-    // fix may carry multiple entries for the same on-disk project (one per stale
-    // id). Keep the first occurrence (insertion order = newest first) and drop
-    // the rest. Persist back so we don't pay the cost on every read.
+    // Also dedupe by path: legacy settings.json may carry multiple entries for
+    // the same on-disk project (one per stale id). Keep first occurrence to
+    // preserve stable workspace order (not recents-by-last-opened). Persist
+    // when we clean up so we don't pay the cost on every read.
     let mut valid_projects = Vec::new();
     let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut needs_persist = false;
@@ -1125,31 +1125,38 @@ fn update_recent_projects(project_info: &ProjectInfo) -> Result<()> {
         default_settings
     };
 
-    // Remove any existing entry for this project. Dedup by id AND by path:
-    // .toquemedia-id can be regenerated (clone, deleted dotfile, .gitignored,
-    // template-copy) so the same on-disk project may end up with a fresh id.
-    // Without path-dedup the file accumulates orphans until truncation drops
-    // legitimate recents.
-    settings
-        .recent_projects
-        .retain(|p| p.id != project_info.id && p.path != project_info.path);
+    // Workspace list (not a "recents by last-opened" ranking): opening a
+    // project must NOT move it to the top. Update in place when present;
+    // append only when the project is new to the list.
+    // Dedup by id AND path: .toquemedia-id can be regenerated (clone, deleted
+    // dotfile, .gitignored, template-copy) so the same folder may get a fresh
+    // id — without path-dedup the file accumulates orphans.
+    let mut found = false;
+    for p in settings.recent_projects.iter_mut() {
+        if p.id == project_info.id || p.path == project_info.path {
+            p.id = project_info.id.clone();
+            p.name = project_info.name.clone();
+            p.path = project_info.path.clone();
+            p.last_opened = project_info.last_opened.clone();
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        settings.recent_projects.push(RecentProject {
+            id: project_info.id.clone(),
+            name: project_info.name.clone(),
+            path: project_info.path.clone(),
+            last_opened: project_info.last_opened.clone(),
+        });
+    }
 
-    // Create new recent project entry
-    let recent_project = RecentProject {
-        id: project_info.id.clone(),
-        name: project_info.name.clone(),
-        path: project_info.path.clone(),
-        last_opened: project_info.last_opened.clone(),
-    };
-
-    // Insert at the beginning
-    settings.recent_projects.insert(0, recent_project);
-
-    // Limit to max_recent_projects
+    // Soft cap so a long-lived workspace list does not grow forever. Drop the
+    // oldest *unfocused* entries only when over the max (stable order; first
+    // in list is oldest addition, not most recently selected).
     if settings.recent_projects.len() > settings.max_recent_projects {
-        settings
-            .recent_projects
-            .truncate(settings.max_recent_projects);
+        let overflow = settings.recent_projects.len() - settings.max_recent_projects;
+        settings.recent_projects.drain(0..overflow);
     }
 
     // Ensure config directory exists

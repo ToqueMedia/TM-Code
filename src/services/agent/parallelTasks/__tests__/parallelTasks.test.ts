@@ -105,21 +105,29 @@ describe('parallelTaskManager', () => {
     useParallelTaskStore.setState({ runs: new Map() })
   })
 
-  it('promotes only up to MAX_CONCURRENT_TASKS, queues the rest', async () => {
+  it('F3: addParallelTask refuses (intra-project fan-out removed)', async () => {
     const { addParallelTask } = await import('../parallelTaskManager')
-    // CONTRATO DURO (2026-07-17): sem sessão ativa não há tarefa — dá ao
-    // manager uma sessão de projecto para as tarefas nascerem COM chat.
     const { useChatStore } = await import('../../../../stores/chatStore')
     const seed = useChatStore.getState().createBackgroundSession('/tmp/test-project', 'seed')
     useChatStore.setState({ activeSessionId: seed })
-    // Billing pré-voo devolve null quando bloqueado — aqui não está (store default).
-    const ids = Array.from({ length: 6 }, (_, i) => addParallelTask(`task ${i}`)).filter((x): x is string => x !== null)
-    expect(ids).toHaveLength(6)
-    // Manager marks the first 4 running; 2 stay queued.
+    expect(addParallelTask('task 1')).toBeNull()
+    expect(useParallelTaskStore.getState().runs.size).toBe(0)
+  })
+
+  it('pump promotes at most one run per projectPath (F3)', async () => {
+    const { pumpParallelTasks } = await import('../parallelTaskManager')
+    const { useChatStore } = await import('../../../../stores/chatStore')
+    const sA = useChatStore.getState().createBackgroundSession('/tmp/proj-a', 'a')
+    const sB = useChatStore.getState().createBackgroundSession('/tmp/proj-b', 'b')
+    const store = useParallelTaskStore.getState()
+    const a1 = store.createQueued('a1', 'a1', sA, '/tmp/proj-a', { continuation: true })
+    const a2 = store.createQueued('a2', 'a2', sA, '/tmp/proj-a', { continuation: true })
+    const b1 = store.createQueued('b1', 'b1', sB, '/tmp/proj-b', { continuation: true })
+    pumpParallelTasks()
     const runs = useParallelTaskStore.getState().runs
-    const running = ids.filter((id) => runs.get(id)!.status === 'running')
-    const queued = ids.filter((id) => runs.get(id)!.status === 'queued')
-    expect(running).toHaveLength(MAX_CONCURRENT_TASKS)
-    expect(queued).toHaveLength(2)
+    // A and B can both run; second A stays queued
+    expect(runs.get(a1)?.status).toBe('running')
+    expect(runs.get(a2)?.status).toBe('queued')
+    expect(runs.get(b1)?.status).toBe('running')
   })
 })

@@ -20,10 +20,12 @@ describe('modelProfiles', () => {
       // Alias do id antigo → mesmo perfil do snapshot datado.
       expect(MODEL_PROFILES['qwen3.7-max']).toBe(MODEL_PROFILES['qwen3.7-max-2026-06-08'])
       expect(ids).toContain('mimo-v2.5-1m')
-      // Gemini: id do preset + id raw com prefixo de publisher → mesmo perfil.
-      expect(MODEL_PROFILES['google/gemini-3.5-flash']).toBe(MODEL_PROFILES['gemini-3.5-flash'])
-      expect(MODEL_PROFILES['google/gemini-3.1-pro-preview']).toBe(MODEL_PROFILES['gemini-3.1-pro-preview'])
-      expect(ids).toContain('kimi-k2.7-code')
+      // Grok 4.5 (xAI) + aliases → mesmo perfil.
+      expect(ids).toContain('grok-4.5')
+      expect(MODEL_PROFILES['grok-4.5-latest']).toBe(MODEL_PROFILES['grok-4.5'])
+      expect(MODEL_PROFILES['grok-build-latest']).toBe(MODEL_PROFILES['grok-4.5'])
+      // Kimi K3 (Moonshot).
+      expect(ids).toContain('kimi-k3')
     })
 
     it('glm-5.2 has 1M context, 128K output, toggleable thinking, no native vision', () => {
@@ -48,10 +50,14 @@ describe('modelProfiles', () => {
       expect(deepseek.supportsSearch).toBe(false)
     })
 
-    it('gemini profiles have native vision and mandatory thinking', () => {
-      const gemini = MODEL_PROFILES['gemini-3.5-flash']
-      expect(gemini.supportsAttachments).toBe(true)
-      expect(gemini.thinkingMandatory).toBe(true)
+    it('grok-4.5 is capped at 200K context (cost tier) with mandatory thinking', () => {
+      const grok = MODEL_PROFILES['grok-4.5']
+      expect(grok.modelId).toBe('grok-4.5')
+      // Janela capada em 200K para ficar no tier de preço barato do xAI
+      // ($2/$0.30/$6); ≥200k salta para $4/$0.60/$12.
+      expect(grok.contextWindow).toBe(200_000)
+      expect(grok.thinkingMandatory).toBe(true)
+      expect(grok.supportsAttachments).toBe(true)
     })
 
     it('qwen3.7-max-2026-06-08 has native vision and search', () => {
@@ -61,14 +67,12 @@ describe('modelProfiles', () => {
       expect(qwen.supportsSearch).toBe(true)
     })
 
-    it('kimi-k2.7-code has 256K context, native vision/search and toggleable thinking', () => {
-      const kimi = MODEL_PROFILES['kimi-k2.7-code']
-      expect(kimi.modelId).toBe('kimi-k2.7-code')
-      expect(kimi.contextWindow).toBe(262_144)
-      expect(kimi.maxOutputTokens).toBe(32_768)
-      expect(kimi.supportsAttachments).toBe(true)
-      expect(kimi.supportsSearch).toBe(true)
-      expect(kimi.thinkingMode).toBe('toggleable')
+    it('kimi-k3 has 1M context and mandatory (always-on) thinking', () => {
+      const kimi = MODEL_PROFILES['kimi-k3']
+      expect(kimi.modelId).toBe('kimi-k3')
+      expect(kimi.contextWindow).toBe(1_048_576)
+      expect(kimi.thinkingMode).toBe('mandatory')
+      expect(kimi.thinkingMandatory).toBe(true)
       expect(kimi.supportsThinking).toBe(true)
     })
 

@@ -5,7 +5,7 @@ import { t } from '@/i18n'
 import { useFileTreeRepository } from '../../stores/fileTreeStore'
 import { useEditorRepository } from '../../stores/editorStore'
 import { useProjectStore } from '../../stores/projectStore'
-import { usePermissionStore } from '../../stores/permissionStore'
+import { getProjectGrants, usePermissionStore } from '../../stores/permissionStore'
 import { findBlockingClaim, registerFileClaim, MAIN_CLAIM_OWNER } from './fileClaims'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useLayoutStore } from '../../stores/layoutStore'
@@ -29,6 +29,8 @@ import {
 import { devServerManager } from '../devServerManager'
 import { resolveAIWorkerUrl } from '../../utils/devUrls'
 import { htmlToText, looksLikeHtml } from '../../utils/htmlToText'
+import { stripAnsi } from '@/utils/stripAnsi'
+import { jsonMini } from './jsonMini'
 
 // Browser-like UA for web_fetch — many docs/CDN sites 403 a bot-looking UA.
 const WEB_FETCH_UA =
@@ -306,6 +308,15 @@ class ToolExecutor {
   private worktreeState: import('./toolExecutor/worktrees').WorktreeState | null = null
 
   /**
+   * The project this executor's run BELONGS to, for in-window multi-project.
+   * Set by a background project-run's isolated executor so path resolution,
+   * the Rust cwd clamp and permission grants target the RUN's project instead
+   * of whatever project the developer is currently VIEWING (`currentProject`).
+   * Null for the foreground/main agent, which follows `currentProject`.
+   */
+  private runProjectContext: { projectId: string; projectPath: string } | null = null
+
+  /**
    * Plan mode — when true, /plan is active and only architecture-producing
    * tools may run. Implementation tools (request_credentials,
    * execute_command, start_dev_server, install commands) are blocked at
@@ -388,6 +399,8 @@ class ToolExecutor {
     const child = new ToolExecutor()
     child.cmdModeCwd = this.cmdModeCwd
     child.worktreeState = this.worktreeState
+    child.runProjectContext = this.runProjectContext
+    child.permissionOrigin = this.permissionOrigin
     child.requestType = this.requestType
     child.planMode = this.planMode
     child.planModePlanFileName = this.planModePlanFileName
@@ -413,12 +426,53 @@ class ToolExecutor {
   /**
    * Attribution for permission prompts raised by THIS executor. Set by the
    * parallel-task runner on its isolated child so the dialog + task rows can
-   * say WHICH task is asking ("Autorização" badge). Null for the main agent.
+   * say WHICH task is asking ("Autorização" badge). Also carries projectId
+   * for in-window multi-project so grants resolve to the RUN's project.
+   * Null for the main agent (uses focused project grants).
    */
   private permissionOrigin: import('../../stores/permissionStore').PermissionOrigin | null = null
 
   setPermissionOrigin(origin: import('../../stores/permissionStore').PermissionOrigin | null): void {
     this.permissionOrigin = origin
+  }
+
+  /**
+   * Effective permission origin for this executor: explicit origin (task) with
+   * projectId filled from runProjectContext when missing, so background
+   * project-runs always check/write the correct project's grants.
+   */
+  private resolvePermissionOrigin(): import('../../stores/permissionStore').PermissionOrigin | undefined {
+    const projectId = this.runProjectContext?.projectId
+    if (this.permissionOrigin) {
+      if (projectId && !this.permissionOrigin.projectId) {
+        return { ...this.permissionOrigin, projectId }
+      }
+      return this.permissionOrigin
+    }
+    // No task origin: still stamp projectId when this is a bound project-run
+    // so requestPermission does not fall through to the focused project.
+    // Label is the folder name (not the UUID) so the attention inbox can say
+    // "my-app · write_file" when the user is focused on another project.
+    if (projectId) {
+      const path = this.runProjectContext?.projectPath ?? ''
+      const folder = path.replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop() || projectId
+      return { taskId: `project:${projectId}`, label: folder, projectId }
+    }
+    return undefined
+  }
+
+  /**
+   * Bind this executor to a specific project (in-window multi-project runs).
+   * A background project-run sets this so getProjectRoot() / path scope / the
+   * Rust cwd clamp resolve to the RUN's project, not the viewed one. The main
+   * agent leaves it null and follows `currentProject`.
+   */
+  setProjectContext(ctx: { projectId: string; projectPath: string } | null): void {
+    this.runProjectContext = ctx
+  }
+
+  getProjectContext(): { projectId: string; projectPath: string } | null {
+    return this.runProjectContext
   }
 
   clearDelegateTelemetry(): void {
@@ -465,6 +519,15 @@ class ToolExecutor {
   /** Disable cwd-scoped execution and return to project diff approval flow. */
   disableCmdMode(): void {
     this.cmdModeCwd = null
+  }
+
+  /** Clear any inherited enter_worktree redirect. A parallel project-run's
+   *  isolated child copies the main run's worktreeState in createIsolatedChild;
+   *  the task must NOT resolve into the main agent's worktree (worktreeState has
+   *  the highest precedence in getProjectRoot), so it clears it and relies on
+   *  enableCmdMode(projectPath) instead. */
+  clearWorktreeState(): void {
+    this.worktreeState = null
   }
 
   /** Enable architect mode for /plan: implementation tools are blocked.
@@ -808,19 +871,50 @@ class ToolExecutor {
 
   /**
    * Bloqueia enquanto houver uma intervenção obrigatória do utilizador
-   * pendente (gate de pausa global — ver o call-site no execute()).
+   * pendente DESTE run (F2: por projecto/origin — não é mais pausa global).
    * Polling de 120ms em vez de subscriptions: só corre enquanto um gate
    * está aberto (caso raro e human-paced), e evita gerir 4 subscrições
    * zustand com cleanup por chamada concorrente. O abort interrompe a
    * espera imediatamente no próximo tick.
    */
   private async waitForUserGates(signal?: AbortSignal): Promise<void> {
+    // F2 multi-project: only wait for gates that belong to THIS run. A
+    // permission dialog for project A must not freeze tool execution of a
+    // parallel/background run on project B (global pause was a known
+    // blocker in the MDI inventory).
+    const myProjectId = this.runProjectContext?.projectId ?? null
+    const myTaskId = this.permissionOrigin?.taskId ?? null
+
+    const gateIsMine = (originTaskId?: string, projectId?: string | null): boolean => {
+      if (projectId && myProjectId) return projectId === myProjectId
+      if (originTaskId && myTaskId) return originTaskId === myTaskId
+      // Unscoped prompt (main, no origin): only the unbound main waits.
+      if (!originTaskId && !projectId) return !myTaskId
+      // Prompt has identity we don't match — not ours.
+      if (originTaskId || projectId) return false
+      return true
+    }
+
     const gateOpen = (): boolean => {
       try {
-        if (usePermissionStore.getState().pendingPermission) return true
-        if (useAskUserQuestionStore.getState().pending.size > 0) return true
-        if (useCredentialRequestStore.getState().pending.size > 0) return true
-        if (hasPendingDiffApprovals()) return true
+        const perm = usePermissionStore.getState().pendingPermission
+        if (perm && gateIsMine(perm.origin?.taskId, perm.projectId)) return true
+        // Also block if a queued permission for US is waiting behind another dialog
+        // (we will eventually need to answer it). Don't block for other projects.
+        for (const q of usePermissionStore.getState().permissionQueue) {
+          if (gateIsMine(q.origin?.taskId, q.projectId)) return true
+        }
+        for (const entry of useAskUserQuestionStore.getState().pending.values()) {
+          if (gateIsMine(entry.origin?.taskId, undefined)) return true
+        }
+        for (const entry of useCredentialRequestStore.getState().pending.values()) {
+          if (gateIsMine(entry.origin?.taskId, undefined)) return true
+        }
+        // Diff approvals are keyed by toolCallId, not project — only the
+        // unbound main (or any run without project isolation) waits globally.
+        // Background project-runs skip: their file writes use cmdMode alreadyApplied
+        // path and don't use the main diff UI. Parallel tasks same.
+        if (!myProjectId && !myTaskId && hasPendingDiffApprovals()) return true
       } catch {
         return false
       }
@@ -994,14 +1088,15 @@ class ToolExecutor {
         // Explore/Research), a hipótese de bypass do gate.
         console.log(`[path-scope-debug] GATE tool=${toolName} path=${pathForScope} dir=${scopeCheck.directoryToAdd} subAgentChild=${ToolExecutor.getInstance() !== this} cmdCwd=${!!this.cmdModeCwd}`)
         const decision = await usePermissionStore.getState()
-          .requestPathAccess(pathForScope, scopeCheck.directoryToAdd)
+          .requestPathAccess(pathForScope, scopeCheck.directoryToAdd, this.runProjectContext?.projectId)
         console.log(`[path-scope-debug] GATE decision approved=${decision.approved} path=${pathForScope}`)
         // ── fim TEMP ──
         this.recordPermission(toolCallId, decision)
         if (!decision.approved) {
-          const reason = decision.source === 'auto_classifier'
-            ? ` ${decision.denyReason ?? 'Blocked by the auto-mode security classifier.'} This was an automated policy decision, NOT the developer — adjust your approach (safer alternative, narrower scope) or ask the developer to run it manually.`
-            : decision.denyReason
+          // Uma negação chega SEMPRE do diálogo humano (source:'user'): o Modo
+          // Auto já não nega sozinho — sinaliza e escala para o diálogo. Por
+          // isso não há ramo auto_classifier aqui.
+          const reason = decision.denyReason
             ? ` User says: ${decision.denyReason}`
             : ' Ask the user how to proceed.'
           return `Blocked: "${pathForScope}" is outside the ${scopeCheck.scopeName}.${reason}`
@@ -1056,12 +1151,11 @@ class ToolExecutor {
           return `Blocked: "${dangerousMatch}" is blocked in your Settings. The developer disabled this command. Ask the developer to unblock it in Settings > Sandbox if needed.`
         }
         // Not blocked but dangerous → always ask (forcePrompt bypasses Accept All)
-        const decision = await usePermissionStore.getState().requestPermission(toolName, input, 'dangerous_command', this.permissionOrigin ?? undefined)
+        const decision = await usePermissionStore.getState().requestPermission(toolName, input, 'dangerous_command', this.resolvePermissionOrigin())
         this.recordPermission(toolCallId, decision)
         if (!decision.approved) {
-          const reason = decision.source === 'auto_classifier'
-            ? ` ${decision.denyReason ?? 'Blocked by the auto-mode security classifier.'} This was an automated policy decision, NOT the developer — adjust your approach (safer alternative, narrower scope) or ask the developer to run it manually.`
-            : decision.denyReason
+          // Negação sempre humana (ver nota no gate de path-scope acima).
+          const reason = decision.denyReason
             ? ` User says: ${decision.denyReason}`
             : ' Ask the user what they want instead.'
           return `Permission denied by user for ${dangerousMatch}.${reason}`
@@ -1094,13 +1188,12 @@ class ToolExecutor {
     ])
 
     if (!dangerousAlreadyApproved && !PERMISSION_EXEMPT_TOOLS.has(toolName)) {
-      const decision = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive ? 'sensitive_file' : false, this.permissionOrigin ?? undefined)
+      const decision = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive ? 'sensitive_file' : false, this.resolvePermissionOrigin())
       this.recordPermission(toolCallId, decision)
       if (!decision.approved) {
         const target = (input.file_path || input.command || input.name || '') as string
-        const reason = decision.source === 'auto_classifier'
-          ? ` ${decision.denyReason ?? 'Blocked by the auto-mode security classifier.'} This was an automated policy decision, NOT the developer — adjust your approach (safer alternative, narrower scope) or ask the developer to run it manually.`
-          : decision.denyReason
+        // Negação sempre humana (ver nota no gate de path-scope acima).
+        const reason = decision.denyReason
           ? ` User says: ${decision.denyReason}`
           : ' Ask the user what they want instead or suggest an alternative approach.'
         return `Permission denied by user for ${toolName}${target ? ` (${target})` : ''}.${reason}`
@@ -1461,6 +1554,11 @@ class ToolExecutor {
    *   path/other.ts:100:5: another_match
    *     context line
    *
+   * Format choice (2026-07-24 bench): domain grep stays the default even when
+   * large-with-context dumps can be slightly fewer tokens as JSON mini — grep
+   * lines are more model-native and avoid reintroducing JSON structure into
+   * the transcript. Unexpected shapes fall back to jsonMini (never pretty).
+   *
    * Handles both the { files: [...] } and bare-array shapes the Rust side can
    * return. Never throws — falls back to JSON on an unexpected shape.
    */
@@ -1481,7 +1579,8 @@ class ToolExecutor {
         totalFiles = typeof obj.total_files === 'number' ? obj.total_files
           : typeof obj.totalFiles === 'number' ? obj.totalFiles : undefined
       } else {
-        return JSON.stringify(result, null, 2)
+        // Unexpected shape — minified JSON (never pretty on the model path).
+        return jsonMini(result)
       }
 
       if (files.length === 0) {
@@ -1537,8 +1636,8 @@ class ToolExecutor {
 
       return lines.join('\n')
     } catch {
-      // Fallback: never break the tool on a formatting error
-      return JSON.stringify(result, null, 2)
+      // Fallback: never break the tool on a formatting error (minified, never pretty).
+      return jsonMini(result)
     }
   }
 
@@ -1824,9 +1923,10 @@ ${preview}
     const chunks = data.split('\n')
     useChatStore.getState().appendToolCallCommandLogs(toolCallId, chunks)
 
-    // Show the last meaningful line as progress (single-line summary)
+    // Show the last meaningful line as progress (single-line summary).
+    // Strip ANSI so the chip never shows raw [38;5;Nm color codes.
     const lines = data.trim().split('\n')
-    const lastLine = lines[lines.length - 1] || ''
+    const lastLine = stripAnsi(lines[lines.length - 1] || '')
     if (lastLine.length > 0) {
       const display = lastLine.length > 80 ? lastLine.slice(0, 80) + '...' : lastLine
       useChatStore.getState().updateToolCallProgress(toolCallId, display)
@@ -2055,6 +2155,9 @@ ${preview}
     // file resolution and shell cwd — into the isolated checkout until
     // exit_worktree. The app/editor keeps pointing at the main checkout.
     if (this.worktreeState) return this.worktreeState.path
+    // In-window multi-project: a background project-run resolves to ITS OWN
+    // project, not the one the developer is currently viewing (currentProject).
+    if (this.runProjectContext?.projectPath) return this.runProjectContext.projectPath
     const project = useProjectStore.getState().currentProject
     if (project?.path) return project.path
     // Cwd-scoped fallback (enableCmdMode, used by /plan): the run may be
@@ -2063,13 +2166,15 @@ ${preview}
     throw new Error('No project is open. Cannot perform file operations without an active project.')
   }
 
-  /** All directories the agent is allowed to access: project root + user-approved extras. */
+  /** All directories the agent is allowed to access: project root + user-approved extras
+   *  for THIS run's project (never the focused project's extras when this is a
+   *  background project-run — that would either under-allow or over-allow). */
   private getAllowedRoots(): string[] {
     const roots: string[] = []
     const projectRoot = this.cmdModeCwd || this.getProjectRoot()
     if (projectRoot) roots.push(projectRoot)
-    const { additionalDirectories } = usePermissionStore.getState()
-    for (const dir of additionalDirectories) roots.push(dir)
+    const grants = getProjectGrants(this.runProjectContext?.projectId ?? null)
+    for (const dir of grants.additionalDirectories) roots.push(dir)
     return roots
   }
 
@@ -3418,6 +3523,7 @@ ${preview}
         // Cwd-scoped execution: write directly to disk, no approval needed, but still
         // return diff JSON so the UI renders the before/after consistently.
         // `alreadyApplied: true` tells chatStore to skip the approval queue.
+        // Diffs stay JSON mini (UI + model; TOON ≈ 0 gain when bulk is file body).
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
           if (dir) await invoke('create_directories_all', { path: dir })
@@ -3431,7 +3537,7 @@ ${preview}
           bumpFsVersion(`write:${path}`)
           this.refreshFileTree()
           this.refreshEditorIfOpen(path)
-          return JSON.stringify({
+          return jsonMini({
             type: 'diff',
             path,
             oldContent,
@@ -3443,7 +3549,7 @@ ${preview}
 
         // Return diff data as JSON for inline display
         // The file is NOT written yet — user approves via InlineDiff
-        return JSON.stringify({
+        return jsonMini({
           type: 'diff',
           path,
           oldContent,
@@ -3491,7 +3597,7 @@ ${preview}
           bumpFsVersion(`create:${path}`)
           this.refreshFileTree()
           this.refreshEditorIfOpen(path)
-          return JSON.stringify({
+          return jsonMini({
             type: 'diff',
             path,
             oldContent: '',
@@ -3502,7 +3608,7 @@ ${preview}
         }
 
         // Return diff data as JSON for inline display (consistent with write_file)
-        return JSON.stringify({
+        return jsonMini({
           type: 'diff',
           path,
           oldContent: '',
@@ -3748,7 +3854,7 @@ ${preview}
           bumpFsVersion(`edit:${path}`)
           this.refreshFileTree()
           this.refreshEditorIfOpen(path)
-          return JSON.stringify({
+          return jsonMini({
             type: 'diff',
             path,
             oldContent: content,
@@ -3759,7 +3865,7 @@ ${preview}
         }
 
         // Return diff data as JSON for inline display
-        return JSON.stringify({
+        return jsonMini({
           type: 'diff',
           path,
           oldContent: content,
@@ -4135,67 +4241,31 @@ ${preview}
       },
     })
 
-    // === send_agent_message (Fase 6b — mensagens agente↔agente) ===
-    // Doutrina "sem deus": N developers no mesmo projecto falam entre si.
-    // Entrega pela MESMA máquina das entregas de sub-agents (autoWake
-    // pendingDeliveriesByOwner → steering no turn boundary do alvo; main
-    // idle → wake/announce) ou pela steerQueue da tarefa alva.
+    // === send_agent_message — F3: peer bus off (ONE_AGENT_PER_PROJECT).
+    // Tool stays registered so old transcripts / models get an honest error.
     this.tools.set(SEND_AGENT_MESSAGE, {
       definition: {
         name: SEND_AGENT_MESSAGE,
         description:
-          'Send a short message to another LIVE agent working on this project: the interactive agent (target "main") or a parallel task (target = its task id or a distinctive part of its description). Use it to coordinate — e.g. warn about a shared file, hand over a finding, or ask the other agent to cover something. The message is delivered at the target\'s next step. Do NOT use it to delegate new work to yourself or to poll for replies; agents answer by messaging back when relevant.',
+          'DEPRECATED (F3): there is only ONE agent per project. Inter-agent messaging is no longer available. Do not call this tool.',
         input_schema: {
           type: 'object',
           properties: {
-            target: { type: 'string', description: '"main", a task id (e.g. "task-2"), or a unique fragment of the task description' },
-            message: { type: 'string', description: 'The message to deliver (keep it short and actionable)' },
+            target: { type: 'string' },
+            message: { type: 'string' },
           },
           required: ['target', 'message'],
         },
         concurrencySafe: true,
       },
-      execute: async (input) => {
-        const target = String(input.target ?? '').trim()
-        const message = String(input.message ?? '').trim()
-        if (!target || !message) return 'Error: target and message are required.'
-        const senderLabel = this.permissionOrigin
-          ? `parallel task "${this.permissionOrigin.label}" (${this.permissionOrigin.taskId})`
-          : 'the main interactive agent'
-        const wrapped = `<system-reminder>Message from ${senderLabel}: ${message}</system-reminder>`
-
-        const { useParallelTaskStore } = await import('../../stores/parallelTaskStore')
-        const runs = useParallelTaskStore.getState().runs
-        const live = Array.from(runs.values()).filter(r => r.status === 'running' || r.status === 'queued')
-
-        if (target.toLowerCase() === 'main') {
-          if (this.permissionOrigin === null) return 'Error: you ARE the main agent — pick a task target.'
-          const { queueAgentMessage } = await import('./subAgents/autoWake')
-          queueAgentMessage(undefined, wrapped)
-          return 'Message queued for the main agent (delivered at its next step; if idle, it is woken/announced).'
+      execute: async () => {
+        const { ONE_AGENT_PER_PROJECT, ONE_AGENT_PER_PROJECT_TOOL_ERROR } = await import(
+          './parallelTasks/policy'
+        )
+        if (ONE_AGENT_PER_PROJECT) {
+          return `Error: send_agent_message is disabled. ${ONE_AGENT_PER_PROJECT_TOOL_ERROR}`
         }
-        const match = live.find(r => r.id === target)
-          ?? live.find(r => r.description.toLowerCase().includes(target.toLowerCase()))
-        if (!match) {
-          const list = live.length
-            ? live.map(r => `${r.id}: "${r.description}"`).join('; ')
-            : '(none)'
-          return `Error: no LIVE task matches "${target}". Live tasks: ${list}. Main agent target: "main".`
-        }
-        if (this.permissionOrigin?.taskId === match.id) return 'Error: that target is yourself.'
-        useParallelTaskStore.getState().enqueueSteer(match.id, wrapped)
-        // Nota visível no transcript da tarefa alva (o steer chega ao modelo;
-        // o developer vê a mensagem no chat dela).
-        if (match.sessionId) {
-          try {
-            const { useChatStore } = await import('../../stores/chatStore')
-            useChatStore.getState().appendMessageToSession(match.sessionId, {
-              role: 'system',
-              content: `📨 ${senderLabel} → "${match.description}": ${message}`,
-            })
-          } catch { /* transcript é espelho — nunca falha o envio */ }
-        }
-        return `Message queued for task ${match.id} ("${match.description}") — delivered at its next turn.`
+        return 'Error: send_agent_message is not available in this build.'
       },
     })
 
@@ -4594,7 +4664,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         if (!rawMember) {
           this.lastDelegateInfo.blocked = true
           this.lastDelegateInfo.blockedReason = 'No member field found in input'
-          throw new Error(JSON.stringify({
+          throw new Error(jsonMini({
             status: 'blocked',
             reason: 'No team member specified. Pass subagent_type (or member alias) as one of: Explore, Research, Verify.',
             receivedInput: Object.keys(input),
@@ -4607,7 +4677,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         if (!resolved) {
           this.lastDelegateInfo.blocked = true
           this.lastDelegateInfo.blockedReason = `Unknown member '${rawMember}'`
-          throw new Error(JSON.stringify({
+          throw new Error(jsonMini({
             status: 'blocked',
             reason: `Unknown team member '${rawMember}'. Available: ${AVAILABLE.join(', ')}.`,
             receivedInput: { member: rawMember, description: input.description, prompt: input.prompt },
@@ -4626,7 +4696,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         if (!prompt) {
           this.lastDelegateInfo.blocked = true
           this.lastDelegateInfo.blockedReason = 'No prompt/task field found in input'
-          throw new Error(JSON.stringify({
+          throw new Error(jsonMini({
             status: 'blocked',
             reason: 'No task prompt specified. Pass prompt (or task alias) with a self-contained task for the team member.',
             receivedInput: Object.keys(input),
@@ -4645,7 +4715,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         if (!def) {
           this.lastDelegateInfo.blocked = true
           this.lastDelegateInfo.blockedReason = `getAgentDefinition returned null for '${subagentType}'`
-          throw new Error(JSON.stringify({
+          throw new Error(jsonMini({
             status: 'blocked',
             reason: `Internal error: team member '${subagentType}' is recognized but has no definition. Available: ${AVAILABLE.join(', ')}.`,
             receivedInput: { member: rawMember },
@@ -4875,14 +4945,14 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('agent_shell_write', {
       definition: {
         name: 'agent_shell_write',
-        description: 'Write exactly one command/input line to a persistent agent shell session. This keeps the agent inside the same shell/SSH context. Do not include multiple commands, newlines, &&, ||, semicolons, or pipes. Observe output after each write.',
+        description: 'Write exactly one command/input line to a persistent agent shell session. This keeps the agent inside the same shell/SSH context. Do not include multiple commands, newlines, &&, ||, semicolons, or pipes. For long jobs (deploy, upload, install) use a large wait_ms so the command can finish in one write+read cycle — avoid polling every few seconds.',
         input_schema: {
           type: 'object',
           properties: {
             session_id: { type: 'string', description: 'Session id returned by agent_shell_start. Defaults to the latest agent shell session.' },
             input: { type: 'string', description: 'One command or interactive input line to send.' },
             press_enter: { type: 'boolean', description: 'Append Enter/newline after input. Default: true.' },
-            wait_ms: { type: 'number', description: 'How long to wait for output after writing. Default: 1000. Max: 10000.' },
+            wait_ms: { type: 'number', description: 'How long to wait for output after writing. Default: 1000. Max: 120000 (use high values for deploy/upload).' },
           },
           required: ['input'],
         },
@@ -4899,7 +4969,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         session.activeToolCallId = input._toolCallId as string | null | undefined || null
 
         await invoke('write_to_pty', { sessionId: session.id, data: payload })
-        await this.waitForAgentShellOutput(session, startLength, Math.min(Number(input.wait_ms) || 1000, 10_000))
+        await this.waitForAgentShellOutput(session, startLength, Math.min(Number(input.wait_ms) || 1000, 120_000))
         session.activeToolCallId = null
 
         const output = this.readAgentShellDelta(session)
@@ -4915,12 +4985,12 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('agent_shell_read', {
       definition: {
         name: 'agent_shell_read',
-        description: 'Read new output from a persistent agent shell session without writing input. Use after agent_shell_write when a command is still running or output is still arriving.',
+        description: 'Read new output from a persistent agent shell session without writing input. Use after agent_shell_write when a command is still running. Prefer ONE long wait_ms (up to 120s) over many short polls — the UI shows a single live terminal for the session.',
         input_schema: {
           type: 'object',
           properties: {
             session_id: { type: 'string', description: 'Session id returned by agent_shell_start. Defaults to the latest agent shell session.' },
-            wait_ms: { type: 'number', description: 'How long to wait for new output before returning. Default: 1000. Max: 10000.' },
+            wait_ms: { type: 'number', description: 'How long to wait for new output before returning. Default: 1000. Max: 120000. For deploys/uploads use 60000–120000 instead of polling every 1–5s.' },
             max_chars: { type: 'number', description: 'Maximum characters to return. Default: 20000. Max: 50000.' },
           },
           required: [],
@@ -4931,7 +5001,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         const session = this.getAgentShellSession(input.session_id as string | undefined)
         const startLength = session.output.length
         session.activeToolCallId = input._toolCallId as string | null | undefined || null
-        await this.waitForAgentShellOutput(session, startLength, Math.min(Number(input.wait_ms) || 1000, 10_000))
+        await this.waitForAgentShellOutput(session, startLength, Math.min(Number(input.wait_ms) || 1000, 120_000))
         session.activeToolCallId = null
         const maxChars = Math.min(Number(input.max_chars) || 20_000, 50_000)
         const output = this.readAgentShellDelta(session, maxChars)
@@ -5078,6 +5148,10 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           useBackgroundCommandStore.getState().addCommand({
             id: cmdId,
             command: cmd,
+            // F2 MDI: stamp the run that owns this process (a parallel task's
+            // runId, else 'main') so the main run's cancel/restart never kills
+            // another project's live task's background process.
+            owner: this.permissionOrigin?.taskId ?? 'main',
             status: 'running',
             pid,
             exitCode: null,

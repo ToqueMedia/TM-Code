@@ -5,6 +5,10 @@ export type BackgroundCommandStatus = 'running' | 'completed' | 'error' | 'cance
 export interface BackgroundCommand {
   id: string
   command: string
+  /** Which run spawned it: 'main' or the parallel-task runId. Lets the main
+   *  run's cancel/restart kill ONLY its own background processes, never another
+   *  project's live task's (F2 MDI — see agentService.cancelLoop). */
+  owner: string
   status: BackgroundCommandStatus
   pid: number
   exitCode: number | null

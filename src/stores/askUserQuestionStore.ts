@@ -18,7 +18,7 @@ export interface PendingAskUserQuestion {
   id: string
   questions: Question[]
   /** Tarefa paralela que perguntou (badge "Pergunta" nas task rows). */
-  origin?: { taskId: string; label: string }
+  origin?: { taskId: string; label: string; sessionId?: string; projectId?: string }
   resolve: (answers: Record<string, string | string[]>) => void
 }
 
@@ -34,7 +34,7 @@ interface AskUserQuestionActions {
    * Returns the synchronously-generated request id and a promise that
    * resolves when the user submits all answers.
    */
-  request: (questions: Question[], origin?: { taskId: string; label: string }) => {
+  request: (questions: Question[], origin?: { taskId: string; label: string; sessionId?: string; projectId?: string }) => {
     id: string
     promise: Promise<Record<string, string | string[]>>
   }

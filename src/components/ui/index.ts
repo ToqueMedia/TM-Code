@@ -1,5 +1,4 @@
 // Layout & Navigation
-export { default as TitleBar } from './TitleBar'
 export { default as ActivityBar } from './ActivityBar'
 export { default as BottomPanel } from './BottomPanel'
 export { default as StatusBar } from './StatusBar'
@@ -22,7 +21,6 @@ export { default as SearchPanel } from './SearchPanel'
 export { default as FileTree } from './FileTree'
 export { default as QuickOpen } from './QuickOpen'
 export { default as CommandPalette } from './CommandPalette'
-export { default as ProjectMenu } from './ProjectMenu'
 export { default as ProjectStatus } from './ProjectStatus'
 export { default as PerformanceStatus } from './PerformanceStatus'
 export { default as OutputContent } from './OutputContent'

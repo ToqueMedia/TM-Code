@@ -167,19 +167,29 @@ const MIMO_V2_5_1M: ModelProfile = {
 }
 
 // ─────────────────────────────────────────────────
-// Gemini 3.5 Flash / 3.1 Pro — Google (Vertex AI)
+// Grok 4.5 — xAI (api.x.ai/v1, OpenAI-compatible, Bearer)
 //
-// Multimodal nativo, thinking SEMPRE ativo (mandatory) no próprio modelo — a
-// IDE não envia params de thinking; os pensamentos chegam no stream quando a
-// config ativa publica google.thinking_config.include_thoughts.
+// Modelo agentic/coding de fronteira da xAI (também por trás do "Grok Build").
+// Reasoning SEMPRE ativo (mandatory) — não se desliga. O stream expõe o
+// raciocínio em `reasoning_content`, que a IDE já parseia genericamente (sem
+// código de parsing novo). Input text+image → text; a IDE não envia
+// penalties/stop (que os modelos de reasoning do xAI rejeitam). Confirmado nas
+// docs oficiais docs.x.ai (2026-07). Search vai por sidecar.
+//
+// JANELA CAPADA EM 200K (deliberado, não é a janela real de 500K): o preço do
+// Grok tem dois patamares por tamanho de prompt — <200k tokens = input $2 /
+// cached $0.30 / output $6; ao ATINGIR 200k salta para $4/$0.60/$12 em TODOS os
+// tokens. Manter a janela em 200k prende-nos ao patamar barato. Nota de borda:
+// o patamar vira quando o prompt "atinge" 200k, por isso 200k exato é o limiar
+// — se quiseres garantia dura do tier $2, deixa folga (~190k).
 // ─────────────────────────────────────────────────
 
-const GEMINI_3_5_FLASH: ModelProfile = {
-  id: 'gemini-3.5-flash',
-  name: 'Gemini 3.5 Flash',
-  modelId: 'google/gemini-3.5-flash',
-  contextWindow: 1_048_576,
-  maxOutputTokens: 65_536,
+const GROK_4_5: ModelProfile = {
+  id: 'grok-4.5',
+  name: 'Grok 4.5',
+  modelId: 'grok-4.5',
+  contextWindow: 200_000,
+  maxOutputTokens: 128_000,
 
   thinkingMode: 'mandatory',
   supportsThinking: true,
@@ -190,35 +200,32 @@ const GEMINI_3_5_FLASH: ModelProfile = {
   counterweights: [],
 }
 
-const GEMINI_3_1_PRO: ModelProfile = {
-  ...GEMINI_3_5_FLASH,
-  id: 'gemini-3.1-pro-preview',
-  name: 'Gemini 3.1 Pro Preview',
-  modelId: 'google/gemini-3.1-pro-preview',
-}
-
 // ─────────────────────────────────────────────────
-// Kimi K2.7 Code — Moonshot/Kimi via Alibaba Cloud DashScope.
+// Kimi K3 — Moonshot/Kimi (api.moonshot.ai/v1, OpenAI-compatible, Bearer)
 //
-// A página oficial do DashScope lista Text Generation, Visual Understanding e
-// Deep Thinking. Capacidades: input text/image/video, function calling, cache,
-// structured output e web search. Esta tabela só expõe os campos que a IDE
-// entende hoje: anexos, thinking e search.
+// Flagship multimodal agentic/coding da Moonshot (lançado 2026-07-16). Janela
+// 1M; reasoning SEMPRE ativo (mandatory), controlado só por `reasoning_effort`
+// (low/high/max, default max) — a forma é injetada pela config gerida via
+// extraBody; a IDE não a envia. O stream expõe o raciocínio em
+// `reasoning_content` (já parseado genericamente). Regra multi-turno: a
+// mensagem completa do assistant (incl. reasoning_content + tool_calls) tem de
+// voltar as-is — o round-trip de thinking da IDE já o faz. Confirmado nas docs
+// oficiais platform.kimi.ai (2026-07). Search por sidecar.
 // ─────────────────────────────────────────────────
 
-const KIMI_K2_7_CODE: ModelProfile = {
-  id: 'kimi-k2.7-code',
-  name: 'Kimi K2.7 Code',
-  modelId: 'kimi-k2.7-code',
-  contextWindow: 262_144,
-  maxOutputTokens: 32_768,
+const KIMI_K3: ModelProfile = {
+  id: 'kimi-k3',
+  name: 'Kimi K3',
+  modelId: 'kimi-k3',
+  contextWindow: 1_048_576,
+  maxOutputTokens: 131_072,
 
-  thinkingMode: 'toggleable',
+  thinkingMode: 'mandatory',
   supportsThinking: true,
-  thinkingMandatory: false,
+  thinkingMandatory: true,
 
   supportsAttachments: true,
-  supportsSearch: true,
+  supportsSearch: false,
   counterweights: [],
 }
 
@@ -238,13 +245,13 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'qwen3.7-max': QWEN_3_7_MAX,
   'mimo-v2.5-pro-1m': MIMO_V2_5_PRO_1M,
   'mimo-v2.5-1m': MIMO_V2_5_1M,
-  // Gemini: id do preset E id raw com prefixo de publisher (X-TM-Model reporta
-  // 'google/gemini-…'; o /v1/me reporta o id do preset).
-  'gemini-3.5-flash': GEMINI_3_5_FLASH,
-  'google/gemini-3.5-flash': GEMINI_3_5_FLASH,
-  'gemini-3.1-pro-preview': GEMINI_3_1_PRO,
-  'google/gemini-3.1-pro-preview': GEMINI_3_1_PRO,
-  'kimi-k2.7-code': KIMI_K2_7_CODE,
+  // Grok 4.5 (xAI). X-TM-Model reporta 'grok-4.5'; os aliases 'grok-4.5-latest'
+  // / 'grok-build-latest' mapeiam para o mesmo perfil caso a config os reporte.
+  'grok-4.5': GROK_4_5,
+  'grok-4.5-latest': GROK_4_5,
+  'grok-build-latest': GROK_4_5,
+  // Kimi K3 (Moonshot). Id plano, sem snapshots datados nas docs oficiais.
+  'kimi-k3': KIMI_K3,
 }
 
 export const DEFAULT_MODEL_ID = 'mimo-v2.5-pro-1m'

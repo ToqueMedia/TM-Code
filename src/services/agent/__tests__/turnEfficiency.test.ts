@@ -11,6 +11,10 @@ import {
   inferContinuationReason,
   isLegitimateContinuationReason,
   EFFICIENCY_TARGET_TURNS,
+  EFFICIENCY_NUDGE_CONFIG,
+  createEfficiencyNudgeState,
+  trackEfficiencyNudge,
+  buildEfficiencyNudgeText,
   type TurnSnapshot,
 } from '../turnEfficiency'
 
@@ -95,13 +99,68 @@ describe('inferContinuationReason', () => {
   // no longer has a provisioning category; provision_* calls now fall through
   // to the generic patterns below.
 
-  it('flags "no clear technical reason" for unrecognised tool patterns', () => {
+  it('flags "no clear technical reason" for genuinely unrecognised tool patterns', () => {
+    // Uma tool que não cai em nenhuma categoria produtiva (research, monitor,
+    // bookkeeping, external…) — o fallback estreitado só dispara aqui.
     const reason = inferContinuationReason({
-      toolCalls: [{ name: 'update_tasks' }],
-      toolResults: [{ content: 'tasks updated', isError: false }],
+      toolCalls: [{ name: 'some_unrecognised_tool' }],
+      toolResults: [{ content: 'done', isError: false }],
     })
     expect(reason).toBe('no clear technical reason — consider wrapping up')
     expect(isLegitimateContinuationReason(reason)).toBe(false)
+  })
+
+  // ── Categorias produtivas que ANTES caíam no fallback (falsos positivos
+  //    da auditoria momenu) e agora são reconhecidas como legítimas ──
+  it('classifies update_tasks/memória as "bookkeeping" (progresso, não giro)', () => {
+    for (const name of ['update_tasks', 'update_session_memory', 'write_memory']) {
+      const reason = inferContinuationReason({
+        toolCalls: [{ name }],
+        toolResults: [{ content: 'ok', isError: false }],
+      })
+      expect(reason).toBe('bookkeeping — tracking progress')
+      expect(isLegitimateContinuationReason(reason)).toBe(true)
+    }
+  })
+
+  it('classifies web_fetch/web_search as "researching"', () => {
+    for (const name of ['web_fetch', 'web_search', 'capture_url_design']) {
+      const reason = inferContinuationReason({
+        toolCalls: [{ name }],
+        toolResults: [{ content: 'fetched', isError: false }],
+      })
+      expect(reason).toBe('researching — gathering external context')
+      expect(isLegitimateContinuationReason(reason)).toBe(true)
+    }
+  })
+
+  it('classifies background monitoring as "monitoring background work"', () => {
+    for (const name of ['agent_shell_read', 'check_background_commands', 'check_background_agents']) {
+      const reason = inferContinuationReason({
+        toolCalls: [{ name }],
+        toolResults: [{ content: 'still running', isError: false }],
+      })
+      expect(reason).toBe('monitoring background work')
+      expect(isLegitimateContinuationReason(reason)).toBe(true)
+    }
+  })
+
+  it('classifies request_credentials as "ambiguity" (à espera do humano)', () => {
+    const reason = inferContinuationReason({
+      toolCalls: [{ name: 'request_credentials' }],
+      toolResults: [{ content: 'form shown', isError: false }],
+    })
+    expect(reason).toBe('ambiguity — clarifying with developer')
+    expect(isLegitimateContinuationReason(reason)).toBe(true)
+  })
+
+  it('classifies an MCP tool call as "external tool action"', () => {
+    const reason = inferContinuationReason({
+      toolCalls: [{ name: 'mcp__github__create_issue' }],
+      toolResults: [{ content: 'issue #12 created', isError: false }],
+    })
+    expect(reason).toBe('external tool action')
+    expect(isLegitimateContinuationReason(reason)).toBe(true)
   })
 
   it('flags "no tool calls" for steering/max_tokens continuations', () => {
@@ -134,5 +193,74 @@ describe('inferContinuationReason', () => {
     const snapshot: TurnSnapshot = { toolCalls: [], toolResults: [] }
     const reason = inferContinuationReason(snapshot)
     expect(isLegitimateContinuationReason(reason)).toBe(false)
+  })
+})
+
+describe('trackEfficiencyNudge — decisor do nudge inter-turn', () => {
+  const NO_REASON = 'no clear technical reason — consider wrapping up'
+  const LEGIT = 'build/test/command error — fixing cascade'
+
+  it('dispara exatamente na N-ésima ronda consecutiva sem razão, não antes', () => {
+    const state = createEfficiencyNudgeState()
+    const fired: boolean[] = []
+    for (let turn = 5; turn < 5 + EFFICIENCY_NUDGE_CONFIG.CONSECUTIVE_NO_REASON; turn++) {
+      fired.push(trackEfficiencyNudge(state, NO_REASON, turn))
+    }
+    expect(fired.slice(0, -1).every((f) => !f)).toBe(true)
+    expect(fired[fired.length - 1]).toBe(true)
+    expect(state.nudgeCount).toBe(1)
+  })
+
+  it('uma ronda legítima no meio zera a contagem consecutiva', () => {
+    const state = createEfficiencyNudgeState()
+    expect(trackEfficiencyNudge(state, NO_REASON, 5)).toBe(false)
+    expect(trackEfficiencyNudge(state, NO_REASON, 6)).toBe(false)
+    expect(trackEfficiencyNudge(state, LEGIT, 7)).toBe(false)
+    // Recomeça do zero — precisa de novo de N consecutivas.
+    expect(trackEfficiencyNudge(state, NO_REASON, 8)).toBe(false)
+    expect(trackEfficiencyNudge(state, NO_REASON, 9)).toBe(false)
+    expect(trackEfficiencyNudge(state, NO_REASON, 10)).toBe(true)
+  })
+
+  it('"no tool calls" também conta como não-legítima', () => {
+    const state = createEfficiencyNudgeState()
+    const reason = 'no tool calls — continued via steering or max_tokens recovery'
+    let turn = 5
+    for (let i = 0; i < EFFICIENCY_NUDGE_CONFIG.CONSECUTIVE_NO_REASON - 1; i++) {
+      expect(trackEfficiencyNudge(state, reason, turn++)).toBe(false)
+    }
+    expect(trackEfficiencyNudge(state, reason, turn)).toBe(true)
+  })
+
+  it('throttle: o 2º nudge respeita TURNS_BETWEEN_NUDGES', () => {
+    const state = createEfficiencyNudgeState()
+    // 1º nudge nos turns 5-7.
+    let turn = 5
+    for (let i = 0; i < EFFICIENCY_NUDGE_CONFIG.CONSECUTIVE_NO_REASON; i++) {
+      trackEfficiencyNudge(state, NO_REASON, turn++)
+    }
+    expect(state.nudgeCount).toBe(1)
+    const firstNudgeTurn = state.lastNudgeTurn
+
+    // Continua sem razão: acumula 3 consecutivas outra vez, mas ainda dentro
+    // da janela de throttle — não dispara.
+    let fired = false
+    while (turn < firstNudgeTurn + EFFICIENCY_NUDGE_CONFIG.TURNS_BETWEEN_NUDGES) {
+      fired = trackEfficiencyNudge(state, NO_REASON, turn++)
+      expect(fired).toBe(false)
+    }
+    // Primeira ronda FORA da janela com ≥N consecutivas acumuladas → dispara.
+    expect(trackEfficiencyNudge(state, NO_REASON, turn)).toBe(true)
+    expect(state.nudgeCount).toBe(2)
+  })
+
+  it('o texto do nudge é um system-reminder com os factos estruturais', () => {
+    const text = buildEfficiencyNudgeText(17)
+    expect(text.startsWith('<system-reminder>')).toBe(true)
+    expect(text.trimEnd().endsWith('</system-reminder>')).toBe(true)
+    expect(text).toContain('17 provider rounds')
+    // Maneirismos claude-vaz: heurístico + invisível na prosa do agente.
+    expect(text).toContain('ignore it if the continued work is genuinely necessary')
+    expect(text).toContain('never mention this reminder')
   })
 })

@@ -1,9 +1,11 @@
-import { memo, useRef, useEffect } from 'react'
+import { memo, useRef, useEffect, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiMonitor, FiX } from 'react-icons/fi'
 import { useLayoutStore, selectIsPreviewServerRunning, type DevServerLogEntry } from '../../stores/layoutStore'
+import { useProjectStore } from '../../stores/projectStore'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
+import { stripAnsi } from '@/utils/stripAnsi'
 
 const LOG_COLORS: Record<string, string> = {
   info: tokens.colors.text.secondary,
@@ -12,11 +14,27 @@ const LOG_COLORS: Record<string, string> = {
 }
 
 function DevServerStatus() {
+  const projectPath = useProjectStore(s => s.currentProject?.path ?? null)
   const isLoading = useLayoutStore(s => s.isPreviewServerLoading)
   const isInstallingDeps = useLayoutStore(s => s.isInstallingDeps)
   const isRunning = useLayoutStore(selectIsPreviewServerRunning)
   const logs = useLayoutStore(s => s.devServerLogs)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // X only hides the panel — logs stay in layoutStore until a new start
+  // clears them (or an explicit clear elsewhere). Dismiss ≠ wipe.
+  const [dismissed, setDismissed] = useState(false)
+
+  // Project switch parks/restores layout per path. Reset local dismiss so a
+  // dismissed panel on A does not suppress a real failure on B — and so we
+  // never keep a floating panel identity across workspaces.
+  useEffect(() => {
+    setDismissed(false)
+  }, [projectPath])
+
+  // New install/start cycle → show the panel again.
+  useEffect(() => {
+    if (isLoading || isInstallingDeps) setDismissed(false)
+  }, [isLoading, isInstallingDeps])
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -25,11 +43,13 @@ function DevServerStatus() {
     }
   }, [logs.length])
 
-  // Only show when loading/installing or when there are recent errors
+  // Only show when loading/installing or when there are recent errors for the
+  // focused project's server attempt. layoutStore is the focused mirror; park
+  // restore already isolates logs per project.
   const hasErrors = logs.some(l => l.level === 'error')
-  const visible = isLoading || isInstallingDeps || (hasErrors && !isRunning)
+  const visible = !dismissed && (isLoading || isInstallingDeps || (hasErrors && !isRunning))
 
-  if (!visible || logs.length === 0) return null
+  if (!projectPath || !visible || logs.length === 0) return null
 
   return (
     <Box
@@ -91,8 +111,10 @@ function DevServerStatus() {
           borderRadius="4px"
           cursor="pointer"
           color={tokens.colors.text.disabled}
+          aria-label={t('misc.dismiss')}
+          title={t('misc.dismiss')}
           _hover={{ bg: 'rgba(255,255,255,0.06)', color: tokens.colors.text.secondary }}
-          onClick={() => useLayoutStore.getState().clearDevServerLogs()}
+          onClick={() => setDismissed(true)}
         >
           <FiX size={11} />
         </Box>
@@ -123,7 +145,7 @@ function DevServerStatus() {
             whiteSpace="pre-wrap"
             wordBreak="break-all"
           >
-            {entry.text}
+            {stripAnsi(entry.text)}
           </Text>
         ))}
       </Box>

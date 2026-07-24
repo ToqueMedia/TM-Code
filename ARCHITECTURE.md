@@ -101,7 +101,73 @@ in the IDE's billing memories.)
 
 ---
 
-## Parallel work (multi-window)
+## Current parallel model (authoritative — 2026-07-24)
+
+> **Single source of truth for runtime behaviour.** Historical phase logs below are archive.
+> If a phase note contradicts this section, **this section wins**. Code contract:
+> `src/services/agent/parallelTasks/policy.ts` (`ONE_AGENT_PER_PROJECT`).
+
+### Topology
+
+| Rule | Behaviour |
+|------|-----------|
+| **1 window = 1 OS process = 1 focused project** | `open_new_instance --open-project`; no shared runtime Zustand between windows |
+| **Cross-window bus = disk only** | Under `~/.toquemedia-studio/projects/<id>/` |
+| **`agent-status.json`** | Writer heartbeats while running (focused: ~3s; background: 30s); **reader** polls ~1.5s focused / 3s background (+ immediate on focus); readers treat `running` older than 90s as crashed |
+| **`window-lock.json`** | Double-open **warning** (not a hard lock); staleness handles dead owners |
+| **`task-stop-requests.json`** | Stop request from another window; owner aborts on turn boundary or heartbeat |
+| **Switch project in-window** | Cancels the live run (confirm first) |
+
+### Concurrency policy — **one agent per project** (F3)
+
+| Allowed | Not allowed |
+|---------|-------------|
+| One live agent run per **project path** (main loop **or** session/project runner) | Concurrent fan-out tasks in the **same** project (`addParallelTask` always refuses) |
+| **Steer** the live run (Enter / mid-run message) | Spawning a second agent on a busy project (redirects to steer when possible) |
+| **Multi-window, multi-project**: window A on `/proj-a`, window B on `/proj-b` | Peer agent messaging (`send_agent_message` is **disabled**) |
+| Sub-agents **read-only** under the owner (Explore / Research / Verify, cap shared) | Inter-agent “teams” board / peer chat |
+| Sequential **queue** (park on Stop; resume) same session | Parallel worktrees **for concurrent agents on one project** (worktree machinery remains for future / isolated checkouts; **not** multi-agent fan-out while F3 is on) |
+
+**Mental model today:** not “N agents on one tree”, but **N windows × N projects**, each with **at most one** agent, plus positional sessions (steer the run you are viewing). Coordinate humans via the developer, not `send_agent_message`.
+
+**Code gates:**
+
+- `parallelTaskManager.addParallelTask` → always `null` + i18n warn  
+- `addSessionAgentRun` / project run → steer if project busy, else spawn  
+- `send_agent_message` tool → hard error (deprecated under F3)  
+- Status writer assumes a single live owner per project file  
+
+### Session / UI invariants (still hold)
+
+1. Streaming is **per-session** (`streamingSessionId`), not per visible tab.  
+2. Interactive prompts (permission / question / credentials) carry **origin** and never stay invisible (Attention Inbox).  
+3. Writes across agents that *could* share a tree use claims / write-lock (main claims registry).  
+4. Auto-wake only with open work and a visible system message.  
+5. Budget exhaustion: client stop-all + park queue; multi-window learns via `/v1/me` on focus (no server push).
+
+### Still open (not 10/10 polish yet)
+
+- Full loop fusion (main `runQueryEngineLoop` vs task `QueryEngine` driver)  
+- **`/plan` on a live task session** remains blocked (slash uses main machinery; one agent per project) — use plan when the project’s agent is free, or steer with plain text  
+- Shared multi-writer **item** board (optional product; out of F3)  
+- Release matrix: see `docs/PARALLEL_RELEASE_CHECKLIST.md` (manual multi-window cases)
+
+### Done recently (Pacote 3)
+
+- **Hard lock optional**: Settings → Sandbox → “Block second window” (`hardBlockSecondProjectWindow`)  
+- **Unified remote-stop message** in owner chat when Stop is requested from another window  
+- **Badge tooltip** includes pid + owner hint
+
+### Done recently (parity)
+
+- **Attachments on task/session-agent steer** (2026-07-24): `ParallelSteerItem` + `resolveSteerItemsToContent` — same image pipeline as main (native vision / sidecar; BYOK via `byokVision.ts`)
+- **First-turn multimodal on session-agent spawn**: `run.initialBlocks` + rebuild from last user `promptBlocks` so history-pop does not drop attachments
+
+### Historical phases (archive)
+
+The long phase log that follows (Fase 1–6, “trono”, worktrees default-on design, etc.) documents **how we got here**. Several notes describe multi-task worktrees and peer messaging as **built**; under the **Current** policy above those paths are **disabled or non-default**. Prefer `policy.ts` + this section when implementing.
+
+## Parallel work (multi-window) — detail
 
 **One window = one OS process = one project.** "Open in New Window" spawns a fresh instance
 (`open_new_instance` → `--open-project <dir>`, lib.rs); instances share **nothing at runtime**
@@ -110,12 +176,10 @@ the user-data dir). The only cross-window channel is **disk**, under the project
 state dir (`~/.toquemedia-studio/projects/<id>/`):
 
 - **`agent-status.json`** — the window running the agent mirrors its run state
-  (`running`/`done`/`error` + task label), heartbeating every 30s
-  (`src/services/projectAgentStatusService.ts`, writer; `useProjectAgentStatuses`, polling
-  reader → badges in the Welcome-sidebar recents and the titlebar project menu). A `running`
-  older than 90s = crashed writer, ignored. Writes are **serialized** (promise chain + unique
-  temp files) and clears are **pid-owned** (`only_if_own`), so two windows never clobber each
-  other's truthful badge; `WindowEvent::Destroyed` removes own files on graceful close.
+  (`running`/`done`/`error` + task label). Writer heartbeat: **~3s when the window is focused**,
+  30s when backgrounded (`src/services/projectAgentStatusService.ts`; reader
+  `useProjectAgentStatuses`). A `running` older than 90s = crashed writer, ignored. Writes are
+  **serialized** (promise chain + unique temp files) and clears are **pid-owned** (`only_if_own`).
 - **`window-lock.json`** — presence heartbeat for the **double-open guard**: opening a project
   whose lock is fresh and foreign warns the user (same state dir → session last-write-wins;
   same working tree → two agents writing). A warning, not a hard lock — staleness arbitrates
@@ -123,21 +187,16 @@ state dir (`~/.toquemedia-studio/projects/<id>/`):
 
 **Switching projects in-window cancels the run** (confirm first — `projectStore.openProject`/
 `closeProject`); background work across projects is the multi-window model above, NOT in-window
-concurrency. The Rust `ActiveProject` clamp, the streaming cursor, and the agent singletons are
-all single-slot per process — see the parallel-projects memory for the Fase 4 (in-window)
-blocker inventory before attempting to change that.
+multi-agent fan-out on one project (F3: one agent per project).
 
-## Multi-agent foreground model (in-window)
+## Multi-agent foreground model (in-window) — historical design notes
 
-**Doutrina (2026-07-17, palavra do produto): NÃO HÁ "DEUS".** Nenhum agente responde a um
-maior. Cada tarefa é o "principal" DA SUA tarefa — com o seu contexto, o seu chat, a sua
-equipa de sub-agents read-only (roteada por dono) e a sua working tree (worktree git por
-omissão; git é REQUISITO da IDE — sem repo, o sistema cria um local). O modelo mental é
-**N developers com o TM Code aberto no MESMO projecto**, cada um numa cópia ramificada em
-git, a pedirem coisas diferentes. "Main agent" é vocabulário LEGADO para "o agente da sessão
-que o developer está a ver" — posicional, nunca estrutural; o que ainda o distingue (a
-maquinaria completa do composer e alguns singletons, ver "O trono por demolir" no fim) é
-dívida da Fase 4b, não design. A migração é faseada; cada fase mantém as invariantes abaixo.
+**Design north star (still valid as product direction):** NÃO HÁ "DEUS". Positional main =
+the session the developer is viewing. Sub-agents remain owner-scoped tools.
+
+**Runtime as of 2026-07-24:** see **Current parallel model** — **one agent per project**;
+intra-project concurrent tasks and `send_agent_message` are off. Worktree multi-task design
+below is retained as archive of implementation investment.
 
 **Invariantes (violá-las = regressão):**
 1. **Uma tarefa nunca desaparece — só o developer apaga.** Cada tarefa paralela É uma sessão
@@ -342,14 +401,12 @@ queue. `useQueueProcessor` also gates on billing, so parked work never burns 402
 until credits return. (The Chat dispatch path has **no billing pre-flight of its own** — the
 queue gate is what stands between an exhausted budget and a real request.)
 
-**Task queue (same project, sequential).** While a run is live, Enter **steers** it (claude-vaz
-parity). The composer's Steer/**New task** toggle enqueues the message as `asTask` instead: its
-own run, dispatched one-at-a-time by the idle drain, never coalesced. **Queue order is execution
-order** — both the steering collectors (`drainSteerableMessages`) and the idle-drain batch stop
-at the first task. Stop (single implementation: `stopAgentRun`, used by BOTH stop buttons)
-drops steering and **parks** tasks (paused, "Resume" in the queue strip; any manual send also
-resumes); a rehydrated queue containing tasks boots paused. Tasks share the session/context —
-per-task sessions and true intra-project parallelism (worktrees) are Fase 5, not built.
+**Task queue (same project).** While a run is live, Enter **steers** it (claude-vaz parity).
+**F3 (current):** concurrent `asTask` / `addParallelTask` fan-out is **disabled** (one agent per
+project); the UI surfaces the one-agent message instead of spawning a second run. Historical
+queue-order / park-on-Stop behaviour still applies to any residual queued work and to
+cross-project session agents. Stop (single implementation: `stopAgentRun`) drops steering and
+**parks** residual tasks. Multi-window multi-**project** remains the supported parallel model.
 
 ---
 

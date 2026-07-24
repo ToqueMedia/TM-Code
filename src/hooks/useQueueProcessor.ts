@@ -71,7 +71,15 @@ export function useQueueProcessor({
   // queue could fire a new turn while the user is still mid-decision on
   // the previous turn's permission prompt — the new turn would either
   // collide with the open dialog or auto-fire another one.
-  const hasPendingPermission = usePermissionStore(s => !!s.pendingPermission)
+  const hasPendingPermission = usePermissionStore(s => {
+    const p = s.pendingPermission
+    if (!p) return false
+    // Only the MAIN run's own permission dialog freezes the main queue. A
+    // parallel TASK's dialog (a real task origin) must NOT stall the main run's
+    // queue (F2 MDI). The main run's own permissions carry no origin or a
+    // synthetic `project:{id}` origin.
+    return !p.origin || p.origin.taskId.startsWith('project:')
+  })
 
   // Explicit pause (Stop with parked tasks / budget stop / task rehydrate).
   // Resumed by the strip's Resume button or any manual send.

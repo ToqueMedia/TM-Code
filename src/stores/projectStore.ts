@@ -22,15 +22,11 @@ import { t } from '@/i18n';
 
 
 /**
- * Dedupe a recent-projects list by `path`. Rust's `get_recent_projects`
- * returns entries sorted by lastOpened DESC; the same project can appear
- * twice when the registry stores it with two different IDs (historically,
- * opened once via cwd-scoped auto-create and once via "Open folder"). Keeping the
- * FIRST occurrence preserves the most recent timestamp and matches what
- * the UI expects ("Recents" should be distinct projects, not entries).
- *
- * Until the Rust side dedupes at save-time, this is the frontend safety
- * net — UI consumers never have to worry about repeats.
+ * Dedupe the workspace project list by `path`. The same folder can appear
+ * twice when the registry stored two IDs (cwd auto-create vs "Open folder").
+ * Keeps the first occurrence to preserve STABLE order — the sidebar is a
+ * workspace list, not a recents ranking (opening a project must not bubble
+ * it to the top).
  */
 function dedupeRecentProjects(projects: RecentProject[]): RecentProject[] {
   const seen = new Set<string>();
@@ -41,6 +37,20 @@ function dedupeRecentProjects(projects: RecentProject[]): RecentProject[] {
     out.push(p);
   }
   return out;
+}
+
+/**
+ * Insert or update a project in the workspace list without reordering.
+ * Existing entries stay at their index; new ones are appended.
+ */
+function upsertProjectStable(list: RecentProject[], entry: RecentProject): RecentProject[] {
+  const idx = list.findIndex(p => p.path === entry.path || p.id === entry.id);
+  if (idx >= 0) {
+    const next = list.slice();
+    next[idx] = { ...next[idx], ...entry, path: entry.path, id: entry.id };
+    return dedupeRecentProjects(next);
+  }
+  return dedupeRecentProjects([...list, entry]);
 }
 
 interface ProjectStore {
@@ -111,22 +121,34 @@ const getRecoveryService = () => RecoveryService.getInstance();
 const getWindowService = () => WindowService.getInstance();
 
 /**
- * Switching/closing a project with the agent mid-task is destructive — the
- * run gets cancelled (see openProject/tearDownProject). Ask first, and point
- * the user at the non-destructive alternative ("Open in New Window", which
- * keeps both projects working in parallel). Returns true to proceed. When the
- * agent is idle there is nothing to lose, so no dialog.
+ * Closing a project with the agent mid-task is still destructive (the
+ * window is leaving that project for good). Switching is NOT — F2 parks the
+ * run as a background project-run (runProjectContext + preserved session),
+ * so no confirm / no cancel on switch. Returns true to proceed.
  */
 async function confirmCancelActiveRun(kind: 'switch' | 'close'): Promise<boolean> {
+  // F2 MDI: switching projects keeps the agent running on the previous
+  // project — there is nothing destructive to confirm.
+  if (kind === 'switch') return true;
+
+  // Close → Welcome kills ALL in-window runs (including parked ones on other
+  // projects). Warn if anything is busy in this process.
   let busy = false;
   try {
-    // Dynamic imports: same circular-dep avoidance as tearDownProject
-    // (projectStore → agentService → toolExecutor → projectStore).
     const agentService = (await import('../services/agent/agentService')).default.getInstance();
     busy = agentService.isAgentRunning();
     if (!busy) {
       const { useSubAgentStore } = await import('./subAgentStore');
       busy = useSubAgentStore.getState().getPendingCount() > 0;
+    }
+    if (!busy) {
+      const { useParallelTaskStore } = await import('./parallelTaskStore');
+      for (const r of useParallelTaskStore.getState().runs.values()) {
+        if (r.status === 'running' || r.status === 'queued') {
+          busy = true;
+          break;
+        }
+      }
     }
   } catch {
     busy = false;
@@ -134,8 +156,7 @@ async function confirmCancelActiveRun(kind: 'switch' | 'close'): Promise<boolean
   if (!busy) return true;
 
   const name = useProjectStore.getState().currentProject?.name || '';
-  const body = t(kind === 'switch' ? 'project.switchWhileRunning' : 'project.closeWhileRunning')
-    .replace('{name}', name);
+  const body = t('project.closeWhileRunning').replace('{name}', name);
   return tauriConfirm(body, {
     title: t('project.agentBusyTitle'),
     kind: 'warning',
@@ -145,48 +166,39 @@ async function confirmCancelActiveRun(kind: 'switch' | 'close'): Promise<boolean
 }
 
 /**
- * Cancels the in-flight agent work (main loop + sub-agents) for the CURRENT
- * project. Must run BEFORE `set_active_project` re-points the Rust clamp at
- * the next project — without this, the orphaned run kept burning tokens, its
- * pending diff approvals hung forever, and (worst) its next shell/PTY tool
- * calls were clamped to the NEW project's directory and executed there
- * (cross-project contamination). cancelLoop() already resolves diffs and
- * clears permission/credential/question prompts for every cancel path.
+ * Tears down the open project and returns to a no-project state (Welcome).
+ * F2 distinction:
+ *   - **Switch** A→B: parks runs (no tearDown).
+ *   - **Close / expel**: leaves the window with NO focused project, so every
+ *     in-window run (including parked ones on other projects) must die —
+ *     there is no UI surface left to host them.
+ * No confirmation dialog. No state save.
  */
-async function cancelActiveRunForProjectExit(): Promise<void> {
-  try {
-    const [{ default: agentServiceModule }, { useSubAgentStore }] = await Promise.all([
-      import('../services/agent/agentService'),
-      import('./subAgentStore'),
-    ]);
-    useSubAgentStore.getState().abortAll();
-    agentServiceModule.getInstance().cancelLoop();
-  } catch (e) {
-    logger.warn('project', 'Failed to cancel agent before project exit:', e);
-  }
-}
+function tearDownProject(_opts?: { forceCancelAll?: boolean }) {
+  // Capture before clearing state — MCP scope stop needs the path.
+  const closingPath = useProjectStore.getState().currentProject?.path;
 
-/**
- * Tears down the current project: cancels agent, stops all monitors/watchers,
- * closes editor files, stops dev server, clears preview, and resets state.
- * No confirmation dialog. No state save. Use for forced teardowns
- * (e.g. before deleting a project).
- */
-function tearDownProject() {
-  // Cancel any running agent loop
-  // (dynamic import to avoid circular dep: projectStore → agentService → toolExecutor → projectStore)
-  import('../services/agent/agentService').then(m => {
-    m.default.getInstance().cancelLoop();
-  });
+  // Always kill every agent in this window: close/expel have no multi-project
+  // host. (Switch never calls tearDown.) Sync cancel before wiping sessions
+  // so pending diffs/permissions resolve while the session Map still exists.
+  void (async () => {
+    try {
+      const [{ default: agentServiceModule }, { useSubAgentStore }, { useParallelTaskStore }] =
+        await Promise.all([
+          import('../services/agent/agentService'),
+          import('./subAgentStore'),
+          import('./parallelTaskStore'),
+        ]);
+      useSubAgentStore.getState().abortAll();
+      useParallelTaskStore.getState().abortAll();
+      agentServiceModule.getInstance().cancelLoop();
+    } catch (e) {
+      logger.warn('project', 'Failed to cancel agent during tearDown:', e);
+    }
+  })();
 
-  // Sub-agents run outside the main loop's AbortController (own registry,
-  // own controllers) — cancelLoop() alone left them alive after teardown,
-  // still executing read tools against a project the UI already left.
-  import('./subAgentStore').then(m => {
-    m.useSubAgentStore.getState().abortAll();
-  }).catch(() => {});
-
-  // Shutdown MCP servers (dynamic import to avoid circular deps)
+  // Close/expel: leave window with no project — stop ALL MCP scopes and
+  // every dev-server slot. Switch never calls tearDown.
   import('../services/mcp/mcpService').then(m => {
     m.default.getInstance().shutdown().catch(() => {});
   });
@@ -203,7 +215,7 @@ function tearDownProject() {
   // Close editor files
   useEditorRepository.getState().closeAllFiles();
 
-  // Clear all chat sessions and streaming state
+  // Clear all chat sessions and streaming state (full wipe — no park on close)
   useChatStore.getState().clearAllSessions();
 
   // Clear file tree to free memory (will reload for next project)
@@ -217,16 +229,25 @@ function tearDownProject() {
     monaco?.editor?.getModels?.().forEach(m => m.dispose());
   } catch {}
 
-  // Stop dev server and clear preview state
-  devServerManager.stop().catch(() => {});
+  // F5: stop EVERY project slot (close leaves no host for background servers)
+  void devServerManager.stopAll().catch(() => {});
   const layout = useLayoutStore.getState();
   layout.clearDevServer();
+  layout.restoreParkSnapshot(null);
   if (layout.viewMode === 'preview' || layout.viewMode === 'generating') {
     layout.setViewMode('chat');
   }
+  if (closingPath) {
+    void import('../services/projectWorkspacePark')
+      .then((m) => { m.clearProjectParks(closingPath) })
+      .catch(() => {})
+  }
 
-  // Release app-level project isolation
-  invoke('clear_active_project', { projectId: useProjectStore.getState().currentProject?.id || '' }).catch(() => {});
+  // Release app-level project isolation. F2 MDI: close/expel leaves NO focused
+  // project and has already aborted every in-window run, so clear the WHOLE
+  // registry — not just the focused project (switching keeps the others
+  // registered; only close/expel empties it, else stale entries accumulate).
+  invoke('clear_all_active_projects').catch(() => {});
 
   // Clear current project
   useProjectStore.setState({ currentProject: null });
@@ -262,12 +283,9 @@ export const useProjectStore = create<ProjectStore>()(
       setNoTmsFile: (value) => set({ noTmsFile: value }),
       setTmsBootstrapping: (value) => set({ tmsBootstrapping: value }),
 
-      // Rust's open_project persists the recents FILE, but the Welcome
-      // "Recents" list renders the in-memory array, which only re-reads disk
-      // on mount. Callers that invoke open_project directly need this mirror,
-      // otherwise the folder never appeared in Recents until an app restart
-      // (user report, 2026-06-12). Same no-extra-IPC pattern as the
-      // freshEntry construction inside openProject.
+      // Mirror disk workspace list into memory without reordering. Callers
+      // that invoke open_project directly need this so a new folder appears
+      // in the sidebar without an app restart (2026-06-12).
       upsertRecentProject: (info: ProjectInfo) => {
         const entry: RecentProject = {
           id: info.id,
@@ -276,7 +294,7 @@ export const useProjectStore = create<ProjectStore>()(
           lastOpened: info.lastOpened,
         }
         set(state => ({
-          recentProjects: dedupeRecentProjects([entry, ...state.recentProjects]),
+          recentProjects: upsertProjectStable(state.recentProjects, entry),
         }))
       },
 
@@ -287,30 +305,49 @@ export const useProjectStore = create<ProjectStore>()(
         // resetting the HTTP client and bouncing the view back to chat — i.e. a
         // pointless "reload" of the project you're already in. An explicit initGit
         // refresh is exempt (the user asked for a git action on this path).
-        if (get().currentProject?.path === path && !options?.initGit) return;
+        // Normalize slashes/trailing slash: multi-agent/recents paths can differ
+        // slightly from currentProject.path and used to re-trigger a full open.
+        const normPath = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '')
+        if (
+          get().currentProject?.path
+          && normPath(get().currentProject!.path) === normPath(path)
+          && !options?.initGit
+        ) return;
 
         // Clean up previous project's state before loading the new one
         const prevProject = get().currentProject;
 
-        // Switching away from a project with the agent mid-task: confirm,
-        // then cancel BEFORE anything re-points global state (Rust clamp,
-        // dev server, chat wipe) at the new project. Same-path re-opens are
-        // exempt — reloading the project you're in shouldn't kill its run.
-        if (prevProject && prevProject.path !== path) {
-          const proceed = await confirmCancelActiveRun('switch');
-          if (!proceed) return;
-        }
+        // F2 MDI: switching projects does NOT cancel the in-flight agent.
+        // The main run is bound to its project via toolExecutor.setProjectContext
+        // (agentRunner); chatStore keeps the streaming session in memory; the
+        // parallel runner uses run.projectPath. set_active_project ADDS the
+        // new project to the Rust registry without dropping the previous one,
+        // so shell/PTY of a background run stays clamped to the right tree.
 
         // Double-open guard (cross-window): the same project in two windows
         // shares the state dir (sessions last-write-wins) AND the working
-        // tree (two agents writing). Warn, don't hard-lock — a rigid lock
-        // orphaned by a crash would strand the user out of their own
-        // project; the lock heartbeat's staleness window arbitrates.
+        // tree (two agents writing). Default = warn + optional Open anyway.
+        // Settings → hardBlockSecondProjectWindow refuses without override
+        // (staleness still frees dead owners — no permanent strand).
         if (prevProject?.path !== path) {
           try {
             const { isProjectOpenElsewhere } = await import('../services/projectWindowLockService');
-            if (await isProjectOpenElsewhere(path)) {
+            const openElsewhere = await isProjectOpenElsewhere(path);
+            const { useSettingsStore } = await import('./settingsStore');
+            const { doubleOpenDecision } = await import('../services/doubleOpenGuard');
+            const decision = doubleOpenDecision(
+              useSettingsStore.getState().hardBlockSecondProjectWindow,
+              openElsewhere,
+            );
+            if (decision !== 'allow') {
               const name = path.replace(/\\/g, '/').split('/').pop() || path;
+              if (decision === 'hard_block') {
+                set({
+                  error: t('project.alreadyOpenElsewhereHard').replace('{name}', name),
+                  loading: false,
+                });
+                return;
+              }
               const ok = await tauriConfirm(
                 t('project.alreadyOpenElsewhere').replace('{name}', name),
                 {
@@ -324,71 +361,81 @@ export const useProjectStore = create<ProjectStore>()(
           } catch { /* best-effort */ }
         }
 
-        // Cancel only after ALL confirms passed — cancelling before the
-        // double-open prompt would kill the run of a switch the user then
-        // declines.
-        if (prevProject && prevProject.path !== path) {
-          await cancelActiveRunForProjectExit();
+        // In-window multi-project switch (F2): keep workspace mounted; skip
+        // cold-open work that moves the window / reopens every editor tab.
+        // `loading: true` on switch made the chrome feel laggy while a
+        // background agent kept running on the previous project.
+        const isInWindowSwitch = !!(prevProject && prevProject.path !== path);
+        if (isInWindowSwitch) {
+          set({ error: null, welcomeScreen: null });
+        } else {
+          set({ loading: true, error: null, welcomeScreen: null });
         }
 
-        // Opening a project exits any Welcome state — clear the persisted marker.
-        set({ loading: true, error: null, welcomeScreen: null });
-
-        if (prevProject) {
-          // Stop old dev server and clear preview — await to ensure port is freed
+        if (prevProject && prevProject.path !== path) {
+          // F5 "tudo vivo": park the outgoing project's UI + leave its dev
+          // server process running (multi-slot). Do NOT stop/clear.
           try {
-            await devServerManager.stop();
+            const { parkLayout, parkHttpClient } = await import('../services/projectWorkspacePark');
+            const layout = useLayoutStore.getState();
+            parkLayout(prevProject.path, layout.captureParkSnapshot());
+            const { useHttpClientStore } = await import('./httpClientStore');
+            const http = useHttpClientStore.getState();
+            parkHttpClient(prevProject.path, {
+              tabs: http.tabs,
+              activeTabId: http.activeTabId,
+              history: http.history,
+              isHistoryOpen: http.isHistoryOpen,
+            });
           } catch (e) {
-            logger.warn('project', 'Failed to stop dev server during project switch:', e);
-          }
-          const layout = useLayoutStore.getState();
-          layout.clearDevServer();
-          layout.clearDevServerLogs();
-          layout.setScaffoldPhase(null);
-          // Reset HTTP Client for the new project context
-          const { useHttpClientStore } = await import('./httpClientStore');
-          useHttpClientStore.getState().resetForNewProject();
-          if (layout.viewMode === 'preview' || layout.viewMode === 'generating') {
-            layout.setViewMode('chat');
+            logger.warn('project', 'Failed to park workspace on switch:', e);
           }
         }
 
         try {
           const projectInfo: ProjectInfo = await invoke('open_project', { path, initGit: options?.initGit });
-          try {
-            await invoke('migrate_project_state', { projectPath: path });
-          } catch (error) {
-            logger.warn('project', 'Project state migration failed:', error);
+          // Migration is rare after first open — never block the switch path.
+          if (isInWindowSwitch) {
+            void invoke('migrate_project_state', { projectPath: path }).catch((error) => {
+              logger.warn('project', 'Project state migration failed:', error);
+            });
+          } else {
+            try {
+              await invoke('migrate_project_state', { projectPath: path });
+            } catch (error) {
+              logger.warn('project', 'Project state migration failed:', error);
+            }
           }
           // Avoid a redundant second IPC: Rust's `open_project` already wrote
-          // the recents file, and we have all four fields RecentProject needs
-          // in `projectInfo`. Constructing the entry locally + prepending +
-          // deduping by path produces an identical sidebar result without the
-          // extra `get_recent_projects` round-trip. The persisted file on disk
-          // remains the source of truth and is re-read by `loadRecentProjects`
-          // on mount, so eventual consistency is preserved across restarts.
+          // the workspace list file. Mirror in-memory without bubbling the
+          // selected project to the top (stable workspace order).
           const freshEntry: RecentProject = {
             id: projectInfo.id,
             name: projectInfo.name,
             path: projectInfo.path,
             lastOpened: projectInfo.lastOpened,
           };
+          // Set focus ASAP so chat restore / UI can follow without waiting on
+          // permissions, TMS probes, or window-state IPC.
           set(state => ({
             currentProject: projectInfo,
-            recentProjects: dedupeRecentProjects([freshEntry, ...state.recentProjects]),
+            recentProjects: upsertProjectStable(state.recentProjects, freshEntry),
             loading: false,
           }));
-
           // Clear editor open files and diagnostics when opening a new project
           try { useEditorRepository.getState().closeAllFiles() } catch (e) {
             logger.error('project', 'Failed to close editor files during project switch:', e)
           }
           useProblemsStore.getState().clear()
 
-          // Check for recovery state before loading project state
-          const hasRecovery = await getRecoveryService().hasRecoveryState(projectInfo.id);
-          if (hasRecovery) {
-            logger.warn('project', `Recovery state found for project ${projectInfo.id}. Consider recovering before loading.`);
+          // Cold open only — recovery probe is non-critical noise on switch.
+          if (!isInWindowSwitch) {
+            try {
+              const hasRecovery = await getRecoveryService().hasRecoveryState(projectInfo.id);
+              if (hasRecovery) {
+                logger.warn('project', `Recovery state found for project ${projectInfo.id}. Consider recovering before loading.`);
+              }
+            } catch { /* non-critical */ }
           }
 
           // Start monitoring project status
@@ -408,11 +455,17 @@ export const useProjectStore = create<ProjectStore>()(
             logger.warn('project', 'Failed to activate project isolation:', err);
           }
 
-          // Load project state if exists
-          try {
-            await get().loadProjectState(projectInfo.id);
-          } catch (error) {
-            logger.warn('project', 'Failed to load project state:', error);
+          // loadProjectState restores window geometry + every open editor tab
+          // from disk. That is correct for a cold open, but on in-window
+          // switch it REPOSITIONS the OS window and re-opens files we just
+          // closed — the main source of "heavy" multi-project switching.
+          // Layout/preview come from park; editor tabs from localStorage.
+          if (!isInWindowSwitch) {
+            try {
+              await get().loadProjectState(projectInfo.id);
+            } catch (error) {
+              logger.warn('project', 'Failed to load project state:', error);
+            }
           }
 
           // Hydrate the agent task tracker from disk. The tracker lives in
@@ -453,25 +506,57 @@ export const useProjectStore = create<ProjectStore>()(
               import('./permissionStore'),
             ]);
             const perms = await loadPermissionsFromDisk(path);
-            hydrateApprovedScopes(perms.scopes, path, perms.tools, perms.directories, perms.autoMode);
+            // projectId is required for multi-project: hydrate stores under
+            // byProject[id] without wiping other open projects' grants.
+            hydrateApprovedScopes(perms.scopes, path, perms.tools, perms.directories, perms.autoMode, perms.commandPrefixes, projectInfo.id);
           } catch (error) {
             logger.warn('project', 'Failed to hydrate permission grants:', error);
           }
 
-          // Hydrate per-project HTTP Client tabs + history. The Postman-like
-          // panel is expected to remember what you were testing; without this
-          // the user's request bodies, auth tokens, and 50-entry history
-          // vanish on every reopen. Failure path leaves the default single
-          // empty tab.
+          // F5: restore parked workspace (layout + HTTP) if this project was
+          // left open in-window; else hydrate from disk / defaults.
           try {
-            const [{ loadHttpClientFromDisk }, { hydrateHttpClientFromDisk }] = await Promise.all([
-              import('../services/httpClientPersistence'),
-              import('./httpClientStore'),
-            ]);
-            const loaded = await loadHttpClientFromDisk(path);
-            if (loaded) hydrateHttpClientFromDisk(loaded);
+            const { takeLayoutPark, takeHttpPark } = await import('../services/projectWorkspacePark');
+            const layoutSnap = takeLayoutPark(path);
+            useLayoutStore.getState().restoreParkSnapshot(layoutSnap);
+            // Point multi-slot manager at this project (keeps process if live).
+            devServerManager.setFocusedProject(path);
+            // If this project has no live preview URL, drop any ghost macOS
+            // webview still bound to the previous project's localhost port.
+            // Otherwise it keeps retrying and floods [runtime] Network errors
+            // into the newly focused layoutStore / DevServerStatus.
+            {
+              const layout = useLayoutStore.getState();
+              const hasPreviewTarget = !!(
+                layout.devServer?.frontendUrl
+                || layout.devServer?.backendUrl
+                || (layout.previewMode === 'static' && layout.previewHtmlContent)
+              );
+              if (!hasPreviewTarget) {
+                void import('../components/ui/TauriWebview')
+                  .then((m) => { m.closePreviewWebview() })
+                  .catch(() => {});
+              }
+            }
+
+            const httpSnap = takeHttpPark(path);
+            const { useHttpClientStore, hydrateHttpClientFromDisk } = await import('./httpClientStore');
+            if (httpSnap) {
+              useHttpClientStore.setState({
+                tabs: httpSnap.tabs as never,
+                activeTabId: httpSnap.activeTabId,
+                history: httpSnap.history as never,
+                isHistoryOpen: httpSnap.isHistoryOpen,
+              });
+            } else {
+              // Cold open — load from disk or empty default.
+              useHttpClientStore.getState().resetForNewProject();
+              const { loadHttpClientFromDisk } = await import('../services/httpClientPersistence');
+              const loaded = await loadHttpClientFromDisk(path);
+              if (loaded) hydrateHttpClientFromDisk(loaded);
+            }
           } catch (error) {
-            logger.warn('project', 'Failed to hydrate HTTP Client state:', error);
+            logger.warn('project', 'Failed to restore workspace / HTTP Client:', error);
           }
 
           // Hydrate dirty editor buffers — restores unsaved edits from the
@@ -491,39 +576,46 @@ export const useProjectStore = create<ProjectStore>()(
           }
 
           // Check for TMS.md — suggest /init only when (a) it's missing AND
-          // (b) the project actually has content to analyze. Suggesting it on
-          // a freshly-opened empty folder is noise: there is nothing to
-          // memorize. Missing TMS.md is optional context, so the next agent
-          // turn should continue the user's task instead of forcing bootstrap.
-          //
-          // The "meaningful content" rule lives in projectHasContent.ts — it
-          // rejects dot-files (.toquemedia/, .git/, .DS_Store, .gitignore,
-          // .env, …) and tool artifacts (node_modules, dist, build, …)
-          // because none of those alone represents developer-authored
-          // intent worth analyzing. The Rust `glob_files('*')` returns
-          // hidden entries by default (glob crate's `require_literal_leading_dot`
-          // defaults to false), and the prior 4-name allowlist was leaking
-          // `.toquemedia/` on every freshly-opened empty project.
-          try {
-            await invoke('read_file', { path: `${path}/TMS.md` });
-            // TMS.md exists — ensure flag is cleared (covers re-open after bootstrap)
-            set({ noTmsFile: false });
-          } catch {
-            // TMS.md not found — keep only state so the UI can suggest /init.
-            // The agent preflight treats absence as optional context and lets
-            // the user's next request proceed normally.
-            const { projectHasMeaningfulContent } = await import('../utils/projectHasContent');
-            let hasContent = false;
+          // (b) the project actually has content to analyze. On in-window
+          // switch this probe (read + optional AGENTS/CLAUDE load + glob) is
+          // deferred so focus feels instant; cold open still awaits it.
+          const probeTms = async () => {
             try {
-              const entries = await invoke<string[]>('glob_files', {
-                pattern: '*',
-                directory: path,
-              });
-              hasContent = projectHasMeaningfulContent(entries);
+              await invoke('read_file', { path: `${path}/TMS.md` });
+              // Only write if still focused on this project (rapid A→B→C).
+              if (get().currentProject?.path === path) set({ noTmsFile: false });
             } catch {
-              hasContent = false;
+              let hasForeignInstructions = false;
+              try {
+                const { loadProjectInstructions } = await import('../services/agent/projectInstructions');
+                const bundle = await loadProjectInstructions(path);
+                hasForeignInstructions = !!bundle.foreignPrimary;
+              } catch {
+                hasForeignInstructions = false;
+              }
+              if (get().currentProject?.path !== path) return;
+              if (hasForeignInstructions) {
+                set({ noTmsFile: false });
+              } else {
+                const { projectHasMeaningfulContent } = await import('../utils/projectHasContent');
+                let hasContent = false;
+                try {
+                  const entries = await invoke<string[]>('glob_files', {
+                    pattern: '*',
+                    directory: path,
+                  });
+                  hasContent = projectHasMeaningfulContent(entries);
+                } catch {
+                  hasContent = false;
+                }
+                if (get().currentProject?.path === path) set({ noTmsFile: hasContent });
+              }
             }
-            set({ noTmsFile: hasContent });
+          };
+          if (isInWindowSwitch) {
+            void probeTms();
+          } else {
+            await probeTms();
           }
         } catch (error: unknown) {
           set({
@@ -588,8 +680,8 @@ export const useProjectStore = create<ProjectStore>()(
           if (count === 0) return;
 
           const ok = await tauriConfirm(
-            `Limpar a lista de projectos recentes (${count})?\n\nOs ficheiros dos projectos não são apagados — apenas desaparecem desta lista.`,
-            { title: 'Limpar recentes', kind: 'warning' }
+            t('welcome.clearProjectsConfirm').replace('{count}', String(count)),
+            { title: t('welcome.clearProjects'), kind: 'warning' }
           );
           if (!ok) return;
 
@@ -647,10 +739,26 @@ export const useProjectStore = create<ProjectStore>()(
             // tearDownProject cancels agent, stops dev server, clears preview,
             // clears sessions, and sets currentProject to null
             tearDownProject();
-          } else if (devServerManager.getProjectPath() === projectPath) {
-            // Stop the dev server only if it belongs to the project being deleted
-            await devServerManager.stop().catch(() => {});
-            useLayoutStore.getState().clearDevServer();
+          } else {
+            // F2 MDI: deleting a NON-current project must also stop its live
+            // background run(s) and drop its Rust registry entry — otherwise the
+            // agent keeps writing under a directory we're deleting, and a stale
+            // ActiveProject keeps a now-deleted path as a valid clamp cwd.
+            try {
+              const { useParallelTaskStore } = await import('./parallelTaskStore');
+              const store = useParallelTaskStore.getState();
+              for (const r of store.runs.values()) {
+                if (r.projectPath === projectPath && (r.status === 'running' || r.status === 'queued')) {
+                  store.abort(r.id);
+                }
+              }
+            } catch { /* best-effort */ }
+            invoke('clear_active_project', { projectId }).catch(() => {});
+            if (devServerManager.getProjectPath() === projectPath) {
+              // Stop the dev server only if it belongs to the project being deleted
+              await devServerManager.stop().catch(() => {});
+              useLayoutStore.getState().clearDevServer();
+            }
           }
 
           // Remove from recentProjects IMMEDIATELY so App.tsx auto-open
@@ -710,6 +818,7 @@ export const useProjectStore = create<ProjectStore>()(
           // conversation between the last auto-save tick and the close.
           await useChatStore.getState().cleanupOnExit(currentProject.path).catch(() => {});
         }
+        // Agent cancel is owned by tearDownProject (scoped to this project).
         tearDownProject();
         // User is now back on Welcome — remember that so a restart doesn't
         // auto-reopen the project they just closed.

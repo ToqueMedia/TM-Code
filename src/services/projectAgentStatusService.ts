@@ -9,11 +9,12 @@
  * `set_project_agent_status` command). The READER side is
  * useProjectAgentStatuses, which polls `get_project_agent_statuses` to render
  * the badges in the recents lists (Welcome sidebar + titlebar project menu).
+ * Reader cadence: ~1.5s focused / 3s background (see hook constants).
  *
  * Liveness contract:
  *  - `running` is only trustworthy while the writer heartbeats
- *    (HEARTBEAT_MS). Readers discard `running` entries older than STALE_MS —
- *    that means the writing process crashed or was killed.
+ *    (~3s focused / 30s background). Readers discard `running` older than
+ *    STALE_MS — that means the writing process crashed or was killed.
  *  - `done`/`error` have NO timeout. They persist until the user
  *    "acknowledges" them: focusing the window that owns the project, keeping
  *    it focused for ATTENDED_CLEAR_MS after the run ends (they watched it
@@ -47,7 +48,14 @@ export interface ProjectAgentStatus {
   pid: number
 }
 
+/** Heartbeat when the window is in the background (CPU-light). */
 export const PROJECT_AGENT_STATUS_HEARTBEAT_MS = 30_000
+/**
+ * Heartbeat when this window is focused — other windows see cross-window
+ * status/stop lag of a few seconds instead of waiting up to 30s.
+ * (ARCHITECTURE Current parallel model — multi-window polish.)
+ */
+export const PROJECT_AGENT_STATUS_HEARTBEAT_FOCUSED_MS = 3_000
 /** Readers treat a `running` older than this as a crashed writer. */
 export const PROJECT_AGENT_STATUS_STALE_MS = 90_000
 /**
@@ -127,24 +135,106 @@ function writeStatus(
   )
 }
 
-function startHeartbeat(): void {
-  stopHeartbeat()
-  heartbeatTimer = setInterval(() => {
-    if (runningPath) {
-      // Re-lê os metadados da sessão a cada beat: se o user renomear a
-      // tarefa ou editar a descrição A MEIO do run, as outras janelas veem
-      // a edição no próximo heartbeat (≤30s) em vez de só no próximo run.
-      // O título continua estável por natureza — session.name não deriva.
-      const meta = extractTaskMeta()
-      if (meta.label) runningLabel = meta.label
-      runningDescription = meta.description
-      writeStatus(runningPath, 'running', runningLabel, {
-        startedAt: runningStartedAt,
-        description: runningDescription,
-      })
-    }
-  }, PROJECT_AGENT_STATUS_HEARTBEAT_MS)
+/**
+ * Write a cross-window agent badge for a BACKGROUND project-run (the parallel
+ * runner). The single-slot main-run writer (`runningPath`) tracks only the
+ * focused main run; a background run on ANOTHER project must drive its OWN badge
+ * or the recents list shows it idle in every window (F2 MDI — "see each
+ * project's progress"). Serialized through the same writeChain. `onlyIfOwn`
+ * stays false — this process owns the run. One-agent-per-project guarantees the
+ * background run's project never collides with the main writer's `runningPath`.
+ */
+export function writeProjectRunBadge(
+  projectPath: string,
+  state: ProjectAgentRunState,
+  opts?: { label?: string | null; description?: string | null; startedAt?: number | null },
+): void {
+  const path = normalizeProjectPath(projectPath)
+  if (!path) return
+  // Never let a background project-run stamp the project the MAIN agent is
+  // already badging — one agent per project; dual writers = dual "running"
+  // lies in the recents list.
+  if (state === 'running' && runningPath && runningPath === path) {
+    return
+  }
+  writeStatus(path, state, opts?.label ?? null, {
+    startedAt: opts?.startedAt ?? null,
+    description: opts?.description ?? null,
+  })
 }
+
+function heartbeatIntervalMs(): number {
+  try {
+    if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+      return PROJECT_AGENT_STATUS_HEARTBEAT_FOCUSED_MS
+    }
+  } catch { /* non-DOM tests */ }
+  return PROJECT_AGENT_STATUS_HEARTBEAT_MS
+}
+
+function tickHeartbeat(): void {
+  // Re-bind to the RUN's project each beat. setProjectContext / session
+  // may be more accurate than the path captured at busy-start (wrong
+  // recents badge when focus and run diverged — report 2026-07-24).
+  const livePath = resolveMainBadgePath()
+  if (livePath && runningPath && livePath !== runningPath) {
+    writeStatus(runningPath, 'idle', null, { onlyIfOwn: true })
+    runningPath = livePath
+    runningStartedAt = runningStartedAt ?? Date.now()
+  }
+  if (!runningPath) return
+  // Cross-window Stop from WelcomeSidebar (project-level disk flag).
+  // Parallel runners consume the same flag on their own heartbeat; F3
+  // guarantees one agent per project so only one owner is live here.
+  const pathForStop = runningPath
+  void import('./agent/parallelTasks/taskStopRequestService')
+    .then(({ consumeProjectAgentStop }) => consumeProjectAgentStop(pathForStop))
+    .then((stop) => {
+      if (!stop) return
+      // Unified stop reason (Pacote 3): user stopped from another window.
+      try {
+        const { useChatStore } = require('../stores/chatStore') as typeof import('../stores/chatStore')
+        const { t } = require('../i18n') as typeof import('../i18n')
+        useChatStore.getState().addSystemMessage(t('parallel.stoppedRemoteWindow'), 'info')
+      } catch { /* chat optional */ }
+      void import('./agent/stopAgentRun').then(({ stopAgentRun }) => {
+        stopAgentRun()
+      })
+    })
+    .catch(() => { /* best-effort */ })
+  // Re-lê os metadados da sessão a cada beat: se o user renomear a
+  // tarefa ou editar a descrição A MEIO do run, as outras janelas veem
+  // a edição no próximo heartbeat (≤3s focused / ≤30s background).
+  const meta = extractTaskMeta()
+  if (meta.label) runningLabel = meta.label
+  runningDescription = meta.description
+  writeStatus(runningPath, 'running', runningLabel, {
+    startedAt: runningStartedAt,
+    description: runningDescription,
+  })
+}
+
+/** Module-level re-arm so focus/visibility always use current runningPath. */
+function rearmHeartbeat(): void {
+  stopHeartbeat()
+  // Never re-arm after the run ends (runningPath cleared) — focus/blur
+  // listeners must not resurrect a dead heartbeat with a stale path.
+  if (!runningPath) return
+  heartbeatTimer = setInterval(tickHeartbeat, heartbeatIntervalMs())
+}
+
+function startHeartbeat(): void {
+  rearmHeartbeat()
+  // Re-arm on focus/visibility so we switch 3s ↔ 30s without a process restart.
+  if (typeof document !== 'undefined' && !visibilityBound) {
+    visibilityBound = true
+    document.addEventListener('visibilitychange', rearmHeartbeat)
+    window.addEventListener('focus', rearmHeartbeat)
+    window.addEventListener('blur', rearmHeartbeat)
+  }
+}
+
+let visibilityBound = false
 
 function stopHeartbeat(): void {
   if (heartbeatTimer) {
@@ -186,6 +276,73 @@ export function acknowledgeTerminalStatus(): void {
 function truncateLabel(text: string): string {
   const clean = text.replace(/\s+/g, ' ').trim()
   return clean.length > 80 ? `${clean.slice(0, 77)}…` : clean
+}
+
+function normalizeProjectPath(path: string | null | undefined): string | null {
+  if (!path) return null
+  return path.replace(/\\/g, '/').replace(/\/+$/, '') || null
+}
+
+/**
+ * Project the MAIN agent run is bound to for the cross-window badge.
+ *
+ * Priority (F2 multi-project — never trust focus alone):
+ *  1. ToolExecutor project context (set by agentRunner before setStatus)
+ *  2. streamingSessionId's session.projectPath (where the run writes)
+ *  3. active session projectPath
+ *  4. focused currentProject (last resort)
+ *
+ * Using only currentProject stamped the wrong recent when the developer had
+ * switched projects or a previous bound context was still on the executor.
+ */
+function resolveMainBadgePath(): string | null {
+  try {
+    // Lazy require: toolExecutor is heavy; this module loads at app boot.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const ToolExecutor = require('./agent/toolExecutor').default as {
+      getInstance: () => { getProjectContext: () => { projectPath: string } | null }
+    }
+    const ctx = ToolExecutor.getInstance().getProjectContext()
+    const bound = normalizeProjectPath(ctx?.projectPath)
+    if (bound) return bound
+  } catch { /* tests / early boot */ }
+
+  try {
+    const chat = useChatStore.getState() as {
+      streamingSessionId?: string | null
+      sessions: Map<string, { projectPath?: string }>
+      getActiveSession: () => { projectPath?: string } | null | undefined
+    }
+    if (chat.streamingSessionId) {
+      const s = chat.sessions.get(chat.streamingSessionId)
+      const p = normalizeProjectPath(s?.projectPath)
+      if (p) return p
+    }
+    const active = chat.getActiveSession?.()
+    const ap = normalizeProjectPath(active?.projectPath)
+    if (ap) return ap
+  } catch { /* tests */ }
+
+  return normalizeProjectPath(useProjectStore.getState().currentProject?.path)
+}
+
+/** True when a parallel/project-run owns a live badge for this path. */
+function hasLiveParallelOn(path: string): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { useParallelTaskStore } = require('@/stores/parallelTaskStore') as {
+      useParallelTaskStore: { getState: () => { runs: Map<string, { status: string; projectPath?: string }> } }
+    }
+    for (const r of useParallelTaskStore.getState().runs.values()) {
+      if (
+        normalizeProjectPath(r.projectPath) === path
+        && (r.status === 'running' || r.status === 'queued')
+      ) {
+        return true
+      }
+    }
+  } catch { /* store unavailable */ }
+  return false
 }
 
 /**
@@ -235,8 +392,15 @@ function onAgentStatusChange(status: AgentStatus, prevStatus: AgentStatus): void
   const isBusy = BUSY_STATUSES.has(status)
 
   if (!wasBusy && isBusy) {
-    const path = useProjectStore.getState().currentProject?.path
+    // Path of the RUN, not merely the focused project (see resolveMainBadgePath).
+    const path = resolveMainBadgePath()
     if (!path) return
+    // If a previous main badge was left dangling (crash / missed terminal
+    // transition), settle it before claiming a different project — otherwise
+    // two recents keep "running" until staleness (90s).
+    if (runningPath && runningPath !== path) {
+      writeStatus(runningPath, 'idle', null, { onlyIfOwn: true })
+    }
     runningPath = path
     const meta = extractTaskMeta()
     runningLabel = meta.label
@@ -253,6 +417,24 @@ function onAgentStatusChange(status: AgentStatus, prevStatus: AgentStatus): void
     return
   }
 
+  // Already busy: if the bound project path changed mid-run (context set late,
+  // or wrong path captured at first busy), re-stamp the correct project and
+  // clear the wrong one so two recents don't both pulse "agora".
+  if (wasBusy && isBusy && runningPath) {
+    const livePath = resolveMainBadgePath()
+    if (livePath && livePath !== runningPath) {
+      writeStatus(runningPath, 'idle', null, { onlyIfOwn: true })
+      runningPath = livePath
+      const meta = extractTaskMeta()
+      if (meta.label) runningLabel = meta.label
+      runningDescription = meta.description
+      writeStatus(runningPath, 'running', runningLabel, {
+        startedAt: runningStartedAt ?? Date.now(),
+        description: runningDescription,
+      })
+    }
+  }
+
   if (wasBusy && !isBusy) {
     stopHeartbeat()
     const path = runningPath
@@ -260,6 +442,15 @@ function onAgentStatusChange(status: AgentStatus, prevStatus: AgentStatus): void
     runningStartedAt = null
     if (!path) {
       budgetStopLabel = null
+      return
+    }
+    // A live project-run owns this path's badge — main must not stamp over it
+    // (one-agent-per-project: if parallel is live here, main shouldn't be;
+    // defensive against races on focus switch).
+    if (hasLiveParallelOn(path)) {
+      budgetStopLabel = null
+      runningLabel = null
+      runningDescription = null
       return
     }
     if (budgetStopLabel) {
@@ -317,21 +508,14 @@ function onProjectChange(
   prevPath: string | null,
 ): void {
   if (prevPath === newPath) return
-  if (prevPath) {
-    // Leaving a project (switch/close). The run was already cancelled by
-    // projectStore's guard — make sure no badge from THIS window survives.
-    // onlyIfOwn: another window may have the SAME project open and running;
-    // its truthful badge must not be stamped over by our exit.
-    stopHeartbeat()
-    cancelAttendedClear()
-    if (runningPath === prevPath) {
-      runningPath = null
-      runningStartedAt = null
-      runningDescription = null
-    }
-    if (terminalWrite?.path === prevPath) terminalWrite = null
-    writeStatus(prevPath, 'idle', null, { onlyIfOwn: true })
-  }
+  // In-window multi-project (F2): switching focus does NOT cancel the previous
+  // project's run. The badge follows the RUN (runningPath) and is driven
+  // ENTIRELY by onAgentStatusChange, never by focus. So leaving a project must
+  // NOT stamp it 'idle' (that blanked a live 'running', and nulling runningPath
+  // dropped the eventual done/error terminal write — the "badge fantasma" bug),
+  // nor stop the heartbeat (which beats for whichever project owns the live run,
+  // not the focused one). We only reconcile the project being OPENED; a real
+  // cancel/close routes through onAgentStatusChange ('cancelled' → idle).
   if (newPath) {
     void clearStaleStatusOnOpen(newPath)
   }

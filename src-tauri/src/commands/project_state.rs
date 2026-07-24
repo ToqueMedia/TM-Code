@@ -387,11 +387,7 @@ pub async fn set_project_agent_status(
     // temp + rename: readers in OTHER processes poll this file — they must
     // never observe a torn write (a parse failure reads as "no status").
     let seq = STATE_FILE_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = root.join(format!(
-        ".agent-status.tmp-{}-{}",
-        std::process::id(),
-        seq
-    ));
+    let tmp = root.join(format!(".agent-status.tmp-{}-{}", std::process::id(), seq));
     std::fs::write(&tmp, &json).map_err(|e| format!("Failed to write agent status: {}", e))?;
     std::fs::rename(&tmp, root.join(AGENT_STATUS_FILE))
         .map_err(|e| format!("Failed to publish agent status: {}", e))?;

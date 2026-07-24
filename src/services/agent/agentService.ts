@@ -25,7 +25,15 @@ import {
 } from "../../stores/chatStore";
 import { useBillingStore } from "../../stores/billingStore";
 import { useAgentStore } from "../../stores/agentStore";
+import { useActiveModelStore } from "../../stores/activeModelStore";
+import {
+  resolveEffectiveEffort,
+  resolveEffortModelId,
+  resolveEffortTurnStamp,
+  shouldSendEffort,
+} from "./reasoningEffortModels";
 import { useTmSpeedStore } from "../../stores/tmSpeedStore";
+import { useReasoningEffortStore } from "../../stores/reasoningEffortStore";
 import { invoke } from "@/utils/invokeMetrics";
 import { logger } from "../../utils/logger";
 import { FALLBACK_CONTEXT_WINDOW } from "../../utils/contextWindow";
@@ -201,8 +209,30 @@ class AgentService {
 
   isThinkingRequestedForNextTurn(): boolean {
     try {
+      // Managed path: o seletor de effort manda no UI de reasoning.
+      // none/minimal → esconde blocos; high/max → mostra se o modelo emitir.
+      // (Antes só olhávamos MODEL_PROFILES[modelName] e, sem X-TM-Model ainda,
+      //  caíamos num fallback que podia esconder reasoning legítimo.)
+      if (!this.byokActive) {
+        const modelId = resolveEffortModelId(
+          useActiveModelStore.getState().activeModelId,
+          useAgentStore.getState().modelName,
+        );
+        if (shouldSendEffort(modelId)) {
+          const selected = useReasoningEffortStore.getState().selected;
+          const effort = resolveEffectiveEffort(modelId, selected);
+          return effort !== "none" && effort !== "minimal";
+        }
+        // Id ainda null → seletor usa fallback GLM; assume thinking ON até
+        // Firestore/header revelarem o modelo.
+        if (modelId == null) return true;
+      }
+
       const plan = useBillingStore.getState().plan;
-      const modelName = useAgentStore.getState().modelName;
+      const modelName = resolveEffortModelId(
+        useActiveModelStore.getState().activeModelId,
+        useAgentStore.getState().modelName,
+      );
       const profile =
         modelName && MODEL_PROFILES[modelName]
           ? MODEL_PROFILES[modelName]
@@ -210,6 +240,24 @@ class AgentService {
       return profile.supportsThinking === true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Carimbo de effort para o próximo turno (valor efetivo + se o header sai).
+   * Só no caminho managed; BYOK devolve null (usa byokSnapshot.reasoningEffort).
+   */
+  getEffortStampForNextTurn(): { effort: string; sent: boolean } | null {
+    if (this.byokActive) return null;
+    try {
+      const modelId = resolveEffortModelId(
+        useActiveModelStore.getState().activeModelId,
+        useAgentStore.getState().modelName,
+      );
+      const selected = useReasoningEffortStore.getState().selected;
+      return resolveEffortTurnStamp(modelId, selected);
+    } catch {
+      return null;
     }
   }
 
@@ -268,7 +316,13 @@ class AgentService {
     import("../../stores/backgroundCommandStore")
       .then(async (m) => {
         const store = m.useBackgroundCommandStore.getState();
-        const running = store.getAll().filter((c) => c.status === "running");
+        // F2 MDI: kill ONLY this (main) run's own background processes. A
+        // parallel task's background process (owner = its runId) belongs to a
+        // different project's live run — the main run's cancel/restart/budget
+        // stop must not tear it down. The task kills its own on its abort.
+        const running = store
+          .getAll()
+          .filter((c) => c.status === "running" && c.owner === "main");
         for (const cmd of running) {
           try {
             await invoke("kill_process", { pid: cmd.pid });
@@ -633,7 +687,7 @@ class AgentService {
     // request_context era injetado pelo ToolsetSelector — que, sem
     // classificador, nunca mais é criado. Sem isto o índice on-demand
     // (513 tokens no prompt) prometia uma tool INEXISTENTE e as secções
-    // omitidas (tms.*, design system, …) ficavam inalcançáveis. A lista de
+    // omitidas (design system, project.docs_full, …) ficavam inalcançáveis. A lista de
     // omitidos é fixa no build do prompt → o def é estável o run inteiro
     // (prefixo de cache intacto). A intercepção já existia (REQUEST_CONTEXT_NAME
     // no bridge) e funciona com selector null.
@@ -1151,10 +1205,18 @@ class AgentService {
           thinkingMode,
           contextWindow,
         );
+        // Alimenta o activeModelStore com o modelo SERVIDO (fallback ao Firestore
+        // real-time). O EffortSelector usa-o p/ a lista de efforts; a troca de
+        // modelo repõe o effort no default (activeModelStore).
+        if (modelName) useActiveModelStore.getState().setActiveModelId(modelName);
         if (contextWindow && contextWindow > 0) {
           this.sessionState.setContextWindowSize(contextWindow);
         }
       }
+
+      // (Removido) parse do header X-Model-Reasoning-Efforts: as opções de effort
+      // são agora definidas no FRONTEND (reasoningEffortModels.ts), não anunciadas
+      // pelo backend. Ver decisão 2026-07-23.
 
       if (byokActiveRaw !== null) {
         useAgentStore.getState().setByokActive(byokActiveRaw.toLowerCase() === "true");
@@ -1177,6 +1239,22 @@ class AgentService {
     if (this.requestType) headers["X-Request-Type"] = this.requestType;
     if (!this.lightweightOptions && useTmSpeedStore.getState().enabled) {
       headers["X-TM-Speed"] = "true";
+    }
+    // Reasoning-effort EFETIVO — mesma resolução de modelId que o seletor e o
+    // carimbo da mensagem (Firestore → fallback X-TM-Model em agentStore).
+    // Antes só lia activeModelStore: se o Firestore atrasasse e o header já
+    // tivesse revelado grok-4.5, o UI mostrava Low e o header NÃO saía →
+    // Grok caía no default high (lento). `shouldSendEffort` evita 400 em
+    // modelos não-mapeados.
+    if (!this.lightweightOptions) {
+      const modelId = resolveEffortModelId(
+        useActiveModelStore.getState().activeModelId,
+        useAgentStore.getState().modelName,
+      );
+      if (shouldSendEffort(modelId)) {
+        const selected = useReasoningEffortStore.getState().selected;
+        headers["X-TM-Reasoning-Effort"] = resolveEffectiveEffort(modelId, selected);
+      }
     }
     return Object.keys(headers).length > 0 ? headers : undefined;
   }
@@ -1295,13 +1373,9 @@ class AgentService {
             isError: false,
           };
         }
-        if (
-          auxiliaryId === 'project.docs_full' ||
-          auxiliaryId === 'project_docs_full' ||
-          auxiliaryId.startsWith('tms.') ||
-          auxiliaryId.startsWith('tms_') ||
-          auxiliaryId.startsWith('project.tms_')
-        ) {
+        // project.docs_full may still include TMS (plus README/PLAN/TODO); mark
+        // for telemetry. Per-section tms.* request_context was removed.
+        if (auxiliaryId === 'project.docs_full' || auxiliaryId === 'project_docs_full') {
           markTmsFullContextSent(auxiliaryId);
         }
         return {

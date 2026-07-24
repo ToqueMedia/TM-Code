@@ -225,6 +225,7 @@ class FirebaseAuthService {
   private unsubscribeUserDoc: (() => void) | null = null
   private unsubscribeSubscription: (() => void) | null = null
   private unsubscribePromotions: (() => void) | null = null
+  private unsubscribeActiveModel: (() => void) | null = null
   private lastBillingFetchMs = 0
   private authGeneration = 0
   /** uid the current authGeneration belongs to. The generation must only
@@ -269,6 +270,7 @@ class FirebaseAuthService {
         this.unsubscribeUserDocListener()
         this.unsubscribeSubscriptionDocListener()
         this.unsubscribePromotionsListener()
+        this.unsubscribeActiveModelListener()
         return
       }
 
@@ -382,6 +384,11 @@ class FirebaseAuthService {
       // Real-time promotions listener — updates PromoBanner instantly when
       // admin creates/edits/deletes promotions in the web admin.
       this.subscribeToPromotions()
+
+      // Real-time modelo-principal listener — quando o admin troca o modelo
+      // ativo (escrito em system/aiActiveModel), o seletor de effort atualiza a
+      // lista de níveis e repõe o default, sem esperar por uma resposta.
+      this.subscribeToActiveModel()
 
       // Register device fingerprint for anti-abuse tracking. signIn() already
       // ran this for the interactive login path (and set lastRegisteredUid);
@@ -557,6 +564,40 @@ class FirebaseAuthService {
     if (this.unsubscribePromotions) {
       this.unsubscribePromotions()
       this.unsubscribePromotions = null
+    }
+  }
+
+  /**
+   * Attach an onSnapshot listener to `system/aiActiveModel` — o modelo PRINCIPAL
+   * definido pelo admin. Uma subscrição só (não polling), fora de qualquer
+   * componente. Real-time: quando o admin troca o modelo, o activeModelStore
+   * atualiza e o EffortSelector muda a lista de níveis + repõe o default. O
+   * mesmo doc é lido pela Web. Doc ausente → activeModelStore fica no fallback
+   * do header/GLM. Requer regra Firestore de leitura para utilizadores autenticados.
+   */
+  private subscribeToActiveModel(): void {
+    this.unsubscribeActiveModelListener()
+
+    const expectedGen = this.authGeneration
+    this.unsubscribeActiveModel = onSnapshot(
+      doc(getFirebaseDb(), 'system', 'aiActiveModel'),
+      (snap) => {
+        if (expectedGen !== this.authGeneration) return
+        const modelId = snap.exists() ? (snap.data()?.modelId as string | undefined) ?? null : null
+        void import('../../stores/activeModelStore').then(({ useActiveModelStore }) => {
+          useActiveModelStore.getState().setActiveModelId(modelId)
+        })
+      },
+      (err) => {
+        console.warn('[activeModel] listener error:', err)
+      },
+    )
+  }
+
+  private unsubscribeActiveModelListener(): void {
+    if (this.unsubscribeActiveModel) {
+      this.unsubscribeActiveModel()
+      this.unsubscribeActiveModel = null
     }
   }
 

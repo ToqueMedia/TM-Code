@@ -10,7 +10,12 @@ import ToolCallDisplayComponent from './ToolCallDisplay'
 import ReadOutputBatch from './ReadOutputBatch'
 import ExplorationBatch from './ExplorationBatch'
 import { groupExplorationRuns, computeContentBlockBatches } from '../../utils/groupToolCalls'
-import { isAgentShellTool, ShellSessionBlock } from '../shell/ShellCommandBlock'
+import {
+  isAgentShellTool,
+  resolveAgentShellSessionId,
+  groupAgentShellBySession,
+  ShellSessionBlock,
+} from '../shell/ShellCommandBlock'
 import AgentLogo from '../ui/AgentLogo'
 import CompactSummary from './CompactSummary'
 import ReasoningBlock from './ReasoningBlock'
@@ -31,6 +36,7 @@ import { useToastStore } from '../../stores/toastStore'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { canonicalToolName, normalizeToolInputForCanonical } from '@/services/agent/toolNames'
+import { effortDisplayLabel } from '@/services/agent/reasoningEffortModels'
 
 /**
  * Toggle a reasoning block while keeping the clicked header in the SAME
@@ -254,28 +260,43 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const fallbackToolCallGroups = useMemo(() => {
     if (!message.toolCalls || message.toolCalls.length === 0) return []
     const groups: Array<
-      | { kind: 'agent_shell_session'; calls: NonNullable<ChatMessage['toolCalls']> }
+      | { kind: 'agent_shell_session'; calls: NonNullable<ChatMessage['toolCalls']>; sessionId: string }
       | ReturnType<typeof groupExplorationRuns>[number]
     > = []
 
-    for (let i = 0; i < message.toolCalls.length; i++) {
+    // Shell first by session, then exploration batches for the rest in order.
+    const shellGrouped = groupAgentShellBySession(message.toolCalls)
+    const shellIds = new Set(
+      shellGrouped
+        .filter((g): g is Extract<typeof g, { kind: 'agent_shell_session' }> => g.kind === 'agent_shell_session')
+        .flatMap(g => g.calls.map(c => c.id)),
+    )
+
+    let i = 0
+    while (i < message.toolCalls.length) {
       const call = message.toolCalls[i]
       if (isAgentShellTool(call.toolName)) {
-        const calls = [call]
-        while (i + 1 < message.toolCalls.length && isAgentShellTool(message.toolCalls[i + 1].toolName)) {
-          calls.push(message.toolCalls[i + 1])
-          i++
+        const sid = resolveAgentShellSessionId(call) || `orphan:${call.id}`
+        const sessionGroup = shellGrouped.find(
+          g => g.kind === 'agent_shell_session' && g.sessionId === sid,
+        )
+        if (sessionGroup && sessionGroup.kind === 'agent_shell_session') {
+          // Only emit once — at the first call of this session in the list.
+          if (sessionGroup.calls[0]?.id === call.id) {
+            groups.push(sessionGroup)
+          }
         }
-        groups.push({ kind: 'agent_shell_session', calls })
+        i++
         continue
       }
 
       const ordinaryCalls = [call]
-      while (i + 1 < message.toolCalls.length && !isAgentShellTool(message.toolCalls[i + 1].toolName)) {
-        ordinaryCalls.push(message.toolCalls[i + 1])
+      i++
+      while (i < message.toolCalls.length && !isAgentShellTool(message.toolCalls[i].toolName)) {
+        ordinaryCalls.push(message.toolCalls[i])
         i++
       }
-      groups.push(...groupExplorationRuns(ordinaryCalls))
+      groups.push(...groupExplorationRuns(ordinaryCalls.filter(c => !shellIds.has(c.id))))
     }
 
     return groups
@@ -527,6 +548,30 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
         >
           {isUser ? 'You' : 'TM Code'}
         </Text>
+        {/* Effort carimbado neste turno — prova visual de que o seletor
+            chegou à mensagem (e se o header saiu: · sent / · not sent). */}
+        {!isUser && message.reasoningEffort && (
+          <Text
+            fontSize="10px"
+            fontWeight="600"
+            color={
+              message.reasoningEffortSent === false
+                ? tokens.colors.text.disabled
+                : tokens.colors.text.secondary
+            }
+            letterSpacing="0.02em"
+            title={
+              message.reasoningEffortSent === false
+                ? t('prompt.effort.badgeNotSentHint')
+                : t('prompt.effort.badgeSentHint')
+            }
+          >
+            {t('prompt.effort.label')} · {effortDisplayLabel(message.reasoningEffort)}
+            {message.reasoningEffortSent === false
+              ? ` · ${t('prompt.effort.badgeNotSent')}`
+              : ''}
+          </Text>
+        )}
         {isStreaming && !isUser && (
           <Box
             w="5px"
@@ -690,23 +735,22 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                     }
                   }
                   if (isAgentShellTool(tc.toolName)) {
-                    const previous = message.contentBlocks?.[idx - 1]
-                    const previousCall = previous?.type === 'tool_call'
-                      ? message.toolCalls?.find(t => t.id === previous.toolCallId)
-                      : null
-                    if (previousCall && isAgentShellTool(previousCall.toolName)) return null
-
-                    const calls = [tc]
-                    let nextIdx = idx + 1
-                    while (message.contentBlocks?.[nextIdx]?.type === 'tool_call') {
-                      const nextBlock = message.contentBlocks[nextIdx]
-                      if (nextBlock.type !== 'tool_call') break
-                      const nextCall = message.toolCalls?.find(t => t.id === nextBlock.toolCallId)
-                      if (!nextCall || !isAgentShellTool(nextCall.toolName)) break
-                      calls.push(nextCall)
-                      nextIdx++
-                    }
-                    return <ShellSessionBlock key={tc.id} toolCalls={calls} mode="chat" />
+                    // One card per PTY session_id — reasoning/text between
+                    // write/read must NOT split the terminal (deploy spam).
+                    const sid = resolveAgentShellSessionId(tc) || `orphan:${tc.id}`
+                    const allShell = (message.toolCalls || []).filter(
+                      c => isAgentShellTool(c.toolName)
+                        && (resolveAgentShellSessionId(c) || `orphan:${c.id}`) === sid,
+                    )
+                    const firstId = allShell[0]?.id
+                    if (firstId && tc.id !== firstId) return null
+                    return (
+                      <ShellSessionBlock
+                        key={sid}
+                        toolCalls={allShell.length > 0 ? allShell : [tc]}
+                        mode="chat"
+                      />
+                    )
                   }
                   return <ToolCallDisplayComponent key={tc.id} toolCall={tc} messageId={message.id} />
                 }

@@ -17,6 +17,7 @@
  */
 
 import ContextBuilder from './contextBuilder'
+import { appendVolatileReminder } from './volatileAppend'
 import ToolExecutor from './toolExecutor'
 import AgentService from './agentService'
 import MCPService from '../mcp/mcpService'
@@ -70,17 +71,35 @@ export const TMS_BOOTSTRAP_INTENT: IntentClassification = {
  * Refresca as tools MCP no executor (idempotente — cobre servers ligados a
  * meio da sessão) e devolve os summaries para a secção de routing do prompt.
  */
-export function refreshMcpForDispatch(): MCPToolSummaryLite[] {
+/**
+ * Refresh MCP tools for an agent dispatch. F4: when `projectPath` is set,
+ * tools come from that project scope (+ global). A background project-run
+ * must not see only the focused project's MCP set.
+ */
+export function refreshMcpForDispatch(
+  projectPath?: string,
+  executor?: ToolExecutor,
+): MCPToolSummaryLite[] {
   const mcpService = MCPService.getInstance()
-  const mcpTools = mcpService.getAllTools()
+  const mcpTools = mcpService.getAllTools(projectPath)
+  // Register on the RUN's executor. The main run passes none → the singleton;
+  // a background project-run passes its OWN isolated child so it (a) actually
+  // receives MCP tools (createIsolatedChild does NOT copy the parent tool map)
+  // and (b) does NOT delete/replace the singleton's mcp__* tools out from under
+  // a concurrent main run on another project.
+  const target = executor ?? ToolExecutor.getInstance()
   if (mcpTools.length > 0) {
-    ToolExecutor.getInstance().registerMCPTools(
+    target.registerMCPTools(
       mcpTools,
       browserSession.wrapCallTool((serverName, toolName, args) =>
-        mcpService.callTool(serverName, toolName, args),
+        mcpService.callTool(serverName, toolName, args, projectPath),
       ),
     )
-    AgentService.getInstance().refreshTools()
+    // Only the singleton feeds the live main AgentService toolset; a task's
+    // QueryEngine reads its child executor directly, so skip the refresh there.
+    if (target === ToolExecutor.getInstance()) {
+      AgentService.getInstance().refreshTools()
+    }
   }
   return mcpTools.map((t) => ({ name: t.name, description: t.description, serverName: t.serverName }))
 }
@@ -154,10 +173,8 @@ export function appendVolatileToUserContent<T extends { type: string }>(
     return userContent
   }
   logger.info('agent', `[FASE B] volátil → mensagem do user (${volatileCtx.length} chars, ${surface})`)
-  const reminder = `<system-reminder>\n${volatileCtx}\n</system-reminder>`
-  return typeof userContent === 'string'
-    ? `${userContent}\n\n${reminder}`
-    : [...userContent, { type: 'text' as const, text: reminder }]
+  // Pure append keeps multimodal arrays intact (text + image_url + reminder).
+  return appendVolatileReminder(userContent, volatileCtx)
 }
 
 // ═════════════════════ FUSÃO F2 — callbacks do loop ═════════════════════
@@ -335,24 +352,54 @@ export function buildMainLoopCallbacks(
       // o AgentTasksPanel. `pending` fica intocado (um /plan seed é todo
       // pending e o onDone dispara logo após o seed). Aborts e background
       // auto-wakes ficam de fora.
+      //
+      // CRITICAL: if a main-owned background command is still running (e.g.
+      // yarn deploy via execute_command_background), do NOT auto-close
+      // in_progress tasks. Closing them made openTasks=0 at cmd-exit, so
+      // autoWake refused to resume (session momenu-fact 2026-07-24: deploy
+      // failed with TS error and the agent never woke). Keep in_progress so
+      // the wake gate sees open work and resumes to check_background_commands.
       if (!isBackgroundRun && !agentService.isAborted()) {
-        // TRACKER POR-SESSÃO: fecha o tracker DESTA sessão do run (main = a
-        // sessão em streaming/ativa), não um tracker global.
-        const chat = useChatStore.getState()
-        const runSid = chat.streamingSessionId ?? chat.activeSessionId ?? ''
-        const tasks = runSid ? useAgentStore.getState().getTasksForSession(runSid) : []
-        if (runSid && tasks.some(tk => tk.status === 'in_progress')) {
-          const closed = tasks.map(tk =>
-            tk.status === 'in_progress'
-              ? { ...tk, status: 'completed' as const, evidence: tk.evidence || 'Run completed' }
-              : tk,
+        let mainBgRunning = 0
+        try {
+          // Lazy import: backgroundCommandStore is store-only, safe from cycles.
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { useBackgroundCommandStore } = require('../../stores/backgroundCommandStore') as typeof import('../../stores/backgroundCommandStore')
+          for (const c of useBackgroundCommandStore.getState().getAll()) {
+            // 'main' or project-bound main stamp (taskId `project:{id}`).
+            if (c.status === 'running' && (c.owner === 'main' || c.owner.startsWith('project:'))) {
+              mainBgRunning++
+            }
+          }
+        } catch { /* store unavailable — fall through to auto-close */ }
+
+        if (mainBgRunning > 0) {
+          logger.info(
+            'agent',
+            `→ Skipping tracker auto-close: ${mainBgRunning} background command(s) still running (await auto-wake)`,
           )
-          useAgentStore.getState().setTasksForSession(runSid, closed)
-          const projectPath = useProjectStore.getState().currentProject?.path
-          if (projectPath) {
-            void import('./taskPersistence')
-              .then(({ saveTasksForSession }) => saveTasksForSession(projectPath, runSid, closed))
-              .catch(() => { /* persistence is best-effort */ })
+        } else {
+          // TRACKER POR-SESSÃO: fecha o tracker DESTA sessão do run (main = a
+          // sessão em streaming/ativa), não um tracker global.
+          const chat = useChatStore.getState()
+          const runSid = chat.streamingSessionId ?? chat.activeSessionId ?? ''
+          const tasks = runSid ? useAgentStore.getState().getTasksForSession(runSid) : []
+          if (runSid && tasks.some(tk => tk.status === 'in_progress')) {
+            const closed = tasks.map(tk =>
+              tk.status === 'in_progress'
+                ? { ...tk, status: 'completed' as const, evidence: tk.evidence || 'Run completed' }
+                : tk,
+            )
+            useAgentStore.getState().setTasksForSession(runSid, closed)
+            // F2: persist under the session's own project, not the focused one
+            // (a parked main run may finish while the user is viewing project B).
+            const sessionPath = chat.sessions.get(runSid)?.projectPath
+            const projectPath = sessionPath || useProjectStore.getState().currentProject?.path
+            if (projectPath) {
+              void import('./taskPersistence')
+                .then(({ saveTasksForSession }) => saveTasksForSession(projectPath, runSid, closed))
+                .catch(() => { /* persistence is best-effort */ })
+            }
           }
         }
       }

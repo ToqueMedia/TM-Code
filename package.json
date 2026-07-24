@@ -1,7 +1,7 @@
 {
   "name": "toquemedia-studio",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "packageManager": "yarn@1.22.22",
   "engines": {
@@ -24,7 +24,9 @@
     "test:ai-worker": "yarn --cwd workers/ai-pass-through test",
     "test:collab-worker": "yarn --cwd workers/collab-signaling test",
     "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "bench:prompt-format": "node scripts/prompt-format-bench.mjs --write",
+    "proof:prompt-format": "tsx scripts/prompt-format-proof.mjs"
   },
   "dependencies": {
     "@chakra-ui/react": "^3.34.0",
@@ -40,6 +42,7 @@
     "@tauri-apps/plugin-opener": "^2.5.3",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.0",
+    "@toon-format/toon": "4.0.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
     "@xterm/addon-webgl": "^0.19.0",
@@ -79,6 +82,7 @@
     "commander": "^14.0.3",
     "concurrently": "^10.0.3",
     "fake-indexeddb": "^6.2.5",
+    "gpt-tokenizer": "2",
     "identity-obj-proxy": "^3.0.0",
     "jest": "^30.3.0",
     "jest-environment-jsdom": "^30.3.0",

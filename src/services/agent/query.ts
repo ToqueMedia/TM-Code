@@ -55,6 +55,9 @@ import {
   inferContinuationReason,
   isLegitimateContinuationReason,
   EFFICIENCY_TARGET_TURNS,
+  createEfficiencyNudgeState,
+  trackEfficiencyNudge,
+  buildEfficiencyNudgeText,
 } from "./turnEfficiency";
 import { DESTRUCTIVE_TOOLS } from "./toolsetSelector";
 import { EDIT_FILE } from "./toolNames";
@@ -1027,6 +1030,15 @@ export async function* query(
   // Surfaced in the payload-inspector log of the NEXT turn so the forensic
   // trail travels with the request diagnostics. Undefined until turn ≥ target.
   let lastContinuationReason: string | undefined;
+
+  // Nudge de eficiência — quando rondas consecutivas continuam SEM razão
+  // técnica, o modelo recebe um system-reminder inter-turn a pedir para
+  // consolidar (antes o sinal morria em console.debug e o pacing vivia numa
+  // secção numérica do prompt que o modelo ignorava — auditoria 2026-07-22).
+  // O decisor/throttle é puro (turnEfficiency.ts); aqui só guardamos o texto
+  // pendente até ao ponto de injeção dos inter-turn attachments.
+  const efficiencyNudgeState = createEfficiencyNudgeState();
+  let pendingEfficiencyNudge: string | null = null;
 
   // Wall-clock of the previous turn's assistant message — feeds the gap-aware
   // (lastAssistantMessageAt was used by microcompact's gap-aware keepRecent.
@@ -2883,6 +2895,13 @@ export async function* query(
           (legit ? `continuing: ${reason}` : `WARNING — ${reason}`) +
           (legit ? "" : " — consider wrapping up if the task is simple"),
         );
+        if (trackEfficiencyNudge(efficiencyNudgeState, reason, state.turnCount)) {
+          pendingEfficiencyNudge = buildEfficiencyNudgeText(state.turnCount);
+          // eslint-disable-next-line no-console
+          console.debug(
+            `[query] turn efficiency · injecting wrap-up nudge #${efficiencyNudgeState.nudgeCount} at turn ${state.turnCount}`,
+          );
+        }
       } catch {
         /* measurement never blocks the loop */
       }
@@ -2912,6 +2931,17 @@ export async function* query(
       } catch {
         // The sweep is best-effort — never let it break the loop.
       }
+    }
+
+    // Nudge de eficiência (decidido na medição desta ronda) — viaja no mesmo
+    // canal dos attachments, DEPOIS do sweep e ANTES do steering: se o
+    // developer mandou instruções, são elas a última palavra, não o nudge.
+    if (pendingEfficiencyNudge) {
+      interTurnMessages.push({
+        role: "user",
+        content: [{ type: "text", text: pendingEfficiencyNudge }],
+      });
+      pendingEfficiencyNudge = null;
     }
 
     // ── Queued-message steering (claude-vaz parity) ──

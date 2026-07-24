@@ -11,8 +11,15 @@
   "transform": {
     "^.+\\.(ts|tsx)$": ["ts-jest", {
       "tsconfig": "tsconfig.test.json"
+    }],
+    "^.+\\.mjs$": ["ts-jest", {
+      "tsconfig": "tsconfig.test.json",
+      "useESM": true
     }]
   },
+  "transformIgnorePatterns": [
+    "/node_modules/(?!(@toon-format/toon)/)"
+  ],
   "testMatch": [
     "<rootDir>/src/**/__tests__/**/*.test.{ts,tsx}",
     "<rootDir>/src/**/?(*.)+(spec|test).{ts,tsx}"
@@ -21,7 +28,7 @@
     "/node_modules/",
     "<rootDir>/src/components/__tests__/setupTests.ts"
   ],
-  "moduleFileExtensions": ["ts", "tsx", "js", "jsx", "json", "node"],
+  "moduleFileExtensions": ["ts", "tsx", "js", "jsx", "mjs", "json", "node"],
   "collectCoverageFrom": [
     "src/**/*.{ts,tsx}",
     "!src/**/*.d.ts"

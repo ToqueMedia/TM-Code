@@ -51,6 +51,7 @@ import {
   useChatStore,
   createDiffApprovalPromise,
   hasPendingDiffApprovals,
+  resolveDiffApproval,
 } from '../chatStore'
 
 // Helper: reset the store to initial state before each test
@@ -387,6 +388,67 @@ describe('chatStore', () => {
 
       await expect(approval).resolves.toBe(false)
       expect(hasPendingDiffApprovals()).toBe(false)
+    })
+
+    it('preserveLiveRuns keeps streaming session + cursor (F2 park)', () => {
+      const sid = useChatStore.getState().createSession('/work/proj-a')
+      useChatStore.getState().startAssistantMessage()
+      const { streamingMessageId, streamingSessionId } = useChatStore.getState()
+      expect(streamingSessionId).toBe(sid)
+      expect(streamingMessageId).toBeTruthy()
+
+      useChatStore.getState().clearAllSessions({ preserveLiveRuns: true })
+
+      const st = useChatStore.getState()
+      expect(st.sessions.has(sid)).toBe(true)
+      expect(st.streamingSessionId).toBe(sid)
+      expect(st.streamingMessageId).toBe(streamingMessageId)
+      expect(st.isStreaming).toBe(true)
+      // View is cleared so the new project can load its active session
+      expect(st.activeSessionId).toBeNull()
+    })
+
+    it('preserveLiveRuns keeps pinStreamingSession before assistant bubble (prep race)', () => {
+      const sid = useChatStore.getState().createSession('/work/proj-a')
+      useChatStore.getState().pinStreamingSession(sid)
+      expect(useChatStore.getState().streamingSessionId).toBe(sid)
+      expect(useChatStore.getState().isStreaming).toBe(false)
+
+      useChatStore.getState().clearAllSessions({ preserveLiveRuns: true })
+
+      const st = useChatStore.getState()
+      expect(st.sessions.has(sid)).toBe(true)
+      expect(st.streamingSessionId).toBe(sid)
+    })
+
+    it('startAssistantMessage respects boundSessionId after active moved', () => {
+      const sidA = useChatStore.getState().createSession('/work/proj-a')
+      const sidB = useChatStore.getState().createSession('/work/proj-b')
+      // Simulate switch: active is B, but run belongs to A
+      useChatStore.setState({ activeSessionId: sidB })
+      useChatStore.getState().startAssistantMessage(undefined, null, sidA)
+
+      const st = useChatStore.getState()
+      expect(st.streamingSessionId).toBe(sidA)
+      expect(st.sessions.get(sidA)?.messages.some(m => m.role === 'assistant')).toBe(true)
+      expect(st.sessions.get(sidB)?.messages.some(m => m.role === 'assistant')).toBe(false)
+    })
+
+    it('preserveLiveRuns does NOT reject pending diffs', async () => {
+      const sid = useChatStore.getState().createSession('/work/proj-a')
+      useChatStore.getState().startAssistantMessage()
+      const approval = createDiffApprovalPromise('tool-call-parked')
+      expect(hasPendingDiffApprovals()).toBe(true)
+
+      useChatStore.getState().clearAllSessions({ preserveLiveRuns: true })
+
+      // Diff must still be pending — the parked run is waiting on it
+      expect(hasPendingDiffApprovals()).toBe(true)
+      expect(useChatStore.getState().sessions.has(sid)).toBe(true)
+
+      // Cleanup so other tests don't hang
+      resolveDiffApproval('tool-call-parked', false)
+      await expect(approval).resolves.toBe(false)
     })
   })
 })

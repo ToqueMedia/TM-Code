@@ -544,6 +544,43 @@ test('config extraBody is merged without overriding client fields', async () => 
   assert.equal(fetcher.calls[0].body.temperature, 0.2)
 })
 
+test('X-TM-Reasoning-Effort is applied as reasoning_effort and overrides extraBody', async () => {
+  const config = {
+    ...activeConfig,
+    provider: 'dashscope',
+    model: 'glm-5.2',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    extraBody: { reasoning_effort: 'max', enable_thinking: false },
+  }
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const req = request('/v1/chat/completions', { messages: [{ role: 'user', content: '1+1' }] })
+  req.headers.set('X-TM-Reasoning-Effort', 'high')
+  await handleRequest(req, env({ ACTIVE_AI_CONFIG_JSON: JSON.stringify(config) }), { fetcher })
+
+  assert.equal(fetcher.calls[0].body.reasoning_effort, 'high')
+  // DashScope: enable_thinking must follow effort (priority over reasoning_effort).
+  assert.equal(fetcher.calls[0].body.enable_thinking, true)
+  // Header never forwarded upstream (x-tm-* strip).
+  assert.equal(fetcher.calls[0].headers.get('x-tm-reasoning-effort'), null)
+})
+
+test('X-TM-Reasoning-Effort none disables DashScope enable_thinking', async () => {
+  const config = {
+    ...activeConfig,
+    provider: 'dashscope',
+    model: 'glm-5.2',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    extraBody: { enable_thinking: true },
+  }
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const req = request('/v1/chat/completions', { messages: [] })
+  req.headers.set('X-TM-Reasoning-Effort', 'none')
+  await handleRequest(req, env({ ACTIVE_AI_CONFIG_JSON: JSON.stringify(config) }), { fetcher })
+
+  assert.equal(fetcher.calls[0].body.reasoning_effort, 'none')
+  assert.equal(fetcher.calls[0].body.enable_thinking, false)
+})
+
 test('client-provided stream_options is never overwritten', async () => {
   const body = { stream: true, stream_options: { include_usage: false } }
   const fetcher = fakeFetcher(Response.json({ ok: true }))

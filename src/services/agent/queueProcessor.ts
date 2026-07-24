@@ -30,7 +30,6 @@
 import {
   dequeue,
   dequeueAllMatching,
-  getCommandQueueSnapshot,
   hasCommandsInQueue,
   isSlashCommand as isSlashCommandValue,
   peek,
@@ -74,30 +73,19 @@ export function processQueueIfReady({
     return { processed: false }
   }
 
-  // Slash commands, bash-mode commands and QUEUED TASKS are processed
-  // individually. Bash commands need per-command error isolation, exit
-  // codes, and progress UI; slash commands have side effects that don't
-  // compose; tasks (`asTask`) are their own agent run by definition —
-  // coalescing one with other queued messages would merge two unrelated
-  // pieces of work into a single turn.
-  if (isSlashCommand(next) || next.mode === 'bash' || next.asTask === true) {
+  // Slash commands and bash-mode commands are processed individually.
+  // Bash needs per-command error isolation; slash commands have side effects
+  // that don't compose. F3: `asTask` is legacy — treated as a normal prompt.
+  if (isSlashCommand(next) || next.mode === 'bash') {
     const cmd = dequeue()!
     void executeInput([cmd])
     return { processed: true }
   }
 
-  // Drain all non-slash items with the same mode at once — but only those
-  // enqueued BEFORE the first task in queue order. Batching across a task
-  // would silently run "message 3" ahead of "task 2" and break the order
-  // the user sees (and reorders) in the queue strip.
-  const snapshot = getCommandQueueSnapshot()
-  const firstTaskIdx = snapshot.findIndex(c => c.asTask === true)
-  const batchWindow = new Set(
-    firstTaskIdx === -1 ? snapshot : snapshot.slice(0, firstTaskIdx),
-  )
+  // Drain all non-slash items with the same mode at once.
   const targetMode = next.mode
   const commands = dequeueAllMatching(
-    cmd => batchWindow.has(cmd) && !isSlashCommand(cmd) && cmd.mode === targetMode,
+    cmd => !isSlashCommand(cmd) && cmd.mode === targetMode,
   )
   if (commands.length === 0) {
     // Priority reordering can make peek() pick an item the array-order

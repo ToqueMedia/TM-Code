@@ -24,7 +24,11 @@ import {
 } from '../../toolNames'
 import { extractCriticalSectionsWithStats, sanitizeProjectContent } from '../helpers'
 import { renderCounterweights } from '../../modelProfiles'
-import { markTmsStubSent } from '../../tmsContext'
+import { markTmsFullContextSent } from '../../tmsContext'
+import {
+  STATIC_PROJECT_INSTRUCTIONS_MAX_CHARS,
+  truncateNamed,
+} from '../../projectInstructions'
 import type { PromptContext } from '../types'
 import {
   sharedDoingTasksCore,
@@ -33,6 +37,7 @@ import {
   sharedUiBaselineReminder,
 } from './sharedSections'
 import type { Skill } from '../../skillService'
+import { formatGitStatusDomain } from '../../domainFormats'
 
 // ── 1. Completion contract ─────────────────────────────────────
 //
@@ -760,11 +765,10 @@ export function getGitStatusSection(ctx: PromptContext): string | null {
     return `${header}\nworking tree clean`
   }
 
-  const fileLines = git.files
-    .map(f => `  ${f.staged ? 'staged  ' : 'unstaged'} ${f.status.padEnd(9)} ${f.path}`)
-    .join('\n')
-  const more = git.truncatedFiles ? `\n  … and ${git.truncatedFiles} more` : ''
-  return `${header}\nchanged files (${git.files.length}${git.truncatedFiles ? '+' : ''}):\n${fileLines}${more}`
+  // Domain TSV (status\tpath\tstaged|unstaged) — bench winner vs JSON/TOON.
+  const fileLines = formatGitStatusDomain(git.files)
+  const more = git.truncatedFiles ? `\n… and ${git.truncatedFiles} more` : ''
+  return `${header}\nchanged files (${git.files.length}${git.truncatedFiles ? '+' : ''}; columns: status\\tpath\\tstaged|unstaged):\n${fileLines}${more}`
 }
 
 export function getGitStatusIndexSection(ctx: PromptContext): string | null {
@@ -792,28 +796,47 @@ export function getReadmeSection(ctx: PromptContext): string | null {
   return `# README summary\n${sanitizeProjectContent(ctx.readme.slice(0, 400))}`
 }
 
-// ── 12. Project memory: TMS / PLAN / TODO ──────────────────────
+// ── 12. Project memory: TMS full (+ foreign AGENTS/CLAUDE when no TMS) ──
+//
+// Lives in the STATIC system-prompt block (provider prompt-cache prefix).
+// Snapshot at run start: same body for every turn of the run → cache hits
+// after turn 1. Update TMS at FINAL CHECKPOINT (reminder), not as ongoing
+// mid-task bookkeeping — positive timing, no mid-run write ban.
 export function getProjectMemorySection(ctx: PromptContext): string | null {
-  if (!ctx.tmsContent) return null
-  const headings = ctx.tmsContent
-    .split('\n')
-    .filter(line => /^#{1,3}\s+/.test(line.trim()))
-    .map(line => line.trim())
-    .slice(0, 24)
-  const lastGeneratedAt =
-    ctx.tmsContent.match(/##\s+lastGeneratedAt\s*\n+([^\n]+)/i)?.[1]?.trim() ??
-    ctx.tmsContent.match(/lastGeneratedAt\s*:\s*([^\n]+)/i)?.[1]?.trim() ??
-    'unknown'
-  const stub = [
-    '# Project memory (TMS.md stub)',
-    `TMS.md exists at ${ctx.normalizedProjectPath}/TMS.md.`,
-    `lastGeneratedAt: ${lastGeneratedAt}`,
-    'Available sections:',
-    ...(headings.length ? headings.map(line => `- ${line.replace(/^#+\s*/, '')}`) : ['- (section index unavailable)']),
-    `Do not treat this stub as the full project memory. Use request_context with the smallest needed section, such as \`tms.commands\`, \`tms.entrypoints\`, \`tms.project_patterns\`, \`tms.agent_rules\`, \`tms.confirmed\`, or \`project.docs_full\` only when the whole document is needed. Use ${READ_ALIAS} on TMS.md only when request_context is insufficient.`,
+  // TMS.md is canonical: full body when present (foreign only via docs_full dual-case).
+  if (ctx.tmsContent) {
+    const capped = truncateNamed(
+      ctx.tmsContent.trim(),
+      STATIC_PROJECT_INSTRUCTIONS_MAX_CHARS,
+      'TMS.md',
+    )
+    const body = [
+      '# Project memory (TMS.md)',
+      `Path: ${ctx.normalizedProjectPath}/TMS.md`,
+      'Operational project memory for this repository. Follow Agent Rules, Commands, and Confirmed facts below.',
+      'At FINAL CHECKPOINT of a significant task, if durable facts changed (commands, entrypoints, patterns, agent rules, confirmed/inferred/pending), write those updates into TMS.md before you stop.',
+      '',
+      sanitizeProjectContent(capped),
+    ].join('\n')
+    markTmsFullContextSent('static:TMS.md')
+    return body
+  }
+
+  // Compat: no TMS.md — inject full AGENTS.md / CLAUDE.md (claude-vaz style).
+  const foreign = ctx.foreignInstructions
+  if (!foreign) return null
+  const capped = truncateNamed(
+    foreign.content.trim(),
+    STATIC_PROJECT_INSTRUCTIONS_MAX_CHARS,
+    foreign.relPath,
+  )
+  return [
+    `# Project instructions (${foreign.relPath} — no TMS.md)`,
+    `Path: ${ctx.normalizedProjectPath}/${foreign.relPath}`,
+    'Developer instructions for this repository. Follow them. Run /init only if the developer wants structured TMS.md memory.',
+    '',
+    sanitizeProjectContent(capped),
   ].join('\n')
-  markTmsStubSent(stub)
-  return sanitizeProjectContent(stub)
 }
 
 /**
@@ -1041,18 +1064,23 @@ export function getTrackerStateSection(ctx: PromptContext): string | null {
 export { buildMemoryGuidanceSection as getMemoryToolsGuidanceSection } from '../../memoryGuidance'
 
 /**
- * TMS.md maintenance guidance.
+ * TMS.md maintenance guidance (positive timing: FINAL CHECKPOINT).
  *
- * Missing-TMS creation is handled by the explicit project_bootstrap preflight,
- * not by a passive reminder in the normal task prompt. Injecting a "create
- * TMS.md" reminder here makes the model treat TMS.md as the user's request and
- * breaks the two-phase flow.
+ * Missing-TMS creation is handled by project_bootstrap / /init, not a passive
+ * "create TMS.md" nag in the normal task prompt.
  */
 export function getMemoryGuidanceSection(ctx: PromptContext): string | null {
   if (ctx.tmsContent) {
     return [
-      'Maintain TMS.md as compact operational project memory using the /init structure: Overview, Stack, Commands, Structure, EntryPoints, Project Patterns, Agent Rules, Confirmed, Inferred, Pending Confirmation, lastGeneratedAt, sourceFilesUsed.',
-      'Update it only when durable commands, entrypoints, repo patterns, agent rules, confirmed facts, or pending confirmations change. Do not append milestone diaries or recreate legacy Project Analysis/Memory/Custom Instructions sections.',
+      'TMS.md is compact operational project memory (/init structure: Overview, Stack, Commands, Structure, EntryPoints, Project Patterns, Agent Rules, Confirmed, Inferred, Pending Confirmation, lastGeneratedAt, sourceFilesUsed).',
+      'At FINAL CHECKPOINT of a significant task, update TMS.md when durable commands, entrypoints, repo patterns, agent rules, confirmed facts, or pending confirmations changed during the work.',
+      'Keep it short — no milestone diaries, no legacy Project Analysis/Memory/Custom Instructions dumps.',
+    ].join(' ')
+  }
+  if (ctx.foreignInstructions) {
+    return [
+      `This project has developer instructions in ${ctx.foreignInstructions.relPath} (not structured TMS.md).`,
+      'Follow them. Run /init only if the developer wants structured TM Code project memory.',
     ].join(' ')
   }
   return null
@@ -1159,7 +1187,7 @@ export function getReminderSection(ctx: PromptContext): string {
 
 1. **COMPLETE** every file. Output goes to disk as-is — omitted code is deleted code.
 2. **AFTER** file changes with a dev server running: \`${READ_DEV_SERVER_LOGS}\` and fix errors before continuing. Track the \`next_since\` cursor — without it you re-read stale entries.
-3. **FINAL CHECKPOINT**: run one highest-signal verification path for the change (dev-server logs, typecheck/build, targeted test, or endpoint curl). If it passes, update \`${UPDATE_TASKS}\` and TMS.md only when the task is significant, then stop with summary + verification + next steps. A clean \`npx tsc\`/typecheck/build/test is enough evidence for the touched files — do not re-read files just to confirm after it passes. End the report with a CTA for user-visible work: tell the developer to click the **Preview** button at the top-right of Chat to see what changed when a dev server/static preview is available. Keep dev servers running by default; use \`${STOP_DEV_SERVER}\` only on explicit request, required restart, project switch/removal, or port/process cleanup. **Do not run extra defensive checks after a clean pass.** If verification isn't possible, say so explicitly. When the task tracker has \`in_progress\` rows still open, never call the run "done" or mark everything completed in one \`${UPDATE_TASKS}\` jump; resume the in_progress row and flip statuses one at a time as each acceptance is verified.
+3. **FINAL CHECKPOINT**: run one highest-signal verification path for the change (dev-server logs, typecheck/build, targeted test, or endpoint curl). If it passes: update \`${UPDATE_TASKS}\`; when the task was significant and durable project facts changed, write those into TMS.md (commands, entrypoints, patterns, agent rules, confirmed/inferred/pending) so the next run starts with an accurate snapshot; then stop with summary + verification + next steps. A clean \`npx tsc\`/typecheck/build/test is enough evidence for the touched files — do not re-read files just to confirm after it passes. End the report with a CTA for user-visible work: tell the developer to click the **Preview** button at the top-right of Chat to see what changed when a dev server/static preview is available. Keep dev servers running by default; use \`${STOP_DEV_SERVER}\` only on explicit request, required restart, project switch/removal, or port/process cleanup. **Do not run extra defensive checks after a clean pass.** If verification isn't possible, say so explicitly. When the task tracker has \`in_progress\` rows still open, never call the run "done" or mark everything completed in one \`${UPDATE_TASKS}\` jump; resume the in_progress row and flip statuses one at a time as each acceptance is verified.
 4. **AFTER** \`execute_command\`: **READ** the output. If exit code ≠ 0, **DIAGNOSE AND FIX** the actual error. **DO NOT BLINDLY RETRY** the exact same command.
 5. **For reading files**, use \`${READ_ALIAS}\` (internal \`${READ_FILE}\`); after a search match, use \`${READ_AROUND}\` for the local window instead of re-reading whole files. Do NOT re-read a file you just edited/wrote — the tool result already confirms the applied state (it would have errored otherwise), and files read earlier stay in your context unless a note says they changed. **For SYMBOL questions** (where is X defined, what is its type, who uses it) and for type-checking ONE file after an edit, use \`${LSP}\` (goToDefinition/findReferences/hover/documentSymbol/diagnostics) — compiler-grade answers, cheaper than grep + speculative reads. **For searching**, use \`${GREP_ALIAS}\` (internal \`${SEARCH_FILES}\`). **For listing directories**, use \`${LS_ALIAS}\` (internal \`${LIST_DIRECTORY}\`). **For finding files by pattern**, use \`${GLOB_ALIAS}\` (internal \`${GLOB}\`). Use \`${EXECUTE_COMMAND}\` to run test runners (\`jest\`, \`vitest\`), scripts (\`ts-node\`, \`bun\`), and system commands.
 6. **DEVELOPER-OWNED env vars** (third-party services the developer integrates — LLM, payments, email, SMTP, analytics, webhooks): call \`${REQUEST_CREDENTIALS}\` in the SAME turn you write \`process.env.X\`. For DB, local dev uses \`DATABASE_URL=file:./dev.db\`.
@@ -1168,7 +1196,7 @@ export function getReminderSection(ctx: PromptContext): string {
 9. **SHORT MESSAGES** are context-dependent. If you just proposed a fix/action and the developer replies briefly, that's approval — execute it. If you just asked a question, the brief reply answers it. Read your own previous turn, not the word itself.
 10. **MENTIONED FILES** (\`@path\`): already read for you — the result appears as synthetic \`${READ_FILE}\` context in \`<system-reminder>\` blocks. Don't re-read unless a truncation note says so; if no block appears, you already have a fresh copy in context. Mentions hint at the developer's focus, not necessarily where the fix belongs.
 11. ${sharedThinkingEfficiencyReminder()}
-12. **TURN EFFICIENCY**: group edits in the same file into one \`${EDIT_FILE}\` (sequential old→new pairs); read one larger range instead of multiple small reads; aim for 3-4 requests on localized fixes. Past 4 is fine with a technical reason (build error, tool failure, insufficient context, edit failed) — the loop logs it. Don't burn 7 turns on a one-line fix without reason. Skip expensive verification for purely visual/low-risk changes; always verify when types/logic are involved. For DIAGNOSIS work this budget is soft: the decisive test beats the request count — never close on an unverified hypothesis to save requests.
+12. **TURN EFFICIENCY**: group edits in the same file into one \`${EDIT_FILE}\` (sequential old→new pairs); read one larger range instead of multiple small reads; continue only while there is a technical reason (build error, tool failure, missing context, failed edit) — when investigation stops producing new information, act or ask. Skip expensive verification for purely visual/low-risk changes; always verify when types/logic are involved. For DIAGNOSIS work: the decisive test beats the request count — never close on an unverified hypothesis to save requests.
 13. **DIAGNOSIS DISCIPLINE**: your first hypothesis is unproven — name the observation that would FALSIFY it and run that check first (the cheapest decisive test), instead of accumulating evidence that merely fits. When the evidence shows a CATEGORY mismatch (this runtime/tool/platform does not support that dependency or approach), CLOSE that architecture decision explicitly — do not patch around it with config/bundler tweaks that hide the mismatch. Loaded context sections, skills and profiles describe CAPABILITIES available to you; they are NOT evidence about the current problem's cause — never let them steer the diagnosis.
 14. **OTHER AGENTS' SESSIONS**: when the developer asks you to continue/resume another coding agent's unfinished work (Claude Code, Codex, Cursor, Aider, …), its session store lives under the user profile using that tool's convention — unix/macOS: \`~/.<tool>/\`, \`~/.config/<tool>/\`, \`~/Library/Application Support/<tool>/\`; Windows: \`%USERPROFILE%\` / \`%APPDATA%\` / \`%LOCALAPPDATA%\`. Locate THIS project's entry (often the project path encoded in the folder name), read the most recent transcript, summarize the prior goal + current state to the developer, then continue the work here. Reading outside the project asks permission once — expected. Never read these unprompted.${mcpReminder}${skillReminder}`
 }

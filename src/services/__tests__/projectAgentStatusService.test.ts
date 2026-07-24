@@ -67,9 +67,11 @@ function setup() {
   return { invoke, useAgentStore, useProjectStore, service }
 }
 
-/** Drain the write chain's microtasks (works under fake timers too). */
+/** Drain the write chain's microtasks (works under fake timers too).
+ *  Focused heartbeat is 3s → a 60s advance can enqueue 20+ serial writes;
+ *  keep flushing until the chain settles (cap avoids infinite loops). */
 async function flushWrites(): Promise<void> {
-  for (let i = 0; i < 10; i++) await Promise.resolve()
+  for (let i = 0; i < 80; i++) await Promise.resolve()
 }
 
 /** Only the set_project_agent_status payloads, in call order. */
@@ -155,9 +157,11 @@ describe('projectAgentStatusService (writer)', () => {
     jest.useFakeTimers()
     const { invoke, useAgentStore, useProjectStore, service } = setup()
     useProjectStore.setState({ currentProject: mkProject('/p/a', 'a') })
+    // jsdom is "visible" → focused heartbeat (3s). Use that interval for advances.
+    const beat = service.PROJECT_AGENT_STATUS_HEARTBEAT_FOCUSED_MS
 
     useAgentStore.getState().setStatus('generating')
-    jest.advanceTimersByTime(service.PROJECT_AGENT_STATUS_HEARTBEAT_MS * 2 + 50)
+    jest.advanceTimersByTime(beat * 2 + 50)
 
     const running = (await statusWrites(invoke)).filter(w => w.state === 'running')
     expect(running.length).toBeGreaterThanOrEqual(3) // initial + 2 heartbeats
@@ -168,7 +172,7 @@ describe('projectAgentStatusService (writer)', () => {
     // Run ends → heartbeat must stop refreshing `running`.
     useAgentStore.getState().setStatus('idle')
     const countAfterEnd = (await statusWrites(invoke)).length
-    jest.advanceTimersByTime(service.PROJECT_AGENT_STATUS_HEARTBEAT_MS * 3)
+    jest.advanceTimersByTime(beat * 5)
     const late = (await statusWrites(invoke)).slice(countAfterEnd)
     expect(late.filter(w => w.state === 'running')).toHaveLength(0)
   })
@@ -196,6 +200,32 @@ describe('projectAgentStatusService (writer)', () => {
     useAgentStore.getState().setStatus('generating')
     useAgentStore.getState().setStatus('idle')
     expect(await statusWrites(invoke)).toHaveLength(0)
+  })
+
+  it('badges the streaming session project, not a stale focused project', async () => {
+    const { invoke, useAgentStore, useProjectStore } = setup()
+    // Focus is project B, but the run's session is bound to A (F2 mid-switch
+    // race / stale focus). Badge must follow the session, not the focus.
+    mockActiveSession = {
+      projectPath: '/p/a',
+      name: 'Task on A',
+      messages: [{ role: 'user', content: 'work on A' }],
+    }
+    // chatStore mock only exposes getActiveSession — set focus to B.
+    useProjectStore.setState({ currentProject: mkProject('/p/b', 'b') })
+    // Without session.projectPath on the mock factory, resolveMainBadgePath
+    // falls through: we need the mock to return projectPath on getActiveSession.
+    // setup() already returns mockActiveSession from getActiveSession.
+    useAgentStore.getState().setStatus('generating')
+
+    const writes = await statusWrites(invoke)
+    // Prefer active session projectPath (/p/a) over focused /p/b.
+    expect(writes[0]).toMatchObject({
+      projectPath: '/p/a',
+      state: 'running',
+      label: 'Task on A',
+    })
+    expect(writes.filter(w => w.projectPath === '/p/b')).toHaveLength(0)
   })
 
   it('badges a budget stop as error with the budget label (any terminal status)', async () => {
