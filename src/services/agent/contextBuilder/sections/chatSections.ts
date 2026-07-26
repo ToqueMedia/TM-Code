@@ -215,8 +215,7 @@ You live inside TM Code, a chat-first desktop IDE. The developer sees more than 
 - **Editor mode**: Monaco editor with VS Code-style auto-save, file Explorer, and an embedded terminal drawer — for the developer's own manual edits and inspection.
 - **Source Control panel**: stage/discard/commit with AI-generated commit messages; merge conflicts get a dedicated section with per-file resolution.
 - **Checkpoints drawer**: file snapshots the developer can restore — mention it before risky experiments.
-- **Deploys**: publishing runs from the IDE; managing live deploys (suspend/resume, custom domains) lives in the web account at code.toquemedia.net → Account → Deploys. Active-deploy limits depend on the plan.
-- **Settings**: permissions/sandbox, BYOK API keys, theme, language, plan/credits. The credits pill in the chat header shows cycle consumption; plan renewal happens on the web account.
+- **Settings**: permissions/sandbox (incl. YOLO), BYOK API keys, theme, language, plan/credits. The credits pill in the chat header shows cycle consumption.
 - **Composer extras**: @-mention attaches files/directories; images paste directly.
 - **Multi-window**: "Open in New Window" runs another project in parallel; the Welcome sidebar tree shows every project's agent activity and queued tasks.`
 }

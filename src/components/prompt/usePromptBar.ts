@@ -941,16 +941,37 @@ export function usePromptBar() {
       const command = slashCommandRegistry.getCommand(prompt)
       if (!command) return
 
-      // Limitação #1 eliminada (ronda crítica 2026-07-16): slash commands
-      // operam a MAIN machinery sobre a sessão ativa — sobre o chat de uma
-      // tarefa VIVA seriam no-ops confusos (/compact não alcança o engine da
-      // tarefa) ou runs cruzados. Bloqueio honesto; steering continua a ser
-      // o canal para falar com a tarefa.
+      // Slash commands drive MAIN machinery. On a live task chat most of them
+      // stay blocked (honest message). Exception: `/plan` rewires the LIVE run
+      // into architect mode (plan-mode tools + system-prompt swap + steer) so
+      // one-agent-per-project does not force the user to stop and re-type.
       {
         const activeId = useChatStore.getState().activeSessionId
         if (activeId) {
           for (const r of useParallelTaskStore.getState().runs.values()) {
             if (r.sessionId === activeId && (r.status === 'running' || r.status === 'queued')) {
+              if (command.name === '/plan') {
+                const projectPathForPlan = currentProject?.path
+                if (!projectPathForPlan) {
+                  useChatStore.getState().setDraftInput('')
+                  clearDraftAttachments()
+                  useChatStore.getState().addSystemMessage('No project open. Open a project first.')
+                  return
+                }
+                const planArgs = slashCommandRegistry.getArgs(prompt)
+                useChatStore.getState().setDraftInput('')
+                clearDraftAttachments()
+                const layout = useLayoutStore.getState()
+                if (layout.viewMode !== 'chat') layout.setViewMode('chat')
+                const { tryPlanOnLiveRun } = await import(
+                  '../../services/agent/parallelTasks/planOnLiveRun'
+                )
+                const steered = await tryPlanOnLiveRun(planArgs, projectPathForPlan, activeId)
+                // steered | usage → stop (usage already showed plan.usage).
+                // none → fall through only if no live match (race: run ended).
+                if (steered === 'steered' || steered === 'usage') return
+                break
+              }
               useChatStore.getState().setDraftInput('')
               clearDraftAttachments()
               useChatStore.getState().addSystemMessage(t('parallel.slashBlocked'), 'warn')

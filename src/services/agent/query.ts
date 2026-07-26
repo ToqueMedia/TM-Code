@@ -310,6 +310,13 @@ export interface QueryParams {
   messages: QueryMessage[];
   /** System prompt. */
   systemPrompt: string;
+  /**
+   * Optional live system-prompt resolver (loop-fusion residual).
+   * When set, each turn re-reads the prompt so a mid-run `/plan` steer can
+   * swap the architect role without restarting the engine. Falls back to
+   * the static `systemPrompt` when absent or when the getter throws.
+   */
+  getSystemPrompt?: () => string;
   /** OpenAI SDK client (pre-configured with baseURL + auth). */
   client: OpenAI;
   /** Recreate the SDK client with fresh credentials after an auth failure. */
@@ -347,6 +354,11 @@ export interface QueryParams {
   compactInstructions?: string;
   /** Extra headers merged into every chat.completions.create request. */
   extraHeaders?: Record<string, string>;
+  /**
+   * Live extra headers (optional). When set, re-read each turn so mid-run
+   * `/plan` can inject `X-Request-Type: plan` without restarting the engine.
+   */
+  getExtraHeaders?: () => Record<string, string> | undefined;
   /** Called as soon as streaming response headers are available. */
   onResponseHeaders?: (headers: Headers) => void;
   /**
@@ -998,7 +1010,8 @@ export async function* query(
   params: QueryParams,
 ): AsyncGenerator<QueryStreamEvent, QueryTerminal> {
   const {
-    systemPrompt,
+    systemPrompt: initialSystemPrompt,
+    getSystemPrompt,
     model,
     tools,
     executeTool,
@@ -1009,13 +1022,34 @@ export async function* query(
     onUsage,
     onRequestUsage,
     compactInstructions,
-    extraHeaders,
+    extraHeaders: initialExtraHeaders,
+    getExtraHeaders,
     onResponseHeaders,
     getContextLimits,
     toolsetSelector,
     auxiliarySelection,
     isStreamSafeTool,
   } = params;
+  const resolveExtraHeaders = (): Record<string, string> | undefined => {
+    if (!getExtraHeaders) return initialExtraHeaders
+    try {
+      return getExtraHeaders() ?? initialExtraHeaders
+    } catch {
+      return initialExtraHeaders
+    }
+  }
+  let extraHeaders = resolveExtraHeaders()
+  /** Resolve per-turn so mid-run plan-mode can rewire the architect role. */
+  const resolveSystemPrompt = (): string => {
+    if (!getSystemPrompt) return initialSystemPrompt
+    try {
+      const live = getSystemPrompt()
+      return typeof live === 'string' && live.length > 0 ? live : initialSystemPrompt
+    } catch {
+      return initialSystemPrompt
+    }
+  }
+  let systemPrompt = resolveSystemPrompt()
   let client = params.client;
   const refreshClient = params.refreshClient;
 
@@ -1228,6 +1262,11 @@ export async function* query(
         return null;
       }
     };
+
+    // Re-resolve before compact + request so a plan-mode steer that just
+    // flipped the system prompt / request headers is visible on this turn.
+    systemPrompt = resolveSystemPrompt();
+    extraHeaders = resolveExtraHeaders();
 
     const ctxLimits = getContextLimits?.();
     const autoResult = await autoCompact(

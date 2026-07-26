@@ -1,11 +1,10 @@
 /**
  * Teste de CABLAGEM do PermissionDialog (createRoot + act, como messageBubbleMemo):
- *   - razão do classificador do Modo Auto renderiza no diálogo (ponto D — antes
- *     só ia para o log do chat);
  *   - o campo de PREFIXO editável leva o prefixo extraído ao grant "sempre neste
  *     projeto" (plumbing prefixDraft → approveAlwaysInProject).
  * A extração pura (getCommandPrefix) e o grant no store têm testes próprios;
- * aqui prova-se que a UI os LIGA.
+ * aqui prova-se que a UI os LIGA. (A secção de "razão do classificador" foi
+ * removida com o classificador do Modo Auto — YOLO não classifica.)
  */
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -50,49 +49,6 @@ describe('PermissionDialog — cablagem', () => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
     })
   }
-
-  it('mostra a razão do classificador quando o diálogo vem por escalada do Modo Auto (ponto D)', () => {
-    const reason = 'writes to a shared production secret store'
-    act(() => {
-      root.render(
-        <ChakraProvider value={theme}>
-          <PermissionDialog
-            toolName="execute_command"
-            args={{ command: 'gcloud secrets versions add PROD_KEY' }}
-            promptReason={null}
-            classifierReason={reason}
-            approve={noop}
-            approveAlwaysInProject={noop}
-            approveAlwaysGlobal={noop}
-            deny={noop}
-            denyWith={noop}
-          />
-        </ChakraProvider>,
-      )
-    })
-    expect(container.textContent).toContain(reason)
-  })
-
-  it('NÃO mostra secção de classificador quando classifierReason é ausente (prompt normal)', () => {
-    act(() => {
-      root.render(
-        <ChakraProvider value={theme}>
-          <PermissionDialog
-            toolName="execute_command"
-            args={{ command: 'ls -la' }}
-            promptReason={null}
-            approve={noop}
-            approveAlwaysInProject={noop}
-            approveAlwaysGlobal={noop}
-            deny={noop}
-            denyWith={noop}
-          />
-        </ChakraProvider>,
-      )
-    })
-    // A label do bloco de classificador não aparece.
-    expect(container.textContent).not.toContain('flagged this')
-  })
 
   it('o grant "sempre neste projeto" leva o PREFIXO extraído do comando', () => {
     const approveAlwaysInProject = jest.fn()

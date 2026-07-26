@@ -276,7 +276,14 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
                 borderLeft={isActive ? '2px solid' : '2px solid transparent'}
                 borderColor={isActive ? tokens.colors.accent.primary : 'transparent'}
                 borderRadius="0 8px 8px 0"
-                onClick={() => project.path && onOpenProject(project.path)}
+                onClick={() => {
+                  if (!project.path) return
+                  void import('@/services/projectWindowFocusService')
+                    .then(({ focusForeignOrOpen }) =>
+                      focusForeignOrOpen(project.path!, status, () => onOpenProject(project.path)),
+                    )
+                    .catch(() => onOpenProject(project.path))
+                }}
                 onContextMenu={(e: React.MouseEvent) => handleProjectContextMenu(e, project)}
               >
                 <Text fontSize="12px" fontWeight="700" lineHeight="1" userSelect="none">
@@ -688,6 +695,44 @@ function ProjectGroup({
     void invoke('open_new_instance', { projectPath: project.path }).catch(() => {})
   }, [project.path])
 
+  /**
+   * Prefer focusing the foreign window that already owns this project.
+   * Second click within ~8s opens here (explicit fallback).
+   */
+  const handleOpenClick = useCallback(() => {
+    const path = project.path
+    if (!path) return
+    void import('@/services/projectWindowFocusService')
+      .then(({ focusForeignOrOpen }) =>
+        focusForeignOrOpen(path, agentStatus, () => {
+          onOpen()
+          if (isActive) openMainSessionChat(path)
+        }, {
+          onFocusRequested: () => {
+            try {
+              const { useChatStore } = require('@/stores/chatStore') as typeof import('@/stores/chatStore')
+              useChatStore.getState().addSystemMessage(
+                `${t('parallel.focusOtherWindow')} ${t('parallel.focusOtherWindowRetry')}`,
+                'info',
+              )
+            } catch {
+              void import('@/services/notificationService').then(({ notify }) =>
+                notify({
+                  title: t('parallel.focusOtherWindow'),
+                  body: t('parallel.focusOtherWindowRetry'),
+                  dedupKey: `focus-${path}`,
+                }),
+              )
+            }
+          },
+        }),
+      )
+      .catch(() => {
+        onOpen()
+        if (isActive) openMainSessionChat(path)
+      })
+  }, [agentStatus, isActive, onOpen, project.path])
+
   const stopBusy = stopPhase === 'local' || stopPhase === 'remote'
   const stopTitle =
     stopPhase === 'local'
@@ -721,7 +766,7 @@ function ProjectGroup({
         cursor="pointer"
         transition={`background ${tokens.transition.fast}`}
         _hover={{ bg: 'rgba(255, 255, 255, 0.05)' }}
-        onClick={() => { onOpen(); if (isActive) openMainSessionChat(project.path) }}
+        onClick={handleOpenClick}
         onContextMenu={onContextMenu}
         title={project.path}
       >

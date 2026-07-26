@@ -66,7 +66,7 @@ function slugifyPlanName(input: string): string {
   return slug || 'feature'
 }
 
-async function resolvePlanArtifact(projectPath: string, args: string): Promise<PlanArtifact> {
+export async function resolvePlanArtifact(projectPath: string, args: string): Promise<PlanArtifact> {
   const defaultPath = joinProjectFile(projectPath, 'PLAN.md')
   if (!(await fileExists(defaultPath))) {
     return { fileName: 'PLAN.md', path: defaultPath }
@@ -91,7 +91,7 @@ function planArtifactFromPath(projectPath: string, planPath?: string): PlanArtif
   return { fileName, path }
 }
 
-async function readPlanReadiness(path: string): Promise<PlanReadiness> {
+export async function readPlanReadiness(path: string): Promise<PlanReadiness> {
   let content: string
   try {
     content = await FileService.readFile(path)
@@ -588,7 +588,8 @@ At FINAL CHECKPOINT of a significant phase (after verification), update TMS.md o
 // chain-of-thought (§5), constraints-as-contract (§6), context engineering (§7),
 // Goldilocks (§8), output length (§14), error recovery (§15).
 
-function buildArchitectUserMessage(
+/** Exported for mid-run `/plan` steer on a live task agent (parallel residual). */
+export function buildArchitectUserMessage(
   userIdea: string,
   projectPath: string,
   signals?: { hasDesign: boolean },
@@ -1272,7 +1273,8 @@ You are the Architect, not the coder. This turn writes ONE artefact (PLAN.md, pl
 Allowed mutations this turn: \`${WRITE_FILE}\` and \`${EDIT_FILE}\` on PLAN.md at the project root, plus \`${UPDATE_TASKS}\`. Allowed reads: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${READ_SKILL}\`. Everything else (scaffolding, installing, starting dev servers, executing commands, writing source files) belongs to the implementation phase that runs AFTER the developer approves the plan card. Describe those steps inside PLAN.md's Implementation Phases section — do not attempt them.`
 }
 
-function buildArchitectSystemPrompt(planFileName: string = 'PLAN.md'): string {
+/** Exported for mid-run `/plan` system-prompt swap on live task agents. */
+export function buildArchitectSystemPrompt(planFileName: string = 'PLAN.md'): string {
   const prompt = [
     // --- Static (cacheable across sessions for the same model) ---
     // Primacy bookend — read-only contract with the cost of violation named.

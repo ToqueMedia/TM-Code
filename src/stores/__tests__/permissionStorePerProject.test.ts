@@ -24,10 +24,6 @@ jest.mock('../chatStore', () => ({
   },
 }))
 
-jest.mock('../../services/agent/permissionClassifier', () => ({
-  classifyPermissionAction: jest.fn(),
-}))
-
 const mockInvoke = jest.fn().mockResolvedValue(undefined)
 jest.mock('@/utils/invokeMetrics', () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
@@ -49,7 +45,6 @@ function resetStore(): void {
     globalCommandAllowlist: new Set<string>(),
     additionalDirectories: new Set<string>(),
     autoModePermissions: false,
-    classifierChecking: null,
     autoDenyAll: false,
     pendingPermission: null,
     permissionQueue: [],

@@ -391,6 +391,14 @@ function App() {
 		void import('./services/projectWindowLockService')
 			.then(m => m.initProjectWindowLock())
 			.catch(() => { /* Tauri not present (jsdom tests) */ })
+		// Focus requests while agent is idle (finished run still on this project).
+		void import('./services/projectWindowFocusService')
+			.then(m => {
+				m.startFocusRequestConsumer(
+					() => useProjectStore.getState().currentProject?.path,
+				)
+			})
+			.catch(() => { /* Tauri not present (jsdom tests) */ })
 	}, []);
 
 	// Backstop drain for `--open-project`: initializeApp only drains it on

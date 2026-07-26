@@ -33,7 +33,9 @@ yarn test src/services/__tests__/projectAgentStatusService.test.ts 2>/dev/null |
 | 8b | Steer live session agent with image attachment | Image reaches model (or sidecar description); no "attachments ignored" system warn |
 | 8d | Session-agent **first** message with image | Multimodal on turn 1 (not text-only after history pop) |
 | 8e | Badge lag other window while owner focused | Status refresh within ~2–4s (writer 3s + reader 1.5s) |
-| 8c | `/plan` while task session is **running** | Honest slash-blocked message; plan when agent free |
+| 8c | `/plan` while task session is **running** | Live agent → architect (plan tools on **child** executor + system prompt + `X-Request-Type: plan`); auto-approve restored on settle; card on **task** session; other slash cmds still blocked |
+| 8f | Click project row with agent **running/done in another window** | First click: focus request (owner ≤2s idle poll / ≤3s focused heartbeat); toast “click again to open here”. Second click: open locally |
+| 8g | `update_tasks` claims | Auto-claim on `in_progress`; foreign claim blocks **status** flips only; same-status description patches OK; board mirror consulted |
 | 9 | Attention Inbox with permission on live run | Origin correct; click navigates to session |
 | 10 | Kill -9 agent window | Other windows: `running` badge clears after stale (90s) |
 

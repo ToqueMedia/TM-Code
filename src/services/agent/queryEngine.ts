@@ -38,6 +38,14 @@ export interface QueryEngineOptions {
   model?: string
   /** System prompt. */
   systemPrompt: string
+  /**
+   * Live system-prompt resolver (optional). When set, the query loop re-reads
+   * it each turn — enables mid-run `/plan` architect swap on task agents
+   * without restarting the engine (loop-fusion residual).
+   */
+  getSystemPrompt?: () => string
+  /** Live extra headers (optional) — re-read each turn (e.g. X-Request-Type: plan). */
+  getExtraHeaders?: () => Record<string, string> | undefined
   /** Tool definitions in OpenAI format. */
   tools: OpenAI.ChatCompletionTool[]
   /** Tool execution function. */
@@ -172,6 +180,9 @@ export class QueryEngine {
     const params: QueryParams = {
       messages,
       systemPrompt: this.options.systemPrompt,
+      getSystemPrompt: this.options.getSystemPrompt,
+      getExtraHeaders: this.options.getExtraHeaders,
+      extraHeaders: this.options.extraHeaders,
       client: this.options.client,
       refreshClient: this.options.refreshClient,
       model: this.options.model ?? DEFAULT_MODEL,
@@ -192,7 +203,6 @@ export class QueryEngine {
         this.options.onRequestUsage?.(entry)
       },
       compactInstructions: this.options.compactInstructions,
-      extraHeaders: this.options.extraHeaders,
       onResponseHeaders: this.options.onResponseHeaders,
       collectInterTurnContext: this.options.collectInterTurnContext,
       collectQueuedSteering: this.options.collectQueuedSteering,

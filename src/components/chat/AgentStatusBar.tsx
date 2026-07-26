@@ -28,7 +28,6 @@ function formatElapsedShort(ms: number): string {
 
 function AgentStatusBar() {
   const status = useAgentStore(s => s.status)
-  const classifierChecking = usePermissionStore(s => s.classifierChecking)
   const error = useAgentStore(s => s.error)
   const isStreaming = useChatStore(s => s.isStreaming)
   const lastTool = useChatStore(selectLastCompletedToolName)
@@ -76,17 +75,6 @@ function AgentStatusBar() {
     : (noCredits && status === 'idle')
     ? { color: tokens.colors.accent.red, label: t('chat.noCredits'), pulse: false }
     : (statusConfig[status] || statusConfig.idle)
-
-  // Modo Auto a classificar um pedido — sobrepõe o estado genérico para o
-  // developer perceber a pausa (a chamada demora ~1-2s; sem isto parecia
-  // um 'applying' pendurado).
-  if (classifierChecking) {
-    config = {
-      color: tokens.colors.accent.orange,
-      label: t('autoMode.checking').replace('{tool}', classifierChecking),
-      pulse: true,
-    }
-  }
 
   // When awaiting a response after a tool just completed, swap the generic
   // "Awaiting response..." for "Processed {tool} — awaiting response..." so

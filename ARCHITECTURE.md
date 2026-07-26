@@ -145,12 +145,17 @@ in the IDE's billing memories.)
 4. Auto-wake only with open work and a visible system message.  
 5. Budget exhaustion: client stop-all + park queue; multi-window learns via `/v1/me` on focus (no server push).
 
-### Still open (not 10/10 polish yet)
+### Still open (honest residual)
 
-- Full loop fusion (main `runQueryEngineLoop` vs task `QueryEngine` driver)  
-- **`/plan` on a live task session** remains blocked (slash uses main machinery; one agent per project) — use plan when the project’s agent is free, or steer with plain text  
-- Shared multi-writer **item** board (optional product; out of F3)  
+- Full **body** loop fusion is **not** planned: main vs task drivers stay separate (toolset/telemetry vs worktree/wall-clock). Shared plumbing: `runClient`, live `getSystemPrompt`, multimodal steer, stop/focus disk bus  
+- Multi-writer board is **lightweight**: per-session claims + `task-board.json` mirror for cross-window *visibility/enforcement hints* — not Claude Code Teams multi-agent. Under F3 (one agent/project) collisions are rare  
 - Release matrix: see `docs/PARALLEL_RELEASE_CHECKLIST.md` (manual multi-window cases)
+
+### Done recently (parallel residual polish — 2026-07-24)
+
+- **`/plan` on a live task session**: steers architect mode (`planOnLiveRun`) with plan-mode **lease**, `X-Request-Type: plan`, auto-approve **restored on settle**, approval card pinned to the **task session**  
+- **Item claims** (`claimedBy`/`claimedAt`, auto-claim on `in_progress`, block only **status** flips, disk board consulted)  
+- **OS focus other window**: foreign badge click → focus-request → owner `focus_main_window` (macOS activate fallback); second click opens here; idle consumer polls current project  
 
 ### Done recently (Pacote 3)
 
@@ -376,12 +381,10 @@ below is retained as archive of implementation investment.
   Os wrappers ficam separados de PROPÓSITO — o resto é legitimamente diferente (principal:
   toolset selector + telemetria TMS; tarefa: worktree + steering por-run + wall-clock), e
   fundi-los num só seria um monstro de condicionais. +9 testes do contrato do cliente.
-- **O trono por demolir (o que RESTA):** (1) **F3 (resto)** — o corpo do LOOP em si
-  (runQueryEngineLoop vs. o driver de QueryEngine da tarefa) continua por unir; traria
-  plan-mode e anexos do composer a todos os agentes. Não-trivial e talvez nem inteiramente
-  desejável (os dois têm ciclos de vida diferentes); avaliar caso a caso. Até lá, o run
-  interativo mantém o queryGuard único. (2) task list partilhada com claim de itens (resto
-  da 6b — o board partilhado, distinto do tracker por-sessão já feito).
+- **O trono por demolir (o que RESTA):** o **corpo** do LOOP em si (runQueryEngineLoop vs.
+  driver da tarefa) continua separado de propósito (ciclos de vida diferentes). Já fundidos:
+  `runClient`, `getSystemPrompt` live (plan mid-run), steer multimodal, claims de itens
+  (`claimedBy` + `task-board.json`). O run interativo mantém o queryGuard único.
 - **Fase 6a — FEITA (2026-07-16): inbox unificado de atenção.** Sino na titlebar
   (`components/ui/AttentionInbox.tsx` + `hooks/useAttentionInbox.ts`, padrão Antigravity):
   agrega pedidos interativos pendentes de TODOS os agentes (permissões atual+fila, perguntas,

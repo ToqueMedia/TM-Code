@@ -222,6 +222,12 @@ function AgentTasksPanel() {
 
 /** Task description text with status-dependent styling. */
 function TaskText({ task }: { task: AgentTask }) {
+  const claim =
+    task.claimedBy && task.status !== 'completed' && task.status !== 'cancelled'
+      ? task.claimedBy === 'main'
+        ? ' · main'
+        : ` · ${task.claimedBy.length > 12 ? `${task.claimedBy.slice(0, 11)}…` : task.claimedBy}`
+      : ''
   return (
     <Text
       fontSize="12px"
@@ -240,6 +246,11 @@ function TaskText({ task }: { task: AgentTask }) {
       opacity={task.status === 'cancelled' ? 0.5 : 1}
     >
       {task.description}
+      {claim ? (
+        <Text as="span" fontSize="10px" color={tokens.colors.text.disabled} fontWeight={400}>
+          {claim}
+        </Text>
+      ) : null}
     </Text>
   )
 }

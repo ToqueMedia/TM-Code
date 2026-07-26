@@ -120,10 +120,12 @@ async function logPermission(message: string, level: 'info' | 'warn' | 'error' |
   } catch { /* chatStore not ready — drop the log line silently */ }
 }
 
-// ── MODO AUTO: gate do classificador (porte claude-vaz) ──
-// allow → corre sem perguntar; block OU unavailable → escala para o diálogo
-// humano (pedir permissão manual, com a razão à vista) — NUNCA nega ao agente.
-// Doutrina 2026-07-23: acelera o claramente seguro, PERGUNTA sobre o resto.
+// ── MODO YOLO (ex-Auto): autonomia total quando ligado ──
+// ON  → ZERO envolvimento do user em permissões (dialogs, forcePrompt, path
+//       access, Settings "blocked dangerous commands" hard-block, diffs).
+//       O risco é do developer ao activar. Sem excepções no path de permissão.
+// OFF → fluxo normal (allowlists, scopes, forcePrompt, flagged hard-blocks).
+// Não é sandbox isolation nem plan-mode (roles de execução, não "permissão UI").
 function isAutoModeEnabled(projectId?: string | null): boolean {
   // POR PROJECTO (decisão do user 2026-07-18): o flag vive NESTE store e
   // persiste em permissions.json com os restantes grants — autonomia no
@@ -132,41 +134,14 @@ function isAutoModeEnabled(projectId?: string | null): boolean {
   return getProjectGrants(projectId).autoModePermissions
 }
 
-/** Tools de escrita cujo checkpoint REAL é o DIFF (aprovação por alteração,
- *  com o toggle autoApproveDiffs próprio). NÃO passam pelo classificador:
- *  classificá-las era latência+custo por write e um veto redundante antes do
- *  portão verdadeiro — paridade com o fast-path acceptEdits do claude-vaz
- *  ("skipping classifier: would be allowed in acceptEdits mode"), transposto
- *  para a lei TM. Exatamente os três produtores de diff do contrato
- *  (CLAUDE.md: "File changes (write_file, edit_file, create_file) produce
- *  diffs"). delete/rename/append ficam DE FORA — sem diff, o classificador
- *  é o gate certo para eles. sensitive_file nunca chega aqui (forcePrompt).
- */
-const DIFF_GATED_WRITE_TOOLS = new Set(['write_file', 'edit_file', 'create_file'])
+/** Public: toolExecutor / other layers that hard-block "for the user" check this. */
+export function isYoloModeEnabled(projectId?: string | null): boolean {
+  return isAutoModeEnabled(projectId)
+}
 
-/** Porte do `stripDangerousPermissionsForAutoMode` do claude-vaz
- *  (permissionSetup.ts): à entrada do modo auto, allows demasiado largos
- *  (`Bash(*)`, prefixos de interpretadores) são removidos para não furarem o
- *  classificador. No TM o grant "always allow" é POR NOME de tool, logo o
- *  equivalente é: em Modo Auto, o fast-path por nome NÃO cobre tools de
- *  execução arbitrária de shell — o classificador tem de ver o COMANDO.
- *  Incidente 2026-07-22 (momenu-fact): um grant antigo em execute_command
- *  deixou `gcloud secrets versions add` mutar o Secret Manager de produção
- *  sem classificação, enquanto o deploy — o MESMO risco, via
- *  execute_command_background sem grant — era corretamente bloqueado. O gate
- *  estava no nome da tool; o risco está no conteúdo do comando.
- *  A lista cobre os vetores de comando arbitrário: execute_command*,
- *  agent_shell_start/write (o PTY persistente é um teclado de shell).
- *  Fora do Modo Auto nada muda — o grant do developer é lei. */
-const AUTO_MODE_SHELL_TOOLS = new Set([
-  'execute_command',
-  'execute_command_background',
-  'agent_shell_start',
-  'agent_shell_write',
-])
-
-function autoModeBlocksNameFastPath(toolName: string, projectId?: string | null): boolean {
-  return isAutoModeEnabled(projectId) && AUTO_MODE_SHELL_TOOLS.has(toolName)
+/** YOLO: approve without UI. Diffs also auto-accept via chatStore when this flag is on. */
+function yoloApprove(): PermissionDecision {
+  return { approved: true, prompted: false, source: 'yolo' }
 }
 
 /** Tools cujo grant "always allow" é POR PREFIXO DE COMANDO, não por nome de
@@ -176,9 +151,6 @@ function autoModeBlocksNameFastPath(toolName: string, projectId?: string | null)
 const COMMAND_SCOPED_TOOLS = new Set(['execute_command', 'execute_command_background'])
 
 /** Se um comando de shell bate num prefixo concedido (projeto ∪ global).
- *  Honrado MESMO em Modo Auto: um prefixo narrow e explicitamente consentido
- *  é o caso seguro que o classificador também deixaria passar — ao contrário
- *  do grant largo por nome de tool, que o Modo Auto neutraliza.
  *  `projectId` selects which project's prefix allowlist to consult. */
 function matchesGrantedCommandPrefix(
   toolName: string,
@@ -194,65 +166,6 @@ function matchesGrantedCommandPrefix(
     matchGrantedPrefix(command, grants.projectCommandAllowlist) != null ||
     matchGrantedPrefix(command, st.globalCommandAllowlist) != null
   )
-}
-
-async function runAutoModeGate(
-  toolName: string,
-  args: Record<string, unknown>,
-  origin: PermissionOrigin | undefined,
-  fallbackToDialog: (classifierReason?: string) => Promise<PermissionDecision>,
-): Promise<PermissionDecision> {
-  if (DIFF_GATED_WRITE_TOOLS.has(toolName)) {
-    // Silencioso (paridade claude-vaz: allows não fazem barulho) — o cartão
-    // de diff aprovado no transcript É o registo da alteração.
-    return { approved: true, prompted: false, source: 'auto_classifier' }
-  }
-  const { classifyPermissionAction } = await import('../services/agent/permissionClassifier')
-  // Transcript da sessão do PEDIDO: tarefas usam a sua própria sessão
-  // (origin.sessionId), o main usa a ativa — o classificador julga com o
-  // contexto certo, não com o da sessão que o user está a ver.
-  let messages: Array<{ role: string; content?: string | null; toolCalls?: Array<{ toolName: string; args?: Record<string, unknown> }> }> = []
-  try {
-    const { useChatStore } = await import('./chatStore')
-    const chat = useChatStore.getState()
-    const sid = origin?.sessionId ?? chat.streamingSessionId ?? chat.activeSessionId
-    const session = sid ? chat.sessions.get(sid) : null
-    messages = (session?.messages ?? []) as typeof messages
-  } catch { /* sem chat — transcript vazio, o classificador julga a ação isolada */ }
-
-  usePermissionStore.setState({ classifierChecking: toolName })
-  let verdict: Awaited<ReturnType<typeof classifyPermissionAction>>
-  try {
-    const projectPath =
-      getProjectGrants(origin?.projectId).projectPath
-      || usePermissionStore.getState().projectPath
-      || undefined
-    verdict = await classifyPermissionAction(
-      toolName, args, messages, projectPath,
-    )
-  } finally {
-    usePermissionStore.setState({ classifierChecking: null })
-  }
-
-  if (verdict.decision === 'allow') {
-    // Silent — classifier allow/deny breadcrumbs polluted the chat (user 2026-07-24).
-    // Logger keeps forensics; the dialog itself surfaces when human input is needed.
-    return { approved: true, prompted: false, source: 'auto_classifier' }
-  }
-
-  if (verdict.decision === 'block') {
-    // O classificador SINALIZOU risco — mas NÃO negamos ao agente (isso fazia a
-    // ação "deixar de fazer"): ESCALAMOS para o diálogo humano com a razão à
-    // vista, para o developer aprovar (forçar) ou recusar manualmente. Doutrina
-    // (pedido 2026-07-23): o Modo Auto acelera o que é claramente seguro e
-    // PERGUNTA sobre o resto — nunca bloqueia sozinho de forma definitiva. Assim
-    // block e unavailable convergem no mesmo destino: fail-to-human.
-    // No chat breadcrumb: the PermissionDialog already shows classifierReason.
-    return fallbackToDialog(verdict.reason)
-  }
-
-  // unavailable — fail-to-human (nunca deny silencioso numa IDE interativa).
-  return fallbackToDialog()
 }
 
 /** Persist/reload autoApproveDiffs from localStorage.
@@ -473,8 +386,9 @@ export interface PermissionDecision {
    *  (safe tool, scope-approved, has-own-approval) — distinguishes silent
    *  approval from an active user choice. */
   prompted: boolean
-  /** Where the decision came from. */
-  source: 'safe_tool' | 'has_own_approval' | 'approved_scope' | 'user' | 'auto_classifier'
+  /** Where the decision came from. ('auto_classifier' era o Modo Auto
+   *  pré-YOLO — transcripts antigos ainda o carregam; ninguém ramifica nele.) */
+  source: 'safe_tool' | 'has_own_approval' | 'approved_scope' | 'user' | 'yolo'
   /** When source === 'user' and the user denied (or approved with a flagged
    *  prompt kind), this is the reason supplied via `denyWith` / promptReason. */
   denyReason?: string
@@ -510,11 +424,6 @@ interface PendingPermission {
   promptReason: PromptReason
   /** When promptReason is 'path_access', the directory being requested for access */
   pathAccessTarget?: string
-  /** Razão do classificador do Modo Auto quando o diálogo surge por ESCALADA
-   *  (o classificador sinalizou risco em vez de negar). Mostrada no próprio
-   *  diálogo para o developer ver PORQUÊ antes de aprovar/recusar. Ausente em
-   *  prompts normais (não-auto) e em forcePrompt. */
-  classifierReason?: string
   /** Resolves the pending `requestPermission` promise. */
   resolve: (result: PermissionDecision) => void
 }
@@ -543,10 +452,8 @@ interface PermissionState {
   additionalDirectories: Set<string>
   /** When true, file diffs (write_file/edit_file/create_file) are auto-accepted without user confirmation */
   autoApproveDiffs: boolean
-  /** Modo Auto (classificador) — grant POR PROJECTO, persistido em permissions.json. */
+  /** Modo YOLO — grant POR PROJECTO, persistido em permissions.json. ON = zero dialogs. */
   autoModePermissions: boolean
-  /** Tool em classificação pelo Modo Auto (statusbar mostra '⏵⏵ a classificar…'). */
-  classifierChecking: string | null
   /** When true, user clicked "Deny All" — auto-deny all non-dangerous queued permissions */
   autoDenyAll: boolean
   /** Current permission being shown to the user */
@@ -557,11 +464,9 @@ interface PermissionState {
 
 interface PermissionActions {
   requestPermission: (toolName: string, args: Record<string, unknown>, forcePrompt?: boolean | PromptReason, origin?: PermissionOrigin) => Promise<PermissionDecision>
-  /** Caminho interno: mostra/enfileira o diálogo humano. Extraído para o
-   *  Modo Auto poder cair para ele em block-escalado e falha do classificador.
-   *  `classifierReason` (opcional) surge quando a escalada vem de um sinal do
-   *  classificador — é mostrado no diálogo. */
-  enqueuePermissionDialog: (toolName: string, args: Record<string, unknown>, promptReason: PromptReason, origin?: PermissionOrigin, classifierReason?: string) => Promise<PermissionDecision>
+  /** Caminho interno: mostra/enfileira o diálogo humano (fluxo normal,
+   *  YOLO OFF). */
+  enqueuePermissionDialog: (toolName: string, args: Record<string, unknown>, promptReason: PromptReason, origin?: PermissionOrigin) => Promise<PermissionDecision>
   /** Prompt the user to allow agent access to a directory outside the project root.
    *  If approved, the directory is added to that project's additionalDirectories.
    *  `projectId` (optional) scopes the grant to a background project-run. */
@@ -614,32 +519,30 @@ function advanceQueue(set: (fn: (state: PermissionState) => Partial<PermissionSt
   const remaining = [...permissionQueue]
   while (remaining.length > 0) {
     const next = remaining.shift()!
+    const pid = next.projectId
+    // YOLO toggled on mid-queue: drain without dialogs.
+    if (isAutoModeEnabled(pid)) {
+      next.resolve(yoloApprove())
+      continue
+    }
     if (next.promptReason) {
       // Flagged command or sensitive file — must show dialog every time
       set(() => ({ pendingPermission: next, permissionQueue: remaining }))
       return
     }
-    const pid = next.projectId
     const grants = getProjectGrants(pid)
-    // Grant por prefixo de comando — honrado mesmo em Modo Auto (mesmo caminho
-    // do requestPermission). Um comando de shell na fila com prefixo concedido
-    // resolve sem prompt.
+    // Grant por prefixo de comando — resolve sem prompt.
     if (matchesGrantedCommandPrefix(next.toolName, next.args, pid)) {
       next.resolve({ approved: true, prompted: false, source: 'user' })
       continue
     }
-    // Em Modo Auto, um pedido de shell só chega à fila porque o classificador
-    // ESCALOU para humano (3 bloqueios / indisponível) — auto-resolvê-lo aqui
-    // pelo allowlist desfaria a escalada. Mesmo guard do requestPermission.
-    const nameFastPathBlocked = autoModeBlocksNameFastPath(next.toolName, pid)
     // Check tool-specific allowlists first (more specific than scopes)
-    if (!nameFastPathBlocked && (globalToolAllowlist.has(next.toolName) || grants.projectToolAllowlist.has(next.toolName))) {
+    if (globalToolAllowlist.has(next.toolName) || grants.projectToolAllowlist.has(next.toolName)) {
       next.resolve({ approved: true, prompted: false, source: 'user' })
       continue
     }
     const scope = getToolScope(next.toolName)
-    if (!nameFastPathBlocked && grants.approvedScopes.has(scope)) {
-      // Auto-approve this one and continue to the next
+    if (grants.approvedScopes.has(scope)) {
       next.resolve({ approved: true, prompted: false, source: 'approved_scope' })
       continue
     }
@@ -663,14 +566,14 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
   additionalDirectories: new Set(),
   autoApproveDiffs: loadAutoApproveDiffs(),
   autoModePermissions: false,
-  classifierChecking: null,
   autoDenyAll: false,
   pendingPermission: null,
   permissionQueue: [],
 
   requestPermission: (toolName, args, forcePrompt, origin) => {
-    // forcePrompt (sensitive files, flagged commands) ALWAYS shows the dialog.
-    // It bypasses scope auto-approval — the user must approve every time.
+    // forcePrompt (sensitive files, flagged commands) shows the dialog in
+    // NORMAL mode — Accept All / scopes cannot skip it. YOLO mode (below)
+    // short-circuits EVERYTHING, including forcePrompt.
     // Accepts boolean (legacy compat) or a PromptReason string.
     const promptReason: PromptReason = typeof forcePrompt === 'string'
       ? forcePrompt
@@ -681,32 +584,33 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
     const projectId = origin?.projectId ?? get().activeProjectId
     const grants = getProjectGrants(projectId)
 
+    // ── MODO YOLO ──
+    // ON: zero permission UI for this project (tools, dangerous cmds, secrets,
+    // path access via requestPathAccess). Diffs auto-accept in chatStore when
+    // autoModePermissions is set. OFF: full normal flow below.
+    if (isAutoModeEnabled(projectId)) {
+      return Promise.resolve(yoloApprove())
+    }
+
     if (!forcePrompt) {
       // Grant por PREFIXO DE COMANDO (narrow, consentido) — verificado ANTES
-      // de tudo e honrado MESMO em Modo Auto: um prefixo específico que o
-      // developer aprovou é o caso seguro (o classificador também o deixaria
-      // passar). Só o grant LARGO por nome de tool é que o Modo Auto neutraliza.
+      // de allowlists largos por nome de tool.
       if (matchesGrantedCommandPrefix(toolName, args, projectId)) {
         return Promise.resolve({ approved: true, prompted: false, source: 'user' })
       }
 
-      // Em Modo Auto, tools de shell não tomam o fast-path por NOME
-      // (allowlists/scope) — ver AUTO_MODE_SHELL_TOOLS. O pedido cai no
-      // gate do classificador abaixo, que julga o comando em si.
-      const nameFastPathBlocked = autoModeBlocksNameFastPath(toolName, projectId)
-
       // Tool-specific allowlists first (more specific than scopes)
-      if (!nameFastPathBlocked && get().globalToolAllowlist.has(toolName)) {
+      if (get().globalToolAllowlist.has(toolName)) {
         return Promise.resolve({ approved: true, prompted: false, source: 'user' })
       }
-      if (!nameFastPathBlocked && grants.projectToolAllowlist.has(toolName)) {
+      if (grants.projectToolAllowlist.has(toolName)) {
         return Promise.resolve({ approved: true, prompted: false, source: 'user' })
       }
 
       const scope = getToolScope(toolName)
 
       // User authorized all tools in this scope (core or mcp) FOR THIS PROJECT
-      if (!nameFastPathBlocked && grants.approvedScopes.has(scope)) {
+      if (grants.approvedScopes.has(scope)) {
         return Promise.resolve({ approved: true, prompted: false, source: 'approved_scope' })
       }
 
@@ -721,30 +625,12 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       if (HAS_OWN_APPROVAL.has(toolName)) {
         return Promise.resolve({ approved: true, prompted: false, source: 'has_own_approval' })
       }
-
-      // ── MODO AUTO (porte do claude-vaz, 2026-07-18) ──
-      // Corre DEPOIS dos fast-paths acima (allowlists/scopes/safe-tools — o
-      // equivalente do allowlist-skip do claude-vaz que evita chamadas ao
-      // classificador) e SÓ para pedidos que mostrariam o diálogo. forcePrompt
-      // (dangerous_command / sensitive_file / browser_action / path_access
-      // forçado) NUNCA passa por aqui — humano sempre. Diffs de ficheiros nem
-      // sequer chegam a este store (caminho próprio de aprovação).
-      //   allow → corre sem perguntar (transcript regista);
-      //   block → NEGA ao agente com a razão (o modelo ajusta); 3 seguidas
-      //           escalam para o diálogo e o contador zera;
-      //   unavailable/erro/imparseável → diálogo (fail-to-human; ≠ headless
-      //           claude-vaz que faz fail-closed-deny).
-      if (isAutoModeEnabled(projectId)) {
-        return runAutoModeGate(toolName, args, origin, (classifierReason) =>
-          get().enqueuePermissionDialog(toolName, args, promptReason, origin, classifierReason),
-        )
-      }
     }
 
     return get().enqueuePermissionDialog(toolName, args, promptReason, origin)
   },
 
-  enqueuePermissionDialog: (toolName, args, promptReason, origin, classifierReason) => {
+  enqueuePermissionDialog: (toolName, args, promptReason, origin) => {
     return new Promise<PermissionDecision>((resolve) => {
       const projectId = origin?.projectId ?? get().activeProjectId
       const entry: PendingPermission = {
@@ -754,7 +640,6 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         promptReason,
         projectId,
         ...(origin ? { origin } : {}),
-        ...(classifierReason ? { classifierReason } : {}),
         resolve,
       }
 
@@ -767,7 +652,7 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
         set(state => ({ permissionQueue: [...state.permissionQueue, entry] }))
       }
       // Dialog IS the interaction surface — no chat breadcrumb spam for
-      // classifier/permission prompts (user 2026-07-24).
+      // permission prompts (user 2026-07-24).
     })
   },
 
@@ -1038,10 +923,39 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
 
   setAutoModePermissions: (enabled: boolean) => {
     // Toggle applies to the focused project only (UI chrome is per-view).
-    mutateProjectGrants(get().activeProjectId, (g) => ({
+    const pid = get().activeProjectId
+    mutateProjectGrants(pid, (g) => ({
       ...g,
       autoModePermissions: enabled,
     }), { persist: true })
+
+    // YOLO ON mid-dialog: approve the open request + drain the queue so the
+    // agent is not stuck behind a dialog the user just opted out of.
+    if (enabled) {
+      const { pendingPermission, permissionQueue } = get()
+      if (pendingPermission) {
+        // Only auto-resolve entries for THIS project (or unscoped / active).
+        const pendingPid = pendingPermission.projectId ?? pid
+        if (!pid || !pendingPid || pendingPid === pid) {
+          set({ pendingPermission: null })
+          pendingPermission.resolve(yoloApprove())
+        }
+      }
+      const remaining: typeof permissionQueue = []
+      for (const entry of get().permissionQueue) {
+        const entryPid = entry.projectId ?? pid
+        if (!pid || !entryPid || entryPid === pid) {
+          entry.resolve(yoloApprove())
+        } else {
+          remaining.push(entry)
+        }
+      }
+      set({ permissionQueue: remaining })
+      // If we cleared pending but left foreign queue items, surface the next one.
+      if (!get().pendingPermission && remaining.length > 0) {
+        advanceQueue(set, get)
+      }
+    }
   },
 
   resetAutoApprove: () => {
@@ -1087,17 +1001,15 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
       return Promise.resolve({ approved: true, prompted: false, source: 'user' as const })
     }
 
-    // Auto Mode (claude-vaz parity): external folder reads/writes for the
-    // agent should not interrupt the developer — auto-grant for this project
-    // (persisted) and continue. Destructive shell still goes through the
-    // classifier; this is only the path-scope gate.
+    // YOLO: external folder reads/writes never interrupt — auto-grant for
+    // this project (persisted) and continue.
     if (isAutoModeEnabled(pid)) {
       mutateProjectGrants(pid, (g) => {
         const dirs = new Set(g.additionalDirectories)
         dirs.add(directoryToAdd)
         return { ...g, additionalDirectories: dirs }
       }, { persist: true, syncDirs: true })
-      return Promise.resolve({ approved: true, prompted: false, source: 'auto_classifier' as const })
+      return Promise.resolve(yoloApprove())
     }
 
     return new Promise<PermissionDecision>((resolve) => {

@@ -17,6 +17,9 @@ type StoredTask = {
   blockedBy?: string[]
   files?: string[]
   evidence?: string
+  /** Multi-writer item claim — owner id or null to release. */
+  claimedBy?: string | null
+  claimedAt?: number | null
 }
 
 const TERMINAL_TASK_STATUSES = new Set<TaskStatus>(['completed', 'failed', 'cancelled'])
@@ -73,6 +76,8 @@ Task statuses: pending | in_progress | completed | failed | cancelled.
 
 Patch semantics: each entry in the tasks array is MERGED with the existing task by ID. To update only a status, send { id, status } — description is optional for existing tasks. New IDs (not in the current tracker) are appended. This prevents accidental task loss when the full list is not re-sent.
 
+Item claims (shared board): optional "claimedBy" string claims an item for an owner (\`main\` or your task/session id). Send claimedBy: null to release. Prefer claiming before starting multi-step work so other writers leave the item alone. claimedAt is set automatically on claim.
+
 Evidence rule: when you flip a task to "completed" you MUST include an "evidence" field stating how its acceptance criterion was verified — the actual signal you observed (test output "12 passed", "tsc --noEmit clean", "GET /users → 200 {id:…}", "build succeeded"). This is per-task accountability, not a formality: "files exist on disk", "done", "ok" are NOT evidence and are rejected — a completion without real evidence is reverted to in_progress. You may complete several tasks in one call, but each needs its own evidence; if you can't articulate the verification for a task, you haven't verified it — keep it in_progress.`,
       input_schema: {
         type: 'object',
@@ -89,6 +94,10 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
                 blockedBy: { type: 'array', items: { type: 'string' }, description: 'IDs of blocking tasks' },
                 files: { type: 'array', items: { type: 'string' }, description: 'Files involved in this task' },
                 evidence: { type: 'string', description: 'How this task was verified (e.g. "tsc clean", "GET /users → 200"). REQUIRED when status is "completed"; filesystem existence does not count.' },
+                claimedBy: {
+                  type: 'string',
+                  description: 'Claim owner for this item (`main`, task id, or session label). Empty string releases the claim.',
+                },
               },
               required: ['id', 'status'],
             },
@@ -121,16 +130,76 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
       // contextos sem chat (testes, races transitórias) sem falhar o tool.
       const execSid =
         ctx.getTaskOrigin()?.sessionId ?? chat.streamingSessionId ?? chat.activeSessionId ?? '__main__'
+      const claimOwner =
+        ctx.getTaskOrigin()?.taskId
+        ?? (execSid === '__main__' ? 'main' : execSid)
 
       const prev = useAgentStore.getState().getTasksForSession(execSid) as StoredTask[]
       const prevCompletedIds = new Set(prev.filter(t => t.status === 'completed').map(t => t.id))
 
-      type IncomingTask = { id: string; description?: string; status: string; dependsOn?: string[]; blockedBy?: string[]; files?: string[]; evidence?: string }
-      const incoming = input.tasks as IncomingTask[]
+      type IncomingTask = {
+        id: string
+        description?: string
+        status: string
+        dependsOn?: string[]
+        blockedBy?: string[]
+        files?: string[]
+        evidence?: string
+        /** Owner id, or empty string/null to release. */
+        claimedBy?: string | null
+      }
+      const incoming = (input.tasks as IncomingTask[]).map((t) => ({
+        ...t,
+        // Empty string from the model = explicit release.
+        claimedBy: t.claimedBy === '' ? null : t.claimedBy,
+      }))
       const prevAllTerminal = prev.length > 0 && prev.every(t => isTerminalTask(t.status))
       const incomingAddsNewTask = incoming.some(t => !prev.some(existing => existing.id === t.id))
       const resetArchivedList = prevAllTerminal && incomingAddsNewTask
       const baseTasks = resetArchivedList ? [] : prev
+
+      // Multi-writer item board: refuse *status transitions* on items claimed
+      // by another owner. Same-status patches (description/files/evidence) are
+      // allowed — models often re-send the full list. Explicit reclaim requires
+      // claimedBy set to THIS owner (not implicit).
+      // Also consult disk board for claims from other sessions/windows.
+      let boardClaims = new Map<string, string>()
+      try {
+        const project = useProjectStore.getState().currentProject
+        if (project?.path) {
+          const { readTaskBoard } = await import('../taskBoardService')
+          const board = await readTaskBoard(project.path)
+          for (const item of board?.items ?? []) {
+            if (item.claimedBy && item.sessionId !== execSid) {
+              boardClaims.set(item.id, item.claimedBy)
+            }
+          }
+        }
+      } catch { /* board is advisory */ }
+
+      for (const t of incoming) {
+        const existing = baseTasks.find(m => m.id === t.id)
+        const localClaim = existing?.claimedBy ?? null
+        const boardClaim = boardClaims.get(t.id) ?? null
+        const foreignClaim =
+          localClaim && localClaim !== claimOwner
+            ? localClaim
+            : boardClaim && boardClaim !== claimOwner
+              ? boardClaim
+              : null
+        if (!foreignClaim) continue
+        const isRelease = t.claimedBy === null
+        const isExplicitReclaim =
+          typeof t.claimedBy === 'string' && t.claimedBy === claimOwner
+        if (isRelease || isExplicitReclaim) continue
+        // Only block actual status changes (not re-sends of description).
+        if (existing && t.status !== existing.status) {
+          return `Blocked: task "${t.id}" is claimed by "${foreignClaim}". Wait for them to finish/release, or explicitly reclaim with { id: "${t.id}", status: "${t.status}", claimedBy: "${claimOwner}" } (prefer coordination via the developer).`
+        }
+        if (!existing && boardClaim) {
+          return `Blocked: task "${t.id}" is claimed by "${foreignClaim}" on the shared board. Reclaim explicitly with claimedBy: "${claimOwner}" if taking over.`
+        }
+      }
 
       // Patch-merge: start from the existing tracker, apply updates by ID,
       // append new tasks. This prevents accidental deletion when the model
@@ -142,10 +211,22 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
       // old completed plan that the UI correctly hides.
       const merged = [...baseTasks]
       const newTasks: StoredTask[] = []
+      const now = Date.now()
 
       for (const t of incoming) {
         const status = t.status as TaskStatus
         const existingIdx = merged.findIndex(m => m.id === t.id)
+        // Auto-claim in_progress for the executing agent when unclaimed.
+        const autoClaim =
+          status === 'in_progress'
+          && (existingIdx === -1 || !merged[existingIdx]?.claimedBy)
+          && t.claimedBy === undefined
+        const nextClaim =
+          t.claimedBy !== undefined
+            ? t.claimedBy
+            : autoClaim
+              ? claimOwner
+              : undefined
         if (existingIdx !== -1) {
           // Patch existing task — description/dependsOn/blockedBy/files
           // are optional on update. Spread the incoming fields so they
@@ -158,6 +239,16 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
             ...(t.blockedBy !== undefined ? { blockedBy: t.blockedBy } : {}),
             ...(t.files !== undefined ? { files: t.files } : {}),
             ...(t.evidence !== undefined ? { evidence: t.evidence } : {}),
+            ...(nextClaim !== undefined
+              ? {
+                  claimedBy: nextClaim,
+                  claimedAt: nextClaim ? now : null,
+                }
+              : {}),
+            // Terminal statuses release the claim so the board stays clean.
+            ...(isTerminalTask(status)
+              ? { claimedBy: null, claimedAt: null }
+              : {}),
             status,
           }
         } else {
@@ -173,6 +264,11 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
             ...(t.blockedBy ? { blockedBy: t.blockedBy } : {}),
             ...(t.files ? { files: t.files } : {}),
             ...(t.evidence ? { evidence: t.evidence } : {}),
+            ...(nextClaim
+              ? { claimedBy: nextClaim, claimedAt: now }
+              : nextClaim === null
+                ? { claimedBy: null, claimedAt: null }
+                : {}),
           })
         }
       }
@@ -214,6 +310,10 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
       if (project?.path) {
         void import('../taskPersistence').then(({ saveTasksForSession }) =>
           saveTasksForSession(project.path, execSid, finalTasks),
+        ).catch(() => { /* non-critical */ })
+        // Multi-writer board mirror (cross-window read of open items + claims).
+        void import('../taskBoardService').then(({ mirrorTaskBoard }) =>
+          mirrorTaskBoard(project.path, execSid, finalTasks),
         ).catch(() => { /* non-critical */ })
       }
 

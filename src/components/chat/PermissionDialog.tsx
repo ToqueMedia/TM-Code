@@ -34,9 +34,6 @@ interface PermissionDialogProps {
   /** Descrição da tarefa paralela que originou o pedido (permissionStore
    *  origin) — o user tem de saber QUEM pergunta quando há multi-agentes. */
   originLabel?: string
-  /** Razão do classificador do Modo Auto quando o diálogo surge por escalada
-   *  (sinalizou risco em vez de negar) — mostrada para o developer ver PORQUÊ. */
-  classifierReason?: string
   approve: () => void
   approveAlwaysInProject: (commandPrefix?: string) => void
   approveAlwaysGlobal: (commandPrefix?: string) => void
@@ -52,7 +49,6 @@ export default function PermissionDialog({
   promptReason,
   pathAccessTarget,
   originLabel,
-  classifierReason,
   approve,
   approveAlwaysInProject,
   approveAlwaysGlobal,
@@ -236,30 +232,6 @@ export default function PermissionDialog({
           )}
         </Flex>
 
-        {/* Razão do classificador do Modo Auto — quando o diálogo surge por
-            escalada, o developer vê AQUI porquê foi sinalizado (antes só ia
-            para o log do chat). */}
-        {classifierReason && (
-          <Flex
-            align="flex-start"
-            gap={1.5}
-            mb={3}
-            px={2}
-            py={1.5}
-            borderRadius="6px"
-            bg={tokens.colors.accent.orangeSubtle}
-            border={`1px solid ${tokens.colors.accent.orangeMuted}`}
-          >
-            <Box as="span" color={tokens.colors.accent.orange} flexShrink={0} mt="1px" fontSize="10px" fontWeight={700}>
-              {'⏵⏵'}
-            </Box>
-            <Text fontSize="11px" color={tokens.colors.text.secondary} lineHeight="1.4">
-              <Text as="span" color={tokens.colors.accent.orange} fontWeight={600}>{t('perm.autoFlagged')}</Text>
-              {' '}{classifierReason}
-            </Text>
-          </Flex>
-        )}
-
         {/* Options */}
         <Flex direction="column" gap={1} mb={2}>
           <OptionRow
@@ -370,9 +342,9 @@ export default function PermissionDialog({
           </Box>
         )}
 
-        {/* Descoberta do Modo Auto no ponto de fricção: quando OFF, um link
-            discreto liga-o (o pedido ATUAL continua manual — só os próximos
-            passam pelo classificador). */}
+        {/* Descoberta do Modo YOLO no ponto de fricção: quando OFF, um link
+            activa YOLO para este projecto — o pedido aberto e a fila deste
+            projecto são aprovados (setAutoModePermissions drena). */}
         {!autoModePermissions && (
           <Box
             as="button"

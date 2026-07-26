@@ -23,6 +23,14 @@ export interface AgentTask {
    *  when flipping a task to `completed` — filesystem existence does not
    *  count. Persisted as an audit trail of why each task was marked done. */
   evidence?: string;
+  /**
+   * Multi-writer item board (Fase 6b residual): which agent owns this item.
+   * `main` = interactive run; otherwise a parallel/session task id or a
+   * stable session label. Empty/undefined = unclaimed (any agent may work).
+   */
+  claimedBy?: string | null;
+  /** Epoch ms when the claim was taken (for UI + cross-window board). */
+  claimedAt?: number | null;
 }
 
 interface AgentState {

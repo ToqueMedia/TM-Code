@@ -519,3 +519,104 @@ pub(crate) fn clear_project_agent_status(project_path: &str) {
         }
     }
 }
+
+// ─── Cross-window focus request ─────────────────────────────────────────────
+//
+// Multi-window residual 10/10: when the user clicks a project whose agent is
+// running in ANOTHER process, we write a focus-request the owner consumes on
+// its next heartbeat (≤3s focused / ≤30s background) and brings its window
+// to the front. Disk-only bus — same doctrine as agent-status / stop-requests.
+
+const FOCUS_REQUEST_FILE: &str = "focus-request.json";
+/// Drop requests older than this (ms) so a dead requester cannot keep
+/// re-focusing the owner forever.
+const FOCUS_REQUEST_STALE_MS: u64 = 15_000;
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFocusRequest {
+    pub target_pid: u32,
+    pub requester_pid: u32,
+    pub requested_at: u64,
+}
+
+/// Ask the window that owns `agent-status.json` (or the window lock) for this
+/// project to come to the front. Returns Ok(true) when a foreign live owner
+/// was targeted, Ok(false) when there is no foreign owner (caller may open
+/// locally).
+#[tauri::command]
+pub async fn request_project_window_focus(project_path: String) -> Result<bool, String> {
+    let Some(root) = project_state_root_readonly(&project_path) else {
+        return Ok(false);
+    };
+    let self_pid = std::process::id();
+    let mut target_pid: Option<u32> = None;
+
+    if let Ok(content) = std::fs::read_to_string(root.join(AGENT_STATUS_FILE)) {
+        if let Ok(status) = serde_json::from_str::<ProjectAgentStatus>(&content) {
+            if status.pid != self_pid
+                && matches!(status.state.as_str(), "running" | "done" | "error")
+            {
+                target_pid = Some(status.pid);
+            }
+        }
+    }
+    if target_pid.is_none() {
+        if let Ok(content) = std::fs::read_to_string(root.join(WINDOW_LOCK_FILE)) {
+            if let Ok(lock) = serde_json::from_str::<ProjectWindowLock>(&content) {
+                if lock.pid != self_pid {
+                    target_pid = Some(lock.pid);
+                }
+            }
+        }
+    }
+    let Some(target) = target_pid else {
+        return Ok(false);
+    };
+
+    let root = project_state_root(&project_path)?;
+    std::fs::create_dir_all(&root)
+        .map_err(|e| format!("Failed to create project state directory: {}", e))?;
+    let req = ProjectFocusRequest {
+        target_pid: target,
+        requester_pid: self_pid,
+        requested_at: now_ms(),
+    };
+    let json = serde_json::to_string(&req)
+        .map_err(|e| format!("Failed to serialize focus request: {}", e))?;
+    let seq = STATE_FILE_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = root.join(format!(".focus-request.tmp-{}-{}", self_pid, seq));
+    std::fs::write(&tmp, &json).map_err(|e| format!("Failed to write focus request: {}", e))?;
+    std::fs::rename(&tmp, root.join(FOCUS_REQUEST_FILE))
+        .map_err(|e| format!("Failed to publish focus request: {}", e))?;
+    Ok(true)
+}
+
+/// Consume a pending focus request aimed at THIS process. Returns true when
+/// the caller should bring its main window to the front.
+#[tauri::command]
+pub async fn take_project_window_focus_request(project_path: String) -> Result<bool, String> {
+    let Some(root) = project_state_root_readonly(&project_path) else {
+        return Ok(false);
+    };
+    let file = root.join(FOCUS_REQUEST_FILE);
+    let Ok(content) = std::fs::read_to_string(&file) else {
+        return Ok(false);
+    };
+    let Ok(req) = serde_json::from_str::<ProjectFocusRequest>(&content) else {
+        let _ = std::fs::remove_file(&file);
+        return Ok(false);
+    };
+    let self_pid = std::process::id();
+    let age = now_ms().saturating_sub(req.requested_at);
+    if req.target_pid != self_pid || age > FOCUS_REQUEST_STALE_MS {
+        // Not for us, or stale — leave foreign requests alone; drop stale own
+        // targets so they don't stick forever.
+        if req.target_pid == self_pid {
+            let _ = std::fs::remove_file(&file);
+        }
+        return Ok(false);
+    }
+    let _ = std::fs::remove_file(&file);
+    Ok(true)
+}

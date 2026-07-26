@@ -327,6 +327,12 @@ class ToolExecutor {
    */
   private planMode: boolean = false
   private planModePlanFileName: string = 'PLAN.md'
+  /**
+   * Owners that currently hold plan-mode (refcounted). Live-task `/plan` and
+   * main `executePlan` each register an owner so one finishing does not clear
+   * plan-mode for the other (singleton ToolExecutor under F2 multi-project).
+   */
+  private planModeOwners: Set<string> = new Set()
 
   /**
    * Memory scope — set per-invocation by execute() when a sub-agent
@@ -530,17 +536,37 @@ class ToolExecutor {
     this.worktreeState = null
   }
 
-  /** Enable architect mode for /plan: implementation tools are blocked.
-   *  Resets plan-progress flags so each /plan run starts clean. */
-  enablePlanMode(planFileName: string = 'PLAN.md'): void {
+  /**
+   * Enable architect mode for /plan: implementation tools are blocked.
+   * Resets plan-progress flags so each /plan run starts clean.
+   * @param ownerId optional lease id — pair with `disablePlanMode(ownerId)`.
+   *   Omit for legacy single-owner callers (`executePlan`); they clear all.
+   */
+  enablePlanMode(planFileName: string = 'PLAN.md', ownerId?: string): void {
     this.planMode = true
     this.planModePlanFileName = planFileName || 'PLAN.md'
     this.planFileWritten = false
     this.planTasksSeeded = false
+    if (ownerId) {
+      this.planModeOwners.add(ownerId)
+    } else {
+      // Legacy: anonymous owner so disablePlanMode() without id still clears.
+      this.planModeOwners.add('__legacy__')
+    }
   }
 
-  /** Restore the normal coding agent surface. */
-  disablePlanMode(): void {
+  /**
+   * Restore the normal coding agent surface when no owners remain.
+   * @param ownerId when set, only releases this lease; plan-mode stays on if
+   *   other owners still hold it. When omitted, clears all owners (legacy).
+   */
+  disablePlanMode(ownerId?: string): void {
+    if (ownerId) {
+      this.planModeOwners.delete(ownerId)
+    } else {
+      this.planModeOwners.clear()
+    }
+    if (this.planModeOwners.size > 0) return
     this.planMode = false
     this.planModePlanFileName = 'PLAN.md'
     this.planFileWritten = false
@@ -549,6 +575,11 @@ class ToolExecutor {
 
   isPlanMode(): boolean {
     return this.planMode
+  }
+
+  /** Test/diagnostics: active plan-mode lease count. */
+  getPlanModeOwnerCount(): number {
+    return this.planModeOwners.size
   }
 
   /** Clears session-scoped state. Call on new sessions. */
@@ -1093,9 +1124,8 @@ class ToolExecutor {
         // ── fim TEMP ──
         this.recordPermission(toolCallId, decision)
         if (!decision.approved) {
-          // Uma negação chega SEMPRE do diálogo humano (source:'user'): o Modo
-          // Auto já não nega sozinho — sinaliza e escala para o diálogo. Por
-          // isso não há ramo auto_classifier aqui.
+          // Uma negação chega SEMPRE do diálogo humano (source:'user'): YOLO
+          // aprova sempre, nunca nega — por isso só há o ramo humano aqui.
           const reason = decision.denyReason
             ? ` User says: ${decision.denyReason}`
             : ' Ask the user how to proceed.'
@@ -1138,23 +1168,29 @@ class ToolExecutor {
     const isSensitive = (toolName === 'read_file' || toolName === READ_AROUND) && this.isSensitiveFile(input.file_path as string)
 
     // Dangerous commands: all commands in the DANGEROUS_COMMANDS list.
-    // - If BLOCKED by user in Settings → rejected immediately (never runs)
-    // - If NOT blocked → always prompts Yes/No (forcePrompt bypasses Accept All)
+    // - YOLO ON → Settings hard-block + forcePrompt ignored (user accepted risk).
+    // - YOLO OFF + BLOCKED in Settings → rejected immediately (never runs)
+    // - YOLO OFF + not blocked → always prompts Yes/No (forcePrompt)
     // - Commands NOT in the list → normal permission flow
     let dangerousAlreadyApproved = false
     if (toolName === 'execute_command') {
       const commandStr = (input.command as string) || ''
       const dangerousMatch = this.matchDangerousCommand(commandStr)
       if (dangerousMatch) {
-        const { flaggedCommands } = useSettingsStore.getState()
-        if (flaggedCommands.includes(dangerousMatch)) {
-          return `Blocked: "${dangerousMatch}" is blocked in your Settings. The developer disabled this command. Ask the developer to unblock it in Settings > Sandbox if needed.`
+        const { isYoloModeEnabled } = await import('../../stores/permissionStore')
+        const yolo = isYoloModeEnabled(this.runProjectContext?.projectId)
+        if (!yolo) {
+          const { flaggedCommands } = useSettingsStore.getState()
+          if (flaggedCommands.includes(dangerousMatch)) {
+            return `Blocked: "${dangerousMatch}" is blocked in your Settings. The developer disabled this command. Ask the developer to unblock it in Settings > Sandbox if needed.`
+          }
         }
-        // Not blocked but dangerous → always ask (forcePrompt bypasses Accept All)
-        const decision = await usePermissionStore.getState().requestPermission(toolName, input, 'dangerous_command', this.resolvePermissionOrigin())
+        // YOLO: still record an auto-approval; OFF: forcePrompt dialog.
+        const decision = await usePermissionStore.getState().requestPermission(
+          toolName, input, 'dangerous_command', this.resolvePermissionOrigin(),
+        )
         this.recordPermission(toolCallId, decision)
         if (!decision.approved) {
-          // Negação sempre humana (ver nota no gate de path-scope acima).
           const reason = decision.denyReason
             ? ` User says: ${decision.denyReason}`
             : ' Ask the user what they want instead.'

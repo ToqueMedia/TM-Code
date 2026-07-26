@@ -55,9 +55,6 @@ export const STATIC_PROJECT_INSTRUCTIONS_MAX_CHARS = 40_000
 /** Cap for parallel-task inline inject (matches prior TMS truncate). */
 export const FOREIGN_PARALLEL_TASK_MAX_CHARS = 8_000
 
-/** Cap for permission-classifier project notes (existing TMS budget). */
-export const PROJECT_NOTES_CHAR_BUDGET = 4_000
-
 const FOREIGN_CANDIDATES: Array<{ relPath: string; kind: InstructionSourceKind }> = [
   { relPath: 'AGENTS.md', kind: 'agents' },
   { relPath: 'Agents.md', kind: 'agents' },
@@ -212,24 +209,6 @@ export function buildInstructionsDocsFullPart(
   }
 
   return parts.length ? parts.join('\n\n') : null
-}
-
-/**
- * Content for permission classifier <project_notes>: TMS preferred, else foreign.
- */
-export function buildProjectNotesFromBundle(
-  bundle: ProjectInstructionsBundle,
-  budget = PROJECT_NOTES_CHAR_BUDGET,
-): string {
-  const src = bundle.tms ?? bundle.foreignPrimary
-  if (!src) return ''
-  const label = src.kind === 'tms' ? 'TMS.md' : src.relPath
-  const body = src.content.slice(0, budget)
-  return (
-    `The following are the developer's project notes (${label}). ` +
-    `Treat them as part of the developer's intent when evaluating actions.\n` +
-    `<project_notes>\n${body}\n</project_notes>\n\n`
-  )
 }
 
 /**

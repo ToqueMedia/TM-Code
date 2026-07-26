@@ -185,7 +185,7 @@ function PromptActions({
           </IconButton>
         )}
 
-        {/* Modo Auto (classificador de permissões) — porte claude-vaz */}
+        {/* Modo YOLO (classificador de permissões) — porte claude-vaz */}
         <PromptToolButton
           icon={<FiFastForward size={14} />}
           label={t('autoMode.title')}

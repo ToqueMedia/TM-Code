@@ -341,7 +341,22 @@ export async function runParallelTask(runId: string): Promise<void> {
   // Builder EFÉMERO desta tarefa — resolve request_context do prompt construído.
   let taskBuilder: ContextBuilderT | null = null
 
+  /** Apply mid-run `/plan` to THIS task's isolated executor (not the singleton). */
+  const syncLivePlanToChild = (): void => {
+    const live = useParallelTaskStore.getState().runs.get(runId)
+    if (!live?.planOverride) return
+    if (!toolExecutor.isPlanMode()) {
+      toolExecutor.enablePlanMode(
+        live.planOverride.planFileName,
+        live.planOverride.planModeOwnerId,
+      )
+    }
+    toolExecutor.setRequestType('plan')
+  }
+
   const executeTool: ToolExecutorFn = async (toolName, toolInput, toolUseId, signal) => {
+    // Mid-run `/plan` may arrive after this child was created — sync lease.
+    syncLivePlanToChild()
     // Meta-tools do prompt construído (fusão 4b) — nunca chegam ao toolExecutor.
     // request_tools: sem seleção dinâmica nas tarefas (toolset completo desde
     // o turno 1). request_context: secções auxiliares omitidas pelo planner,
@@ -490,6 +505,17 @@ export async function runParallelTask(runId: string): Promise<void> {
     refreshClient,
     model,
     systemPrompt,
+    // Loop fusion residual: re-read each turn so mid-run `/plan` can swap the
+    // architect system prompt without restarting the engine.
+    getSystemPrompt: () => {
+      const live = useParallelTaskStore.getState().runs.get(runId)
+      return live?.planOverride?.systemPrompt ?? systemPrompt
+    },
+    getExtraHeaders: () => {
+      const live = useParallelTaskStore.getState().runs.get(runId)
+      if (live?.planOverride) return { 'X-Request-Type': 'plan' }
+      return undefined
+    },
     getContextLimits: () => contextLimits,
     tools: openaiTools,
     executeTool,
@@ -522,6 +548,10 @@ export async function runParallelTask(runId: string): Promise<void> {
         useParallelTaskStore.getState().abort(runId)
         return null
       }
+      // Focus request can land on turn boundaries too (faster than 30s beat).
+      void import('../../projectWindowFocusService')
+        .then(({ consumeFocusRequestIfAny }) => consumeFocusRequestIfAny(projectPath))
+        .catch(() => { /* best-effort */ })
       const steer = useParallelTaskStore.getState().drainSteer(runId)
       const { drainSubAgentDeliveries } = await import('../subAgents/autoWake')
       const deliveries = drainSubAgentDeliveries(runId)
@@ -618,6 +648,10 @@ export async function runParallelTask(runId: string): Promise<void> {
         ]).then(([sessionStop, projectStop]) => {
           if (sessionStop || projectStop) useParallelTaskStore.getState().abort(runId)
         })
+        // Cross-window focus request (same disk bus as main writer heartbeat).
+        void import('../../projectWindowFocusService')
+          .then(({ consumeFocusRequestIfAny }) => consumeFocusRequestIfAny(projectPath))
+          .catch(() => { /* best-effort */ })
       }, 30_000)
     : null
 
@@ -915,6 +949,21 @@ export async function runParallelTask(runId: string): Promise<void> {
     if (persistBeat) clearInterval(persistBeat)
     abortController.signal.removeEventListener('abort', onAbort)
     toolExecutor.disposeIsolatedChild()
+
+    // Mid-run `/plan`: release child plan-mode lease, then settle UI state.
+    const planOverride = useParallelTaskStore.getState().runs.get(runId)?.planOverride
+    if (planOverride) {
+      try {
+        toolExecutor.disablePlanMode(planOverride.planModeOwnerId)
+        toolExecutor.setRequestType(null)
+      } catch { /* */ }
+      void import('./planOnLiveRun')
+        .then(({ settlePlanOverrideOnRunEnd }) =>
+          settlePlanOverrideOnRunEnd(planOverride, projectPath, chatSessionId),
+        )
+        .catch(() => { /* best-effort */ })
+    }
+
     // Fase 6 (inbox): se o developer estava A VER o chat da tarefa quando ela
     // terminou, o resultado conta como visto — nada de item fantasma no inbox.
     if (chatSessionId && useChatStore.getState().activeSessionId === chatSessionId) {

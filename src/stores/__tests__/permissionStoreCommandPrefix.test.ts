@@ -20,15 +20,6 @@ jest.mock('../chatStore', () => ({
   },
 }))
 
-jest.mock('../../services/agent/permissionClassifier', () => ({
-  classifyPermissionAction: jest.fn(),
-}))
-
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { classifyPermissionAction } = require('../../services/agent/permissionClassifier') as {
-  classifyPermissionAction: jest.Mock
-}
-
 function resetStore(partial: Record<string, unknown> = {}): void {
   usePermissionStore.setState({
     projectPath: null,
@@ -39,7 +30,6 @@ function resetStore(partial: Record<string, unknown> = {}): void {
     globalCommandAllowlist: new Set<string>(),
     additionalDirectories: new Set<string>(),
     autoModePermissions: false,
-    classifierChecking: null,
     autoDenyAll: false,
     pendingPermission: null,
     permissionQueue: [],
@@ -51,7 +41,6 @@ function resetStore(partial: Record<string, unknown> = {}): void {
 describe('permissionStore — grants por prefixo de comando', () => {
   beforeEach(() => {
     resetStore()
-    classifyPermissionAction.mockReset()
     try { localStorage.clear() } catch { /* jsdom */ }
   })
 
@@ -91,7 +80,7 @@ describe('permissionStore — grants por prefixo de comando', () => {
     expect(usePermissionStore.getState().pendingPermission?.toolName).toBe('execute_command')
   })
 
-  it('Modo Auto: prefixo concedido curto-circuita o classificador', async () => {
+  it('Modo YOLO: approve sem classificador (mesmo com prefixo concedido)', async () => {
     resetStore({
       autoModePermissions: true,
       projectCommandAllowlist: new Set(['gcloud secrets versions add']),
@@ -102,23 +91,21 @@ describe('permissionStore — grants por prefixo de comando', () => {
       { command: 'gcloud secrets versions add X --data-file=-' },
     )
 
-    expect(classifyPermissionAction).not.toHaveBeenCalled()
-    expect(decision).toEqual(expect.objectContaining({ approved: true, source: 'user' }))
+    expect(decision).toEqual(expect.objectContaining({ approved: true, source: 'yolo' }))
   })
 
-  it('Modo Auto: comando sem prefixo concedido cai no classificador', async () => {
+  it('Modo YOLO: comando sem prefixo também aprova sem classificador', async () => {
     resetStore({
       autoModePermissions: true,
       projectCommandAllowlist: new Set(['npm run']),
     })
-    classifyPermissionAction.mockResolvedValue({ decision: 'allow', reason: 'ok' })
 
-    await usePermissionStore.getState().requestPermission(
+    const decision = await usePermissionStore.getState().requestPermission(
       'execute_command',
       { command: 'gcloud secrets versions add X' },
     )
 
-    expect(classifyPermissionAction).toHaveBeenCalledTimes(1)
+    expect(decision).toEqual(expect.objectContaining({ approved: true, source: 'yolo' }))
   })
 
   it('approveAlwaysInProject grava o PREFIXO extraído, não o nome da tool', () => {

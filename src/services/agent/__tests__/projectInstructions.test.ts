@@ -4,12 +4,10 @@
 import {
   loadProjectInstructions,
   buildInstructionsDocsFullPart,
-  buildProjectNotesFromBundle,
   buildParallelTaskInstructionsBody,
   extractInstructionHeadings,
   truncateNamed,
   FOREIGN_DOCS_FULL_MAX_CHARS,
-  PROJECT_NOTES_CHAR_BUDGET,
   type InstructionSource,
 } from '../projectInstructions'
 import { getProjectMemorySection } from '../contextBuilder/sections/chatSections'
@@ -148,61 +146,6 @@ describe('buildInstructionsDocsFullPart', () => {
     const out = buildInstructionsDocsFullPart(null, huge, { omitForeignAlreadyInSystem: false })!
     expect(out).toContain('truncated AGENTS.md')
     expect(out.length).toBeLessThan(huge.content.length)
-  })
-})
-
-describe('buildProjectNotesFromBundle', () => {
-  it('prefers TMS over foreign', () => {
-    const notes = buildProjectNotesFromBundle({
-      tms: { kind: 'tms', path: '/p/TMS.md', relPath: 'TMS.md', content: 'tms notes' },
-      foreignPrimary: {
-        kind: 'agents',
-        path: '/p/AGENTS.md',
-        relPath: 'AGENTS.md',
-        content: 'agents notes',
-      },
-      hasAny: true,
-    })
-    expect(notes).toContain('TMS.md')
-    expect(notes).toContain('tms notes')
-    expect(notes).not.toContain('agents notes')
-  })
-
-  it('falls back to foreign with relPath label', () => {
-    const notes = buildProjectNotesFromBundle({
-      tms: null,
-      foreignPrimary: {
-        kind: 'agents',
-        path: '/p/AGENTS.md',
-        relPath: 'AGENTS.md',
-        content: 'deploy only with confirm',
-      },
-      hasAny: true,
-    })
-    expect(notes).toContain('AGENTS.md')
-    expect(notes).toContain('deploy only with confirm')
-  })
-
-  it('respects char budget', () => {
-    const notes = buildProjectNotesFromBundle(
-      {
-        tms: {
-          kind: 'tms',
-          path: '/p/TMS.md',
-          relPath: 'TMS.md',
-          content: 'a'.repeat(PROJECT_NOTES_CHAR_BUDGET + 200),
-        },
-        foreignPrimary: null,
-        hasAny: true,
-      },
-      PROJECT_NOTES_CHAR_BUDGET,
-    )
-    const inner = notes.match(/<project_notes>\n([\s\S]*)\n<\/project_notes>/)?.[1] ?? ''
-    expect(inner.length).toBe(PROJECT_NOTES_CHAR_BUDGET)
-  })
-
-  it('returns empty string when nothing', () => {
-    expect(buildProjectNotesFromBundle({ tms: null, foreignPrimary: null, hasAny: false })).toBe('')
   })
 })
 

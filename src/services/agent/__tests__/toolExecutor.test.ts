@@ -144,6 +144,10 @@ const mockGetState_chat = jest.fn(() => ({
 jest.mock('../../../stores/permissionStore', () => ({
   usePermissionStore: { getState: mockGetState_permission },
   getProjectGrants: mockGetProjectGrants,
+  // O gate de dangerous_command consulta isto ANTES do hard-block de Settings
+  // (9db8082); sem o stub, todos os testes de execute_command rebentam com
+  // "isYoloModeEnabled is not a function".
+  isYoloModeEnabled: () => false,
 }))
 
 jest.mock('../../../stores/projectStore', () => ({

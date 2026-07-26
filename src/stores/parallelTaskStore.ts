@@ -23,6 +23,25 @@ export type ParallelSteerItem = {
   blocks?: PromptBlock[]
 }
 
+/**
+ * Mid-run `/plan` architect switch (parallel residual). When set, the runner
+ * serves this system prompt via `getSystemPrompt` and settles the approval
+ * card when the run ends.
+ */
+export type ParallelTaskPlanOverride = {
+  systemPrompt: string
+  planFileName: string
+  planPath: string
+  originalArgs: string
+  enabledAt: number
+  /** ToolExecutor plan-mode lease id (refcount). */
+  planModeOwnerId: string
+  /** Previous autoApproveDiffs — restored on settle. */
+  prevAutoApproveDiffs: boolean
+  /** Whether we set AgentService requestType to 'plan' and must clear it. */
+  setRequestTypePlan: boolean
+}
+
 export function normalizeSteerItem(item: string | ParallelSteerItem): ParallelSteerItem {
   if (typeof item === 'string') return { text: item }
   return { text: item.text, blocks: item.blocks }
@@ -117,6 +136,11 @@ export interface ParallelTaskRun {
    * history pops the last user bubble and resubmits `run.prompt` as plain text.
    */
   initialBlocks?: PromptBlock[]
+  /**
+   * Live `/plan` override — architect system prompt + artefact paths for the
+   * rest of this run (loop-fusion residual: getSystemPrompt re-reads each turn).
+   */
+  planOverride?: ParallelTaskPlanOverride
 }
 
 interface ParallelTaskState {
@@ -150,6 +174,8 @@ interface ParallelTaskState {
   enqueueSteer: (id: string, item: string | ParallelSteerItem) => void
   /** Drena (e limpa) a fila de steering — chamado pelo runner por turno. */
   drainSteer: (id: string) => ParallelSteerItem[]
+  /** Mid-run `/plan` architect switch for this live task. */
+  setPlanOverride: (id: string, override: ParallelTaskPlanOverride | undefined) => void
   /** Abort one task (queued or running). */
   abort: (id: string) => void
   /** Abort everything (queued + running). */
@@ -311,6 +337,15 @@ export const useParallelTaskStore = create<ParallelTaskState>((set, get) => ({
     })
     return drained
   },
+
+  setPlanOverride: (id, override) =>
+    set((s) => {
+      const run = s.runs.get(id)
+      if (!run) return s
+      const runs = new Map(s.runs)
+      runs.set(id, { ...run, planOverride: override })
+      return { runs }
+    }),
 
   abort: (id) => {
     const run = get().runs.get(id)

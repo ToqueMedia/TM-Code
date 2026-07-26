@@ -540,6 +540,51 @@ fn app_ready(app: tauri::AppHandle) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Bring THIS process's main window to the front (cross-window focus request
+/// residual — another window wrote focus-request.json for our pid).
+#[tauri::command]
+fn focus_main_window(app: tauri::AppHandle) -> std::result::Result<(), String> {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        win.show().map_err(|e| format!("show failed: {}", e))?;
+        // Best-effort: set_focus can silently fail under macOS focus-stealing
+        // policy; we still try and then escalate via OS activate below.
+        let _ = win.set_focus();
+    }
+
+    // OS-level activate — set_focus alone often fails when another app owns
+    // keyboard focus (Spaces, App Nap, click-from-background).
+    #[cfg(target_os = "macos")]
+    {
+        let pid = std::process::id();
+        let script = format!(
+            "tell application \"System Events\" to set frontmost of first process whose unix id is {} to true",
+            pid
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Tauri set_focus is usually enough on Windows; no extra fallback.
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // Best-effort: wmctrl by pid if present (optional dependency).
+        let pid = std::process::id();
+        let _ = std::process::Command::new("wmctrl")
+            .args(["-i", "-a", &format!("pid:{}", pid)])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    Ok(())
+}
+
 /// Files queued by the OS for opening (file association: "Open with TM Code"
 /// from Finder/Explorer/Nautilus, or by drag-dropping a file onto the dock
 /// icon). The frontend drains this on mount and listens for the live
@@ -1540,6 +1585,7 @@ pub fn run() {
             get_device_fingerprint,
             detect_test_browsers,
             app_ready,
+            focus_main_window,
             take_pending_open_files,
             take_pending_open_project,
             is_directory,
@@ -1548,7 +1594,9 @@ pub fn run() {
             get_project_agent_statuses,
             acquire_project_window_lock,
             check_project_window_lock,
-            release_project_window_lock
+            release_project_window_lock,
+            request_project_window_focus,
+            take_project_window_focus_request
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

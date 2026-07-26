@@ -345,6 +345,8 @@ interface ChatActions {
     type: ChatMessageCard['type'],
     projectPath: string,
     metadata?: Pick<ChatMessageCard, 'planPath' | 'planFileName'>,
+    /** When set, write the card on this session (task chats) not only active. */
+    targetSessionId?: string,
   ) => void
   /** Add a credential_request card with field metadata. Returns the message id so the
    *  card can update its own status when the user submits or cancels. */
@@ -667,14 +669,10 @@ export function resolveDiffApprovalByResultId(diffResultId: string, approved: bo
 export async function createDiffApprovalPromise(toolCallId: string): Promise<boolean> {
   // Auto-aprovação de diffs por DOIS interruptores:
   //  - autoApproveDiffs ("Accept All" no chrome do chat), como sempre;
-  //  - MODO AUTO (paridade 100% claude-vaz, decisão do user 2026-07-18):
-  //    com o auto mode ligado, escrever código NÃO pergunta — no claude-vaz
-  //    os edits passam pelo fast-path acceptEdits sem classificação nem
-  //    prompt. O diff é aplicado e fica REGISTADO no transcript como
-  //    aprovado (o caminho abaixo já faz isso). Desligar o Modo Auto
-  //    restaura o checkpoint sem tocar na preferência autoApproveDiffs.
-  //    Escritas perigosas continuam gated ANTES daqui (sensitive_file /
-  //    path_access são forcePrompt — nunca passam pelo Modo Auto).
+  //  - MODO YOLO (autoModePermissions): com YOLO ligado, escrever código
+  //    NÃO pergunta — o diff aplica-se e fica REGISTADO no transcript como
+  //    aprovado. Desligar YOLO restaura o checkpoint de diffs sem tocar na
+  //    preferência autoApproveDiffs.
   const { autoApproveDiffs, autoModePermissions } = usePermissionStore.getState()
   if (autoApproveDiffs || autoModePermissions) {
     // Preferred path: updateToolCallWithResult already started acceptDiff
@@ -4215,6 +4213,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       type: ChatMessageCard['type'],
       projectPath: string,
       metadata?: Pick<ChatMessageCard, 'planPath' | 'planFileName'>,
+      targetSessionId?: string,
     ) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
@@ -4227,10 +4226,20 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       set(state => {
         const { activeSessionId, sessions } = state
-        if (!activeSessionId) return state
+        const sid = targetSessionId || activeSessionId
+        if (!sid) return state
 
-        const session = sessions.get(activeSessionId)
+        const session = sessions.get(sid)
         if (!session) return state
+        // Never stamp a plan card onto a session from a different project.
+        if (
+          session.projectPath
+          && projectPath
+          && session.projectPath.replace(/\\/g, '/').replace(/\/+$/, '')
+            !== projectPath.replace(/\\/g, '/').replace(/\/+$/, '')
+        ) {
+          return state
+        }
 
         const updatedSession: ChatSession = {
           ...session,
@@ -4239,12 +4248,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         }
 
         const updatedSessions = new Map(sessions)
-        updatedSessions.set(activeSessionId, updatedSession)
+        updatedSessions.set(sid, updatedSession)
 
         return { sessions: updatedSessions }
       })
 
       debouncedSave()
+      if (targetSessionId) persistSessionById(targetSessionId)
     },
 
     updateCardStatus: (messageId: string, status: ChatMessageCard['status']) => {

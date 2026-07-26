@@ -202,6 +202,11 @@ function tickHeartbeat(): void {
       })
     })
     .catch(() => { /* best-effort */ })
+  // Cross-window focus request: another window clicked this project and asked
+  // us to come to the front (disk bus; residual OS-focus polish).
+  void import('./projectWindowFocusService')
+    .then(({ consumeFocusRequestIfAny }) => consumeFocusRequestIfAny(pathForStop))
+    .catch(() => { /* best-effort */ })
   // Re-lê os metadados da sessão a cada beat: se o user renomear a
   // tarefa ou editar a descrição A MEIO do run, as outras janelas veem
   // a edição no próximo heartbeat (≤3s focused / ≤30s background).
