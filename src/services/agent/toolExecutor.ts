@@ -70,9 +70,8 @@ import {
 } from './toolNames'
 import { ENTER_WORKTREE_DESCRIPTION, EXIT_WORKTREE_DESCRIPTION } from './toolExecutor/worktrees'
 import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileState, type FileStateCache } from './toolExecutor/fileStateCache'
-import { FILE_UNCHANGED_STUB } from './toolExecutor/readDedup'
-import { checkReadRangeOverlap, recordReadRange, clearReadRangeTracker } from './toolExecutor/readRangeTracker'
-import { isToolResultContextVisible, clearToolResultVisibility } from './toolExecutor/toolResultVisibility'
+import { recordReadRange, clearReadRangeTracker } from './toolExecutor/readRangeTracker'
+import { clearToolResultVisibility } from './toolExecutor/toolResultVisibility'
 import { clearMentionContextTracker } from './mentionContextTracker'
 import { addLineNumbers } from './toolExecutor/lineNumbers'
 import { hasBinaryExtension } from './toolExecutor/binaryExtensions'
@@ -3136,8 +3135,7 @@ ${preview}
             file_path: { type: 'string', description: 'Absolute path to the file to read' },
             path: { type: 'string', description: 'Alias for file_path' },
             offset: { type: 'number', description: '1-indexed line number to start from. Combine with `limit` to read a slice of a large file.' },
-            limit: { type: 'number', description: 'Maximum number of lines to read. Default: read to end of file.' },
-            force: { type: 'boolean', description: 'Bypass duplicate-read suppression only when a previous Read range is no longer available after compaction/context loss. Do not use for normal navigation.' }
+            limit: { type: 'number', description: 'Maximum number of lines to read. Default: read to end of file.' }
           },
           required: []
         },
@@ -3156,7 +3154,6 @@ ${preview}
         let offset = offsetProvided ? Math.max(1, input.offset as number) : 1
         let limit = limitProvided ? Math.max(1, input.limit as number) : 0
         let sliceRequested = offsetProvided || limitProvided
-        const forceRead = input.force === true
         // Injected by execute(); undefined em caminhos sem tool_call
         // (executeForMention). Guarda-se no FileState/readRangeTracker para
         // o dedup poder perguntar ao toolResultVisibility se o resultado que
@@ -3178,7 +3175,6 @@ ${preview}
         try {
           let requestedOffset = offsetProvided ? offset : undefined
           let requestedLimit = limitProvided ? limit : undefined
-          const existingState = this.readFileState.get(filePath)
 
           // ── Pre-read stat: size guard + dedup freshness (claude-vaz parity) ──
           // claude-vaz does a single getFileModificationTimeAsync(path) stat
@@ -3225,56 +3221,33 @@ ${preview}
           // fire when the tool_result that carried this content went INTACT in
           // the last provider request. If context management compacted it, we
           // fall through and serve the content (no stub, no force:true dance).
-          if (
-            !forceRead &&
-            existingState?.source === 'read' &&
-            !existingState.isPartialView &&
-            isToolResultContextVisible(existingState.toolCallId) &&
-            existingState.offset === requestedOffset &&
-            existingState.limit === requestedLimit &&
-            existingState.signature?.modifiedMs !== undefined &&
-            existingState.signature?.modifiedMs !== null &&
-            preStat?.modifiedMs !== undefined &&
-            preStat?.modifiedMs !== null &&
-            preStat.modifiedMs === existingState.signature.modifiedMs
-          ) {
-            const now = Date.now()
-            this.readFileTimestamps.set(filePath, { timestamp: now, hash: existingState.hash })
-            // Refresh fsVersion on the cached entry so downstream
-            // fsVersion-keyed caches (ipcCache, prompt cache) stay coherent.
-            this.readFileState.set(filePath, {
-              ...existingState,
-              timestamp: now,
-              fsVersion: currentFsVersion,
-            })
-            return FILE_UNCHANGED_STUB
-          }
-
-          // ── Overlap dedup / narrowing ─────────────────────────────
-          // `limit` omitted means read-to-EOF. A prior read-to-EOF range
-          // fully covers later sub-ranges; a partially covered request is
-          // narrowed to the first missing line range before the disk read.
-          if (!forceRead) {
-            const overlap = checkReadRangeOverlap(
-              filePath,
-              requestedOffset,
-              requestedLimit,
-              currentFsVersion,
-              preStat?.modifiedMs,
-            )
-            if (overlap.kind === 'fully_covered' && overlap.stub) {
-              return overlap.stub
-            }
-            if (overlap.kind === 'partially_covered' && overlap.adjustedRange) {
-              offset = overlap.adjustedRange.offset
-              limit = overlap.adjustedRange.limit ?? 0
-              offsetProvided = true
-              limitProvided = overlap.adjustedRange.limit !== undefined
-              sliceRequested = true
-              requestedOffset = offset
-              requestedLimit = overlap.adjustedRange.limit
-            }
-          }
+          // ── Sem supressão de releituras (paridade claude-vaz, 29-07) ──
+          //
+          // Havia aqui duas coisas: um stub "o ficheiro não mudou, o conteúdo
+          // ainda está na conversa" para releituras do mesmo intervalo, e um
+          // dedup de sobreposição que devolvia stub ou ESTREITAVA em silêncio
+          // o intervalo pedido. Ambos gated por um `force` que a própria
+          // descrição mandava não usar em navegação normal.
+          //
+          // O claude-vaz não faz nada disto: o Read devolve o que foi pedido,
+          // todas as vezes, com um tecto DECLARADO (offset/limit). A economia
+          // vinha de o modelo pedir menos, não de a tool entregar menos.
+          //
+          // Porque saiu: sessão katondo-queue (29-07) — 175 read_file em 127
+          // turnos, `schema.ts` lido 23 vezes, 12,36M tokens de input, tarefa
+          // por acabar e créditos esgotados. A narração do modelo explica o
+          // ciclo: "os resultados do Read estão a ser compactados", "vou ler
+          // em pequenas janelas para evitar compactação", "tenho andado em
+          // círculos devido à compactação". O stub afirmava que o conteúdo
+          // ainda estava na conversa quando, do ponto de vista do modelo, já
+          // não estava; a saída documentada (`force`) era desaconselhada pela
+          // própria descrição. Sem forma de obter o ficheiro, ele contornava
+          // pedindo janelas cada vez menores — e cada contorno acrescentava
+          // contexto, que provocava mais compactação. A economia de tokens
+          // gastou 12 milhões deles.
+          //
+          // A dedup por mtime ANTES da leitura (file_stat) fica: essa é a que
+          // o claude-vaz também faz, e não mente ao modelo sobre o que tem.
 
           const readResult = sliceRequested
             ? await this.readFileRange({
@@ -3486,7 +3459,7 @@ ${preview}
     this.tools.set(READ_AROUND, {
       definition: {
         name: READ_AROUND,
-        description: 'Read a bounded line window around a specific 1-indexed line in a file. Use this after search_files returns a matching line and you need the surrounding code. This is a convenience wrapper over read_file offset/limit, so duplicate-read suppression and range tracking still apply.',
+        description: 'Read a bounded line window around a specific 1-indexed line in a file. Use this after search_files returns a matching line and you need the surrounding code. This is a convenience wrapper over read_file offset/limit.',
         input_schema: {
           type: 'object',
           properties: {
@@ -3495,7 +3468,6 @@ ${preview}
             line: { type: 'number', description: '1-indexed target line to center the read around' },
             before: { type: 'number', description: 'Number of lines to include before line. Default: 40, max: 200.' },
             after: { type: 'number', description: 'Number of lines to include after line. Default: 40, max: 200.' },
-            force: { type: 'boolean', description: 'Bypass duplicate-read suppression only when prior context was compacted away.' },
           },
           required: ['line'],
         },

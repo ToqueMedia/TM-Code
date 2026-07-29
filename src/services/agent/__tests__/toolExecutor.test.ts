@@ -329,7 +329,17 @@ describe('A: execute() orchestration', () => {
     })
   })
 
-  it('lets Read force bypass duplicate-read suppression for context-loss recovery', async () => {
+  // Paridade claude-vaz (29-07): o Read devolve o que foi pedido, TODAS as
+  // vezes. Havia aqui um stub "File unchanged since last Read" para
+  // releituras, com um `force` para o contornar — e o `force` era
+  // desaconselhado pela própria descrição.
+  //
+  // Sessão katondo-queue: 175 read_file em 127 turnos, `schema.ts` lido 23
+  // vezes, 12,36M tokens de input, tarefa por acabar. O stub afirmava que o
+  // conteúdo ainda estava na conversa quando já não estava, e o modelo
+  // contornava pedindo janelas cada vez menores — cada contorno somando
+  // contexto. A economia de tokens gastou 12 milhões deles.
+  it('serves the file on every Read — no stub, no force dance', async () => {
     const exec = freshExecutor()
     mockInvokeImpl.mockImplementation(async (cmd: string) => {
       if (cmd === 'file_stat') return { size: 12, modifiedMs: 1700000000000 }
@@ -337,17 +347,14 @@ describe('A: execute() orchestration', () => {
       return undefined
     })
 
-    await exec.execute('Read', { path: 'src/App.tsx' })
-    const suppressed = await exec.execute('Read', { path: 'src/App.tsx' })
-    const forced = await exec.execute('Read', { path: 'src/App.tsx', force: true })
+    const first = await exec.execute('Read', { path: 'src/App.tsx' })
+    const second = await exec.execute('Read', { path: 'src/App.tsx' })
 
-    expect(suppressed).toContain('File unchanged since last Read')
-    expect(forced).toContain('hello world')
-    expect(mockInvokeImpl).toHaveBeenCalledWith('read_file_with_signature', {
-      path: '/projects/test-app/src/App.tsx',
-    })
+    expect(first).toContain('hello world')
+    expect(second).toContain('hello world')
+    expect(second).not.toContain('File unchanged since last Read')
+    // Duas leituras pedidas, duas leituras servidas do disco.
     expect(mockInvokeImpl.mock.calls.filter(([cmd]) => cmd === 'read_file_with_signature')).toHaveLength(2)
-    expect(mockInvokeImpl.mock.calls.filter(([cmd]) => cmd === 'read_file_range_with_signature')).toHaveLength(0)
   })
 
   it('read_around reads only the requested local line window', async () => {
@@ -1481,7 +1488,7 @@ describe('G: Truncation and large results', () => {
     expect(preview.endsWith('x'.repeat(49) + '\n')).toBe(true)
   })
 
-  it('records only model-visible lines as covered when a large Read is preview-truncated', async () => {
+  it('serves every requested range of a preview-truncated file — no coverage refusals', async () => {
     const exec = freshExecutor()
     const line = (n: number) => `line ${String(n).padStart(3, '0')} ` + 'x'.repeat(40)
     const bigContent = Array.from({ length: 2400 }, (_, i) => line(i + 1)).join('\n')
@@ -1494,12 +1501,17 @@ describe('G: Truncation and large results', () => {
     const first = await exec.execute('read_file', { file_path: '/projects/test-app/lines.ts' })
     expect(first).toContain('read_large_result')
 
-    const covered = await exec.execute('read_file', {
+    // Paridade claude-vaz: nenhum intervalo é recusado por "já coberto". O
+    // registo de cobertura continua (serve o read-before-write e a telemetria),
+    // mas deixou de decidir o que o modelo recebe — era isso que o mandava
+    // pedir janelas cada vez menores para fugir ao dedup.
+    const inPreview = await exec.execute('read_file', {
       file_path: '/projects/test-app/lines.ts',
       offset: 20,
       limit: 5,
     })
-    expect(covered).toContain('Range already covered')
+    expect(inPreview).toContain('line 020')
+    expect(inPreview).not.toContain('Range already covered')
 
     const outsidePreview = await exec.execute('read_file', {
       file_path: '/projects/test-app/lines.ts',
@@ -1508,7 +1520,6 @@ describe('G: Truncation and large results', () => {
     })
     expect(outsidePreview).toContain('line 220')
     expect(outsidePreview).not.toContain('Range already covered')
-    expect(mockInvokeImpl.mock.calls.filter(([cmd]) => cmd === 'read_file_with_signature')).toHaveLength(2)
   })
 
   it('continuation offset equals the actual chars shown (no gap skipped)', async () => {
