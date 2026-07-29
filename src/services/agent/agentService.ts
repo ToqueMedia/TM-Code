@@ -1423,10 +1423,28 @@ class AgentService {
         };
       }
 
-      let effectiveToolName = toolName;
+      // Nome CANÓNICO desde a primeira linha.
+      //
+      // Sem isto, `WRITE_TOOLS.has(effectiveToolName)` comparava o nome do
+      // dialecto de treino (`Edit`, `Write`) contra os nomes canónicos
+      // (`edit_file`, `write_file`) e devolvia false — portanto o portão de
+      // aprovação de diffs abaixo era SALTADO por inteiro. O agente publicava
+      // o diff, não esperava por decisão nenhuma e seguia para a tool
+      // seguinte, com o utilizador ainda a olhar para os botões
+      // Accept/Reject (sessão momenu-fact 29-07: três Edits e a seguir Grep,
+      // Read e Bash, tudo antes de qualquer clique).
+      //
+      // Efeito colateral do mesmo salto: o modelo recebia o JSON CRU do diff
+      // — ficheiro velho e novo por inteiro — em vez do resumo compacto
+      // pós-edição. O `toolExecutor` e o `planMode` já normalizavam; este
+      // call site ficou para trás na renomeação para o dialecto de treino.
+      let effectiveToolName = canonicalToolName(toolName);
       let effectiveToolInput = toolInput;
 
-      if (toolName === "execute_command") {
+      // Canónico também aqui: com o dialecto de treino chega `Bash`, e a
+      // comparação crua deixava a redirecção de leituras-por-shell
+      // (`cat`, `head` → Read) sem efeito nenhum.
+      if (effectiveToolName === "execute_command") {
         const command = typeof toolInput.command === "string" ? toolInput.command : "";
         const converted = convertShellReadCommand(command);
         const purpose = converted ? "file_read" : classifyExecuteCommandPurpose(command);

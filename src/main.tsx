@@ -1,4 +1,5 @@
 import React from "react";
+import { disableInputAssist } from "./utils/disableInputAssist";
 import ReactDOM from "react-dom/client";
 import { QueryClientProvider } from '@tanstack/react-query';
 import { queryClient } from './lib/queryClient';
@@ -24,6 +25,10 @@ function logRootError(kind: string) {
     );
   };
 }
+
+// Nenhum campo da IDE completa nem corrige automaticamente. Ligado antes do
+// render para o primeiro ecrã já nascer coberto — ver disableInputAssist.
+disableInputAssist();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement, {
   onUncaughtError: logRootError("Uncaught render error"),
