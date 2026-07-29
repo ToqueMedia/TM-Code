@@ -46,9 +46,17 @@ function isDashScopeProvider(provider: string | undefined, baseUrl: string | und
   }
 }
 
+/**
+ * FAMÍLIA, não versão exacta (2026-07-29). Ver a nota gémea no IDE
+ * (src/services/agent/dashscopePromptCache.ts): trocar o modelo gerido é uma
+ * edição de dados no KV, e o `model !== 'glm-5.1'` deixou de bater quando o
+ * activo passou a `glm-5.2` — sem marcadores, o prefixo cacheado congela e o
+ * histórico é refacturado todos os turnos (12,36M de input numa só sessão).
+ * A correcção estrutural é a capacidade vir do KV `active`.
+ */
 function supportsExplicitCache(model: string, baseUrl: string | undefined): boolean {
   if (DASHSCOPE_EXPLICIT_CACHE_MODELS.has(model)) return true
-  if (model !== 'glm-5.1' || !baseUrl) return false
+  if (!/^glm-/i.test(model) || !baseUrl) return false
   try {
     const host = new URL(baseUrl).hostname.toLowerCase()
     return host === 'dashscope.aliyuncs.com' || host.includes('cn-beijing')

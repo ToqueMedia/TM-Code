@@ -1525,14 +1525,25 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
   sessionService.setTurnSnapshotGetter(() => {
     const c = get()
     const a = useAgentStore.getState()
+    // Fallback: o snapshot JÁ PERSISTIDO da sessão activa. O persist
+    // reconstrói o ficheiro inteiro a cada save, portanto devolver null aqui
+    // não "deixa como está" — APAGA o snapshot anterior. Um save disparado
+    // com o estado vivo vazio (arranque, pós-reset, autosave em idle)
+    // destruía a última janela conhecida, e era por isso que sessões com
+    // horas de trabalho exportavam `lastTurnSnapshot: null` e a pill
+    // renascia no fallback de 200K (sessão katondo, 29-07).
+    const active = c.activeSessionId ? c.sessions.get(c.activeSessionId) : null
+    const persisted = (active as (ChatSession & { lastTurnSnapshot?: import('../types/chat').SessionTurnSnapshot }) | null)?.lastTurnSnapshot ?? null
     if (c.currentPromptTokens === 0 && c.currentResponseTokens === 0 && a.modelContextWindow == null) {
-      return null
+      return persisted
     }
     return {
-      promptTokens: c.currentPromptTokens,
-      responseTokens: c.currentResponseTokens,
-      contextWindow: a.modelContextWindow,
-      modelName: a.modelName,
+      promptTokens: c.currentPromptTokens || persisted?.promptTokens || 0,
+      responseTokens: c.currentResponseTokens || persisted?.responseTokens || 0,
+      // O header vivo manda; sem ele, a última janela conhecida vale mais do
+      // que null — null aqui é o que faz o restore cair no fallback.
+      contextWindow: a.modelContextWindow ?? persisted?.contextWindow ?? null,
+      modelName: a.modelName ?? persisted?.modelName ?? null,
     }
   })
 

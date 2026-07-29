@@ -286,14 +286,24 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
       compactPhase: "idle",
       error: null,
       workerStatus: null,
-      modelName: null,
-      modelProvider: null,
-      thinkingMode: null,
-      modelContextWindow: null,
-      modelMaxOutputTokens: null,
+      // A identidade do modelo NÃO é estado transiente (2026-07-29).
+      //
+      // Isto anulava modelName/modelContextWindow/modelMaxOutputTokens na
+      // troca de projecto — mas o modelo gerido é global, não por projecto, e
+      // estes campos só se repovoam com a PRÓXIMA resposta do worker
+      // (X-Model-Context-Window). Sem próxima resposta — créditos esgotados,
+      // por exemplo — a pill caía no FALLBACK de 200K e mostrava "252%
+      // (overrun) / Compaction is overdue" para um modelo cuja janela real é
+      // 1M (screenshot katondo, 29-07). E o save da sessão nesse estado
+      // persistia um snapshot sem janela, envenenando o restore.
+      //
+      // A identidade fica; quando um modelo diferente responder, o update
+      // opt-in (setModelInfo) substitui-a — que é o único momento em que ela
+      // muda de facto. byokActive é decisão por sessão e esse continua a
+      // limpar-se.
       byokActive: false,
       teamByokActive: false,
-          cumulativeToolCalls: 0,
+      cumulativeToolCalls: 0,
       writesWithoutDevServerLogs: 0,
     });
   },

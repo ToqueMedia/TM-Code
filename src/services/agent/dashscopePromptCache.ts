@@ -40,9 +40,26 @@ function isDashScopeHost(baseURL: string | undefined): boolean {
   }
 }
 
+/**
+ * FAMÍLIA, não versão exacta (2026-07-29).
+ *
+ * Era `model !== 'glm-5.1'`. Trocar o modelo gerido é uma edição de DADOS no
+ * KV, não de código — foi assim que o activo passou a `glm-5.2` e esta
+ * igualdade deixou de bater, silenciosamente. Sem marcadores de cache, o
+ * prefixo cacheado congela no bloco estático e todo o histórico é refacturado
+ * a cada turno: sessão katondo-queue (29-07) fechou com 12,36M tokens de input
+ * e 36% de cache, com o valor cacheado parado em 31.808 desde o turno 11.
+ *
+ * O gate de host fica — é ele que garante que só se marca onde o provider
+ * suporta. O que sai é o acoplamento a um número de versão.
+ *
+ * A correcção estrutural é a capacidade vir do próprio KV `active` (como o
+ * resto do routing), em vez de qualquer lista em código. Enquanto isso não
+ * existir, uma família não obriga a um commit por ponto de versão.
+ */
 function supportsExplicitCache(model: string, baseURL: string | undefined): boolean {
   if (DASHSCOPE_EXPLICIT_CACHE_MODELS.has(model)) return true
-  if (model !== 'glm-5.1' || !baseURL) return false
+  if (!/^glm-/i.test(model) || !baseURL) return false
   const host = baseURL.toLowerCase()
   return host === 'dashscope.aliyuncs.com' || host.includes('cn-beijing')
 }
