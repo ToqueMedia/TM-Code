@@ -127,7 +127,7 @@ Every import **MUST** point to a package already listed in the dependency manife
  - **STEP 2a (listed)**: Proceed with the import.
  - **STEP 2b (missing, single package during editing)**: Run \`${ctx.pmDetected} add <package>\` via \`${EXECUTE_COMMAND}\`, confirm exit code 0, THEN write the import. Batch missing packages into one command: \`${ctx.pmDetected} add a b c\`.
  - **STEP 2b (missing, new project / scaffolding)**: Do NOT use \`${EXECUTE_COMMAND}\` — use the "Installing dependencies — background pattern" section that follows.
- - When the IDE blocks a write with "package imported but not installed", **DO NOT** retry the same write. **DO** install the package first, then retry. Repeating without installing repeats the block.
+ - Nothing checks this for you at write time. An import of a package that is not in the manifest fails only later, at build/run — which is why STEP 1 is not optional.
 
 ## Verification — required before declaring done
 
@@ -451,8 +451,19 @@ export function getEnvironmentSection(ctx: PromptContext): string {
   if (ctx.pkgSummary) {
     lines.push(`name: ${ctx.pkgSummary.name}`)
     if (ctx.pkgSummary.scripts.length) lines.push(`scripts: ${ctx.pkgSummary.scripts.join(', ')}`)
-    if (ctx.pkgSummary.dependencies.length) lines.push(`deps: ${ctx.pkgSummary.dependencies.join(', ')}`)
-    if (ctx.pkgSummary.devDependencies.length) lines.push(`devDeps: ${ctx.pkgSummary.devDependencies.join(', ')}`)
+    // A lista é TRUNCADA e o marcador não é cosmética: o protocolo de
+    // dependências manda "confirma que o pacote está no manifest", e um modelo
+    // que tome estas 15 linhas como o manifest INTEIRO conclui que falta um
+    // pacote que já está instalado e queima um turno a instalá-lo (auditoria
+    // 2026-07-29 — a truncagem era invisível).
+    const depsTail = (shown: number, total: number): string =>
+      total > shown ? `, … (+${total - shown} more — open package.json for the full list)` : ''
+    if (ctx.pkgSummary.dependencies.length) {
+      lines.push(`deps: ${ctx.pkgSummary.dependencies.join(', ')}${depsTail(ctx.pkgSummary.dependencies.length, ctx.pkgSummary.dependencyCount)}`)
+    }
+    if (ctx.pkgSummary.devDependencies.length) {
+      lines.push(`devDeps: ${ctx.pkgSummary.devDependencies.join(', ')}${depsTail(ctx.pkgSummary.devDependencies.length, ctx.pkgSummary.devDependencyCount)}`)
+    }
   }
   // Import path aliases — resolve aliased imports (@/foo) without grepping the
   // tsconfig. One line; only present when the project actually defines them.
@@ -502,9 +513,31 @@ export function getEnvironmentSection(ctx: PromptContext): string {
  *   module-level Set to track warned project paths; subsequent turns
  *   inject a one-liner instead of the full block.
  */
-// Track which project paths have already received the full warning.
-// Survives across turns within the same session; resets on project switch.
-const _compatWarnedProjects = new Set<string>()
+// Memo do bloco de compatibilidade, por projecto.
+//
+// Era um Set de PATHS que nada limpava (auditoria 2026-07-29) — e o comentário
+// prometia duas coisas falsas: que "reseta na troca de projecto" (não há quem o
+// limpe) e que os turnos seguintes injetavam "uma linha em vez do bloco" (o
+// caminho devolve `null`, ou seja, nada). O efeito real era pior do que a
+// economia: se o manifest do projecto MUDASSE a meio da sessão — o próprio
+// agente a editar `.toquemedia/project.json`, um `package.json` novo a tornar o
+// preview insuportado — o aviso já tinha sido dado uma vez e nunca voltava.
+//
+// Passa a memorizar a ASSINATURA do que foi injetado. Mesmo conteúdo → cala-se
+// (a economia de ~300-500 tokens/turno fica intacta); conteúdo diferente →
+// injeta outra vez, que é o único momento em que o aviso vale alguma coisa.
+const _compatWarnedProjects = new Map<string, string>()
+
+/** True quando este exato aviso já foi injetado para este projecto. */
+function compatAlreadyWarned(projectPath: string, signature: string): boolean {
+  return _compatWarnedProjects.get(projectPath) === signature
+}
+
+/** Devolve o bloco e memoriza a sua assinatura. */
+function rememberCompatWarning(projectPath: string, signature: string, block: string): string {
+  _compatWarnedProjects.set(projectPath, signature)
+  return block
+}
 
 /**
  * Extract the real non-JS project type from synthetic __type_*__ tokens
@@ -536,10 +569,10 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
       ...(deploy.supported ? [] : (deploy.blockers ?? ['Deploy is not supported by this project manifest.'])),
     ]
     if (preview.supported && deploy.supported && warnings.length === 0 && blockers.length === 0) return null
-    if (_compatWarnedProjects.has(projectPath)) return null
-    _compatWarnedProjects.add(projectPath)
+    const signature = `manifest|${preview.supported}|${deploy.supported}|${warnings.join('¦')}|${blockers.join('¦')}`
+    if (compatAlreadyWarned(projectPath, signature)) return null
 
-    return [
+    return rememberCompatWarning(projectPath, signature, [
       '# Project compatibility',
       '',
       `The project manifest declares preview=${preview.supported ? 'supported' : 'unsupported'} and deploy=${deploy.supported ? 'supported' : 'unsupported'}.`,
@@ -550,12 +583,14 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
       '- Continue editing, testing, and running commands normally.',
       '- If preview/deploy is required, adapt the project and update `.toquemedia/project.json` so the manifest names the supported command/output.',
       '- If the stack is intentionally native/desktop/mobile, say clearly that TM Code can edit it but cannot preview/deploy it through the web pipeline.',
-    ].join('\n')
+    ].join('\n'))
   }
 
   const rawPt = ctx.projectType
+  // Inclui os workspaces: sem eles, um monorepo Express caía no tier "node
+  // genérico sem dev script" em vez de "backend-only".
   const deps = ctx.pkgSummary
-    ? [...ctx.pkgSummary.dependencies, ...ctx.pkgSummary.devDependencies]
+    ? [...ctx.pkgSummary.dependencies, ...ctx.pkgSummary.devDependencies, ...ctx.pkgSummary.workspaceDependencies]
     : []
   const scripts = ctx.pkgSummary?.scripts ?? []
 
@@ -568,9 +603,8 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
   // → detectProjectType returned 'node' but syntheticType is also absent.
   // Could be a bare directory or a language the detector doesn't cover yet.
   if (!pt || pt === 'node' && !ctx.pkgSummary && !syntheticType) {
-    if (_compatWarnedProjects.has(projectPath)) return null
-    _compatWarnedProjects.add(projectPath)
-    return [
+    if (compatAlreadyWarned(projectPath, 'unknown')) return null
+    return rememberCompatWarning(projectPath, 'unknown', [
       '# Project compatibility',
       '',
       'No recognized project structure detected (no `package.json`, `go.mod`, `requirements.txt`, or similar). The IDE may not be able to auto-start a dev server.',
@@ -579,16 +613,13 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
       '1. Tell the agent the command to start your project — it will use `start_dev_server` with that command.',
       '2. Add `.toquemedia/project.json` with preview capabilities so future runs know the project contract.',
       '3. If the project is in a subdirectory, reopen it at the correct path.',
-    ].join('\n')
+    ].join('\n'))
   }
 
-  // One-shot: if already warned for this project, inject a brief reminder
-  // instead of the full block. Saves ~300-500 tokens per turn.
-  if (_compatWarnedProjects.has(projectPath)) {
-    // Brief reminder — keeps the model aware without burning tokens.
-    // Only re-inject if something changed (framework detected differently).
-    return null
-  }
+  // Os tiers abaixo derivam do tipo de projecto + deps + scripts detectados;
+  // a assinatura é isso mesmo, para que uma detecção DIFERENTE volte a avisar.
+  const detectedSignature = `detected|${pt}|${deps.slice().sort().join(',')}|${scripts.slice().sort().join(',')}`
+  if (compatAlreadyWarned(projectPath, detectedSignature)) return null
 
   // ── Tier 1: non-JS/TS projects (Go, Python, Rust, etc.) ──────
   // No package.json dev command → the IDE can't start a dev server,
@@ -597,7 +628,7 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
   // Chat-mode loop (agent edits → preview updates live) is broken.
   const nonJsTypes = ['go', 'python', 'rust']
   if (nonJsTypes.includes(pt)) {
-    _compatWarnedProjects.add(projectPath)
+    _compatWarnedProjects.set(projectPath, detectedSignature)
     const commands: Record<string, string> = {
       go: '`go run .`',
       python: '`python manage.py runserver` or `uvicorn main:app`',
@@ -628,7 +659,7 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
   const isBackendOnly = backendFrameworks.some(f => deps.includes(f))
     && !['react', 'vue', 'svelte', 'nextjs', 'nuxt', 'angular'].includes(pt)
   if (isBackendOnly) {
-    _compatWarnedProjects.add(projectPath)
+    _compatWarnedProjects.set(projectPath, detectedSignature)
     return [
       '# Project compatibility',
       '',
@@ -648,7 +679,7 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
       s === 'dev' || s === 'start' || s === 'serve' || s.startsWith('dev:')
     )
     if (!hasDevScript) {
-      _compatWarnedProjects.add(projectPath)
+      _compatWarnedProjects.set(projectPath, detectedSignature)
       return [
         '# Project compatibility',
         '',
@@ -683,7 +714,12 @@ export function getDevServerStatusSection(): string | null {
   // message and frozen for the whole tool loop. Without the caveat, after the
   // agent itself stops/restarts the server mid-turn this block actively
   // forbids the correct next action (context pollution audit, 2026-06-12).
-  return `# Dev Server (running — status captured at turn start)\n${lines.join('\n')}\n\nA dev server was RUNNING when this turn started. Do NOT call \`${START_DEV_SERVER}\` or \`npm run dev\` / \`yarn dev\` while it runs — it will fail or create a duplicate. Use \`${READ_DEV_SERVER_LOGS}\` to check for errors. If YOU stopped or restarted the server with tools later in this turn, trust your own tool results over this block.`
+  return `# Dev Server (running — status captured at turn start)\n${lines.join('\n')}\n\nA dev server was RUNNING when this turn started.
+
+ - To check on it, use \`${READ_DEV_SERVER_LOGS}\`. Never re-start it to find out whether it is alive.
+ - \`${START_DEV_SERVER}\` on a running project is a RESTART, not a duplicate and not an error: it stops the current process first and you lose the log history you have not read yet. Call it only when a restart is what you actually want (config change, new dependency) — and then you do NOT need \`${STOP_DEV_SERVER}\` first.
+ - \`npm run dev\` / \`yarn dev\` through \`${EXECUTE_COMMAND}\` is a different mistake: that command never exits, so it burns the whole timeout and the server it starts is invisible to the IDE.
+ - If YOU stopped or restarted the server with tools later in this turn, trust your own tool results over this block.`
 }
 
 // ── 10b. Hashtag-signalled skills (conditional) ────────────────
@@ -1174,7 +1210,7 @@ export function getConstraintsSection(ctx: PromptContext): string {
 
 ## Commands
  - **USE** \`${ctx.pmDetected}\` for all install/run/add commands.
- - The system blocks duplicate install commands automatically — **MOVE ON** after a successful install.
+ - **MOVE ON** after a successful install: exit code 0 means the package is there. Nothing blocks a repeated install for you — package managers are idempotent, so a re-run wastes a turn and tells you nothing new.
 ${vanillaWebRule}
 ## Git
  - **Do not commit, branch, tag or stash unless the developer asks.** Finishing a change is not a reason to commit it — the developer reviews the diff and decides. (Pushing already requires an explicit request; the same holds for everything that rewrites history.)

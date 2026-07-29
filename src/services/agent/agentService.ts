@@ -53,7 +53,6 @@ import { QueryEngine, toQueryMessages } from "./queryEngine";
 import { ToolsetSelector, REQUEST_TOOLS_NAME, REQUEST_CONTEXT_NAME, requestContextDefinition } from "./toolsetSelector";
 import type { ToolsetGroupName } from "./toolsetSelector";
 import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
-import type { PromptProfile } from "./contextBuilder/auxiliaryRegistry";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 import { classifyExecuteCommandPurpose, convertShellReadCommand } from "./commandPurpose";
 import { EDIT_FILE, WEB_FETCH, canonicalToolName } from "./toolNames";
@@ -128,12 +127,10 @@ class AgentService {
   // runQueryEngineLoop; the createToolExecutorBridge reads it to intercept
   // the request_tools meta-tool.
   private currentToolsetSelector: ToolsetSelector | null = null;
-  private postTmsBootstrapToolProfile: {
-    profile: PromptProfile;
-    readOnly: boolean;
-    enforceReadOnly: boolean;
-  } | null = null;
-
+  // Fase do run corrente, para o bridge do executor. `executionPhase` é local
+  // ao runQueryEngineLoop e o bridge é outro método — sem este campo o portão
+  // de confinação de escrita do bootstrap não tinha como ver a fase.
+  private currentExecutionPhase: 'project_bootstrap' | 'original_task' = 'original_task';
   // Última resposta HTTP confirmou TM Speed (`X-TM-Speed-Applied: true`)?
   // Os headers chegam no início de cada resposta e o `message_stop` desse
   // mesmo turno chega depois (sequencial), por isso um campo simples por
@@ -183,12 +180,6 @@ class AgentService {
 
   setSystemPrompt(prompt: string) {
     this.systemPrompt = prompt;
-  }
-  setPostTmsBootstrapToolProfile(profile: PromptProfile, readOnly: boolean, enforceReadOnly = false): void {
-    this.postTmsBootstrapToolProfile = { profile, readOnly, enforceReadOnly };
-  }
-  clearPostTmsBootstrapToolProfile(): void {
-    this.postTmsBootstrapToolProfile = null;
   }
   getAgentType(): string | null {
     return this.agentType;
@@ -655,9 +646,24 @@ class AgentService {
     // custava caro em cadeia: cada request_tools invalidava o PREFIXO inteiro
     // do cache do provider (tools→system→histórico re-faturados a 100%) e
     // cada misclassificação do router custava turnos de auto-correção. Com a
-    // cobrança de cache a 50%, o conjunto estável vence. A seleção só
-    // sobrevive no caso de SEGURANÇA: enforceReadOnly (keyword do user)
-    // mantém a negação de mutações ao nível do schema.
+    // cobrança de cache a 50%, o conjunto estável vence.
+    //
+    // ESTADO REAL, medido na auditoria de 2026-07-29: este selector é `null`
+    // em TODOS os runs. `enforceReadOnly` exige `auxiliarySelection.readOnly`,
+    // que só ficaria true com o perfil `analysis_readonly` ou com um
+    // `intentOverride.readOnly` — e o classificador local devolve apenas
+    // `vision`/`bugfix_local`, enquanto os dois únicos produtores de
+    // intentOverride (/init e o preflight de TMS) passam `readOnly: false`.
+    // Não vou ressuscitar o caminho com matching de texto: foi assim que uma
+    // classificação read-only errada negou create/edit num run inteiro, e a
+    // doutrina do turnEfficiency.ts deste repo proíbe-o.
+    //
+    // O que era ERRADO era deixar os PORTÕES pendurados nele. Os dois que
+    // valem alguma coisa saíram daqui: a confinação de escrita do
+    // project_bootstrap passa a olhar para `executionPhase` (alcançável) e o
+    // bloqueio de tools destrutivas passa a olhar para `readOnlyRun`
+    // (alcançável pelos sub-agentes read-only). O selector fica só com o que
+    // é otimização de custo — e essa, se nunca correr, não mente a ninguém.
     const toolsetSelector = (this.lightweightOptions || !enforceReadOnly)
       ? null
       : new ToolsetSelector(
@@ -668,6 +674,7 @@ class AgentService {
         enforceReadOnly,
       );
     this.currentToolsetSelector = toolsetSelector;
+    this.currentExecutionPhase = executionPhase;
 
     if (toolsetSelector && auxiliarySelection) {
       toolsetSelector.setOmittedAuxiliaries(auxiliarySelection.omitted.length);
@@ -819,6 +826,9 @@ class AgentService {
       onRequestUsage: (entry) => callbacks.onRequestUsage?.(decorateTmsRequestUsage(entry, this.systemPrompt)),
       // Dynamic toolset selector (null for sub-agents).
       toolsetSelector: toolsetSelector ?? undefined,
+      // Política de read-only, separada do selector: cobre os sub-agentes
+      // lightweight (verify, /review) que antes não tinham bloqueio nenhum.
+      readOnlyRun: this.lightweightOptions?.readOnly === true || enforceReadOnly,
       // Auxiliary-context selection (core/auxiliary breakdown for the
       // payloadInspector; null for sub-agents).
       auxiliarySelection: auxiliarySelection ?? undefined,
@@ -1472,8 +1482,15 @@ class AgentService {
       }
 
       const selector = this.currentToolsetSelector;
-      const isTmsBootstrap = selector?.getProfile() === "project_bootstrap";
-      if (isTmsBootstrap && WRITE_TOOLS.has(canonicalName)) {
+      // `executionPhase`, não `selector.getProfile()`: o selector é null em
+      // todos os runs (ver a nota na sua construção), e com ele morria a
+      // confinação de escrita do /init — que podia escrever qualquer ficheiro
+      // do projecto na fase de bootstrap. Pior: `markTmsWriteAttempt` vivia
+      // dentro deste mesmo ramo, portanto o diagnóstico de falha do bootstrap
+      // afirmava sempre "terminou antes de tentar escrever TMS.md", mesmo
+      // quando havia tentativa. `executionPhase` deriva do perfil da seleção
+      // auxiliar e é `project_bootstrap` de facto quando o /init corre.
+      if (this.currentExecutionPhase === "project_bootstrap" && WRITE_TOOLS.has(canonicalName)) {
         const targetPath = this.getToolInputPath(effectiveToolInput);
         if (!(await this.isProjectRootTmsPath(targetPath))) {
           return {
@@ -1562,15 +1579,6 @@ class AgentService {
                 parsedDiff.path,
                 newContent,
               );
-              if (this.postTmsBootstrapToolProfile && this.currentToolsetSelector) {
-                this.currentToolsetSelector.switchProfile(
-                  this.postTmsBootstrapToolProfile.profile,
-                  this.postTmsBootstrapToolProfile.readOnly,
-                  [],
-                  this.postTmsBootstrapToolProfile.enforceReadOnly,
-                );
-                this.postTmsBootstrapToolProfile = null;
-              }
               return {
                 content: `File ${parsedDiff.isNewFile ? "created" : "updated"}: ${parsedDiff.path}\nProject bootstrap is complete. Stop this phase; the host will resume the original user request.`,
                 isError: false,

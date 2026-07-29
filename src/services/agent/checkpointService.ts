@@ -249,6 +249,70 @@ class CheckpointService {
   }
 
   /**
+   * Capture a whole DIRECTORY before it is deleted — um checkpoint, N ficheiros.
+   *
+   * A descrição do `delete_file` sempre prometeu "a checkpoint is created
+   * automatically so the user can undo": para directórios era falso. O caminho
+   * antigo tentava `read_file` no directório, apanhava o erro e SALTAVA o
+   * checkpoint em silêncio — e a seguir apagava a árvore recursivamente. Uma
+   * remoção de pasta era, na prática, irreversível com uma promessa de undo
+   * por cima (auditoria 2026-07-29).
+   *
+   * O `Checkpoint.files` sempre foi um array; era só nunca ter sido usado como
+   * tal. Reverter este checkpoint repõe a árvore inteira de uma vez.
+   */
+  async captureBeforeDirectoryDelete(
+    dirPath: string,
+    files: Array<{ filePath: string; content: string }>,
+    toolCallId: string,
+  ): Promise<void> {
+    if (!this.currentProjectPath || !this.currentSessionId) return
+    if (files.length === 0) return
+
+    try {
+      const { useCheckpointStore } = await import('../../stores/checkpointStore')
+      if (useCheckpointStore.getState().isReverting) return
+    } catch { /* import failure is non-critical */ }
+
+    const checkpointId = `cp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+    const snapshots: FileSnapshot[] = []
+
+    for (const { filePath, content } of files) {
+      const filePathHash = await hashFilePath(filePath)
+      if (!this.sessionBaseline.has(filePath)) {
+        this.sessionBaseline.add(filePath)
+        this.baselineIndex.set(filePath, { checkpointId, filePathHash, wasNew: false })
+      }
+      await invoke('save_checkpoint_file', {
+        projectPath: this.currentProjectPath,
+        sessionId: this.currentSessionId,
+        checkpointId,
+        filePathHash,
+        content,
+      })
+      snapshots.push({
+        filePath,
+        filePathHash,
+        operation: 'delete',
+        contentBefore: '__stored_on_disk__',
+      })
+    }
+
+    this.checkpoints.push({
+      id: checkpointId,
+      sessionId: this.currentSessionId,
+      timestamp: Date.now(),
+      toolCallId,
+      toolName: 'delete_file',
+      description: `Deleted ${this.shortPath(dirPath)} (${snapshots.length} file${snapshots.length === 1 ? '' : 's'})`,
+      files: snapshots,
+    })
+
+    this.enforceMaxCheckpoints()
+    this.schedulePersist()
+  }
+
+  /**
    * Capture file state BEFORE a rename operation.
    */
   async captureBeforeRename(

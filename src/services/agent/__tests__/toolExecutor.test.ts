@@ -206,11 +206,16 @@ jest.mock('../../tauriFetch', () => ({
   tauriFetch: jest.fn(),
 }))
 
+// Hoisted para os testes do checkpoint de directório poderem inspecionar as
+// chamadas (o `delete_file` numa pasta grava UM checkpoint com N ficheiros).
+const mockCaptureBeforeDelete = jest.fn().mockResolvedValue(undefined)
+const mockCaptureBeforeDirectoryDelete = jest.fn().mockResolvedValue(undefined)
 jest.mock('../checkpointService', () => ({
   __esModule: true,
   default: {
     getInstance: () => ({
-      captureBeforeDelete: jest.fn().mockResolvedValue(undefined),
+      captureBeforeDelete: mockCaptureBeforeDelete,
+      captureBeforeDirectoryDelete: mockCaptureBeforeDirectoryDelete,
       captureBeforeRename: jest.fn().mockResolvedValue(undefined),
     }),
   },
@@ -2600,5 +2605,148 @@ describe('deletion guard', () => {
       'untracked_file',
       undefined,
     )
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════
+// delete_file num DIRECTÓRIO — o único caminho destrutivo sem undo
+// ═══════════════════════════════════════════════════════════════════════
+//
+// A descrição da tool prometia "a checkpoint is created automatically so the
+// user can undo if needed". Para um directório era falso, e a mecânica da
+// mentira era simples:
+//
+//   1. `invoke('read_file', { path: dirPath })` → o Rust responde
+//      "Path is a directory" (contrato do read_file/file_stat).
+//   2. O `catch` engolia o erro: "File might be a directory or unreadable —
+//      skip checkpoint".
+//   3. `delete_file_or_directory` apagava a ÁRVORE INTEIRA, recursivamente.
+//
+// Passa a haver dois regimes: árvore pequena → um checkpoint com N ficheiros;
+// árvore grande → RECUSA com os números na mensagem. A recusa é a parte que
+// fecha o buraco — gravar `node_modules` não é opção, e apagá-lo sem undo
+// também não.
+describe('delete_file num directório', () => {
+  type Guard = (dirPath: string, toolCallId: string | undefined) => Promise<string | null>
+  let guard: Guard
+
+  beforeEach(() => {
+    const exec = freshExecutor() as unknown as { snapshotDirectoryForDelete: Guard }
+    guard = exec.snapshotDirectoryForDelete.bind(exec)
+    mockCaptureBeforeDirectoryDelete.mockClear()
+    mockCaptureBeforeDirectoryDelete.mockResolvedValue(undefined)
+  })
+
+  it('grava UM checkpoint com todos os ficheiros da árvore', async () => {
+    mockInvokeImpl.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'glob_files_filtered') return ['/p/comp/a.tsx', '/p/comp/b.tsx', '/p/comp/index.ts']
+      if (cmd === 'read_file') return `conteudo de ${(args as { path: string }).path}`
+      return undefined
+    })
+
+    expect(await guard('/p/comp', 'tc-1')).toBeNull()
+    expect(mockCaptureBeforeDirectoryDelete).toHaveBeenCalledTimes(1)
+    const [dirPath, files, toolCallId] = mockCaptureBeforeDirectoryDelete.mock.calls[0]
+    expect(dirPath).toBe('/p/comp')
+    expect(toolCallId).toBe('tc-1')
+    expect(files).toHaveLength(3)
+    expect(files[0]).toEqual({ filePath: '/p/comp/a.tsx', content: 'conteudo de /p/comp/a.tsx' })
+  })
+
+  it('enumera SEM respeitar o .gitignore — o ignorado é o que ninguém repõe', async () => {
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'glob_files_filtered') return ['/p/x/a.ts']
+      if (cmd === 'read_file') return 'x'
+      return undefined
+    })
+
+    await guard('/p/x', 'tc-2')
+
+    const globCall = mockInvoke.mock.calls.find(([cmd]) => cmd === 'glob_files_filtered')
+    expect(globCall?.[1]).toMatchObject({ respectGitignore: false, pattern: '**/*' })
+  })
+
+  it('RECUSA uma árvore acima do tecto de ficheiros, antes de ler qualquer um', async () => {
+    const many = Array.from({ length: 401 }, (_, i) => `/p/node_modules/f${i}.js`)
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'glob_files_filtered') return many
+      return undefined
+    })
+
+    const refusal = await guard('/p/node_modules', 'tc-3')
+
+    expect(refusal).toContain('refused')
+    expect(refusal).toContain('401 files')
+    expect(refusal).toContain('400')
+    expect(mockCaptureBeforeDirectoryDelete).not.toHaveBeenCalled()
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === 'read_file')).toBe(false)
+  })
+
+  it('RECUSA quando o conteúdo total passa o tecto de bytes', async () => {
+    const big = 'x'.repeat(3 * 1024 * 1024)
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'glob_files_filtered') return ['/p/d/1.bin', '/p/d/2.bin', '/p/d/3.bin']
+      if (cmd === 'read_file') return big
+      return undefined
+    })
+
+    const refusal = await guard('/p/d', 'tc-4')
+
+    expect(refusal).toContain('refused')
+    expect(refusal).toContain('MB')
+    expect(mockCaptureBeforeDirectoryDelete).not.toHaveBeenCalled()
+  })
+
+  it('RECUSA quando a enumeração falha — nunca apaga às cegas', async () => {
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'glob_files_filtered') throw new Error('EACCES')
+      return undefined
+    })
+
+    const refusal = await guard('/p/locked', 'tc-5')
+
+    expect(refusal).toContain('refused')
+    expect(refusal).toContain('EACCES')
+    expect(refusal).toContain('Nothing was deleted')
+  })
+
+  it('RECUSA quando o próprio checkpoint não consegue ser escrito', async () => {
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'glob_files_filtered') return ['/p/d/a.ts']
+      if (cmd === 'read_file') return 'a'
+      return undefined
+    })
+    mockCaptureBeforeDirectoryDelete.mockRejectedValueOnce(new Error('disk full'))
+
+    const refusal = await guard('/p/d', 'tc-6')
+
+    expect(refusal).toContain('refused')
+    expect(refusal).toContain('disk full')
+  })
+
+  it('directório vazio segue sem checkpoint — não há nada a perder', async () => {
+    mockInvokeImpl.mockImplementation(async (cmd: string) => {
+      if (cmd === 'glob_files_filtered') return []
+      return undefined
+    })
+
+    expect(await guard('/p/empty', 'tc-7')).toBeNull()
+    expect(mockCaptureBeforeDirectoryDelete).not.toHaveBeenCalled()
+  })
+
+  it('ficheiros ilegíveis são saltados, mas o resto ainda é snapshotado', async () => {
+    mockInvokeImpl.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'glob_files_filtered') return ['/p/d/ok.ts', '/p/d/img.png']
+      if (cmd === 'read_file') {
+        if ((args as { path: string }).path.endsWith('.png')) throw new Error('invalid utf-8')
+        return 'ok'
+      }
+      return undefined
+    })
+
+    expect(await guard('/p/d', 'tc-8')).toBeNull()
+    const [, files] = mockCaptureBeforeDirectoryDelete.mock.calls[0]
+    expect(files).toHaveLength(1)
+    expect(files[0].filePath).toBe('/p/d/ok.ts')
   })
 })

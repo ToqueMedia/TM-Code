@@ -627,6 +627,11 @@ fn take_pending_open_project() -> Option<String> {
 /// folder drop (open as project) from a file drop (likely an image targeted
 /// at the prompt — handled by the HTML5 path). Doesn't validate suitability,
 /// so it's faster than `validate_project_path` and the contract is clearer.
+///
+/// Também usado pelo `delete_file` do agente para escolher entre o checkpoint
+/// de ficheiro e o de árvore. Não valida o caminho de propósito — quem chama
+/// do lado do agente já passou pelo `requirePathAccess`, e uma sonda que
+/// devolve um bool não abre nada.
 #[tauri::command]
 fn is_directory(path: String) -> bool {
     std::path::Path::new(&path).is_dir()

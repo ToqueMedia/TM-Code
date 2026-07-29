@@ -386,7 +386,21 @@ export class ToolsetSelector {
     plannedGroups: ToolsetGroupName[] = [],
     enforceReadOnly = readOnly,
   ) {
-    this.allToolNames = new Set(allToolNames)
+    // CANONIZAR à entrada (2026-07-29). O chamador passa
+    // `openaiTools.map(t => t.function.name)`, que são os nomes ANUNCIADOS
+    // (`Read`, `Grep`, `Bash`, `Edit`…), enquanto tudo o que consulta este
+    // conjunto — `canActivate`, `requestTools`, os conjuntos por perfil —
+    // trabalha em nomes CANÓNICOS. Sem esta conversão, `canActivate('edit_file')`
+    // era false porque o conjunto continha `Edit`, e `expandForToolName`
+    // devolvia false para TODAS as tools renomeadas.
+    //
+    // Estava latente por o selector nunca ser construído em runs normais
+    // (ver a nota da FASE A em agentService). Armava no instante em que
+    // alguém o passasse a construir: o gate em agentService responderia
+    // "Tool blocked: Edit is not available" à ferramenta mais usada do agente.
+    // Corrigido ANTES de o selector voltar a existir para o /init, e não
+    // depois — é a ordem que distingue um fix de uma detonação.
+    this.allToolNames = new Set(allToolNames.map(canonicalToolName))
     this.profile = profile
     this.readOnlyHint = readOnly
     this.enforceReadOnly = enforceReadOnly
@@ -514,7 +528,11 @@ export class ToolsetSelector {
     const alreadyActive: string[] = []
     const unknown: string[] = []
     const denied: string[] = []
-    for (const name of toolNames) {
+    for (const requested of toolNames) {
+      // O modelo pede pelo nome que vê no schema (anunciado); os conjuntos
+      // internos são canónicos. Sem canonizar, `request_tools(["Edit"])`
+      // respondia "unknown tool".
+      const name = canonicalToolName(requested)
       if (!this.allToolNames.has(name)) {
         unknown.push(name)
       } else if (this.isBlockedByHardPolicy(name)) {

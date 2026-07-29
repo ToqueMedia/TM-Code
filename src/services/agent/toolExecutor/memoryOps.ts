@@ -72,7 +72,7 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
           },
           description: {
             type: 'string',
-            description: 'One-line summary (≤150 chars) shown in MEMORY.md to decide if this memory is relevant to a future task. Be specific — "user is data scientist focused on logging observability" beats "user is a data scientist".',
+            description: 'One-line summary shown in MEMORY.md to decide if this memory is relevant to a future task. Hard limit 200 chars (the call is rejected above it); aim for ~150. Be specific — "user is data scientist focused on logging observability" beats "user is a data scientist".',
           },
           body: {
             type: 'string',
@@ -94,6 +94,21 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
       const type = String(input.type || '').trim() as 'user' | 'feedback' | 'project' | 'reference'
       const description = String(input.description || '').trim()
       const body = String(input.body || '').trim()
+      // `paths` era anunciado no schema e NUNCA lido (auditoria 2026-07-29): a
+      // memória ficava gravada como incondicional e o modelo acreditava ter
+      // pedido activação condicional. Toda a máquina a jusante já existia — o
+      // frontmatter (buildMemoryFileContent), a coluna do índice
+      // (INDEX_LINE_REGEX) e o filtro (matchesAccessedPaths no contextBuilder).
+      // Só faltava esta ligação.
+      const paths = Array.isArray(input.paths)
+        ? (input.paths as unknown[])
+            .map((p) => String(p ?? '').trim())
+            // Uma vírgula parte a coluna do índice (é o separador da lista);
+            // um `|` parte a própria linha. Rejeitar é mais honesto do que
+            // gravar um padrão que o parser volta a ler ao contrário.
+            .filter((p) => p.length > 0 && !p.includes(',') && !p.includes('|'))
+            .slice(0, 12)
+        : []
 
       if (!name) return 'save_memory failed: `name` is required and cannot be empty.'
       if (!['user', 'feedback', 'project', 'reference'].includes(type)) {
@@ -121,7 +136,10 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
           scope,
           projectPath: scope === 'project' ? projectPath : null,
           filename,
-          content: buildMemoryFileContent({ name, type, description }, body),
+          content: buildMemoryFileContent(
+            { name, type, description, ...(paths.length ? { paths } : {}) },
+            body,
+          ),
           subdirectory: memoryScope ?? undefined,
         })
       } catch (err) {
@@ -132,7 +150,11 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
       // name if present, otherwise append.
       try {
         const existingIndex = await loadMemoryIndex(scope, projectPath, memoryScope ?? undefined)
-        const lineToWrite = `- [${name}](${filename}) — ${description}`
+        // A coluna `| paths:` é o que o loadMemoryIndex volta a ler para
+        // aplicar o filtro condicional — sem ela a memória carrega sempre.
+        const lineToWrite = paths.length
+          ? `- [${name}](${filename}) — ${description} | paths: ${paths.join(', ')}`
+          : `- [${name}](${filename}) — ${description}`
         let lines = (existingIndex.content ?? '').split('\n')
         const warningIdx = lines.findIndex(l => l.startsWith('> ⚠️ MEMORY.md'))
         if (warningIdx >= 0) lines = lines.slice(0, warningIdx).filter(l => l.length > 0)
@@ -170,7 +192,13 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
         if (sessionId) m.recordMemoryWrite(sessionId)
       }).catch(() => { /* noop */ })
 
-      return `Memory saved: ${scope}/${filename} (${type}). It will appear in the persistent-memory section of every future prompt for this ${scope === 'project' ? 'project' : 'IDE installation'}.`
+      // A confirmação diz qual dos dois regimes ficou de facto gravado: com
+      // `paths`, a memória só entra no prompt quando o agente tocar em
+      // ficheiros que casem — dizer "todos os prompts futuros" seria falso.
+      const where = scope === 'project' ? 'project' : 'IDE installation'
+      return paths.length
+        ? `Memory saved: ${scope}/${filename} (${type}), CONDITIONAL on paths [${paths.join(', ')}] — it enters the prompt only in turns where accessed files match one of them.`
+        : `Memory saved: ${scope}/${filename} (${type}). It will appear in the persistent-memory section of every future prompt for this ${where}.`
     },
   })
 
@@ -442,7 +470,9 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
       try {
         const { useChatStore } = await import('../../../stores/chatStore')
         const store = useChatStore.getState()
-        const previous = store.getActiveSession()?.sessionMemory ?? ''
+        // Sessão do RUN, não a que está no ecrã: comparar com as notas de
+        // outra sessão dava "unchanged" errado e escondia a escrita.
+        const previous = store.getRunSession()?.sessionMemory ?? ''
 
         // Guardas anti-spam (observado 2026-07-13: 5 chamadas seguidas com
         // mini-checklists de 29–80 chars — o modelo usava isto como task
@@ -490,7 +520,7 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
     execute: async () => {
       try {
         const { useChatStore } = await import('../../../stores/chatStore')
-        const session = useChatStore.getState().getActiveSession()
+        const session = useChatStore.getState().getRunSession()
         if (!session?.sessionMemory) {
           return '(no session memory recorded yet — call update_session_memory to start tracking session state)'
         }

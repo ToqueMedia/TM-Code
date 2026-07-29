@@ -145,6 +145,8 @@ interface ChatActions {
   /** Carimba o estado final de uma tarefa paralela na SUA sessão (persiste). */
   setSessionTaskStatus: (sessionId: string, status: import('../types/chat').ParallelTaskSessionStatus) => void
   getActiveSession: () => ChatSession | null
+  /** Sessão do RUN corrente (streaming), com fallback para a activa. */
+  getRunSession: () => ChatSession | null
   setActiveSession: (sessionId: string) => void
   addUserMessage: (content: string, attachments?: Attachment[], promptBlocks?: PromptBlock[]) => string
   /**
@@ -1641,7 +1643,14 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
     setSessionMemory: (memory: string) => {
       set(state => {
-        const sessionId = state.activeSessionId
+        // `streamingSessionId ?? activeSessionId` — o mesmo alvo que
+        // updateToolCallWithResult e as outras escritas do run já usam.
+        // Esta era a excepção (auditoria 2026-07-29): escrevia sempre na
+        // sessão em VISUALIZAÇÃO, portanto um run de fundo (F2: outro
+        // projecto vivo in-window, tarefa paralela) substituía as notas da
+        // sessão que o utilizador estava a ler. E `setSessionMemory`
+        // SUBSTITUI, não acrescenta — a perda era total e silenciosa.
+        const sessionId = state.streamingSessionId ?? state.activeSessionId
         if (!sessionId) return state
         const sessions = new Map(state.sessions)
         const session = sessions.get(sessionId)
@@ -1840,6 +1849,21 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       const { sessions, activeSessionId } = get()
       if (!activeSessionId) return null
       return sessions.get(activeSessionId) || null
+    },
+
+    /**
+     * A sessão a que o RUN corrente pertence — não a que está no ecrã.
+     *
+     * Tudo o que uma tool escreve ou lê em nome do agente tem de passar por
+     * aqui: com vários projectos vivos na mesma janela, `getActiveSession()`
+     * devolve aquilo que o utilizador está a ver, que pode não ter nada a ver
+     * com o run que está a correr. Fora de um run, os dois coincidem.
+     */
+    getRunSession: () => {
+      const { sessions, streamingSessionId, activeSessionId } = get()
+      const sessionId = streamingSessionId ?? activeSessionId
+      if (!sessionId) return null
+      return sessions.get(sessionId) || null
     },
 
     setActiveSession: (sessionId: string) => {

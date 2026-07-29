@@ -405,6 +405,18 @@ export interface QueryParams {
    * (legacy behaviour).
    */
   toolsetSelector?: import('./toolsetSelector').ToolsetSelector;
+  /**
+   * Run é read-only por POLÍTICA, independente do selector.
+   *
+   * O bloqueio de tools destrutivas vivia atrás de `toolsetSelector.isReadOnly()`
+   * — e o selector é null em todos os runs reais (só nasceria com um
+   * `enforceReadOnly` que nenhum produtor liga, ver a nota no agentService).
+   * Consequência medida na auditoria de 2026-07-29: um sub-agente criado com
+   * `createLightweight({ readOnly: true })` (o `verify` do toolExecutor, o
+   * /review) não tinha bloqueio nenhum ao nível do loop. A política passa a
+   * viajar como flag própria, que é o que ela sempre foi.
+   */
+  readOnlyRun?: boolean;
   /** Auxiliary-context selection — core/auxiliary breakdown for the inspector. */
   auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection;
   /** Execution phase for bootstrap/original-task telemetry and guardrails. */
@@ -1044,6 +1056,7 @@ export async function* query(
     onResponseHeaders,
     getContextLimits,
     toolsetSelector,
+    readOnlyRun,
     auxiliarySelection,
     isStreamSafeTool,
   } = params;
@@ -2710,6 +2723,7 @@ export async function* query(
         noEditRecoveryCount < 1 &&
         // FASE A: selector null = toolset completo congelado (o caso normal);
         // o guard continua vivo — read-only explícito continua a desarmá-lo.
+        !readOnlyRun &&
         (!toolsetSelector || !toolsetSelector.isReadOnly())
       ) {
         const hasEditFile = !toolsetSelector || toolsetSelector.isActive(EDIT_FILE);
@@ -2899,9 +2913,9 @@ export async function* query(
         toolInput = {};
       }
 
-      if (toolsetSelector?.isReadOnly() && DESTRUCTIVE_TOOLS.has(canonicalToolName(tc.name))) {
-        toolsetSelector.noteDeniedToolName(tc.name);
-        const blocked = `Tool blocked: ${tc.name} cannot run because the latest user request is read-only/no-edit.`;
+      if ((readOnlyRun || toolsetSelector?.isReadOnly()) && DESTRUCTIVE_TOOLS.has(canonicalToolName(tc.name))) {
+        toolsetSelector?.noteDeniedToolName(tc.name);
+        const blocked = `Tool blocked: ${tc.name} cannot run because this run is read-only (no file mutations).`;
         yield {
           type: "tool_result",
           toolUseId: tc.id,

@@ -28,6 +28,7 @@ import {
   SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,
   UPDATE_SESSION_MEMORY, READ_SESSION_MEMORY,
   REQUEST_CREDENTIALS,
+  canonicalToolName,
 } from '../toolNames'
 import type OpenAI from 'openai'
 
@@ -112,7 +113,13 @@ describe('ToolsetSelector (on-demand)', () => {
         expect(names).toContain(base)
       }
       expect(activeCount).toBe(BUGFIX_BASE.length)
-      expect(totalCount).toBe(ALL_NAMES.length)
+      // `totalCount` conta nomes CANÓNICOS distintos, não entradas da lista de
+      // entrada. Este ALL_NAMES inclui de propósito 4 aliases do dialecto de
+      // treino (Read/Grep/Glob/LS) ao lado dos canónicos: o construtor canoniza
+      // à entrada (2026-07-29), portanto colapsam. Contá-los duas vezes era a
+      // versão anterior — e era ela que estava errada.
+      expect(totalCount).toBe(new Set(ALL_NAMES.map(canonicalToolName)).size)
+      expect(totalCount).toBe(ALL_NAMES.length - 4)
       expect(allActive).toBe(false)
       expect(names).toContain(REQUEST_TOOLS_NAME)
       // EDIT_FILE entrou na base (auditoria 2026-07-28): o perfil default de

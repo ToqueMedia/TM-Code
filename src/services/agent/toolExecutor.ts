@@ -3080,6 +3080,81 @@ ${preview}
     useFileTreeRepository.getState().refresh()
   }
 
+  /**
+   * Snapshot de uma árvore antes de a apagar. Devolve `null` quando o
+   * checkpoint ficou gravado (o delete pode seguir) ou a MENSAGEM DE RECUSA
+   * quando não é recuperável.
+   *
+   * Recusar é a parte que importa. Uma pasta de componentes tem 12 ficheiros e
+   * cabe num checkpoint; `node_modules` tem 40 mil e não cabe em nada. Sem o
+   * tecto, ou se gravava gigabytes ou — como acontecia — se apagava sem undo
+   * nenhum. Quem quiser apagar uma árvore grande usa a shell e assume-o.
+   */
+  private async snapshotDirectoryForDelete(
+    dirPath: string,
+    toolCallId: string | undefined,
+  ): Promise<string | null> {
+    const MAX_FILES = 400
+    const MAX_TOTAL_BYTES = 8 * 1024 * 1024
+
+    let paths: string[]
+    try {
+      // respect_gitignore: false — o que vai ser apagado inclui o que o git
+      // ignora, e é precisamente isso que ninguém mais consegue repor.
+      paths = await invoke<string[]>('glob_files_filtered', {
+        pattern: '**/*',
+        directory: dirPath,
+        respectGitignore: false,
+      })
+    } catch (err) {
+      return `delete_file refused: could not enumerate ${dirPath} to build an undo checkpoint (${err instanceof Error ? err.message : String(err)}). Nothing was deleted.`
+    }
+
+    if (paths.length > MAX_FILES) {
+      return `delete_file refused: ${dirPath} holds ${paths.length} files (ceiling ${MAX_FILES}). A tree this size cannot be snapshotted for undo, and deleting it without one is not something this tool does. If it is genuinely meant to go, say so to the developer and let them remove it — or delete the specific files that matter.`
+    }
+    if (paths.length === 0) {
+      // Directório vazio: nada para snapshotar, nada para perder.
+      return null
+    }
+
+    const files: Array<{ filePath: string; content: string }> = []
+    let totalBytes = 0
+    let unreadable = 0
+    for (const filePath of paths) {
+      let content: string
+      try {
+        content = await invoke<string>('read_file', { path: filePath })
+      } catch {
+        // Binário ou ilegível. Conta-se e reporta-se — um checkpoint que
+        // silencia o que não guardou é pior do que não ter checkpoint.
+        unreadable += 1
+        continue
+      }
+      totalBytes += content.length
+      if (totalBytes > MAX_TOTAL_BYTES) {
+        return `delete_file refused: ${dirPath} exceeds ${Math.round(MAX_TOTAL_BYTES / 1024 / 1024)} MB of snapshottable content, so no undo can be captured. Nothing was deleted.`
+      }
+      files.push({ filePath, content })
+    }
+
+    if (toolCallId && files.length > 0) {
+      try {
+        await CheckpointService.getInstance().captureBeforeDirectoryDelete(dirPath, files, toolCallId)
+        useCheckpointStore.getState().syncFromService()
+      } catch (err) {
+        return `delete_file refused: the undo checkpoint for ${dirPath} could not be written (${err instanceof Error ? err.message : String(err)}). Nothing was deleted.`
+      }
+    }
+    if (unreadable > 0) {
+      logger.warn(
+        'agent',
+        `[delete_file] ${dirPath}: ${unreadable} ficheiro(s) ilegível(eis) ficaram FORA do checkpoint`,
+      )
+    }
+    return null
+  }
+
   private closeEditorIfOpen(path: string) {
     const editorState = useEditorRepository.getState()
     if (editorState.openFiles.some(f => f.path === path)) {
@@ -3795,7 +3870,15 @@ ${preview}
           whole_word: false,
           use_regex: (input.useRegex as boolean) || false,
           include_patterns: (input.includePatterns as string[]) || [],
-          exclude_patterns: ['node_modules/**', '.git/**', 'dist/**', 'build/**'],
+          // Condicional ao includeIgnored, senão o flag é uma promessa vazia:
+          // estas quatro exclusões corriam SEMPRE, portanto `dist/` e
+          // `node_modules/` eram inalcançáveis mesmo com o opt-in explícito —
+          // os dois casos de uso que a própria descrição nomeia (depurar um
+          // build, ler o código real de uma dependência). O `.git` fica de
+          // fora em qualquer caso: não é o assunto de ninguém.
+          exclude_patterns: (input.includeIgnored as boolean)
+            ? ['.git/**']
+            : ['node_modules/**', '.git/**', 'dist/**', 'build/**'],
           max_results: maxResults,
           context_lines: outputMode === 'content' && typeof input.contextLines === 'number'
             ? Math.min(Math.max(0, Math.floor(input.contextLines)), 10)
@@ -4015,7 +4098,7 @@ ${preview}
     this.tools.set('delete_file', {
       definition: {
         name: 'delete_file',
-        description: 'Delete a file or directory. A checkpoint is created automatically so the user can undo if needed. Only use when the user explicitly asks to delete, or when removing a file you just created in error.',
+        description: 'Delete a file or directory. A checkpoint is captured first so the user can undo — for a directory that means every file inside it, and the call is REFUSED when the tree is too large to snapshot (the refusal tells you the numbers). Only use when the user explicitly asks to delete, or when removing a file you just created in error.',
         input_schema: {
           type: 'object',
           properties: {
@@ -4030,8 +4113,19 @@ ${preview}
 
         // Capture checkpoint before deleting. Use injected _toolCallId so
         // concurrent invocations don't race a shared field.
+        //
+        // O ramo do DIRECTÓRIO existe porque a versão anterior tentava
+        // `read_file` no caminho, apanhava o erro ("Path is a directory") e
+        // saltava o checkpoint em SILÊNCIO — para logo a seguir apagar a
+        // árvore recursivamente. A tool prometia undo e não o tinha; era o
+        // caminho mais destrutivo do executor (auditoria 2026-07-29).
         const tcId = input._toolCallId as string | undefined
-        if (tcId) {
+        const isDirectory = await invoke<boolean>('is_directory', { path: filePath }).catch(() => false)
+
+        if (isDirectory) {
+          const refusal = await this.snapshotDirectoryForDelete(filePath, tcId)
+          if (refusal) return refusal
+        } else if (tcId) {
           try {
             const content = await invoke<string>('read_file', { path: filePath })
             await CheckpointService.getInstance().captureBeforeDelete(
@@ -4041,7 +4135,9 @@ ${preview}
             )
             useCheckpointStore.getState().syncFromService()
           } catch {
-            // File might be a directory or unreadable — skip checkpoint
+            // Ficheiro binário ou ilegível: sem conteúdo não há snapshot
+            // possível. Fica dito no log em vez de insinuado.
+            logger.warn('agent', `[delete_file] sem checkpoint para ${filePath} (ilegível) — remoção sem undo`)
           }
         }
 
@@ -5672,11 +5768,18 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           'execute_command', 'read_dev_server_logs',
           'read_large_result',
         ])
+        // canonicalToolName no filtro: getToolDefinitions() emite o nome
+        // ANUNCIADO (`Read`, `LS`, `Grep`, `Glob`, `Bash`) e este conjunto
+        // guarda canónicos. Sem a conversão, a intersecção era só
+        // read_around/read_dev_server_logs/read_large_result — os três em que
+        // anunciado e canónico coincidem. O verificador ficava SEM shell, sem
+        // Read por caminho e sem Grep, enquanto o seu próprio prompt lhe manda
+        // correr o build e os testes ("Broken build = automatic FAIL").
         const verifierTools = this.getToolDefinitions()
-          .filter(t => verifierToolNames.has(t.function.name))
+          .filter(t => verifierToolNames.has(canonicalToolName(t.function.name)))
           .map(t => {
             // Annotate execute_command description with read-only constraint
-            if (t.function.name === 'execute_command') {
+            if (canonicalToolName(t.function.name) === 'execute_command') {
               return {
                 ...t,
                 function: {

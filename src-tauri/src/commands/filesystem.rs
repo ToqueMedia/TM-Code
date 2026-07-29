@@ -325,10 +325,35 @@ pub async fn glob_files_filtered(
                             .unwrap_or(false)
                     })
                 };
-                let excluded = if is_dir {
-                    in_excluded_dir(rel)
+                // O piso de NOMES é conveniência (menos ruído), não fronteira.
+                // Com `includeIgnored` (respect_gitignore=false) o pedido é
+                // explícito — "mostra-me o output de build / o código real da
+                // dependência" — e este piso corria ANTES do escape, portanto
+                // `dist/`, `build/`, `out/` e `node_modules/` eram
+                // inalcançáveis por qualquer via. A descrição do glob nomeia
+                // exactamente esses casos de uso, e devolvia vazio (auditoria
+                // 2026-07-29).
+                //
+                // Os directórios de controlo de versões ficam sempre fora: não
+                // são o assunto de ninguém e inundariam o resultado.
+                const VCS_DIRS: &[&str] = &[".git", ".svn", ".hg"];
+                let in_vcs_dir = |p: &Path| {
+                    p.components().any(|c| {
+                        c.as_os_str()
+                            .to_str()
+                            .map(|s| VCS_DIRS.contains(&s))
+                            .unwrap_or(false)
+                    })
+                };
+                let floor = if respect_gitignore {
+                    in_excluded_dir
                 } else {
-                    rel.parent().map(in_excluded_dir).unwrap_or(false)
+                    in_vcs_dir
+                };
+                let excluded = if is_dir {
+                    floor(rel)
+                } else {
+                    rel.parent().map(floor).unwrap_or(false)
                 };
                 if excluded {
                     continue;
@@ -1077,6 +1102,66 @@ mod tests {
         .await
         .unwrap();
         assert!(!generated, "lib/ sem regra de ignore e fonte");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `includeIgnored` tem de alcançar `dist/` e `node_modules/` — são os dois
+    /// casos de uso que a descrição do glob NOMEIA (depurar um build, ler o
+    /// código real de uma dependência). O piso de nomes (EXCLUDED_DIRS) corria
+    /// ANTES do escape do opt-in, portanto devolvia sempre vazio, e a nota de
+    /// zero-resultados aconselhava exactamente o flag que não funcionava
+    /// (auditoria 2026-07-29).
+    #[tokio::test]
+    async fn include_ignored_reaches_build_output_and_dependencies() {
+        let root = std::env::temp_dir().join(format!("tm_incign_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".gitignore"), "dist/\nnode_modules/\n").unwrap();
+        std::fs::write(root.join("src/app.ts"), "").unwrap();
+        std::fs::write(root.join("dist/app.js"), "").unwrap();
+        std::fs::write(root.join("node_modules/pkg/index.js"), "").unwrap();
+        std::fs::write(root.join(".git/config"), "").unwrap();
+        let root_s = root.to_string_lossy().to_string();
+
+        // Por omissão: só a fonte.
+        let padrao = super::glob_files_filtered("**/*".into(), root_s.clone(), Some(true))
+            .await
+            .unwrap();
+        assert!(padrao.iter().any(|p| p.ends_with("src/app.ts")));
+        assert!(
+            !padrao.iter().any(|p| p.contains("/dist/")),
+            "dist fora por omissao"
+        );
+        assert!(
+            !padrao.iter().any(|p| p.contains("node_modules")),
+            "node_modules fora por omissao"
+        );
+
+        // Com o opt-in: alcança os dois.
+        let optin = super::glob_files_filtered("**/*".into(), root_s, Some(false))
+            .await
+            .unwrap();
+        assert!(
+            optin.iter().any(|p| p.ends_with("dist/app.js")),
+            "includeIgnored tem de alcancar dist/: {:?}",
+            optin
+        );
+        assert!(
+            optin
+                .iter()
+                .any(|p| p.contains("node_modules/pkg/index.js")),
+            "includeIgnored tem de alcancar node_modules/: {:?}",
+            optin
+        );
+        // O controlo de versoes fica sempre fora.
+        assert!(
+            !optin.iter().any(|p| p.contains("/.git/")),
+            ".git nunca entra"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

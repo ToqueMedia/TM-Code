@@ -186,6 +186,43 @@ async function listSubdirs(path: string, limit: number): Promise<string[]> {
 }
 
 /**
+ * Directórios do projecto que valem uma inspeção: os workspaces DECLARADOS
+ * (a resposta certa num monorepo) mais uma varredura de um nível, que apanha
+ * os layouts que não os declaram (`functions/`, `server/`).
+ *
+ * Extraído do readGeneratedPaths porque a detecção de FRAMEWORK precisa
+ * exactamente da mesma lista: num monorepo o `package.json` da raiz não tem
+ * `react` nenhum — ele vive em `packages/web/package.json`. Ler só a raiz
+ * classificava todo o monorepo React como "vanilla web" e injetava-lhe as
+ * regras erradas no prompt (auditoria 2026-07-29).
+ */
+async function resolveProjectSubdirs(projectPath: string): Promise<Set<string>> {
+  const rootPkg = parseJsonc((await safeReadFile(`${projectPath}/package.json`)) ?? '')
+  const rawWorkspaces = Array.isArray(rootPkg?.workspaces)
+    ? rootPkg.workspaces
+    : Array.isArray((rootPkg?.workspaces as Record<string, unknown> | undefined)?.packages)
+      ? ((rootPkg!.workspaces as Record<string, unknown>).packages as unknown[])
+      : []
+
+  const dirs = new Set<string>(await listSubdirs(projectPath, 24))
+  for (const entry of rawWorkspaces) {
+    if (typeof entry !== 'string') continue
+    const spec = entry.replace(/\\/g, '/').replace(/\/+$/, '')
+    if (spec.includes('..')) continue
+    if (spec.endsWith('/*')) {
+      // `packages/*` → expande para os filhos reais (profundidade 2).
+      const base = spec.slice(0, -2)
+      for (const child of await listSubdirs(`${projectPath}/${base}`, 40)) {
+        dirs.add(`${base}/${child}`)
+      }
+    } else if (!spec.includes('*')) {
+      dirs.add(spec)
+    }
+  }
+  return dirs
+}
+
+/**
  * Bundlers cujo directório de saída é fixo e documentado quando não é
  * sobreposto. NUNCA basta o nome: ver `readGeneratedPaths` para as três
  * condições que têm de coincidir antes de um destes ser declarado.
@@ -246,30 +283,7 @@ export async function readGeneratedPaths(projectPath: string): Promise<Generated
   }
 
   // ── Que directórios inspeccionar ──
-  // Os workspaces declarados são a resposta certa para um monorepo; a varredura
-  // de um nível apanha os layouts que não os declaram (`functions/`, `server/`).
-  const rootPkg = parseJsonc((await safeReadFile(`${projectPath}/package.json`)) ?? '')
-  const rawWorkspaces = Array.isArray(rootPkg?.workspaces)
-    ? rootPkg.workspaces
-    : Array.isArray((rootPkg?.workspaces as Record<string, unknown> | undefined)?.packages)
-      ? ((rootPkg!.workspaces as Record<string, unknown>).packages as unknown[])
-      : []
-
-  const dirs = new Set<string>(await listSubdirs(projectPath, 24))
-  for (const entry of rawWorkspaces) {
-    if (typeof entry !== 'string') continue
-    const spec = entry.replace(/\\/g, '/').replace(/\/+$/, '')
-    if (spec.includes('..')) continue
-    if (spec.endsWith('/*')) {
-      // `packages/*` → expande para os filhos reais (profundidade 2).
-      const base = spec.slice(0, -2)
-      for (const child of await listSubdirs(`${projectPath}/${base}`, 40)) {
-        dirs.add(`${base}/${child}`)
-      }
-    } else if (!spec.includes('*')) {
-      dirs.add(spec)
-    }
-  }
+  const dirs = await resolveProjectSubdirs(projectPath)
 
   // ── 1. outDir declarado ──
   for (const file of configFiles) {
@@ -290,6 +304,7 @@ export async function readGeneratedPaths(projectPath: string): Promise<Generated
   }
 
   // ── 3. Default de bundler, só com os três sinais a coincidir ──
+  const rootPkg = parseJsonc((await safeReadFile(`${projectPath}/package.json`)) ?? '')
   const deps = {
     ...(rootPkg?.dependencies as Record<string, unknown> | undefined),
     ...(rootPkg?.devDependencies as Record<string, unknown> | undefined),
@@ -310,17 +325,50 @@ export async function readGeneratedPaths(projectPath: string): Promise<Generated
   return found.slice(0, 12)
 }
 
+/** Ceiling das listas que vão para o prompt. O total real viaja à parte. */
+const DEPS_PROMPT_LIMIT = 15
+const DEV_DEPS_PROMPT_LIMIT = 10
+/** Ceiling da união de workspaces: é para DETECÇÃO, nunca é renderizada. */
+const WORKSPACE_DEPS_LIMIT = 400
+
 export async function extractPackageSummary(projectPath: string): Promise<PackageSummary | null> {
   const raw = await safeReadFile(`${projectPath}/package.json`)
   if (!raw) return null
 
   try {
     const pkg = JSON.parse(raw)
+    const deps = Object.keys(pkg.dependencies || {})
+    const devDeps = Object.keys(pkg.devDependencies || {})
+
+    // Deps dos sub-pacotes de workspace, para quem DETECTA (framework, stack)
+    // e não para quem renderiza. Falha de leitura de um sub-pacote é benigna:
+    // perde-se sinal, não se ganha sinal errado.
+    const workspaceDeps = new Set<string>()
+    try {
+      for (const dir of await resolveProjectSubdirs(projectPath)) {
+        if (workspaceDeps.size >= WORKSPACE_DEPS_LIMIT) break
+        const subRaw = await safeReadFile(`${projectPath}/${dir}/package.json`)
+        if (!subRaw) continue
+        const sub = parseJsonc(subRaw)
+        if (!sub) continue
+        for (const name of [
+          ...Object.keys((sub.dependencies as Record<string, unknown>) || {}),
+          ...Object.keys((sub.devDependencies as Record<string, unknown>) || {}),
+        ]) {
+          if (workspaceDeps.size >= WORKSPACE_DEPS_LIMIT) break
+          workspaceDeps.add(name)
+        }
+      }
+    } catch { /* sub-pacotes ilegíveis: seguimos com o que a raiz declara */ }
+
     return {
       name: pkg.name || 'unknown',
       scripts: Object.keys(pkg.scripts || {}),
-      dependencies: Object.keys(pkg.dependencies || {}).slice(0, 15),
-      devDependencies: Object.keys(pkg.devDependencies || {}).slice(0, 10),
+      dependencies: deps.slice(0, DEPS_PROMPT_LIMIT),
+      devDependencies: devDeps.slice(0, DEV_DEPS_PROMPT_LIMIT),
+      dependencyCount: deps.length,
+      devDependencyCount: devDeps.length,
+      workspaceDependencies: Array.from(workspaceDeps),
       packageManager: pkg.packageManager || '',
     }
   } catch {

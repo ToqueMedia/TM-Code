@@ -154,11 +154,6 @@ export interface BuildMainSystemPromptArgs {
  */
 export async function buildMainSystemPrompt(args: BuildMainSystemPromptArgs): Promise<string> {
   const builder = args.builder ?? ContextBuilder.getInstance()
-  // Estado pós-bootstrap é do RUN INTERATIVO — builds efémeros de tarefas
-  // não lhe tocam.
-  if (!args.builder) {
-    AgentService.getInstance().clearPostTmsBootstrapToolProfile()
-  }
   const effectiveIntent = args.bootstrapOnly ? TMS_BOOTSTRAP_INTENT : (args.intentOverride ?? null)
   if (effectiveIntent) {
     logger.info(

@@ -717,8 +717,13 @@ class ContextBuilder {
 
     const pmDetected = pkgSummary?.packageManager || await detectPackageManager(projectPath)
     const isTemplateProject = templateManifest !== null
+    // `workspaceDependencies` incluído de propósito (auditoria 2026-07-29):
+    // as listas da raiz vêm TRUNCADAS a 15/10 para o prompt, e num monorepo a
+    // raiz não declara framework nenhum. Com só a raiz, `isVanillaWeb` dava
+    // true em qualquer monorepo React e o prompt injetava-lhe as regras de
+    // "site sem build" — orientação errada por omissão de dados.
     const hasFrameworkDeps = pkgSummary
-      ? [...pkgSummary.dependencies, ...pkgSummary.devDependencies].some(d =>
+      ? [...pkgSummary.dependencies, ...pkgSummary.devDependencies, ...pkgSummary.workspaceDependencies].some(d =>
           ['react', 'next', 'vue', 'nuxt', 'svelte', '@angular/core', 'astro', 'solid-js', 'express', 'fastify', '@nestjs/core'].includes(d)
         )
       : false

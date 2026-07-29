@@ -15,8 +15,18 @@ export interface MCPToolSummary {
 export interface PackageSummary {
   name: string
   scripts: string[]
+  /** Deps da RAIZ, truncadas para o prompt. Ver `dependencyCount` para o total. */
   dependencies: string[]
   devDependencies: string[]
+  /** Totais REAIS antes da truncagem — o prompt precisa deles para não mentir. */
+  dependencyCount: number
+  devDependencyCount: number
+  /**
+   * União das deps declaradas nos sub-pacotes de workspace. Num monorepo o
+   * `package.json` da raiz não tem framework nenhum: sem isto, a detecção de
+   * "vanilla web" dava positivo em todo o monorepo React.
+   */
+  workspaceDependencies: string[]
   packageManager: string
 }
 

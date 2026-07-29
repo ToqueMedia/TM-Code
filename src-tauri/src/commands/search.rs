@@ -102,6 +102,11 @@ fn build_include_set(patterns: &[String]) -> Result<Option<GlobSet>, String> {
 /// Walk com as mesmas regras do Glob (`glob_files_filtered`), para que as duas
 /// tools nunca descrevam a mesma árvore de maneiras diferentes.
 fn build_walker(root: &Path, options: &SearchOptions) -> Result<ignore::Walk, String> {
+    // `respect_gitignore` por omissão LIGADO: descoberta honesta é o default.
+    // Desligá-lo continua possível (depurar um build partido, ler o que
+    // compilou) — é o mesmo opt-in do Glob, não um caminho acidental.
+    let respect = options.respect_gitignore.unwrap_or(true);
+
     let mut overrides = OverrideBuilder::new(root);
     let mut add = |glob: &str| -> Result<(), String> {
         overrides
@@ -115,17 +120,20 @@ fn build_walker(root: &Path, options: &SearchOptions) -> Result<ignore::Walk, St
             add(&format!("!{}", pattern))?;
         }
     }
+    // `node_modules` é o único do lote que o `includeIgnored` tem de poder
+    // alcançar: a descrição do Grep nomeia "ler o código real de uma
+    // dependência" como caso de uso, e com esta exclusão incondicional isso
+    // devolvia sempre vazio. Os restantes (minificados, sourcemaps, lockfiles)
+    // são ruído em qualquer cenário, incluindo o de depurar um build.
     for exclude in BUILTIN_EXCLUDES {
+        if !respect && *exclude == "!node_modules/**" {
+            continue;
+        }
         add(exclude)?;
     }
     let overrides = overrides
         .build()
         .map_err(|e| format!("Failed to build search filters: {}", e))?;
-
-    // `respect_gitignore` por omissão LIGADO: descoberta honesta é o default.
-    // Desligá-lo continua possível (depurar um build partido, ler o que
-    // compilou) — é o mesmo opt-in do Glob, não um caminho acidental.
-    let respect = options.respect_gitignore.unwrap_or(true);
 
     // Ler .gitignore de directórios ACIMA da raiz da busca só faz sentido
     // quando a raiz está mesmo dentro de um repositório — aí as regras do topo
