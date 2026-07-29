@@ -763,6 +763,11 @@ export function fallbackContextPlanForProfile(profile: PromptProfile): ContextPl
     }
   }
 
+  // RESERVADO como o deploy_publish/auth_database abaixo (auditoria 2026-07-29):
+  // `scaffold_project` também não tem produtor. `classifyPromptIntent` devolve
+  // só vision/bugfix_local e os dois produtores de intentOverride (/init e o
+  // preflight de TMS) pedem project_bootstrap. Ficou de fora da nota de 07-28
+  // por engano — que é exactamente como um perfil morto continua a parecer vivo.
   if (profile === 'scaffold_project') {
     return {
       taskDomain: 'project/scaffold',
@@ -778,8 +783,8 @@ export function fallbackContextPlanForProfile(profile: PromptProfile): ContextPl
 
   // RESERVADOS (auditoria 2026-07-28): deploy_publish e auth_database são
   // perfis da era pré-pivot dev-only — nada os produz hoje (classifyPromptIntent
-  // só devolve vision/bugfix_local; os overrides internos usam
-  // project_bootstrap/scaffold_project). Ficam como dados inertes porque
+  // só devolve vision/bugfix_local; o único override interno usa
+  // project_bootstrap). Ficam como dados inertes porque
   // remover o valor do union PromptProfile tocaria em tipos partilhados;
   // não há código a alcançá-los.
   if (profile === 'deploy_publish') {

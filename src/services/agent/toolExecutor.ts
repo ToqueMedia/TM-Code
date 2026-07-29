@@ -71,7 +71,6 @@ import {
 import { ENTER_WORKTREE_DESCRIPTION, EXIT_WORKTREE_DESCRIPTION } from './toolExecutor/worktrees'
 import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileState, type FileStateCache } from './toolExecutor/fileStateCache'
 import { recordReadRange, clearReadRangeTracker } from './toolExecutor/readRangeTracker'
-import { clearToolResultVisibility } from './toolExecutor/toolResultVisibility'
 import { clearMentionContextTracker } from './mentionContextTracker'
 import { addLineNumbers } from './toolExecutor/lineNumbers'
 import { hasBinaryExtension } from './toolExecutor/binaryExtensions'
@@ -377,6 +376,12 @@ class ToolExecutor {
    *  polling em `check_background_commands`. */
   private lastBackgroundPollSignature = ''
   private backgroundPollRepeats = 0
+  // Mesmo circuito para o collect_results. A descrição da tool sempre disse
+  // "não chames outra vez para esperar" — e nada o impedia (auditoria
+  // 2026-07-29). Pedir por palavras o que se pode negar por construção é o
+  // mesmo erro que custou 42% dos turnos no polling de comandos de fundo.
+  private lastCollectResultsSignature = ''
+  private collectResultsRepeats = 0
 
   /**
    * Ficheiros que NÃO existiam antes desta sessão e foram criados pelo agente,
@@ -741,8 +746,9 @@ class ToolExecutor {
     this.createdThisSession.clear()
     this.lastBackgroundPollSignature = ''
     this.backgroundPollRepeats = 0
+    this.lastCollectResultsSignature = ''
+    this.collectResultsRepeats = 0
     clearReadRangeTracker()
-    clearToolResultVisibility()
     this.largeResults.clear()
     this.largeResultsTotalBytes = 0
     this.largeResultRangesShown.clear()
@@ -1904,6 +1910,21 @@ class ToolExecutor {
           + `Narrow with includePatterns or raise maxResults.`,
         )
       }
+      // Ficheiros >1MB nunca foram procurados. O corte existia; o silêncio era
+      // o defeito (auditoria 2026-07-29): um símbolo que só vive num bundle ou
+      // num schema gerado dava "No matches found" e o modelo concluía que não
+      // existe. Com o número à frente, ele sabe que há onde procurar.
+      const skippedTooLarge = !Array.isArray(result)
+        && typeof (result as Record<string, unknown>)?.skipped_too_large === 'number'
+        ? (result as Record<string, unknown>).skipped_too_large as number
+        : 0
+      if (skippedTooLarge > 0) {
+        lines.push(
+          `⚠ ${skippedTooLarge} file${skippedTooLarge === 1 ? '' : 's'} over 1 MB `
+          + `${skippedTooLarge === 1 ? 'was' : 'were'} NOT searched (size cap). If what you are looking for could live in a bundle, `
+          + `minified output, a generated schema or a data dump, read that file directly with offset/limit instead of concluding it is absent.`,
+        )
+      }
 
       for (const file of files) {
         const f = file as Record<string, unknown>
@@ -3054,11 +3075,53 @@ ${preview}
       .replace(/\r/g, '\n')
   }
 
+  /**
+   * Uma linha, uma ACÇÃO.
+   *
+   * A descrição da tool sempre proibiu "multiple commands, newlines, &&, ||,
+   * semicolons, or pipes" e o código só rejeitava newlines (auditoria
+   * 2026-07-29). Duas correcções, em direcções opostas:
+   *
+   *  · `&&`, `||` e `;` passam a ser REJEITADOS. Numa shell persistente eles
+   *    não servem para nada — o `cd` fica, portanto cada passo pode ser o seu
+   *    próprio write — e partem o que a tool devolve: uma resposta com o output
+   *    de três comandos e um único `shell_status` não diz qual deles falhou.
+   *  · O PIPE passa a ser permitido, e a descrição corrigida. `a | b` é UM
+   *    statement com UM código de saída; proibi-lo tirava à shell metade da
+   *    sua utilidade (`ps aux | grep node`) sem nada em troca.
+   *
+   * O varrimento ignora separadores dentro de aspas: `echo "a && b"` é uma
+   * acção só, e recusá-la seria a mesma classe de erro — uma tool a negar o
+   * gesto certo.
+   */
   private validateAgentShellInput(data: string): string {
     const command = data.replace(/\n+$/g, '').trim()
     if (!command) throw new Error('Agent shell input cannot be empty.')
     if (command.includes('\n')) {
       throw new Error('Agent shell input must contain exactly one terminal action. Send separate agent_shell_write calls for multiple lines.')
+    }
+
+    let quote: string | null = null
+    for (let i = 0; i < command.length; i++) {
+      const ch = command[i]
+      if (quote) {
+        if (ch === '\\' && quote === '"') { i++; continue }
+        if (ch === quote) quote = null
+        continue
+      }
+      if (ch === '"' || ch === "'") { quote = ch; continue }
+      if (ch === '\\') { i++; continue }
+      const two = command.slice(i, i + 2)
+      if (two === '&&' || two === '||') {
+        throw new Error(
+          `Agent shell input must be exactly ONE command; found "${two}". This shell is PERSISTENT — state (cwd, env, an open SSH session) survives between calls, so send each step as its own agent_shell_write and read its output. Chaining hides which step failed: the tool reports one shell_status for the whole line. Pipes (|) are fine — they are one command.`,
+        )
+      }
+      if (ch === ';') {
+        throw new Error(
+          'Agent shell input must be exactly ONE command; found ";". Send each step as its own agent_shell_write — the shell is persistent, so cwd and env carry over. Pipes (|) are fine.',
+        )
+      }
     }
     return command
   }
@@ -3219,7 +3282,14 @@ ${preview}
         result += this.formatFileTreeCompact(child, childIndent, ignoreGlobs)
       }
     }
-    return result || '(empty directory)'
+    // Devolve VAZIO quando não há nada a mostrar. Dizer "(empty directory)"
+    // aqui era mentir por omissão de causa (auditoria 2026-07-29): `result`
+    // fica vazio tanto para um directório realmente vazio como para um cujas
+    // entradas foram todas FILTRADAS — pelo `ignore` do pedido ou pelo
+    // .gitignore. Um `list_directory` numa pasta cheia respondia
+    // "(empty directory)" e o modelo concluía que o caminho não tinha o que
+    // procurava. Quem chama sabe quantos filtros aplicou; a explicação é lá.
+    return result
   }
 
   private registerTools() {
@@ -3361,12 +3431,32 @@ ${preview}
           const signatureForRead = readResult.signature
           const contentHash = this.simpleHash(readResult.content)
 
-          // (Second-stage content dedup + post-read byte-size guard removed
-          // for claude-vaz parity: claude-vaz gates dedup solely on mtime
-          // (done above via file_stat) and rejects >256KB pre-read (done
-          // above via file_stat.size). Re-adding a post-read content
-          // equality check would diverge from Claude's "stat is the gate"
-          // model.)
+          // (Second-stage content dedup removed for claude-vaz parity:
+          // claude-vaz gates dedup solely on mtime (done above via file_stat).
+          // Re-adding a post-read content equality check would diverge from
+          // Claude's "stat is the gate" model.)
+
+          // TECTO DE BYTES, REDE PÓS-LEITURA (auditoria 2026-07-29).
+          //
+          // O guarda de 256KB acima só corre quando o `file_stat` respondeu.
+          // Quando ele falha o código cai para a leitura confiando que ela
+          // "erra de forma útil" — o que é verdade para ficheiro inexistente
+          // ou binário, e falso para tudo o resto: uma corrida de permissões,
+          // um symlink, um caminho com bytes estranhos, e um ficheiro de texto
+          // de 40MB entrava inteiro no contexto do modelo. O contexto é
+          // precisamente o que este tecto existe para proteger, portanto a
+          // ausência de stat não pode ser um passe-livre.
+          //
+          // Só quando não houve stat: com stat, a decisão já foi tomada acima
+          // (e uma slice pedida é o caminho legítimo para ficheiros grandes).
+          if (!preStat && !sliceRequested && readResult.content.length > ToolExecutor.READ_FILE_MAX_BYTES) {
+            const kb = (readResult.content.length / 1024).toFixed(1)
+            logger.warn(
+              'agent',
+              `[read_file] ${filePath}: file_stat falhou e o corpo tem ${kb} KB — recusado pelo tecto pós-leitura`,
+            )
+            return `Error: File is ${kb} KB which exceeds the 256 KB read cap. Use ${READ_ALIAS} with \`offset\` + \`limit\` to read a line range, or use ${GREP_ALIAS} / ${GLOB_ALIAS} to locate specific content. Reading the whole file would saturate the output budget for one call.`
+          }
 
           // Apply line-based slice if requested. For ranged reads, Rust does
           // the line-oriented scan and returns only the selected lines (parity
@@ -3819,7 +3909,19 @@ ${preview}
         const ignore = Array.isArray(input.ignore)
           ? (input.ignore as unknown[]).filter((g): g is string => typeof g === 'string')
           : []
-        return this.formatFileTreeCompact(tree as Record<string, unknown>, undefined, ignore)
+        const listing = this.formatFileTreeCompact(tree as Record<string, unknown>, undefined, ignore)
+        if (listing.trim().length > 0) return listing
+
+        // Nada a mostrar — e a razão importa mais do que o facto. Cada filtro
+        // activo é uma hipótese que o modelo pode testar; sem elas ele conclui
+        // "a pasta está vazia" e desiste do caminho certo.
+        const activeFilters: string[] = []
+        if (!includeIgnored) activeFilters.push('.gitignore (pass includeIgnored: true to see build output and dependencies)')
+        if (ignore.length > 0) activeFilters.push(`your ignore patterns [${ignore.join(', ')}]`)
+        if (input.showHidden !== true) activeFilters.push('dot-files (pass showHidden: true)')
+        return activeFilters.length > 0
+          ? `No entries to show for ${dirPath} at depth ${filter.maxDepth}. This may be an empty directory OR everything in it was filtered by: ${activeFilters.join('; ')}.`
+          : `Empty directory: ${dirPath} (no filters were applied, so it really is empty at depth ${filter.maxDepth}).`
       }
     })
 
@@ -4609,10 +4711,6 @@ ${preview}
         // truncated = the raw body was over the parse cap OR the extracted text
         // is over the caller's maxLength.
         let truncated = bodyTruncated
-        if (content.length > maxLength) {
-          content = content.slice(0, maxLength)
-          truncated = true
-        }
 
         const header = [
           `URL: ${parsed.toString()}`,
@@ -4623,12 +4721,34 @@ ${preview}
           .filter(Boolean)
           .join('\n')
 
+        // O CORTE CONTA O ENVELOPE (auditoria 2026-07-29).
+        //
+        // Antes, o conteúdo era cortado em exactamente `maxLength` (50000 por
+        // omissão) e só DEPOIS se somavam cabeçalho, rodapé de design e nota de
+        // truncagem. O resultado passava dos 50000 — que é precisamente o tecto
+        // do `getToolResultMaxChars('web_fetch')` — e o `truncateResult`
+        // devolvia ao modelo um PREVIEW DE 2000 caracteres de uma página que
+        // ele mandara buscar inteira. Ou seja: o default do schema garantia a
+        // paginação que o ramo de 07-28 tinha vindo evitar.
+        //
+        // O tecto do resultado é o orçamento REAL. Corta-se o conteúdo para o
+        // que sobra dele depois do envelope, e a nota diz o número verdadeiro.
+        const ceiling = ToolExecutor.getToolResultMaxChars('web_fetch')
+        const truncationNotice = (limit: number): string =>
+          `\n\n[Content truncated at ${limit} chars. Re-fetch with a higher maxLength, or a more specific URL/anchor, if you need more.]`
+        const envelope = `${header}\n\n${designFooter}`.length + truncationNotice(maxLength).length
+        const contentBudget = Math.max(1_000, Math.min(maxLength, ceiling - envelope))
+        if (content.length > contentBudget) {
+          content = content.slice(0, contentBudget)
+          truncated = true
+        }
+
         // designFooter carries stylesheet URLs + inline-style signal — append
         // AFTER the body so the model sees content first, then the design-copy
         // affordances. Truncation notice comes last so it is never buried.
         let output = `${header}\n\n${content}${designFooter}`
         if (truncated) {
-          output += `\n\n[Content truncated at ${maxLength} chars. Re-fetch with a higher maxLength, or a more specific URL/anchor, if you need more.]`
+          output += truncationNotice(contentBudget)
         }
         return output
       }
@@ -4976,7 +5096,18 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         const logs = useLayoutStore.getState().devServerLogs
 
         if (logs.length === 0) {
-          return 'Dev server is running but has produced no output yet.'
+          // CURSOR TAMBÉM AQUI (auditoria 2026-07-29). A descrição da tool
+          // promete um `next_since` no rodapé e manda passá-lo na chamada
+          // seguinte; este ramo devolvia texto sem cursor. Consequência: numa
+          // primeira leitura antes de o servidor escrever nada, o modelo ficava
+          // sem cursor, chamava outra vez sem `since_timestamp` e recebia a
+          // cauda inteira do buffer — sem forma de distinguir o erro NOVO do
+          // erro velho que ele acabou de corrigir. É precisamente o trabalho
+          // para o qual o cursor existe.
+          //
+          // `- 1` porque o filtro é `> since`: um log escrito neste mesmo
+          // milissegundo seria saltado com o valor exacto.
+          return `Dev server is running but has produced no output yet.\nnext_since: ${Date.now() - 1}`
         }
 
         // The buffer is cumulative — old errors persist after fixes.
@@ -5266,6 +5397,32 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           return 'No team tasks are active. Use the delegate tool to assign work to team members first.'
         }
 
+        // Circuito: nada mudou desde a última chamada → recusa.
+        //
+        // A assinatura são os ids AINDA A CORRER. Se um membro tiver acabado no
+        // intervalo, a assinatura muda, o contador reinicia e o relatório vem
+        // normalmente — o que se recusa é só voltar a perguntar o que já se
+        // sabe. Os resultados são ENTREGUES automaticamente (auto-wake), por
+        // isso parar o turno aqui nunca perde nada.
+        const runningSignature = ownedSummaries
+          .filter(sm => sm.status === 'running')
+          .map(sm => sm.id)
+          .sort()
+          .join(',')
+        if (runningSignature && runningSignature === this.lastCollectResultsSignature) {
+          this.collectResultsRepeats += 1
+        } else {
+          this.collectResultsRepeats = 0
+          this.lastCollectResultsSignature = runningSignature
+        }
+        if (this.collectResultsRepeats >= 1) {
+          return (
+            `Nothing has changed since your last collect_results — the same team member(s) are still working, and this call cost a full round-trip to learn that.\n\n` +
+            `END YOUR TURN NOW. Their results are delivered to you automatically the moment they finish (mid-run or via auto-wake), so stopping here does not abandon the work. ` +
+            `If you have independent work that does NOT depend on them, do that instead — but do not ask again.`
+          )
+        }
+
         const { buildTeamResultsReport } = await import('./subAgents/resultsReport')
         const { markSubAgentResultsDelivered } = await import('./subAgents/autoWake')
 
@@ -5384,14 +5541,14 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('agent_shell_write', {
       definition: {
         name: 'agent_shell_write',
-        description: 'Write exactly one command/input line to a persistent agent shell session. This keeps the agent inside the same shell/SSH context. Do not include multiple commands, newlines, &&, ||, semicolons, or pipes. For long jobs (deploy, upload, install) use a large wait_ms so the command can finish in one write+read cycle — avoid polling every few seconds.',
+        description: 'Write exactly one command/input line to a persistent agent shell session. This keeps the agent inside the same shell/SSH context — cwd, env and an open SSH session survive between calls. Exactly one command is ENFORCED: newlines, &&, || and ; are rejected (send each step as its own call and read its output — a chained line reports one status for everything). Pipes are allowed: `a | b` is one command. For long jobs (deploy, upload, install) use a large wait_ms so the command can finish in one write+read cycle — avoid polling every few seconds.',
         input_schema: {
           type: 'object',
           properties: {
             session_id: { type: 'string', description: 'Session id returned by agent_shell_start. Defaults to the latest agent shell session.' },
             input: { type: 'string', description: 'One command or interactive input line to send.' },
             press_enter: { type: 'boolean', description: 'Append Enter/newline after input. Default: true.' },
-            wait_ms: { type: 'number', description: 'How long to wait for output after writing. Default: 1000. Max: 120000 (use high values for deploy/upload).' },
+            wait_ms: { type: 'number', description: 'How long to wait for output after writing. Default: 10000. Max: 120000 (use high values for deploy/upload). Returns EARLY on the first new output or on shell exit, so this is a ceiling, not a delay.' },
           },
           required: ['input'],
         },
@@ -5408,7 +5565,11 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         session.activeToolCallId = input._toolCallId as string | null | undefined || null
 
         await invoke('write_to_pty', { sessionId: session.id, data: payload })
-        await this.waitForAgentShellOutput(session, startLength, Math.min(Number(input.wait_ms) || 1000, 120_000))
+        // Default 10s, não 1s: a espera termina no PRIMEIRO output novo, portanto
+        // um tecto alto não custa nada quando o comando fala — e quando ele está
+        // calado é exactamente aí que a descrição manda esperar. O default de 1s
+        // treinava o polling que as duas descrições proíbem (auditoria 2026-07-29).
+        await this.waitForAgentShellOutput(session, startLength, Math.min(Number(input.wait_ms) || 10_000, 120_000))
         session.activeToolCallId = null
 
         const output = this.readAgentShellDelta(session)
@@ -5424,12 +5585,12 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('agent_shell_read', {
       definition: {
         name: 'agent_shell_read',
-        description: 'Read new output from a persistent agent shell session without writing input. Use after agent_shell_write when a command is still running. Prefer ONE long wait_ms (up to 120s) over many short polls — the UI shows a single live terminal for the session.',
+        description: 'Read new output from a persistent agent shell session without writing input. Use after agent_shell_write when a command is still running. Prefer ONE long wait_ms (up to 120s) over many short polls — the UI shows a single live terminal for the session. The wait returns as soon as ANY new output arrives, so a long wait_ms costs nothing when the command is talking.',
         input_schema: {
           type: 'object',
           properties: {
             session_id: { type: 'string', description: 'Session id returned by agent_shell_start. Defaults to the latest agent shell session.' },
-            wait_ms: { type: 'number', description: 'How long to wait for new output before returning. Default: 1000. Max: 120000. For deploys/uploads use 60000–120000 instead of polling every 1–5s.' },
+            wait_ms: { type: 'number', description: 'How long to wait for new output before returning. Default: 30000. Max: 120000. Returns EARLY on the first new output or on shell exit, so this is a ceiling, not a delay. For deploys/uploads pass 60000–120000.' },
             max_chars: { type: 'number', description: 'Maximum characters to return. Default: 20000. Max: 50000.' },
           },
           required: [],
@@ -5440,7 +5601,9 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         const session = this.getAgentShellSession(input.session_id as string | undefined)
         const startLength = session.output.length
         session.activeToolCallId = input._toolCallId as string | null | undefined || null
-        await this.waitForAgentShellOutput(session, startLength, Math.min(Number(input.wait_ms) || 1000, 120_000))
+        // 30s por omissão — ver a nota no agent_shell_write. Esta é A tool de
+        // polling, portanto era a que mais sofria com o default de 1s.
+        await this.waitForAgentShellOutput(session, startLength, Math.min(Number(input.wait_ms) || 30_000, 120_000))
         session.activeToolCallId = null
         const maxChars = Math.min(Number(input.max_chars) || 20_000, 50_000)
         const output = this.readAgentShellDelta(session, maxChars)
@@ -5727,7 +5890,18 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           this.backgroundPollRepeats = 0
           this.lastBackgroundPollSignature = stillRunningSignature
         }
-        if (this.backgroundPollRepeats >= 1) {
+        // A recusa cobre a VARREDURA ("mudou algo?"), não o pedido por id.
+        //
+        // Estava antes deste ponto e apanhava os dois (auditoria 2026-07-29):
+        // `check_background_commands({ id })` é o caminho DOCUMENTADO para
+        // obter o output completo de um comando que terminou, e era negado
+        // sempre que a assinatura se repetia — o modelo pedia o resultado que a
+        // tool lhe tinha dito para ir buscar e ouvia "não perguntes outra vez".
+        // Uma recusa que bloqueia o gesto certo deixa de ser um guardrail.
+        const targetStillRunning = targetId
+          ? bgCmdStore.getById(targetId)?.status === 'running'
+          : false
+        if (this.backgroundPollRepeats >= 1 && (!targetId || targetStillRunning)) {
           return (
             `Nothing has changed since your last check — the same command(s) are still running, and this call cost a full round-trip to learn that.\n\n` +
             `END YOUR TURN NOW. The system auto-wakes you the moment a background command exits; the run resumes by itself, so stopping here is not abandoning the task. ` +

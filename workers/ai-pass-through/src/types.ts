@@ -54,6 +54,27 @@ export interface ActiveAIConfig {
    */
   maxOutputTokens?: number
   /**
+   * Capacidades do modelo ativo, emitidas em `X-Model-Capabilities` como
+   * `vision=1;search=0;thinking=toggleable`.
+   *
+   * Terceiro irmão do contextWindow/maxOutputTokens, e pela mesma razão levada
+   * até ao fim (auditoria 2026-07-29): a IDE tem uma tabela `MODEL_PROFILES`
+   * cozida e, para um modelo que ela não conhece, herdava as flags de OUTRO
+   * modelo — o perfil do plano. Num desenho onde "adicionar um modelo é editar
+   * a KV, não o código", publicar um modelo novo dava-lhe silenciosamente a
+   * visão, o pensamento e a pesquisa do anterior: imagens enviadas a quem não
+   * as lê, `thinking` imposto a quem não o suporta.
+   *
+   * Campos publicados na KV: `supportsVision`, `supportsSearch`, `thinkingMode`.
+   * Ausentes → header omitido → a IDE fica com o perfil local (comportamento
+   * anterior, agora por escolha e não por falta de informação).
+   */
+  capabilities?: {
+    vision?: boolean
+    search?: boolean
+    thinking?: 'toggleable' | 'mandatory' | 'none'
+  }
+  /**
    * Campos extra de request específicos do provider, merged no corpo de
    * CADA pedido (depois do model, antes do stream_options). Config-driven
    * para o worker continuar provider-agnóstico — ex.: DashScope

@@ -88,6 +88,18 @@ interface AgentState {
    */
   modelMaxOutputTokens: number | null;
   /**
+   * Capacidades DECLARADAS pelo data-plane (`X-Model-Capabilities`).
+   *
+   * `null` = o servidor não declarou; quem lê cai no perfil local. Nunca
+   * confundir com `false` (declarado como não-suportado). A distinção importa:
+   * antes, um modelo que a tabela MODEL_PROFILES não conhecia herdava as flags
+   * do perfil de FALLBACK — visão, pensamento e pesquisa de OUTRO modelo — e
+   * publicar um modelo novo na KV dava-lhe silenciosamente essas capacidades
+   * (auditoria 2026-07-29).
+   */
+  modelSupportsVision: boolean | null;
+  modelSupportsSearch: boolean | null;
+  /**
    * Whether the most recent response was actually served via BYOK (the
    * server-side X-BYOK-Active header). This is the authoritative source for
    * the chat-header pill — the byokStore.enabled toggle says what the user
@@ -128,6 +140,7 @@ interface AgentActions {
     thinkingMode?: "none" | "toggleable" | "mandatory" | null,
     contextWindow?: number | null,
     maxOutputTokens?: number | null,
+    capabilities?: { vision?: boolean | null; search?: boolean | null },
   ) => void;
   setByokActive: (active: boolean) => void;
   setTeamByokActive: (active: boolean) => void;
@@ -164,6 +177,8 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
   thinkingMode: null,
   modelContextWindow: null,
   modelMaxOutputTokens: null,
+  modelSupportsVision: null,
+  modelSupportsSearch: null,
   byokActive: false,
   teamByokActive: false,
   cumulativeToolCalls: 0,
@@ -185,7 +200,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
     set({ workerStatus });
   },
 
-  setModelInfo: (name, provider, thinkingMode, contextWindow, maxOutputTokens) => {
+  setModelInfo: (name, provider, thinkingMode, contextWindow, maxOutputTokens, capabilities) => {
     set({
       modelName: name,
       modelProvider: provider,
@@ -205,6 +220,10 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
       ...(maxOutputTokens !== undefined
         ? { modelMaxOutputTokens: maxOutputTokens }
         : {}),
+      // Idem para as capacidades: `undefined` não toca, `null` limpa (volta a
+      // "o servidor não declarou" → perfil local), booleano manda.
+      ...(capabilities?.vision !== undefined ? { modelSupportsVision: capabilities.vision } : {}),
+      ...(capabilities?.search !== undefined ? { modelSupportsSearch: capabilities.search } : {}),
     });
   },
 
@@ -322,6 +341,8 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
       thinkingMode: null,
       modelContextWindow: null,
       modelMaxOutputTokens: null,
+  modelSupportsVision: null,
+  modelSupportsSearch: null,
       byokActive: false,
       teamByokActive: false,
           cumulativeToolCalls: 0,

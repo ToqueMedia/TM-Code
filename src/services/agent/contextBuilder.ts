@@ -39,6 +39,7 @@ import {
 import type {
   MCPToolSummary,
   PackageSummary,
+  PathAlias,
   PromptCacheEntry,
   PromptContext,
 } from './contextBuilder/types'
@@ -151,6 +152,36 @@ export {
   skillsFromHashtags,
 }
 export type { PromptContext, MCPToolSummary, PackageSummary }
+
+/**
+ * Sumário de package.json em texto — não o objecto.
+ *
+ * `${pkgSummary}` numa template string rende "[object Object]", e era assim
+ * que três auxiliares o entregavam ao modelo (auditoria 2026-07-29). Rende só
+ * o que serve para descobrir comandos e stack: nome, scripts, deps (com o
+ * total real quando a lista vem truncada).
+ */
+function renderPkgSummaryLines(pkg: PackageSummary | null | undefined): string {
+  if (!pkg) return 'package summary: unavailable'
+  const tail = (shown: number, total: number): string =>
+    total > shown ? ` (+${total - shown} more)` : ''
+  const parts = [`package summary: ${pkg.name}`]
+  if (pkg.packageManager) parts.push(`  package manager field: ${pkg.packageManager}`)
+  if (pkg.scripts.length) parts.push(`  scripts: ${pkg.scripts.join(', ')}`)
+  if (pkg.dependencies.length) {
+    parts.push(`  deps: ${pkg.dependencies.join(', ')}${tail(pkg.dependencies.length, pkg.dependencyCount)}`)
+  }
+  if (pkg.devDependencies.length) {
+    parts.push(`  devDeps: ${pkg.devDependencies.join(', ')}${tail(pkg.devDependencies.length, pkg.devDependencyCount)}`)
+  }
+  return parts.join('\n')
+}
+
+/** Aliases de import em `alias→target`, em vez de "- [object Object]". */
+function renderPathAliasLines(aliases: PathAlias[] | undefined): string | null {
+  if (!aliases || aliases.length === 0) return null
+  return `path aliases:\n${aliases.map(a => `- ${a.alias} → ${a.target}`).join('\n')}`
+}
 
 class ContextBuilder {
   private static instance: ContextBuilder
@@ -275,6 +306,13 @@ class ContextBuilder {
         return sharedUiBaselineCore()
       case 'ui_patterns':
         return sharedTasteDefaults()
+      // Estas secções interpolavam OBJECTOS em template strings (auditoria
+      // 2026-07-29): `${pkgSummary}` rendia "[object Object]" e
+      // `pathAliases.map(a => \`- ${a}\`)` rendia uma lista de
+      // "[object Object]". Três auxiliares — project.package_map,
+      // project.entrypoints e delivery.build_scripts — entregavam isso ao
+      // modelo como se fosse contexto. Pior do que não ter a secção: ocupa
+      // tokens, parece dados e não diz nada.
       case 'project.structure_overview':
         return ctx?.promptCtx ? getProjectStructureIndexSection(ctx.promptCtx) : null
       case 'project.package_map':
@@ -283,15 +321,15 @@ class ContextBuilder {
           '# Project package map',
           `project type: ${ctx.promptCtx.projectType}`,
           `package manager: ${ctx.promptCtx.pmDetected}`,
-          ctx.promptCtx.pkgSummary ? `package summary:\n${ctx.promptCtx.pkgSummary}` : 'package summary: unavailable',
-          ctx.promptCtx.pathAliases.length ? `path aliases:\n${ctx.promptCtx.pathAliases.map(a => `- ${a}`).join('\n')}` : null,
+          renderPkgSummaryLines(ctx.promptCtx.pkgSummary),
+          renderPathAliasLines(ctx.promptCtx.pathAliases),
         ].filter(Boolean).join('\n')
       case 'project.entrypoints':
         if (!ctx?.promptCtx) return null
         return [
           '# Project entrypoints',
           'Expected entrypoint candidates: src/main.tsx, src/App.tsx, src/index.ts, src/routes/**, vite.config.*, tauri command modules.',
-          ctx.promptCtx.pathAliases.length ? `path aliases:\n${ctx.promptCtx.pathAliases.map(a => `- ${a}`).join('\n')}` : null,
+          renderPathAliasLines(ctx.promptCtx.pathAliases),
           'Use search/list/read tools to confirm the exact entrypoint before editing.',
         ].filter(Boolean).join('\n')
       case 'project.symbol_index':
@@ -332,7 +370,7 @@ class ContextBuilder {
         return [
           '# Delivery: build scripts',
           `package manager: ${ctx.promptCtx.pmDetected}`,
-          ctx.promptCtx.pkgSummary ? `package summary:\n${ctx.promptCtx.pkgSummary}` : 'package summary: unavailable',
+          renderPkgSummaryLines(ctx.promptCtx.pkgSummary),
           'Use for build/test/dev command discovery before broader project structure.',
         ].join('\n')
       case 'delivery.git_status':
@@ -740,7 +778,20 @@ class ContextBuilder {
       const { useAgentStore } = await import('../../stores/agentStore')
       const modelName = useAgentStore.getState().modelName
       const plan = useBillingStore.getState().plan
-      modelProfile = modelName && MODEL_PROFILES[modelName] ? MODEL_PROFILES[modelName] : getProfileForPlan(plan)
+      const local = modelName && MODEL_PROFILES[modelName] ? MODEL_PROFILES[modelName] : getProfileForPlan(plan)
+      // A capacidade DECLARADA pelo data-plane sobrepõe-se ao perfil local
+      // (auditoria 2026-07-29). Sem isto, o prompt anunciava "pesquisa web
+      // nativa" a um modelo publicado só na KV que a herdava do perfil de
+      // fallback — e o modelo confiava, deixando de chamar a tool que era o
+      // seu único acesso real à web.
+      const { effectiveCapability } = await import('./modelProfiles')
+      const declaredSearch = useAgentStore.getState().modelSupportsSearch
+      const declaredVision = useAgentStore.getState().modelSupportsVision
+      modelProfile = {
+        ...local,
+        supportsSearch: effectiveCapability(declaredSearch, local.supportsSearch),
+        supportsAttachments: effectiveCapability(declaredVision, local.supportsAttachments),
+      }
     } catch { /* fallback: no profile */ }
 
     // ═══════════════════════════════════════════════════════════════

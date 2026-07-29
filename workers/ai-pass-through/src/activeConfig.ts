@@ -108,9 +108,37 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     ? Math.floor(obj.maxOutputTokens)
     : undefined
 
+  // Capacidades do modelo, emitidas em X-Model-Capabilities.
+  //
+  // PORQUÊ (auditoria 2026-07-29): a IDE tem uma tabela MODEL_PROFILES cozida
+  // e, para um modelo desconhecido, herdava as flags de OUTRO modelo (o perfil
+  // do plano). Num desenho em que "adicionar um modelo é editar a KV, não o
+  // código", isso significa que publicar um modelo novo lhe atribuía silen-
+  // ciosamente a visão, o pensamento e a pesquisa do modelo anterior — imagens
+  // enviadas a quem não as lê, thinking imposto a quem não o suporta. Os dois
+  // campos numéricos (contextWindow/maxOutputTokens) já vinham por aqui; estas
+  // são as que faltavam. Mesma tolerância: ausente → undefined, e a IDE cai no
+  // perfil local em vez de falhar o pedido.
+  const readCapability = (key: string): boolean | undefined =>
+    typeof (obj as Record<string, unknown>)[key] === 'boolean'
+      ? (obj as Record<string, unknown>)[key] as boolean
+      : undefined
+  const capabilities = {
+    vision: readCapability('supportsVision'),
+    search: readCapability('supportsSearch'),
+    thinking: typeof obj.thinkingMode === 'string'
+      && ['toggleable', 'mandatory', 'none'].includes(obj.thinkingMode)
+      ? obj.thinkingMode as 'toggleable' | 'mandatory' | 'none'
+      : undefined,
+  }
+  const hasCapabilities = capabilities.vision !== undefined
+    || capabilities.search !== undefined
+    || capabilities.thinking !== undefined
+
   return {
     provider: assertString(obj.provider, 'provider'),
     model: assertString(obj.model, 'model'),
+    capabilities: hasCapabilities ? capabilities : undefined,
     speedModel,
     baseUrl: assertString(obj.baseUrl, 'baseUrl').replace(/\/+$/, ''),
     chatCompletionsPath: assertString(obj.chatCompletionsPath, 'chatCompletionsPath'),

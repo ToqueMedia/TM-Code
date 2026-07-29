@@ -39,6 +39,9 @@ export function formatSearchResultsByFile(result: unknown, mode: 'files_with_mat
     capped > 0
       ? `\n[${capped} file${capped === 1 ? '' : 's'} hit the per-file cap: the counts above are what was returned, not what exists]`
       : '',
+    typeof obj.skipped_too_large === 'number' && obj.skipped_too_large > 0
+      ? `\n[${obj.skipped_too_large} file(s) over 1 MB were NOT searched (size cap) — read them directly if the answer could live in a bundle or generated file]`
+      : '',
   ].join('')
   return `${header}\n${lines.join('\n')}${footer}`
 }

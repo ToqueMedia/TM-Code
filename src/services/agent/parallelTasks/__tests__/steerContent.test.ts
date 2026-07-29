@@ -39,6 +39,11 @@ jest.mock('../../modelProfiles', () => ({
     'vision-native': { supportsAttachments: true, contextWindow: 128000, maxOutputTokens: 8192 },
   },
   getProfileForPlan: jest.fn(() => ({ supportsAttachments: false, contextWindow: 128000, maxOutputTokens: 8192 })),
+  // Implementação REAL: a precedência (declarado pelo servidor > perfil local)
+  // é o que estes testes exercitam sem o saber — mockar isto para um valor fixo
+  // esconderia a regressão em vez de a apanhar.
+  effectiveCapability: (declared: boolean | null | undefined, profileValue: boolean | undefined) =>
+    typeof declared === 'boolean' ? declared : profileValue === true,
 }))
 
 jest.mock('../../byokVision', () => ({

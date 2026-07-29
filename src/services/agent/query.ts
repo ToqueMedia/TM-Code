@@ -29,7 +29,6 @@ import {
   type CompactFn,
 } from "./compact";
 import { applyGlobalToolResultBudget } from "./toolResultGlobalBudget";
-import { updateToolResultVisibility } from "./toolExecutor/toolResultVisibility";
 import {
   buildToolLoopNudgeText,
   checkForLoop,
@@ -44,7 +43,7 @@ import { getCriticalReinjectionReminder } from "./contextBuilder/sections/chatSe
 import { isAtBlockingLimit } from "../../utils/contextWindow";
 import { contentAsText } from "./promptValueHelpers";
 import { inspectAndLogPayload } from "./payloadInspector";
-import { getReadRanges, getAndResetOverlapStats } from "./toolExecutor/readRangeTracker";
+import { getReadRanges } from "./toolExecutor/readRangeTracker";
 import {
   getAndResetMentionContextStats,
   recordMentionContextFull,
@@ -1221,9 +1220,9 @@ export async function* query(
     //    corrigida 2026-07-13); OVER budget the oldest results are compacted
     //    to a structured summary (tool name, path/range, hash, preview,
     //    re-read hint) until back under, keepRecent=4 protected. Compacted ≠
-    //    deleted — the model re-reads via read_file / read_large_result, and
-    //    updateToolResultVisibility (below) garante que o dedup não bloqueia
-    //    essa releitura. Token-reduction phase 2026-06-26, budget real 07-13.
+    //    deleted — o modelo relê via read_file / read_large_result, e o read
+    //    NUNCA lhe recusa a releitura (a supressão saiu em 2026-07-29).
+    //    Token-reduction phase 2026-06-26, budget real 07-13.
     const budgetResult = applyGlobalToolResultBudget(messagesForQuery);
     if (budgetResult.compactedCount > 0) {
       messagesForQuery = budgetResult.messages;
@@ -1390,16 +1389,12 @@ export async function* query(
     resetMentionContextTurnStats();
     const providerMessagesForQuery = compactHistoricalMentionContextForPayload(messagesForQuery);
 
-    // Regista que tool_results seguem INTACTOS neste payload vs compactados/
-    // removidos por QUALQUER camada acima (budget global, per-message,
-    // collapse, autoCompact, snip de emergência, mention-compaction). As
-    // camadas de dedup de leitura consultam este registo: um stub "já leste
-    // isto, está no contexto" só é permitido quando é VERDADE — senão o read
-    // serve o conteúdo diretamente e poupa o round-trip do force:true.
-    // `messages` (histórico canónico) delimita os ids deste loop, para não
-    // reclassificar resultados de loops concorrentes (sub-agentes).
-    updateToolResultVisibility(messages, providerMessagesForQuery);
-
+    // (Removido 2026-07-29) updateToolResultVisibility: registava, a cada turno,
+    // quais tool_results seguiam INTACTOS no payload vs compactados. O ÚNICO
+    // leitor desse registo era a dedup de leitura — que saiu com a supressão de
+    // releituras — portanto isto passou a percorrer todas as mensagens de todos
+    // os pedidos para produzir um estado que ninguém consultava. Registar por
+    // registar não é observabilidade; é trabalho por turno a fingir que serve.
     // Ensure message alternation: Anthropic requires user/assistant/user/...
     // NOTE: This synthetic assistant message was removed — it caused the model
     // to see 'Understood. What would you like me to do next?' as its own prior
@@ -2376,13 +2371,6 @@ export async function* query(
           typeof tu.cache_creation_input_tokens === 'number' ? tu.cache_creation_input_tokens : undefined
         const cacheReadInputTokens =
           typeof tu.cache_read_input_tokens === 'number' ? tu.cache_read_input_tokens : dashScopeCachedTokens
-        const overlapStats = getAndResetOverlapStats()
-        if (overlapStats.skippedOverlappingReads > 0 || overlapStats.adjustedReadRanges > 0) {
-          console.debug(
-            `[query] read-range dedup: skipped=${overlapStats.skippedOverlappingReads}, ` +
-            `adjusted=${overlapStats.adjustedReadRanges}`,
-          )
-        }
         onRequestUsage?.({
           requestId: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
             ? crypto.randomUUID()
@@ -2458,13 +2446,13 @@ export async function* query(
           contextPlannerSelectionReason: auxiliarySelection?.contextPlannerSelectionReason,
           expandedToolNames: toolsetSelector?.getExpandedNames(),
           deniedToolNames: toolsetSelector?.getDeniedNames(),
-          // ── Read Range Tracker telemetry (overlap dedup) ──
-          // readRanges/skippedOverlappingReads/adjustedReadRanges reflect
-          // tool calls executed between the previous request and this one;
-          // getAndResetOverlapStats() resets the counters each call.
+          // ── Read Range Tracker telemetry ──
+          // Quais intervalos foram lidos entre o pedido anterior e este. Os
+          // contadores skippedOverlappingReads/adjustedReadRanges saíram com a
+          // dedup de sobreposição (auditoria 2026-07-29): sem a dedup só podiam
+          // reportar zero, e uma métrica que não pode variar mente sobre o que
+          // mede — quem lesse o painel concluía "nenhuma leitura redundante".
           readRanges: getReadRanges(),
-          skippedOverlappingReads: overlapStats.skippedOverlappingReads,
-          adjustedReadRanges: overlapStats.adjustedReadRanges,
           // ── Mention context redundancy telemetry (Correção B) ──
           // mentionContextSentFullThisTurn=false means the follow-up-turn
           // stub fired (full outline replaced by a short reference);
@@ -2801,7 +2789,17 @@ export async function* query(
       // pending rows. One reconciliation nudge per run; a model that touched
       // the tracker at all (even partially) is deliberately NOT nudged —
       // partial sessions legitimately end with pending tasks.
-      if (taskGuardCount < 1 && !runTouchedTaskTracker) {
+      //
+      // `writeActionCount > 0` (auditoria 2026-07-29): o tracker é POR SESSÃO,
+      // não por run, portanto as linhas pendentes que este run nunca tocou
+      // podem ser de um pedido ANTERIOR já resolvido. Sem esta condição, uma
+      // pergunta read-only ("onde está X?") a seguir a um run com linhas
+      // pendentes era interrompida com uma ordem para reconciliar um tracker
+      // que não é dela — ruído com cara de guardrail. Com trabalho de escrita
+      // feito, a reconciliação é legítima; e o texto passa a admitir que as
+      // linhas podem ser de antes, que é uma resolução válida em vez de um
+      // convite a inventar progresso.
+      if (taskGuardCount < 1 && !runTouchedTaskTracker && writeActionCount > 0) {
         try {
           const { useAgentStore } = await import("../../stores/agentStore");
           const tasks = useAgentStore.getState().tasks;
@@ -2819,11 +2817,11 @@ export async function* query(
                 {
                   role: "user",
                   content:
-                    `The task tracker still shows ${unfinished.length} task(s) not completed:\n${preview}\n\n` +
+                    `You changed files this run but never called update_tasks, and the task tracker still shows ${unfinished.length} task(s) not completed:\n${preview}\n\n` +
                     `Reconcile it before finishing (update_session_memory is NOT the task tracker — use update_tasks): ` +
                     `if this work is actually done and verified, call update_tasks now marking each finished task completed (with evidence); ` +
-                    `if something remains, continue working on it now; if a task is obsolete or blocked, update its status/description to say so. ` +
-                    `Do not end the run with a stale tracker.`,
+                    `if something remains, continue working on it now; if a task is obsolete, blocked, or left over from an EARLIER request, update its status/description to say exactly that. ` +
+                    `Do not invent progress to clear a row, and do not end the run with a tracker that contradicts what happened.`,
                 },
               ],
               continuationCount: 0,

@@ -2750,3 +2750,64 @@ describe('delete_file num directório', () => {
     expect(files[0].filePath).toBe('/p/d/ok.ts')
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════════
+// agent_shell_write: uma linha, uma ACÇÃO
+// ═══════════════════════════════════════════════════════════════════════
+//
+// A descrição sempre proibiu "multiple commands, newlines, &&, ||, semicolons,
+// or pipes"; o código só rejeitava newlines. Duas correcções em direcções
+// opostas: `&&`/`||`/`;` passam a ser rejeitados (numa shell persistente não
+// servem, e partem a atribuição de output — uma resposta com três comandos tem
+// um único shell_status); o PIPE passa a ser permitido, porque `a | b` é um
+// statement com um código de saída e proibi-lo tirava metade da utilidade da
+// shell sem nada em troca.
+describe('agent_shell_write: uma acção por chamada', () => {
+  type Validate = (data: string) => string
+  let validate: Validate
+
+  beforeEach(() => {
+    const exec = freshExecutor() as unknown as { validateAgentShellInput: Validate }
+    validate = exec.validateAgentShellInput.bind(exec)
+  })
+
+  it('aceita um comando simples', () => {
+    expect(validate('ls -la')).toBe('ls -la')
+  })
+
+  it('aceita PIPES — um statement, um exit code', () => {
+    expect(validate('ps aux | grep node')).toBe('ps aux | grep node')
+    expect(validate('cat a.log | tail -20 | wc -l')).toContain('wc -l')
+  })
+
+  it('rejeita && com uma explicação accionável', () => {
+    expect(() => validate('cd /tmp && ls')).toThrow(/exactly ONE command.*&&/s)
+    // A mensagem tem de dizer PORQUE não é preciso: o estado da shell persiste.
+    expect(() => validate('cd /tmp && ls')).toThrow(/PERSISTENT/)
+  })
+
+  it('rejeita || e ;', () => {
+    expect(() => validate('make || echo fail')).toThrow(/exactly ONE command/)
+    expect(() => validate('cd /tmp; ls')).toThrow(/exactly ONE command/)
+  })
+
+  it('rejeita newlines internos', () => {
+    expect(() => validate('ls\nrm -rf /')).toThrow(/exactly one terminal action/)
+  })
+
+  it('NÃO rejeita separadores dentro de aspas', () => {
+    // Recusar isto seria a mesma classe de erro que estamos a corrigir: uma
+    // tool a negar o gesto certo.
+    expect(validate('echo "a && b"')).toBe('echo "a && b"')
+    expect(validate("git commit -m 'fix; really'")).toContain('really')
+    expect(validate('echo "one; two || three"')).toContain('three')
+  })
+
+  it('respeita o escape dentro de aspas duplas', () => {
+    expect(validate('echo "quote \\" and && inside"')).toContain('inside')
+  })
+
+  it('rejeita input vazio', () => {
+    expect(() => validate('   ')).toThrow(/cannot be empty/)
+  })
+})

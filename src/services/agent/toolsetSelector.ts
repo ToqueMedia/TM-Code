@@ -215,6 +215,8 @@ const PROFILE_TOOLSETS: Record<PromptProfile, ProfileToolset> = {
   },
 
   // New project — broad starter set (needs everything to scaffold).
+  // Inerte: nada produz o perfil `scaffold_project` (ver a nota no
+  // auxiliaryRegistry). Fica como dado, não como caminho.
   scaffold_project: { base: [...BUGFIX_BASE, EDIT_FILE, WRITE_FILE, CREATE_FILE] },
 
   // Deploy/publish — shell + credentials + read.

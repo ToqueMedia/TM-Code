@@ -24,7 +24,7 @@ import { resolveAttachments, resolveImageToDataUri } from '../attachmentService'
 import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText } from './promptValueHelpers'
 import { describeImagesViaSidecar } from './visionSidecar'
 // joinPromptValues: agora só usado pelo steering em mainDispatch (F2).
-import { MODEL_PROFILES, getProfileForPlan } from './modelProfiles'
+import { MODEL_PROFILES, getProfileForPlan, effectiveCapability } from './modelProfiles'
 import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from './atMentions'
 import {
   buildTmsBootstrapOnlyPrompt,
@@ -470,7 +470,14 @@ async function runAgentInternal(
         : getProfileForPlan(billingPlan)
 
       const parts = await buildContentParts(blocksForModel, promptResolvers)
-      if (parts && activeProfile.supportsAttachments) {
+      // Capacidade declarada pelo data-plane vence o perfil local — ver
+      // effectiveCapability. Antes, um modelo desconhecido herdava a visão do
+      // perfil de fallback e recebia imagens que não sabe ler.
+      const supportsAttachments = effectiveCapability(
+        useAgentStore.getState().modelSupportsVision,
+        activeProfile.supportsAttachments,
+      )
+      if (parts && supportsAttachments) {
         userContent = parts
       } else if (parts) {
         // Modelo ativo sem visão → uma descrição auxiliar vira texto para o

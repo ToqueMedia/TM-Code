@@ -385,7 +385,7 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
   ctx.tools.set('read_large_result', {
     definition: {
       name: 'read_large_result',
-      description: 'Read a portion of a large tool result that was too big to return inline. Use the reference ID from the "Output too large" message. Specify offset and limit to read specific sections.',
+      description: 'Read a portion of a large tool result that was too big to return inline. The reference ID appears in the "Partial view" system-reminder that wraps the truncated result — it looks like large_result_3 and the reminder also gives you the exact offset to continue from. (The description used to point at an "Output too large" message; no such text is ever produced, so a model looking for it found nothing.) Specify offset and limit to read specific sections.',
       input_schema: {
         type: 'object',
         properties: {

@@ -1,132 +1,51 @@
 /**
- * Read dedup — avoids re-sending file content the model already has in context.
+ * Resíduo do read-dedup: só o marcador histórico sobrevive aqui.
  *
- * When the model calls read_file on a path+range it has already read this
- * session, and the file hasn't changed on disk, we return a short stub
- * message instead of the full content. The earlier tool_result is still
- * in the conversation context — two full copies waste cache_creation tokens
- * on every subsequent turn.
+ * Este módulo ERA a supressão de releituras — quando o modelo chamava read_file
+ * num intervalo que já tinha lido, com o ficheiro inalterado, recebia um stub
+ * em vez do conteúdo. Foi REMOVIDA em 2026-07-29 por paridade com o claude-vaz
+ * (cujo Read devolve sempre o que foi pedido, todas as vezes) e por causa
+ * medida: na sessão katondo-queue foram 175 read_file em 127 turnos, 12,36M
+ * tokens de input e a tarefa por acabar. A narração do modelo explica o ciclo —
+ * "os resultados do Read estão a ser compactados", "vou ler em pequenas janelas
+ * para evitar compactação", "tenho andado em círculos". O stub afirmava que o
+ * conteúdo ainda estava na conversa quando, do ponto de vista do modelo, já não
+ * estava; sem forma de obter o ficheiro, ele contornava pedindo janelas cada vez
+ * menores, e cada contorno acrescentava contexto. A economia gastou 12 milhões
+ * de tokens.
  *
- * Claude Code's BQ proxy data: ~18% of Read calls are same-file collisions
- * (up to 2.64% of fleet cache_creation). Client-side dedup eliminates this
- * waste without any server-side changes.
- *
- * Freshness check
- * ---------------
- * The first gate is cheap: `fsVersion`, a global counter that increments on
- * every observed write. If it matches, no local tool write happened and the
- * cached content is still valid without touching disk.
- *
- * If `fsVersion` differs, the caller may pass a freshly-computed Rust SHA-256
- * signature or the freshly-read disk content. A signature match lets dedup
- * fire before fetching the full file body again; an exact string match is the
- * fallback when no signature is available.
- *
- * Adapted from claude-vaz's FileReadTool dedup logic (FileReadTool.ts:523-573).
+ * O que fica é a CONSTANTE, e por uma razão de compatibilidade de dados, não de
+ * comportamento — ver a nota nela.
  */
-
-import type { FileContentSignature, FileStateCache } from './fileStateCache'
 
 // ── Stub message ────────────────────────────────────────────────────────
 
 /**
- * Returned instead of file content when the same file+range was already read
- * and the file is unchanged on disk. The model should use its existing
- * knowledge of the file rather than requesting the full content again.
+ * MARCADOR HISTÓRICO — já não é produzido. Não editar o texto.
  *
- * NOTE: We do NOT say "refer to the earlier tool_result" because compacted
- * conversations may have removed that result from the model's context.
- * Instead, we state the file is unchanged and let the model decide whether
- * it still has the content in its context window or needs to proceed
- * differently. If the content was compacted away, the model will re-read
- * on its own — no silent data loss.
+ * Isto ERA a resposta a uma releitura do mesmo intervalo com o ficheiro
+ * inalterado. A supressão de releituras foi REMOVIDA em 2026-07-29 (paridade
+ * com o claude-vaz, cujo Read devolve sempre o que foi pedido): a sessão
+ * katondo-queue mostrou o custo real — 175 read_file em 127 turnos, 12,36M
+ * tokens de input, tarefa por acabar, porque o stub afirmava que o conteúdo
+ * ainda estava na conversa quando, do ponto de vista do modelo, já não estava,
+ * e a saída documentada (`force: true`) era desaconselhada pela própria
+ * descrição da tool. O parâmetro `force` também já não existe no schema —
+ * portanto a última frase deste texto instrui algo IMPOSSÍVEL.
+ *
+ * A constante fica por uma razão só: as sessões PERSISTIDAS em disco contêm
+ * este texto, e `readStateRecovery` compara-o com `startsWith` para saltar
+ * esses tool_results ao reconstruir o estado de leitura. Mudar uma vírgula
+ * quebra esse reconhecimento e a recuperação passa a tratar o stub como
+ * conteúdo de ficheiro. É por isso que a frase morta continua aqui: ela é
+ * DADOS de sessões antigas, não uma instrução que alguém vá receber.
  */
 export const FILE_UNCHANGED_STUB =
   'File unchanged since last Read. The content you previously read is still current in the conversation/cache; use that existing knowledge rather than requesting it again. Do not work around this with execute_command/cat/head/tail/sed. If you need different lines, call Read only for the missing range. If compaction removed the exact text from context and you truly need the same range again, call Read once with force: true.'
 
-// ── Dedup check ─────────────────────────────────────────────────────────
-
-export interface DedupResult {
-  /** True if the read should be stubbed (file unchanged, same range). */
-  isDuplicate: boolean
-  /** The stub message to return, or null if this is not a duplicate. */
-  stub: string | null
-}
-
-/**
- * Check whether a read_file call can be deduped against a prior read.
- *
- * Conditions for dedup (mirrors claude-vaz):
- *   1. An existing cache entry exists for this file path.
- *   2. The entry came from a prior Read (not from Edit/Write).
- *   3. The read range matches exactly (same offset + limit, including both
- *      undefined for a full-file read).
- *   4. Either:
- *      - the global fsVersion hasn't changed since the read; or
- *      - the caller provides currentSignature and it matches the cached
- *        model-visible signature; or
- *      - the caller provides currentContent and it exactly equals the cached
- *        model-visible content.
- *
- * Ranged reads that DON'T match the cached range are allowed through — the
- * model may need a different slice. Only exact same-range reads are deduped.
- *
- * @param filePath  Normalised absolute path
- * @param offset    1-based line offset (undefined = full file)
- * @param limit     Line limit (undefined = read to EOF)
- * @param readFileState  The content cache to check against
- * @param currentFsVersion  The current global fsVersion counter value
- * @param currentContent    Optional freshly-read disk content for an exact
- *                          second-stage equality check after fsVersion changed.
- * @param currentSignature  Optional freshly-computed disk signature. When it
- *                          matches the cached signature, dedup can fire before
- *                          reading the full file body.
- */
-export function checkReadDedup(
-  filePath: string,
-  offset: number | undefined,
-  limit: number | undefined,
-  readFileState: FileStateCache,
-  currentFsVersion: number,
-  currentContent?: string,
-  currentSignature?: FileContentSignature,
-): DedupResult {
-  const existingState = readFileState.get(filePath)
-
-  // Only dedup entries that came from a prior Read. Full-file reads and writes
-  // both store offset/limit as undefined, so source is the discriminator.
-  if (
-    !existingState ||
-    existingState.source !== 'read' ||
-    existingState.isPartialView
-  ) {
-    return { isDuplicate: false, stub: null }
-  }
-
-  // Range must match exactly
-  const rangeMatch =
-    existingState.offset === offset && existingState.limit === limit
-  if (!rangeMatch) {
-    return { isDuplicate: false, stub: null }
-  }
-
-  // Freshness check via fsVersion first. If the global counter changed, only
-  // dedupe when the caller gives us a freshly-computed signature or content
-  // that matches the cached model-visible state.
-  if (currentFsVersion !== existingState.fsVersion) {
-    if (
-      currentSignature &&
-      existingState.signature &&
-      currentSignature.size === existingState.signature.size &&
-      currentSignature.sha256 === existingState.signature.sha256
-    ) {
-      return { isDuplicate: true, stub: FILE_UNCHANGED_STUB }
-    }
-    if (currentContent !== undefined && currentContent === existingState.content) {
-      return { isDuplicate: true, stub: FILE_UNCHANGED_STUB }
-    }
-    return { isDuplicate: false, stub: null }
-  }
-
-  return { isDuplicate: true, stub: FILE_UNCHANGED_STUB }
-}
+// ── (Removido 2026-07-29) checkReadDedup ────────────────────────────────
+//
+// Decidia se uma releitura do MESMO intervalo, com o ficheiro inalterado, era
+// servida com o FILE_UNCHANGED_STUB acima. Saiu com o resto da supressão de
+// releituras, e ficara aqui sem chamadores. O que resta neste módulo é a
+// constante — dados de sessões antigas em disco, ver a nota nela.

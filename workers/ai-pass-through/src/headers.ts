@@ -55,6 +55,7 @@ export function buildCorsHeaders(request: Request): Headers {
     // cross-origin mesmo que seja enviado.
     'X-Model-Context-Window',
     'X-Model-Max-Output-Tokens',
+    'X-Model-Capabilities',
     'X-TM-Speed-Applied',
     'X-TM-Upstream-Status',
     'X-TM-Config-Source',
@@ -209,6 +210,9 @@ export function buildResponseHeaders(upstream: Response, meta: {
   /** Teto de tokens de SAÍDA do modelo ativo, vindo da config KV. Mesma
    *  semântica de ausência do contextWindow. */
   maxOutputTokens?: number
+  /** Capacidades do modelo ativo, vindas da config KV. Mesma semântica de
+   *  ausência: sem elas a IDE fica com o perfil local. */
+  capabilities?: { vision?: boolean; search?: boolean; thinking?: 'toggleable' | 'mandatory' | 'none' }
   /** Estado de billing pré-voo (ausente quando o lookup falhou ou billing off). */
   budget?: BudgetHeaderMeta
 }): Headers {
@@ -251,6 +255,19 @@ export function buildResponseHeaders(upstream: Response, meta: {
   // que é também o teto da escalada anti-truncagem do loop.
   if (typeof meta.maxOutputTokens === 'number' && meta.maxOutputTokens > 0) {
     headers.set('x-model-max-output-tokens', String(meta.maxOutputTokens))
+  }
+  // CAPACIDADES — o terceiro irmão. Sem elas, a IDE atribuía a um modelo
+  // desconhecido as flags do perfil de FALLBACK: visão, pensamento e pesquisa
+  // de outro modelo. Formato `k=v;k=v` para caber num header e crescer sem
+  // quebrar o parser do cliente (chaves desconhecidas são ignoradas lá).
+  // Só as chaves DECLARADAS são emitidas: silêncio significa "não sei", que é
+  // diferente de "não suporta".
+  if (meta.capabilities) {
+    const parts: string[] = []
+    if (typeof meta.capabilities.vision === 'boolean') parts.push(`vision=${meta.capabilities.vision ? 1 : 0}`)
+    if (typeof meta.capabilities.search === 'boolean') parts.push(`search=${meta.capabilities.search ? 1 : 0}`)
+    if (meta.capabilities.thinking) parts.push(`thinking=${meta.capabilities.thinking}`)
+    if (parts.length > 0) headers.set('x-model-capabilities', parts.join(';'))
   }
 
   // Billing pré-voo — nomes exatos que billingStore.updateFromHeaders já

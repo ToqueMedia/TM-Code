@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useSyncExternalStore } from 'react'
 import { useChatStore, appendTextDeltaBuffered, flushBufferedDeltas, generateId } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
-import { MODEL_PROFILES, getProfileForPlan } from '../../services/agent/modelProfiles'
+import { MODEL_PROFILES, getProfileForPlan, effectiveCapability } from '../../services/agent/modelProfiles'
 import { describeImagesViaSidecar } from '../../services/agent/visionSidecar'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore, selectIsPreviewServerRunning } from '../../stores/layoutStore'
@@ -679,8 +679,16 @@ export function usePromptBar() {
     const activeProfile = modelName && MODEL_PROFILES[modelName]
       ? MODEL_PROFILES[modelName]
       : getProfileForPlan(billingPlan)
+    // Precedência: BYOK (o modelo é do developer) → capacidade DECLARADA pelo
+    // data-plane → perfil local. Sem o passo do meio, um modelo publicado só na
+    // KV herdava a visão do perfil de fallback.
     const activeModelSupportsImageParts =
-      byokNativeVision !== null ? byokNativeVision : activeProfile.supportsAttachments
+      byokNativeVision !== null
+        ? byokNativeVision
+        : effectiveCapability(
+          useAgentStore.getState().modelSupportsVision,
+          activeProfile.supportsAttachments,
+        )
 
     let userContent: string | OpenAIContentPart[] | null = bootstrapOnly && tmsPreflight
       ? buildTmsBootstrapOnlyPrompt(tmsPreflight, display.text)

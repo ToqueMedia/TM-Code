@@ -256,6 +256,28 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
 
 export const DEFAULT_MODEL_ID = 'mimo-v2.5-pro-1m'
 
+/**
+ * Capacidade EFECTIVA de um modelo: o que o servidor declarou vence o que a
+ * tabela local adivinha.
+ *
+ * PORQUÊ (auditoria 2026-07-29): `MODEL_PROFILES` é uma lista fixa e o resto do
+ * sistema é config-driven — "adicionar um modelo é editar a KV, não o código".
+ * Quando o nome não estava na tabela, o código caía em `getProfileForPlan()` e
+ * o modelo novo HERDAVA as flags de outro: a visão, o pensamento e a pesquisa
+ * do MiMo. O efeito prático era enviar imagens a um modelo que não as lê, e
+ * anunciar-lhe no prompt uma pesquisa nativa que ele não tem.
+ *
+ * `declared === null` significa "o servidor não declarou" — e aí o perfil local
+ * é a melhor informação que existe. Só um booleano explícito o substitui.
+ */
+export function effectiveCapability(
+  declared: boolean | null | undefined,
+  profileValue: boolean | undefined,
+): boolean {
+  if (typeof declared === 'boolean') return declared
+  return profileValue === true
+}
+
 export function getModelProfile(modelId: string): ModelProfile {
   return MODEL_PROFILES[modelId] || MODEL_PROFILES[DEFAULT_MODEL_ID]
 }

@@ -1213,6 +1213,29 @@ class AgentService {
       const modelName = headers.get("X-Model-Name") ?? headers.get("X-TM-Model");
       const modelProvider = headers.get("X-Model-Provider") ?? headers.get("X-TM-Provider");
       const thinkingModeRaw = headers.get("X-Model-Thinking-Mode");
+      // `vision=1;search=0;thinking=toggleable` — declarado na config KV e
+      // emitido pelo data-plane. Existe porque a tabela MODEL_PROFILES local é
+      // fixa e, para um modelo que ela não conhece, a IDE herdava as flags do
+      // perfil de FALLBACK: visão, pensamento e pesquisa de OUTRO modelo. Num
+      // desenho em que publicar um modelo é editar a KV, isso significa que o
+      // modelo novo ganhava capacidades que não tem — imagens enviadas a quem
+      // não as lê (auditoria 2026-07-29). Chaves desconhecidas são ignoradas
+      // de propósito, para o header crescer sem quebrar clientes antigos.
+      const capabilitiesRaw = headers.get("X-Model-Capabilities");
+      const declaredCapabilities = (() => {
+        if (capabilitiesRaw === null) return undefined;
+        const map = new Map<string, string>();
+        for (const pair of capabilitiesRaw.split(";")) {
+          const [k, v] = pair.split("=");
+          if (k && v !== undefined) map.set(k.trim().toLowerCase(), v.trim().toLowerCase());
+        }
+        const bool = (key: string): boolean | null | undefined => {
+          const v = map.get(key);
+          if (v === undefined) return undefined;
+          return v === "1" || v === "true";
+        };
+        return { vision: bool("vision"), search: bool("search"), thinking: map.get("thinking") };
+      })();
       const contextWindowRaw = headers.get("X-Model-Context-Window");
       const maxOutputRaw = headers.get("X-Model-Max-Output-Tokens");
       const byokActiveRaw = headers.get("X-BYOK-Active");
@@ -1226,7 +1249,8 @@ class AgentService {
         modelProvider !== null ||
         thinkingModeRaw !== null ||
         contextWindowRaw !== null ||
-        maxOutputRaw !== null;
+        maxOutputRaw !== null ||
+        capabilitiesRaw !== null;
 
       if (hasModelInfo) {
         const parsedContext =
@@ -1237,12 +1261,16 @@ class AgentService {
             : contextWindowRaw !== null
               ? null
               : undefined;
+        // O `thinking` das capacidades vale como o header dedicado: é o mesmo
+        // dado, publicado no mesmo sítio. O header antigo mantém precedência
+        // para não mudar o comportamento de quem já o emitia.
+        const thinkingRaw = thinkingModeRaw ?? declaredCapabilities?.thinking ?? null;
         const thinkingMode =
-          thinkingModeRaw === "none" ||
-          thinkingModeRaw === "toggleable" ||
-          thinkingModeRaw === "mandatory"
-            ? thinkingModeRaw
-            : thinkingModeRaw !== null
+          thinkingRaw === "none" ||
+          thinkingRaw === "toggleable" ||
+          thinkingRaw === "mandatory"
+            ? thinkingRaw
+            : thinkingRaw !== null
               ? null
               : undefined;
 
@@ -1263,6 +1291,9 @@ class AgentService {
           thinkingMode,
           contextWindow,
           maxOutputTokens,
+          declaredCapabilities
+            ? { vision: declaredCapabilities.vision, search: declaredCapabilities.search }
+            : undefined,
         );
         // Alimenta o activeModelStore com o modelo SERVIDO (fallback ao Firestore
         // real-time). O EffortSelector usa-o p/ a lista de efforts; a troca de

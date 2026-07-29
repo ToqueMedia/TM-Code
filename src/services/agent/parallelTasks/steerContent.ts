@@ -16,7 +16,7 @@ import { describeImagesViaSidecar } from '../visionSidecar'
 import { useBillingStore } from '../../../stores/billingStore'
 import { useAgentStore } from '../../../stores/agentStore'
 import { useChatStore } from '../../../stores/chatStore'
-import { getProfileForPlan, MODEL_PROFILES } from '../modelProfiles'
+import { getProfileForPlan, MODEL_PROFILES, effectiveCapability } from '../modelProfiles'
 import { resolveByokNativeVision } from '../byokVision'
 
 const resolvers = {
@@ -73,7 +73,12 @@ export async function resolveSteerItemsToContent(
       : getProfileForPlan(billingPlan)
   // Same gate as usePromptBar / mainDispatch: BYOK snapshot wins when set.
   const activeModelSupportsImageParts =
-    byokNativeVision !== null ? byokNativeVision : activeProfile.supportsAttachments === true
+    byokNativeVision !== null
+      ? byokNativeVision
+      : effectiveCapability(
+        useAgentStore.getState().modelSupportsVision,
+        activeProfile.supportsAttachments,
+      )
 
   if (planAllowsImagePipeline && display.attachments.some((a) => a.type === 'image')) {
     const parts = await buildContentParts(merged, resolvers)

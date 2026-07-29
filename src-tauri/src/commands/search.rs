@@ -158,7 +158,13 @@ fn build_walker(root: &Path, options: &SearchOptions) -> Result<ignore::Walk, St
         // git, e o Glob (que usa matchers Gitignore directos) honra-o sempre —
         // as duas tools voltariam a divergir num projecto ainda sem `git init`.
         .require_git(false)
-        .max_filesize(Some(MAX_SEARCH_FILESIZE))
+        // `max_filesize` SAIU daqui de propósito (auditoria 2026-07-29): o
+        // walker descartava ficheiros >1MB dentro do iterador, sem deixar
+        // rasto. Uma busca por um símbolo que vive num ficheiro grande — um
+        // bundle, um dump SQL, um schema gerado — respondia "No matches found"
+        // e o modelo concluía que o símbolo não existe. O corte continua (é
+        // paridade com `--max-filesize 1M` e protege o tempo de resposta), mas
+        // agora é feito no laço, onde pode ser CONTADO e reportado.
         .overrides(overrides)
         // Poda dot-DIRECTÓRIOS (.git, .next, .yarn) na descida, em vez de
         // descer e descartar ficheiro a ficheiro. A raiz nunca é podada: uma
@@ -271,7 +277,7 @@ fn run_search(
     root: &Path,
     options: &SearchOptions,
     global_limit: usize,
-) -> Result<(Vec<FileSearchResult>, usize, bool), String> {
+) -> Result<(Vec<FileSearchResult>, usize, bool, usize), String> {
     let depth = if options.count_only {
         SearchDepth::CountOnly
     } else {
@@ -280,13 +286,14 @@ fn run_search(
     run_search_with_depth(query, root, options, global_limit, depth)
 }
 
+/// Devolve `(ficheiros, total_matches, truncated, saltados_por_tamanho)`.
 fn run_search_with_depth(
     query: &str,
     root: &Path,
     options: &SearchOptions,
     global_limit: usize,
     depth: SearchDepth,
-) -> Result<(Vec<FileSearchResult>, usize, bool), String> {
+) -> Result<(Vec<FileSearchResult>, usize, bool, usize), String> {
     let matcher = build_matcher(query, options)?;
     let mut searcher = SearcherBuilder::new()
         .binary_detection(BinaryDetection::quit(b'\x00'))
@@ -298,6 +305,7 @@ fn run_search_with_depth(
     let mut files: Vec<FileSearchResult> = vec![];
     let mut total_matches = 0usize;
     let mut truncated = false;
+    let mut skipped_too_large = 0usize;
 
     // Um ficheiro como alvo é dialecto do Grep do Claude Code ("procurar só
     // neste ficheiro") e é pedido explícito — procura-se sem walk nem filtro.
@@ -323,6 +331,13 @@ fn run_search_with_depth(
         if total_matches >= global_limit {
             truncated = true;
             break;
+        }
+        // Corte por tamanho, agora explícito e contado. Um `metadata()` que
+        // falha (ficheiro apagado a meio do walk, permissões) não conta como
+        // "grande" — segue para a busca, que trata o erro dela.
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_SEARCH_FILESIZE) {
+            skipped_too_large += 1;
+            continue;
         }
         let mut sink = MatchSink {
             matcher: &matcher,
@@ -355,7 +370,7 @@ fn run_search_with_depth(
         });
     }
 
-    Ok((files, total_matches, truncated))
+    Ok((files, total_matches, truncated, skipped_too_large))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -457,6 +472,15 @@ pub struct SearchResult {
     pub file_name_matches: Vec<FileNameMatch>,
     pub duration_ms: u64,
     pub truncated: bool,
+    /// Ficheiros que existiam e casavam com os filtros mas não foram
+    /// procurados por passarem de MAX_SEARCH_FILESIZE.
+    ///
+    /// O corte existia; o SILÊNCIO era o defeito (auditoria 2026-07-29). Uma
+    /// busca por um símbolo que vive num ficheiro grande — um bundle, um dump
+    /// SQL, um schema gerado — respondia "No matches found" e o modelo concluía
+    /// que o símbolo não existe.
+    #[serde(default)]
+    pub skipped_too_large: usize,
 }
 
 /// Global hard cap on total matches to prevent IPC/UI explosion.
@@ -541,6 +565,7 @@ pub async fn search_in_files(
             file_name_matches: vec![],
             duration_ms: 0,
             truncated: false,
+            skipped_too_large: 0,
         });
     }
 
@@ -589,11 +614,12 @@ pub async fn search_in_files(
     let seal_env_files = options.seal_env_files;
     let max_results = options.max_results;
 
-    let (mut files, total_matches, mut truncated) = tokio::task::spawn_blocking(move || {
-        run_search(&query_for_search, &root, &options, global_limit)
-    })
-    .await
-    .map_err(|e| format!("Search task failed: {}", e))??;
+    let (mut files, total_matches, mut truncated, skipped_too_large) =
+        tokio::task::spawn_blocking(move || {
+            run_search(&query_for_search, &root, &options, global_limit)
+        })
+        .await
+        .map_err(|e| format!("Search task failed: {}", e))??;
 
     attach_match_context(&mut files, context_lines);
 
@@ -637,6 +663,7 @@ pub async fn search_in_files(
         file_name_matches: vec![],
         duration_ms: duration.as_millis() as u64,
         truncated,
+        skipped_too_large,
     };
     if seal_env_files {
         strip_sealed_env_files(&mut result);
@@ -684,7 +711,7 @@ pub async fn replace_in_files(
         // O replace precisa dos CAMINHOS (PathsOnly a seguir), nunca de contagens.
         count_only: false,
     };
-    let (matched_files, _, _) = tokio::task::spawn_blocking(move || {
+    let (matched_files, _, _, _) = tokio::task::spawn_blocking(move || {
         run_search_with_depth(
             &query_for_search,
             &root,
@@ -787,7 +814,7 @@ mod tests {
     }
 
     fn found_files(root: &Path, query: &str, respect_gitignore: Option<bool>) -> Vec<String> {
-        let (files, _, _) =
+        let (files, _, _, _) =
             run_search(query, root, &opts(respect_gitignore), GLOBAL_MAX_MATCHES).unwrap();
         let mut names: Vec<String> = files
             .into_iter()
@@ -880,7 +907,7 @@ mod tests {
         std::fs::write(dir.join(".env.example"), "SECRET_TOKEN=\n").unwrap();
 
         let root = canonicalize_path(&dir).unwrap();
-        let (files, _, _) =
+        let (files, _, _, _) =
             run_search("SECRET_TOKEN", &root, &opts(None), GLOBAL_MAX_MATCHES).unwrap();
         let mut result = SearchResult {
             query: "SECRET_TOKEN".to_string(),
@@ -890,6 +917,7 @@ mod tests {
             file_name_matches: vec![],
             duration_ms: 0,
             truncated: false,
+            skipped_too_large: 0,
         };
         // Sem selo o `.env` é alcançável — é por isso que o selo existe.
         assert!(result.files.iter().any(|f| f.file_path.ends_with(".env")));
@@ -927,7 +955,7 @@ mod tests {
 
         let mut o = opts(None);
         o.include_patterns = vec!["*.ts".to_string()];
-        let (files, _, _) = run_search("MARKER", &root, &o, GLOBAL_MAX_MATCHES).unwrap();
+        let (files, _, _, _) = run_search("MARKER", &root, &o, GLOBAL_MAX_MATCHES).unwrap();
         let mut got: Vec<String> = files
             .iter()
             .map(|f| f.file_path.replace(root.to_str().unwrap(), ""))
@@ -942,7 +970,7 @@ mod tests {
 
         let mut o2 = opts(None);
         o2.exclude_patterns = vec!["**/*.js".to_string()];
-        let (files2, _, _) = run_search("MARKER", &root, &o2, GLOBAL_MAX_MATCHES).unwrap();
+        let (files2, _, _, _) = run_search("MARKER", &root, &o2, GLOBAL_MAX_MATCHES).unwrap();
         let mut got2: Vec<String> = files2
             .iter()
             .map(|f| f.file_path.replace(root.to_str().unwrap(), ""))
@@ -980,7 +1008,7 @@ mod tests {
 
         let mut o = opts(None);
         o.include_patterns = vec!["*.js".to_string(), "*.ts".to_string()];
-        let (files, _, _) = run_search("MARKER", &root, &o, GLOBAL_MAX_MATCHES).unwrap();
+        let (files, _, _, _) = run_search("MARKER", &root, &o, GLOBAL_MAX_MATCHES).unwrap();
         let got: Vec<String> = files
             .iter()
             .map(|f| f.file_path.replace(root.to_str().unwrap(), ""))
@@ -995,7 +1023,7 @@ mod tests {
         // A porta legítima continua aberta — e é a única.
         let mut o2 = opts(Some(false));
         o2.include_patterns = vec!["*.js".to_string()];
-        let (files2, _, _) = run_search("MARKER", &root, &o2, GLOBAL_MAX_MATCHES).unwrap();
+        let (files2, _, _, _) = run_search("MARKER", &root, &o2, GLOBAL_MAX_MATCHES).unwrap();
         assert!(
             files2.iter().any(|f| f.file_path.ends_with("lib/a.js")),
             "com includeIgnored o transpilado tem de continuar alcancavel"
@@ -1019,7 +1047,8 @@ mod tests {
         std::fs::write(project.join("a.ts"), "MARKER\n").unwrap();
 
         let root = canonicalize_path(&project).unwrap();
-        let (files, _, _) = run_search("MARKER", &root, &opts(None), GLOBAL_MAX_MATCHES).unwrap();
+        let (files, _, _, _) =
+            run_search("MARKER", &root, &opts(None), GLOBAL_MAX_MATCHES).unwrap();
         assert_eq!(
             files.len(),
             1,
@@ -1029,7 +1058,8 @@ mod tests {
         // Com um repositório por cima, as regras do topo passam a valer — que
         // é o que o git faz.
         std::fs::create_dir_all(base.join(".git")).unwrap();
-        let (files2, _, _) = run_search("MARKER", &root, &opts(None), GLOBAL_MAX_MATCHES).unwrap();
+        let (files2, _, _, _) =
+            run_search("MARKER", &root, &opts(None), GLOBAL_MAX_MATCHES).unwrap();
         assert_eq!(
             files2.len(),
             0,
@@ -1037,6 +1067,41 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Um ficheiro grande saltado tem de ser CONTADO, não engolido.
+    ///
+    /// O corte de 1MB (paridade com `--max-filesize 1M`) vivia dentro do
+    /// walker, portanto o ficheiro desaparecia sem rasto: uma busca por um
+    /// símbolo que só existe num bundle, num dump SQL ou num schema gerado
+    /// respondia "No matches found" e o modelo concluía que o símbolo não
+    /// existe (auditoria 2026-07-29).
+    #[test]
+    fn files_over_the_size_cap_are_counted_not_swallowed() {
+        let dir = std::env::temp_dir().join(format!("tm_big_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Ficheiro grande COM o acerto lá dentro.
+        let mut big = String::with_capacity(MAX_SEARCH_FILESIZE as usize + 64);
+        big.push_str("NEEDLE_IN_BIG_FILE\n");
+        while big.len() <= MAX_SEARCH_FILESIZE as usize {
+            big.push_str("filler filler filler filler\n");
+        }
+        std::fs::write(dir.join("bundle.js"), &big).unwrap();
+        // E um pequeno sem o acerto, para o walk não ficar vazio.
+        std::fs::write(dir.join("small.ts"), "nothing here\n").unwrap();
+        let root = canonicalize_path(&dir).unwrap();
+
+        let (files, total, _, skipped) =
+            run_search("NEEDLE_IN_BIG_FILE", &root, &opts(None), GLOBAL_MAX_MATCHES).unwrap();
+
+        assert!(files.is_empty(), "o ficheiro grande nao e procurado");
+        assert_eq!(total, 0);
+        assert_eq!(
+            skipped, 1,
+            "o salto tem de ser CONTADO — era este silencio que fazia o modelo \
+             concluir que o simbolo nao existe"
+        );
     }
 
     /// O `outputMode: "count"` do agente tem de dar o total REAL.
@@ -1059,7 +1124,7 @@ mod tests {
         let root = root.as_path();
 
         // Content: limitado a 10, e diz que ficou limitado.
-        let (content_files, content_total, _) =
+        let (content_files, content_total, _, _) =
             run_search("needle", root, &opts(None), GLOBAL_MAX_MATCHES).unwrap();
         assert_eq!(content_files.len(), 1);
         assert_eq!(
@@ -1075,7 +1140,7 @@ mod tests {
         // CountOnly: o total real.
         let mut counting = opts(None);
         counting.count_only = true;
-        let (count_files, count_total, _) =
+        let (count_files, count_total, _, _) =
             run_search("needle", root, &counting, GLOBAL_MAX_MATCHES).unwrap();
         assert_eq!(count_files.len(), 1);
         assert_eq!(count_files[0].total_matches, 25, "CountOnly conta tudo");
@@ -1097,7 +1162,7 @@ mod tests {
         std::fs::write(dir.join("many.ts"), "MARKER\n".repeat(30)).unwrap();
         let root = canonicalize_path(&dir).unwrap();
 
-        let (paths, n, _) = run_search_with_depth(
+        let (paths, n, _, _) = run_search_with_depth(
             "MARKER",
             &root,
             &opts(None),
@@ -1113,7 +1178,8 @@ mod tests {
         );
 
         // O modo Content continua a devolver detalhe, com o teto por ficheiro.
-        let (content, _, _) = run_search("MARKER", &root, &opts(None), GLOBAL_MAX_MATCHES).unwrap();
+        let (content, _, _, _) =
+            run_search("MARKER", &root, &opts(None), GLOBAL_MAX_MATCHES).unwrap();
         assert_eq!(content[0].matches.len(), MAX_MATCHES_PER_FILE);
 
         let _ = std::fs::remove_dir_all(&dir);
