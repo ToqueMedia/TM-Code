@@ -20,6 +20,20 @@ import {
 
 /** Stop trying autocompact after this many consecutive failures. */
 const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
+/**
+ * Arrefecimento do disjuntor.
+ *
+ * Era um FUSÍVEL, não um disjuntor (auditoria 2026-07-29): `consecutiveFailures`
+ * nunca decrescia, portanto três falhas — que num run longo podem ser três
+ * blips de rede no sumarizador — desligavam a compactação POR SUMÁRIO para o
+ * resto do run. O que sobrava era o snip mecânico: corta o mais antigo sem
+ * resumir nada, ou seja, o run passava o resto da vida a perder contexto que
+ * um sumário teria guardado.
+ *
+ * Meio-aberto: passados 90s desde a última falha, deixa passar UMA tentativa.
+ * Se falhar, o relógio recomeça; se acertar, as falhas voltam a zero.
+ */
+const AUTOCOMPACT_BREAKER_COOLDOWN_MS = 90_000
 
 // The "unknown window" fallback (FALLBACK_CONTEXT_WINDOW = 200K) lives in
 // utils/contextWindow.ts so the pill, the status line, the admin Select and this
@@ -33,6 +47,8 @@ export interface AutoCompactTrackingState {
   turnCounter: number
   turnId: string
   consecutiveFailures?: number
+  /** Quando a última falha ocorreu — alimenta o arrefecimento do disjuntor. */
+  lastFailureAt?: number
 }
 
 /**
@@ -184,6 +200,7 @@ export interface AutoCompactResult {
   preCompactTokenCount?: number
   postCompactTokenCount?: number
   consecutiveFailures?: number
+  lastFailureAt?: number
 }
 
 /**
@@ -276,12 +293,17 @@ export async function autoCompact(
   snipTokensFreed?: number,
   limits?: AutoCompactLimits,
 ): Promise<AutoCompactResult> {
-  // Circuit breaker
-  if (
-    tracking?.consecutiveFailures !== undefined &&
-    tracking.consecutiveFailures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
-  ) {
-    return { wasCompacted: false }
+  // Disjuntor com arrefecimento — ver a nota em AUTOCOMPACT_BREAKER_COOLDOWN_MS.
+  const failures = tracking?.consecutiveFailures ?? 0
+  if (failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES) {
+    const openedAt = tracking?.lastFailureAt
+    const cooled = openedAt !== undefined && Date.now() - openedAt >= AUTOCOMPACT_BREAKER_COOLDOWN_MS
+    if (!cooled) {
+      return { wasCompacted: false }
+    }
+    console.debug(
+      '[autoCompact] disjuntor em meio-aberto após arrefecimento — a tentar uma compactação',
+    )
   }
 
   const shouldCompact = shouldAutoCompact(messages, snipTokensFreed, limits)
@@ -296,10 +318,10 @@ export async function autoCompact(
     const postCompactMessages = await compactNow(messages, systemPrompt, compactFn)
 
     if (!postCompactMessages) {
-      const prevFailures = tracking?.consecutiveFailures ?? 0
       return {
         wasCompacted: false,
-        consecutiveFailures: prevFailures + 1,
+        consecutiveFailures: failures + 1,
+        lastFailureAt: Date.now(),
       }
     }
 
@@ -314,17 +336,19 @@ export async function autoCompact(
       postCompactMessages,
       preCompactTokenCount,
       postCompactTokenCount,
+      // Sucesso limpa o historial: uma tentativa de meio-aberto que acerta
+      // devolve o disjuntor a fechado, não a "quase aberto".
       consecutiveFailures: 0,
+      lastFailureAt: undefined,
     }
   } catch (error) {
     console.error('[autoCompact] compaction failed:', error)
-    const prevFailures = tracking?.consecutiveFailures ?? 0
-    const nextFailures = prevFailures + 1
+    const nextFailures = failures + 1
     if (nextFailures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES) {
       console.warn(
-        `[autoCompact] circuit breaker tripped after ${nextFailures} consecutive failures`,
+        `[autoCompact] circuit breaker aberto após ${nextFailures} falhas — nova tentativa dentro de ${AUTOCOMPACT_BREAKER_COOLDOWN_MS / 1000}s`,
       )
     }
-    return { wasCompacted: false, consecutiveFailures: nextFailures }
+    return { wasCompacted: false, consecutiveFailures: nextFailures, lastFailureAt: Date.now() }
   }
 }

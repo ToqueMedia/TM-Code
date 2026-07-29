@@ -157,8 +157,35 @@ export function snipCompactIfNeeded(
   const kept = messages.slice(finalCutIndex)
   const tokensFreed = removed.reduce((sum, msg) => sum + messageTokens(msg), 0)
 
+  // MARCADOR (auditoria 2026-07-29): o snip devolvia `kept` cru, portanto o
+  // modelo recebia uma conversa que começava a meio e não tinha como saber
+  // que algo tinha sido cortado. Isso não é economia, é amnésia com cara de
+  // conversa completa: o modelo re-deriva decisões já tomadas, contradiz
+  // acordos anteriores e não pede o que perdeu — porque não sabe que perdeu.
+  // Ao contrário do auto-compact, o snip não resume nada, logo o marcador é a
+  // ÚNICA pista que resta. Vai como bloco de texto no início da primeira
+  // mensagem mantida (que é sempre `user`, garantido acima) e não como
+  // mensagem nova, para não criar dois `user` seguidos.
+  const marker = `<system-reminder>\n`
+    + `${removed.length} earlier message${removed.length === 1 ? '' : 's'} `
+    + `(~${tokensFreed} tokens) were dropped from this conversation to free context. `
+    + `They were NOT summarized — that content is gone. If you need something from the earlier part of `
+    + `this session, call read_session_memory or re-read the relevant files instead of assuming. `
+    + `Do not claim to remember what was cut.\n</system-reminder>`
+
+  const first = kept[0]
+  const markedFirst: MessageLike = typeof first.content === 'string'
+    ? { ...first, content: `${marker}\n\n${first.content}` }
+    : {
+      ...first,
+      content: [
+        { type: 'text', text: marker } as ContentBlockAPI,
+        ...(Array.isArray(first.content) ? first.content : []),
+      ],
+    }
+
   return {
-    messages: kept,
+    messages: [markedFirst, ...kept.slice(1)],
     tokensFreed,
     messagesRemoved: removed.length,
   }

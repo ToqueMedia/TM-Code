@@ -23,7 +23,11 @@ describe('formatSearchResultsByFile', () => {
 
   it('count: caminho + contagem por ficheiro, com total no cabeçalho', () => {
     const out = formatSearchResultsByFile(result, 'count')
-    expect(out).toContain('4 matches across 2 files:')
+    // "(true totals)" desde 2026-07-29: o count passou a correr em
+    // SearchDepth::CountOnly no Rust, sem o tecto de 10 por ficheiro. Antes
+    // reportava a contagem já limitada do modo content — um ficheiro com 60
+    // usos aparecia com 10 — e o sufixo é o que distingue os dois regimes.
+    expect(out).toContain('4 matches across 2 files (true totals):')
     expect(out).toContain('/proj/a.ts: 3')
     expect(out).toContain('/proj/b.ts: 1')
   })

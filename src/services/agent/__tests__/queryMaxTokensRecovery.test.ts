@@ -51,6 +51,16 @@ const TRUNCATED_TURN = [
   { choices: [{ delta: {}, finish_reason: 'length' }] },
 ]
 
+/**
+ * Stream que fecha sem NUNCA mandar `finish_reason` — comportamento observado
+ * em providers OpenAI-compat do data-plane. `stopReason` fica "", que não bate
+ * com "length" nem "max_tokens", portanto a recovery de truncagem não disparava
+ * e o run terminava como completo sobre uma resposta cortada.
+ */
+const NO_FINISH_REASON_TURN = [
+  { choices: [{ delta: { content: 'Resposta que o socket cortou a mei' } }] },
+]
+
 const STOP_TURN = [
   { choices: [{ delta: { content: 'o. E aqui termina completa.' } }] },
   { choices: [{ delta: {}, finish_reason: 'stop' }] },
@@ -107,6 +117,26 @@ describe('query — output-cap truncation recovery', () => {
     )) as { reason: string }
 
     expect(create).toHaveBeenCalledTimes(4)
-    expect(terminal.reason).toBe('completed')
+    // 'incomplete', não 'completed' (2026-07-29). O limite de recoveries
+    // impede o loop — isso continua certo — mas a resposta CONTINUA cortada, e
+    // reportá-la como completa era mentir a jusante: o agentService marcava a
+    // tarefa como concluída e o utilizador lia uma frase a meio sem qualquer
+    // aviso. O reason novo é o que faz o agentService acrescentar a nota.
+    expect(terminal.reason).toBe('incomplete')
+  })
+
+  it('um stream que fecha SEM finish_reason não é um run completo', async () => {
+    // Alguns providers OpenAI-compat fecham o socket sem mandar o chunk final.
+    // `stopReason` ficava "" — que não é "length", portanto a recovery nunca
+    // disparava — e o run terminava como 'completed' sobre texto cortado.
+    const create = jest.fn().mockImplementation(() => streamResponse(NO_FINISH_REASON_TURN))
+
+    const terminal = (await drain(
+      query(baseParams({ client: makeClient(create) })),
+    )) as { reason: string }
+
+    // Tentou retomar (1 inicial + 3 recoveries) e assumiu o corte no fim.
+    expect(create).toHaveBeenCalledTimes(4)
+    expect(terminal.reason).toBe('incomplete')
   })
 })

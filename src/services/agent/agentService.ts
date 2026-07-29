@@ -1092,6 +1092,16 @@ class AgentService {
       return;
     }
 
+    // Resposta cortada e sem forma de retomar: dizê-lo. O silêncio aqui é o
+    // pior dos dois mundos — o utilizador lê uma frase a meio e não tem como
+    // saber se aquilo era o fim. `incomplete` só chega aqui depois de a
+    // retoma ter sido tentada e esgotada (ver query.ts).
+    if (terminal.reason === "incomplete") {
+      const note = "⚠️ A resposta ficou cortada: o modelo parou a meio e as tentativas de retoma esgotaram-se. Pede para continuar se faltar informação.";
+      callbacks.onDone(finalText ? `${finalText}\n\n${note}` : note);
+      return;
+    }
+
     callbacks.onDone(finalText);
   }
 

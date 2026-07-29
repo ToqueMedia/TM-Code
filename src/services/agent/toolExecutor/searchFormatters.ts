@@ -23,12 +23,23 @@ export function formatSearchResultsByFile(result: unknown, mode: 'files_with_mat
     total += count
     lines.push(mode === 'count' ? `${filePath}: ${count}` : filePath)
   }
+  // `count` recebe agora os totais REAIS do Rust (SearchDepth::CountOnly, sem
+  // tecto por ficheiro). Antes lia o `total_matches` do modo Content — já
+  // limitado a 10 por ficheiro — e um ficheiro com 60 usos aparecia com 10.
+  // O `capped_at_file_limit` fica como rede: se algum dia voltar a chegar
+  // limitado, o resultado di-lo em vez de o esconder.
+  const capped = files.filter((f) => f.capped_at_file_limit === true).length
   const header = mode === 'count'
-    ? `${total} match${total === 1 ? '' : 'es'} across ${files.length} file${files.length === 1 ? '' : 's'}:`
+    ? `${total} match${total === 1 ? '' : 'es'} across ${files.length} file${files.length === 1 ? '' : 's'} (true totals):`
     : `${files.length} file${files.length === 1 ? '' : 's'} with matches:`
-  const footer = truncated
-    ? `\n[truncated at the global match cap — narrow the query or includePatterns to see the rest]`
-    : ''
+  const footer = [
+    truncated
+      ? `\n[truncated at the global match cap — narrow the query or includePatterns to see the rest]`
+      : '',
+    capped > 0
+      ? `\n[${capped} file${capped === 1 ? '' : 's'} hit the per-file cap: the counts above are what was returned, not what exists]`
+      : '',
+  ].join('')
   return `${header}\n${lines.join('\n')}${footer}`
 }
 

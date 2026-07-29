@@ -187,6 +187,15 @@ enum SearchDepth {
     Content,
     /// Só o primeiro acerto por ficheiro; nada é guardado.
     PathsOnly,
+    /// CONTA todos os acertos de cada ficheiro, sem guardar texto nenhum e sem
+    /// o tecto por ficheiro.
+    ///
+    /// Existe porque o `outputMode: "count"` do agente reportava o `total_matches`
+    /// do modo Content — ou seja, a contagem já LIMITADA a 10 por ficheiro
+    /// (auditoria 2026-07-29). Um ficheiro com 60 usos aparecia como 10 e o
+    /// modelo decidia com base nisso. Contar é barato quando não se guarda
+    /// texto: é a mesma passagem do ripgrep, sem alocações.
+    CountOnly,
 }
 
 /// Recolhe os matches de UM ficheiro, com teto por ficheiro e teto global.
@@ -197,6 +206,16 @@ struct MatchSink<'a> {
     depth: SearchDepth,
     /// Em PathsOnly não há `matches` para contar — este flag é o resultado.
     matched_any: bool,
+    /// Acertos contados em CountOnly (sem tecto, sem texto guardado).
+    counted: usize,
+    /// A leitura deste ficheiro parou por causa do MAX_MATCHES_PER_FILE?
+    ///
+    /// Sem isto, `total_matches` de um ficheiro com 60 acertos era 10 — o
+    /// número LIMITADO, servido como se fosse o total. O modelo lia
+    /// "10 matches" e concluía que havia 10 usos (auditoria 2026-07-29).
+    /// Distinguir "acabou o ficheiro" de "acabou a cota" é o mínimo para o
+    /// número deixar de mentir.
+    capped: bool,
 }
 
 impl Sink for MatchSink<'_> {
@@ -207,7 +226,16 @@ impl Sink for MatchSink<'_> {
             self.matched_any = true;
             return Ok(false); // um acerto basta; não se lê o resto do ficheiro
         }
-        if self.matches.len() >= MAX_MATCHES_PER_FILE || self.remaining_global == 0 {
+        if self.depth == SearchDepth::CountOnly {
+            self.counted += 1;
+            self.matched_any = true;
+            return Ok(true); // continua: o objectivo é o total real
+        }
+        if self.matches.len() >= MAX_MATCHES_PER_FILE {
+            self.capped = true;
+            return Ok(false);
+        }
+        if self.remaining_global == 0 {
             return Ok(false);
         }
         let bytes = mat.bytes();
@@ -244,7 +272,12 @@ fn run_search(
     options: &SearchOptions,
     global_limit: usize,
 ) -> Result<(Vec<FileSearchResult>, usize, bool), String> {
-    run_search_with_depth(query, root, options, global_limit, SearchDepth::Content)
+    let depth = if options.count_only {
+        SearchDepth::CountOnly
+    } else {
+        SearchDepth::Content
+    };
+    run_search_with_depth(query, root, options, global_limit, depth)
 }
 
 fn run_search_with_depth(
@@ -297,6 +330,8 @@ fn run_search_with_depth(
             remaining_global: global_limit - total_matches,
             depth,
             matched_any: false,
+            counted: 0,
+            capped: false,
         };
         // Um ficheiro ilegível (permissões, apagado a meio do walk, UTF-16
         // inválido) não pode abortar a busca inteira — salta-se.
@@ -306,11 +341,16 @@ fn run_search_with_depth(
         if !sink.matched_any && sink.matches.is_empty() {
             continue;
         }
-        let hits = sink.matches.len().max(usize::from(sink.matched_any));
+        let hits = if depth == SearchDepth::CountOnly {
+            sink.counted
+        } else {
+            sink.matches.len().max(usize::from(sink.matched_any))
+        };
         total_matches += hits;
         files.push(FileSearchResult {
             file_path: normalize_str_for_frontend(&path.to_string_lossy()),
             total_matches: hits,
+            capped_at_file_limit: sink.capped,
             matches: sink.matches,
         });
     }
@@ -337,6 +377,10 @@ pub struct SearchOptions {
     /// vez de regras diferentes sobre a mesma árvore.
     #[serde(default)]
     pub respect_gitignore: Option<bool>,
+    /// Só contar: totais por ficheiro sem tecto e sem texto de linha.
+    /// Ligado pelo `outputMode: "count"` do agente — ver SearchDepth::CountOnly.
+    #[serde(default)]
+    pub count_only: bool,
 }
 
 /// Env TEMPLATE basenames — documentation, never secrets.
@@ -389,7 +433,12 @@ pub struct SearchMatch {
 pub struct FileSearchResult {
     pub file_path: String,
     pub matches: Vec<SearchMatch>,
+    /// Acertos DEVOLVIDOS, não acertos existentes. Ver `capped_at_file_limit`.
     pub total_matches: usize,
+    /// `true` quando a leitura parou no MAX_MATCHES_PER_FILE — há mais acertos
+    /// neste ficheiro que ninguém contou. Quem formata tem de o dizer.
+    #[serde(default)]
+    pub capped_at_file_limit: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -632,6 +681,8 @@ pub async fn replace_in_files(
         context_lines: None,
         seal_env_files: options.seal_env_files,
         respect_gitignore: options.respect_gitignore,
+        // O replace precisa dos CAMINHOS (PathsOnly a seguir), nunca de contagens.
+        count_only: false,
     };
     let (matched_files, _, _) = tokio::task::spawn_blocking(move || {
         run_search_with_depth(
@@ -731,6 +782,7 @@ mod tests {
             context_lines: None,
             seal_env_files: false,
             respect_gitignore,
+            count_only: false,
         }
     }
 
@@ -985,6 +1037,53 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// O `outputMode: "count"` do agente tem de dar o total REAL.
+    ///
+    /// O modo Content corta em MAX_MATCHES_PER_FILE (10) e reportava esse 10
+    /// como `total_matches` — um ficheiro com 25 usos aparecia com 10 e o
+    /// modelo decidia com base nisso. CountOnly conta tudo, sem guardar texto.
+    #[test]
+    fn count_only_reports_true_totals_above_the_per_file_cap() {
+        let dir = std::env::temp_dir().join(format!("tm_count_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 25 acertos num único ficheiro — bem acima do tecto de 10.
+        let body = (0..25)
+            .map(|i| format!("let needle{} = 1;", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.join("a.ts"), body).unwrap();
+        let root = canonicalize_path(&dir).unwrap();
+        let root = root.as_path();
+
+        // Content: limitado a 10, e diz que ficou limitado.
+        let (content_files, content_total, _) =
+            run_search("needle", root, &opts(None), GLOBAL_MAX_MATCHES).unwrap();
+        assert_eq!(content_files.len(), 1);
+        assert_eq!(
+            content_files[0].total_matches, MAX_MATCHES_PER_FILE,
+            "Content corta em 10 por ficheiro"
+        );
+        assert!(
+            content_files[0].capped_at_file_limit,
+            "o corte tem de ser SINALIZADO — era isto que faltava"
+        );
+        assert_eq!(content_total, MAX_MATCHES_PER_FILE);
+
+        // CountOnly: o total real.
+        let mut counting = opts(None);
+        counting.count_only = true;
+        let (count_files, count_total, _) =
+            run_search("needle", root, &counting, GLOBAL_MAX_MATCHES).unwrap();
+        assert_eq!(count_files.len(), 1);
+        assert_eq!(count_files[0].total_matches, 25, "CountOnly conta tudo");
+        assert_eq!(count_total, 25);
+        assert!(
+            count_files[0].matches.is_empty(),
+            "CountOnly não guarda texto de linha — é o que o torna barato"
+        );
     }
 
     /// PathsOnly existe para o `replace_in_files`: um acerto por ficheiro, sem

@@ -1878,8 +1878,32 @@ class ToolExecutor {
         const m = (f as Record<string, unknown>)?.matches
         return sum + (Array.isArray(m) ? m.length : 0)
       }, 0)
+      // `matchCount` é o que foi DEVOLVIDO, não o que existe: o Rust corta em
+      // MAX_MATCHES_PER_FILE (10) por ficheiro. Dizer "Found 10 matches" sobre
+      // um ficheiro com 60 fazia o modelo concluir que havia 10 usos e decidir
+      // com base nisso (auditoria 2026-07-29). O `capped_at_file_limit` diz
+      // quais ficheiros ficaram a meio.
+      const cappedFiles = files.filter((f) => {
+        const o = f as Record<string, unknown>
+        return o.capped_at_file_limit === true || o.cappedAtFileLimit === true
+      }).length
+      const globalTruncated = !Array.isArray(result)
+        && (result as Record<string, unknown>)?.truncated === true
       const header = `Found ${matchCount} match${matchCount === 1 ? '' : 's'} in ${totalFiles ?? files.length} file${files.length === 1 ? '' : 's'}`
-      lines.push(header)
+      lines.push(cappedFiles > 0 || globalTruncated ? `${header} (PARTIAL)` : header)
+      if (cappedFiles > 0) {
+        lines.push(
+          `⚠ ${cappedFiles} file${cappedFiles === 1 ? '' : 's'} hit the 10-matches-per-file cap — `
+          + `the counts above are what was returned, NOT how many matches exist. `
+          + `Use outputMode:"count" for true per-file totals, or narrow the query.`,
+        )
+      }
+      if (globalTruncated) {
+        lines.push(
+          `⚠ The global result limit was reached — files after the last one listed were not searched. `
+          + `Narrow with includePatterns or raise maxResults.`,
+        )
+      }
 
       for (const file of files) {
         const f = file as Record<string, unknown>
@@ -3841,7 +3865,7 @@ ${preview}
             includePatterns: { type: 'array', items: { type: 'string' }, description: 'Glob patterns to include (e.g., ["*.tsx", "*.ts"])' },
             contextLines: { type: 'number', description: 'Number of lines before and after each match to include. Default: 0, max: 10.' },
             outputMode: { type: 'string', enum: ['content', 'files_with_matches', 'count'], description: 'content (default): matching lines. files_with_matches: only file paths — use for broad "where is X used" sweeps. count: per-file match counts. The compact modes cover up to 500 matches; content is capped at maxResults.' },
-            maxResults: { type: 'number', description: 'Max matching lines in content mode. Default: 50, max: 200. When results are truncated, narrow with includePatterns or switch to files_with_matches.' },
+            maxResults: { type: 'number', description: 'Max matching lines in content mode across ALL files. Default: 50, max: 200. Independently, each file returns at most 10 matches — so a single file with 60 hits shows 10 and the result says so. When results are truncated, narrow with includePatterns, or switch to count (true per-file totals) or files_with_matches.' },
             includeIgnored: { type: 'boolean', description: 'Search .gitignore\'d paths too. Default: false — build output (compiled JS, bundles) is excluded, because the project declares there what is generated rather than authored. Set true only when the generated code is itself the subject, e.g. debugging a broken build. Same flag as glob.' },
           },
           required: ['query', 'directory']
@@ -3895,6 +3919,12 @@ ${preview}
           // descrições contraditórias da mesma árvore e resolvia-as escalando
           // para includeIgnored (sessão momenu-fact 2026-07-28).
           respect_gitignore: !(input.includeIgnored as boolean),
+          // `count` conta de VERDADE: o Rust muda para SearchDepth::CountOnly,
+          // sem tecto por ficheiro e sem guardar texto de linha. Antes o modo
+          // count reportava o `total_matches` do modo Content — já limitado a
+          // 10 por ficheiro — portanto "quantos usos tem X" respondia 10 num
+          // ficheiro com 60 (auditoria 2026-07-29).
+          count_only: outputMode === 'count',
         }
         const result = await invoke('search_in_files', {
           query: input.query,

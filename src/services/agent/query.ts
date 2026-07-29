@@ -437,7 +437,7 @@ export interface QueryParams {
 
 /** Terminal return value. */
 export interface QueryTerminal {
-  reason: "completed" | "aborted" | "error" | "max_turns" | "blocking_limit";
+  reason: "completed" | "aborted" | "error" | "max_turns" | "blocking_limit" | "incomplete";
   turnCount: number;
   totalInputTokens: number;
   totalOutputTokens: number;
@@ -1322,6 +1322,7 @@ export async function* query(
         turnId: generateId(),
         turnCounter: 0,
         consecutiveFailures: 0,
+        lastFailureAt: undefined,
       };
       // Carry the summary text out so the handler can PERSIST it on the boundary
       // marker (chatStore.addCompactBoundaryMessage). O sumário é SEMPRE o
@@ -1342,6 +1343,9 @@ export async function* query(
       tracking = {
         ...(tracking ?? { compacted: false, turnId: "", turnCounter: 0 }),
         consecutiveFailures: autoResult.consecutiveFailures,
+        // Sem propagar o timestamp, o disjuntor não tem como arrefecer e
+        // volta a ser o fusível que era.
+        lastFailureAt: autoResult.lastFailureAt,
       };
     }
 
@@ -1464,6 +1468,8 @@ export async function* query(
       }
     > = new Map();
     let stopReason = "";
+    // O stream fechou sem qualquer `finish_reason`? Ver a nota no fim do laço.
+    let streamEndedWithoutSignal = false;
     let turnUsage: OpenAI.CompletionUsage | undefined;
 
     // ── Streaming tool execution (porte scoped do claude-vaz) ──
@@ -1924,6 +1930,16 @@ export async function* query(
 
       // Get final message for usage/stop reason (not needed with standard stream)
       // Usage and finish_reason are already captured from chunks above
+      //
+      // CORTE SILENCIOSO (auditoria 2026-07-29): `stopReason` fica "" quando o
+      // provider fecha o socket sem nunca mandar `finish_reason`. Isso não é
+      // "acabou" — é "não sabemos". Sem esta marca, a recovery de truncagem
+      // não disparava (compara com "length") e o run terminava com
+      // reason:"completed" sobre uma resposta cortada a meio da frase. É o
+      // mesmo defeito que o lado Web tinha, e lá chamei-lhe `sawTerminalSignal`.
+      if (!stopReason) {
+        streamEndedWithoutSignal = true;
+      }
       break;
     } catch (error) {
       const errMsg = formatError(error);
@@ -2668,8 +2684,14 @@ export async function* query(
       // truncadas terminavam a run como se estivessem completas. O cap dos
       // pedidos seguintes já foi escalado no pós-stream (escalatedMaxTokens),
       // por isso a continuação tem espaço real, não só o pedido de brevidade.
+      const truncatedByCap = stopReason === "length" || stopReason === "max_tokens";
+      // Corte silencioso: sem finish_reason E com texto produzido, a resposta
+      // ficou a meio. Só conta como corte se houve texto — um stream vazio sem
+      // sinal é outro problema (erro de transporte) e não se resolve pedindo
+      // ao modelo para "continuar de onde parou".
+      const cutSilently = streamEndedWithoutSignal && assistantTextParts.join('').trim().length > 0;
       if (
-        (stopReason === "length" || stopReason === "max_tokens") &&
+        (truncatedByCap || cutSilently) &&
         maxOutputTokensRecoveryCount < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
       ) {
         state = {
@@ -2678,15 +2700,33 @@ export async function* query(
             ...updatedMessages,
             {
               role: "user",
-              content:
-                "Your previous message hit the output token limit and was cut off mid-answer. " +
-                "Resume EXACTLY where it stopped — no apology, no recap, do not repeat text already produced.",
+              content: truncatedByCap
+                ? "Your previous message hit the output token limit and was cut off mid-answer. " +
+                  "Resume EXACTLY where it stopped — no apology, no recap, do not repeat text already produced."
+                : "Your previous message was cut off mid-answer (the connection closed before you finished). " +
+                  "Resume EXACTLY where it stopped — no apology, no recap, do not repeat text already produced.",
             },
           ],
           maxOutputTokensRecoveryCount: maxOutputTokensRecoveryCount + 1,
           continuationCount: 0,
         };
         continue;
+      }
+      // Esgotou as tentativas de retoma e continua cortada: o run NÃO está
+      // completo, e dizê-lo é o mínimo. Quem chama já distingue os reasons.
+      if (truncatedByCap || cutSilently) {
+        state.messages = updatedMessages;
+        return {
+          reason: "incomplete",
+          turnCount: state.turnCount,
+          totalInputTokens,
+          totalOutputTokens,
+          runHasEdited,
+          noEditRecoveryCount,
+          noEditGuardTriggered: noEditRecoveryCount > 0,
+          firstWriteTurn,
+          writeActionCount,
+        };
       }
 
       // The model is ready to stop — but if the developer queued a message

@@ -478,22 +478,35 @@ export async function runParallelTask(runId: string): Promise<void> {
 
   // Fase 4b (paridade de compaction): limites reais do modelo ativo para o
   // auto-compact do engine — tarefas longas deixam de morrer em prompt_too_long.
-  const contextLimits = (() => {
-    // REGRA DO MAIN (getContextLimits): header do worker → perfil conhecido →
-    // FALLBACK 200K conservador (nunca o perfil do plano, que assumia 1M para
-    // modelos desconhecidos e estourava). Sob BYOK o header gerido é ignorado
-    // (é do modelo do worker, possivelmente stale) e o perfil resolve pelo
-    // modelId do snapshot.
-    const { modelContextWindow, modelName } = useAgentStore.getState()
+  //
+  // FUNÇÃO, não IIFE (auditoria 2026-07-29). Isto era avaliado UMA vez, no
+  // arranque da tarefa, e congelava. A janela real chega no header
+  // X-Model-Context-Window da PRIMEIRA resposta, portanto uma tarefa que
+  // arrancasse antes dele vivia o resto da vida com o fallback de 200K — num
+  // modelo de 1M isso significa compactar cinco vezes antes do tempo, ou (pelo
+  // outro lado, quando o fallback é maior que o real) estourar. O caminho
+  // principal lê fresco a cada turno; esta era a cópia que ficou atrás.
+  //
+  // REGRA DO MAIN: header do worker → perfil conhecido → FALLBACK 200K
+  // conservador (nunca o perfil do plano, que assumia 1M para modelos
+  // desconhecidos e estourava). Sob BYOK o header gerido é ignorado (é do
+  // modelo do worker, possivelmente stale) e o perfil resolve pelo modelId do
+  // snapshot.
+  const contextLimits = () => {
+    const { modelContextWindow, modelMaxOutputTokens, modelName } = useAgentStore.getState()
     const knownProfile = byokActive
       ? MODEL_PROFILES[model]
       : (modelName ? MODEL_PROFILES[modelName] : undefined)
     const profile = knownProfile ?? getProfileForPlan(useBillingStore.getState().plan)
     return {
       contextWindow: (byokActive ? null : modelContextWindow) ?? knownProfile?.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
-      maxOutputTokens: profile.maxOutputTokens ?? null,
+      // `modelMaxOutputTokens` primeiro, como no main: um modelo publicado só
+      // no KV herdava o teto do fallback e calava-se aí, e esse mesmo valor é
+      // o teto da escalada anti-truncagem no query.ts — o efeito era duplo.
+      // Sob BYOK o header é do modelo do worker, logo não se aplica.
+      maxOutputTokens: (byokActive ? null : modelMaxOutputTokens) ?? profile.maxOutputTokens ?? null,
     }
-  })()
+  }
 
   const engine = new QueryEngine({
     client,
@@ -511,7 +524,7 @@ export async function runParallelTask(runId: string): Promise<void> {
       if (live?.planOverride) return { 'X-Request-Type': 'plan' }
       return undefined
     },
-    getContextLimits: () => contextLimits,
+    getContextLimits: contextLimits,
     // O prompt das tarefas é o do main + adenda de tarefa — o reminder crítico
     // faz parte dele, portanto a re-injeção periódica aplica-se cá também.
     reinjectCriticalReminder: true,
