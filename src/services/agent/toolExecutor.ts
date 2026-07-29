@@ -373,6 +373,12 @@ class ToolExecutor {
    */
   private planModeOwners: Set<string> = new Set()
 
+  /** Assinatura dos comandos em background ainda a correr na última consulta,
+   *  e quantas vezes seguidas foi pedida sem nada mudar. Ver a recusa de
+   *  polling em `check_background_commands`. */
+  private lastBackgroundPollSignature = ''
+  private backgroundPollRepeats = 0
+
   /**
    * Ficheiros que NÃO existiam antes desta sessão e foram criados pelo agente,
    * mapeados para o hash do conteúdo que ele escreveu.
@@ -734,6 +740,8 @@ class ToolExecutor {
     // nova, um ficheiro criado antes já é património do projecto como outro
     // qualquer, e apagá-lo volta a merecer o diálogo.
     this.createdThisSession.clear()
+    this.lastBackgroundPollSignature = ''
+    this.backgroundPollRepeats = 0
     clearReadRangeTracker()
     clearToolResultVisibility()
     this.largeResults.clear()
@@ -5581,7 +5589,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('check_background_commands', {
       definition: {
         name: 'check_background_commands',
-        description: 'Read the status and output of background commands started with execute_command_background. Use once after an auto-wake or after you have done other useful work. Do not call repeatedly to wait; if commands are still running and you have no other work, end your turn.',
+        description: 'Read the status and output of background commands started with execute_command_background. Use once after an auto-wake or after you have done other useful work. Calling it again while the same commands are still running returns a refusal instead of output — end your turn and the system auto-wakes you when a command exits.',
         input_schema: {
           type: 'object',
           properties: {
@@ -5595,6 +5603,39 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         const bgCmdStore = useBackgroundCommandStore.getState()
 
         const targetId = input.id as string | undefined
+
+        // ── Recusa de polling ──────────────────────────────────────────
+        // A regra "não faças polling" existia só em prosa, e prosa perde para
+        // o circuito de retorno: cada resposta a um comando ainda a correr
+        // parecia informação útil, portanto o modelo repetia. Sessão
+        // katondo-streaming (29-07): 15 chamadas seguidas a ver se o
+        // `npm install` já tinha acabado — 42% dos turnos, ~552 mil tokens de
+        // input, para um auto-wake que depois funcionou em 86 segundos.
+        //
+        // A partir da SEGUNDA consulta consecutiva sem nada ter mudado, a
+        // tool deixa de responder com log e devolve a instrução. Não é
+        // bloqueio: assim que algum comando muda de estado (ou termina), o
+        // contador reinicia e a resposta normal volta. O que se recusa é
+        // exactamente o gesto inútil — perguntar outra vez o que já se sabe.
+        const stillRunningSignature = bgCmdStore
+          .getAll()
+          .filter(cmd => cmd.status === 'running')
+          .map(cmd => cmd.id)
+          .sort()
+          .join(',')
+        if (stillRunningSignature && stillRunningSignature === this.lastBackgroundPollSignature) {
+          this.backgroundPollRepeats += 1
+        } else {
+          this.backgroundPollRepeats = 0
+          this.lastBackgroundPollSignature = stillRunningSignature
+        }
+        if (this.backgroundPollRepeats >= 1) {
+          return (
+            `Nothing has changed since your last check — the same command(s) are still running, and this call cost a full round-trip to learn that.\n\n` +
+            `END YOUR TURN NOW. The system auto-wakes you the moment a background command exits; the run resumes by itself, so stopping here is not abandoning the task. ` +
+            `If you have other useful work that does NOT depend on this command, do that instead — but do not ask again.`
+          )
+        }
 
         if (targetId) {
           const cmd = bgCmdStore.getById(targetId)

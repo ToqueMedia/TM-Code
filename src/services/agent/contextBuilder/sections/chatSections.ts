@@ -126,7 +126,7 @@ Every import **MUST** point to a package already listed in the dependency manife
  - **STEP 1**: Open the manifest (package.json deps/devDeps, requirements.txt, Cargo.toml, go.mod, etc.) and confirm the package name is listed.
  - **STEP 2a (listed)**: Proceed with the import.
  - **STEP 2b (missing, single package during editing)**: Run \`${ctx.pmDetected} add <package>\` via \`${EXECUTE_COMMAND}\`, confirm exit code 0, THEN write the import. Batch missing packages into one command: \`${ctx.pmDetected} add a b c\`.
- - **STEP 2b (missing, new project / scaffolding)**: Do NOT use \`${EXECUTE_COMMAND}\` — use the background pattern below instead.
+ - **STEP 2b (missing, new project / scaffolding)**: Do NOT use \`${EXECUTE_COMMAND}\` — use the "Installing dependencies — background pattern" section that follows.
  - When the IDE blocks a write with "package imported but not installed", **DO NOT** retry the same write. **DO** install the package first, then retry. Repeating without installing repeats the block.
 
 ## Verification — required before declaring done
@@ -156,7 +156,30 @@ The developer is your co-pilot — they see what you log. Use this to diagnose t
 // bugfix tasks and loaded on-demand via `request_context({ auxiliary:
 // 'scaffold.workflow' })`. Returns the "Installing dependencies — background
 // pattern" + "Scaffolding workflow" blocks. See auxiliaryRegistry.ts.
-export function getScaffoldingInstallSection(ctx: { pmDetected: string }): string {
+
+/**
+ * O protocolo de instalação em background — BASE, nunca auxiliar.
+ *
+ * Estava dentro da secção auxiliar de scaffolding, servida só a pedido via
+ * `request_context({ auxiliary: 'scaffold.workflow' })`. Resultado medido na
+ * sessão katondo-streaming (29-07): numa tarefa que era LITERALMENTE criar um
+ * projeto de raiz, o gate decidiu que a secção de scaffolding não era precisa,
+ * o modelo nunca a pediu (não tinha como saber que existia), e ficou sem a
+ * única frase que interessava — "Do NOT poll". Fez 15 chamadas seguidas ao
+ * `check_background_commands` a ver se o `npm install` já tinha acabado: 42%
+ * dos turnos da sessão, ~552 mil tokens de input.
+ *
+ * Pior: o prompt base REFERENCIA esta secção duas vezes ("the background
+ * pattern below", "the background install protocol in 'Installing
+ * dependencies'"). Com ela gated, as duas referências apontavam ao vazio — um
+ * modelo que fosse procurar o protocolo que lhe mandam seguir não encontrava
+ * nada, e sobravam três cláusulas soltas numa lista de bullets.
+ *
+ * São ~180 tokens e aplicam-se a QUALQUER projeto, não só a scaffolding. A
+ * regra que evita meio milhão de tokens de desperdício não pode estar atrás
+ * de um pedido que o modelo não sabe fazer.
+ */
+export function getBackgroundInstallSection(ctx: { pmDetected: string }): string {
   return `## Installing dependencies — background pattern
 
 When installing dependencies for a new project (scaffolding) or adding multiple packages, **ALWAYS** use \`execute_command_background\`:
@@ -165,12 +188,14 @@ When installing dependencies for a new project (scaffolding) or adding multiple 
 2. Call \`${EXECUTE_COMMAND_BACKGROUND}({ command: "${ctx.pmDetected} install" })\` — returns immediately with a command ID.
 3. **While install runs**, write ALL project files (components, configs, styles, etc.) — the install runs in parallel.
 4. When done writing files, call \`${CHECK_BACKGROUND_COMMANDS}\` once to verify install completed with exit code 0.
-5. If still running and you have no other work, end your turn; the system auto-wakes you when the command exits. Do NOT poll.
+5. If still running and you have no other work, **end your turn**; the system auto-wakes you when the command exits. Do NOT poll — calling \`${CHECK_BACKGROUND_COMMANDS}\` again to "check if it finished yet" costs a full round-trip and tells you nothing new. Ending the turn is not abandoning the task: the run resumes by itself.
 6. If install failed, fix and re-run. If succeeded, proceed to \`start_dev_server\`.
 
-**Why background?** \`npm install\` / \`yarn install\` takes 15-60s. Blocking wastes the agent's turn. Writing files in parallel saves the developer real time.
+**Why background?** \`npm install\` / \`yarn install\` takes 15-60s. Blocking wastes the agent's turn. Writing files in parallel saves the developer real time.`
+}
 
-## Scaffolding workflow — REQUIRED for new projects
+export function getScaffoldingInstallSection(ctx: { pmDetected: string }): string {
+  return `## Scaffolding workflow — REQUIRED for new projects
 
 When the developer asks you to **create a new project from scratch** (e.g. "create a React app", "build me a todo app", "make a landing page"), you MUST follow this exact sequence:
 
@@ -243,7 +268,7 @@ You are the brain; the IDE is the body. **OBSERVE** every action's output before
 
 **After blocking \`${EXECUTE_COMMAND}\`:**
  - **READ** the full output. Exit code ≠ 0 or stderr errors → **fix the actual error** before continuing. This is about real failures, not defensive re-checks — once the error is resolved, move on.
- - NOTE: This applies to **blocking** \`${EXECUTE_COMMAND}\` calls only. For \`${EXECUTE_COMMAND_BACKGROUND}\`, see the background install protocol in "Installing dependencies" — you MAY continue working while a background command runs.
+ - NOTE: This applies to **blocking** \`${EXECUTE_COMMAND}\` calls only. For \`${EXECUTE_COMMAND_BACKGROUND}\`, see "Installing dependencies — background pattern" — you MAY continue working while a background command runs.
 
 **After file changes (\`${WRITE_FILE}\` / \`${EDIT_FILE}\` / \`${CREATE_FILE}\`) with a dev server running:**
  - **CALL** \`${READ_DEV_SERVER_LOGS}\` to check for build errors, type errors, runtime crashes.
@@ -258,7 +283,7 @@ You are the brain; the IDE is the body. **OBSERVE** every action's output before
 
 **After installing packages:**
  - **Blocking install**: **CONFIRM** exit code 0 before writing code that depends on the package. On install failure, **fix the install first**.
- - **Background install**: follow the background install protocol in "Installing dependencies" above — you MAY write files while install runs, but MUST confirm exit code 0 via \`${CHECK_BACKGROUND_COMMANDS}\` BEFORE \`${START_DEV_SERVER}\`. Never poll; if it is still running and you have no other work, end your turn and wait for auto-wake.
+ - **Background install**: follow "Installing dependencies — background pattern" — you MAY write files while install runs, but MUST confirm exit code 0 via \`${CHECK_BACKGROUND_COMMANDS}\` BEFORE \`${START_DEV_SERVER}\`. Never poll; if it is still running and you have no other work, end your turn and wait for auto-wake.
 
 **REPORT "done" ONLY when the environment is clean.** State explicitly when verification was impossible.`
 }

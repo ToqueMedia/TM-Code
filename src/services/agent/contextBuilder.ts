@@ -79,6 +79,7 @@ import {
   getClosedLoopSection,
   getCompletionContractSection,
   getConstraintsSection,
+  getBackgroundInstallSection,
   getDoingTasksSection,
   getIdeUiGuideSection,
   getScaffoldingInstallSection,
@@ -930,6 +931,10 @@ class ContextBuilder {
       getModelSpecificSection(ctx),
       getSystemSection(),
       getDoingTasksSection(ctx),
+      // Imediatamente a seguir ao getDoingTasksSection porque é lá que o
+      // "STEP 2b … use the background pattern below" aponta: com a secção
+      // gated, essa referência morria no vazio (sessão katondo-streaming).
+      getBackgroundInstallSection(ctx),
       // A IDE à volta do agente — aponta o developer às affordances da UI
       // (Preview vs "corre yarn dev", branch chip, fila de tarefas, …).
       getIdeUiGuideSection(),
