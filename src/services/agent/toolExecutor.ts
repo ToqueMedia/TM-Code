@@ -3197,6 +3197,13 @@ ${preview}
       return `delete_file refused: could not enumerate ${dirPath} to build an undo checkpoint (${err instanceof Error ? err.message : String(err)}). Nothing was deleted.`
     }
 
+    // `glob_files_filtered` com respect_gitignore:false devolve também
+    // DIRECTÓRIOS (filesystem.rs empurra o caminho sem filtrar por tipo). Sem
+    // os separar, cada pasta da árvore falhava o `read_file` e era contada como
+    // "ilegível" — um aviso a dizer que ficheiros ficaram fora do checkpoint
+    // quando não ficou nenhum. Alarme falso é exactamente o que esta auditoria
+    // anda a apagar. Sonda-se só o que falha a leitura, portanto o custo é
+    // proporcional aos erros e não à árvore.
     if (paths.length > MAX_FILES) {
       return `delete_file refused: ${dirPath} holds ${paths.length} files (ceiling ${MAX_FILES}). A tree this size cannot be snapshotted for undo, and deleting it without one is not something this tool does. If it is genuinely meant to go, say so to the developer and let them remove it — or delete the specific files that matter.`
     }
@@ -3213,6 +3220,10 @@ ${preview}
       try {
         content = await invoke<string>('read_file', { path: filePath })
       } catch {
+        // Directório: não tem conteúdo a repor, e o `delete_file_or_directory`
+        // recria a estrutura ao restaurar os ficheiros. Não é uma perda.
+        const isDir = await invoke<boolean>('is_directory', { path: filePath }).catch(() => false)
+        if (isDir) continue
         // Binário ou ilegível. Conta-se e reporta-se — um checkpoint que
         // silencia o que não guardou é pior do que não ter checkpoint.
         unreadable += 1

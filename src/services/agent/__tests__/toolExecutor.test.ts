@@ -2734,6 +2734,27 @@ describe('delete_file num directório', () => {
     expect(mockCaptureBeforeDirectoryDelete).not.toHaveBeenCalled()
   })
 
+  it('DIRECTÓRIOS na lista não contam como ficheiros ilegíveis', async () => {
+    // `glob_files_filtered` com respect_gitignore:false devolve também pastas
+    // (filesystem.rs empurra o caminho sem filtrar por tipo). Cada uma falhava
+    // o read_file e era contada como "ilegível" — um aviso a dizer que
+    // ficheiros ficaram fora do checkpoint quando não ficou nenhum.
+    mockInvokeImpl.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'glob_files_filtered') return ['/p/d/sub', '/p/d/sub/a.ts']
+      if (cmd === 'is_directory') return (args as { path: string }).path === '/p/d/sub'
+      if (cmd === 'read_file') {
+        if ((args as { path: string }).path === '/p/d/sub') throw new Error('Is a directory')
+        return 'conteudo'
+      }
+      return undefined
+    })
+
+    expect(await guard('/p/d', 'tc-9')).toBeNull()
+    const [, files] = mockCaptureBeforeDirectoryDelete.mock.calls[0]
+    expect(files).toHaveLength(1)
+    expect(files[0].filePath).toBe('/p/d/sub/a.ts')
+  })
+
   it('ficheiros ilegíveis são saltados, mas o resto ainda é snapshotado', async () => {
     mockInvokeImpl.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'glob_files_filtered') return ['/p/d/ok.ts', '/p/d/img.png']
