@@ -51,6 +51,9 @@ export function stopAgentRun(): boolean {
 
   usePermissionStore.getState().clearPending()
   usePermissionStore.getState().resetAutoApprove()
+  // Desbloqueia o agente E descarta os diffs à espera de decisão (marca-os como
+  // recusados na UI) — sem a segunda parte, os botões Accept/Reject ficavam
+  // clicáveis depois do Stop. Ver resolveAllPendingDiffApprovals.
   resolveAllPendingDiffApprovals(false)
   useSubAgentStore.getState().abortAll()
   AgentService.getInstance().cancelLoop()

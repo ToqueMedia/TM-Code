@@ -14,8 +14,8 @@ use super::{canonicalize_path, normalize_path_for_frontend};
 const MAX_CHILDREN_PER_DIR: usize = 500;
 
 /// Directories always excluded from the file tree to avoid massive context waste.
-/// Matches the exclusion list in `filesystem.rs:has_excluded` (glob tool).
-const EXCLUDED_DIRS: &[&str] = &[
+/// Shared with the glob tool (`filesystem.rs:glob_files`).
+pub(crate) const EXCLUDED_DIRS: &[&str] = &[
     // JS/TS ecosystem
     "node_modules",
     ".next",

@@ -44,6 +44,26 @@ export interface PathAlias {
 }
 
 /**
+ * Um caminho que o projecto DECLARA ser gerado — não escrito à mão.
+ *
+ * Existe porque um dev humano nunca precisa de deduzir isto: ao entrar num
+ * projecto TypeScript sabe que os `.js` ao lado de `src/` são output do
+ * compilador e nem olha para eles. O modelo não tinha esse dado e tinha de o
+ * inferir do nome da pasta — o que falha nos dois sentidos: `functions/lib`
+ * ERA gerado e `lib/` noutro projecto é fonte legítima. Sem o facto, a sessão
+ * momenu-fact (2026-07-28) leu transpilado e propôs apagá-lo.
+ *
+ * A `source` é sempre uma declaração do próprio projecto (o `outDir` de um
+ * tsconfig), nunca um palpite nosso sobre nomes de pastas.
+ */
+export interface GeneratedPath {
+  /** Caminho relativo à raiz do projecto (ex.: `functions/lib`). */
+  path: string
+  /** Quem o declara (ex.: `functions/tsconfig.json outDir`). */
+  source: string
+}
+
+/**
  * Inputs every project prompt section function needs. Built once per
  * `buildSystemPrompt` call from the parallel gather phase, then passed
  * through. Lets section functions stay pure (input → string | null), so
@@ -69,6 +89,8 @@ export interface PromptContext {
   recentFiles: RecentFileEntry[]
   /** Import path aliases from tsconfig/jsconfig. Empty when none. */
   pathAliases: PathAlias[]
+  /** Caminhos que o projecto declara serem gerados (`outDir`). Empty when none. */
+  generatedPaths: GeneratedPath[]
   readme: string | null
   /** Real TMS.md body only. Null when the project has no structured TM memory. */
   tmsContent: string | null

@@ -6,7 +6,7 @@ import { useProjectStore } from '../../stores/projectStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { t } from '../../i18n/useTranslation'
 import AgentService from './agentService'
-import type { IntentClassification } from './intentRouter'
+import type { IntentClassification } from './mainDispatch'
 import {
   refreshMcpForDispatch,
   buildMainSystemPrompt,
@@ -418,6 +418,7 @@ async function runAgentInternal(
       bootstrapOnly,
       intentOverride,
       mcpToolSummaries,
+      hasImage: userMessageAttachments?.some(a => a.type === 'image') ?? false,
     })
   }
   logger.info('agent', `✓ System prompt built (${systemPrompt.length} chars, ${Date.now() - promptBuildStart}ms)`)

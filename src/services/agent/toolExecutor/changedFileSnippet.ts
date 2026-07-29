@@ -94,3 +94,50 @@ export function getSnippetForTwoFileDiff(fileAContents: string, fileBContents: s
   const remaining = countCharInString(full, '\n', kept.length) + 1
   return `${kept}\n\n... [${remaining} lines truncated] ...`
 }
+
+/** Teto do excerto pós-edição. O snippet acima vai até 8K, mas isso é para um
+ *  ficheiro inteiro mudado por fora; aqui há um por CADA edição aplicada. */
+const POST_EDIT_SNIPPET_MAX_CHARS = 2_000
+
+/**
+ * Texto do resultado de uma edição, como o MODELO o vê.
+ *
+ * PORQUÊ (auditoria 2026-07-28): o resultado era só "File updated: path" — o
+ * modelo aplicava a edição e ficava sem ver nada do que ficou escrito. Daí saem
+ * os dois comportamentos caros: ou re-lê o ficheiro que acabou de editar (um
+ * turn inteiro), ou encadeia a edição seguinte às cegas sobre um estado que
+ * assume. Devolver o excerto numerado da zona alterada é o que o claude-vaz
+ * faz — e o snippet já existia aqui, usado só no sweep de alterações externas.
+ *
+ * Partilhado pelo caminho direto (query.ts) e pelo de APROVAÇÃO
+ * (agentService.ts): eram dois formatos a divergir para o mesmo evento.
+ */
+export function buildPostEditResultText(diff: {
+  path?: unknown
+  isNewFile?: unknown
+  oldContent?: unknown
+  newContent?: unknown
+}): string {
+  const path = typeof diff.path === 'string' ? diff.path : '(unknown path)'
+  const isNewFile = diff.isNewFile === true
+  const header = `File ${isNewFile ? 'created' : 'updated'}: ${path}`
+
+  const oldContent = typeof diff.oldContent === 'string' ? diff.oldContent : ''
+  const newContent = typeof diff.newContent === 'string' ? diff.newContent : ''
+
+  let snippet = ''
+  try {
+    snippet = isNewFile
+      ? addLineNumbers({ content: newContent.split('\n').slice(0, 20).join('\n'), startLine: 1 })
+      : getSnippetForTwoFileDiff(oldContent, newContent)
+  } catch {
+    // Um excerto é um extra: nunca pode partir o resultado da edição.
+  }
+  if (!snippet) return header
+
+  if (snippet.length > POST_EDIT_SNIPPET_MAX_CHARS) {
+    const cut = snippet.lastIndexOf('\n', POST_EDIT_SNIPPET_MAX_CHARS)
+    snippet = `${snippet.slice(0, cut > 0 ? cut : POST_EDIT_SNIPPET_MAX_CHARS)}\n… (excerpt truncated — read the file if you need more)`
+  }
+  return `${header}\n\nResulting content (verify it says what you intended — do NOT re-read this file just to check):\n${snippet}`
+}

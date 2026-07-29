@@ -23,8 +23,31 @@ import AgentService from './agentService'
 import MCPService from '../mcp/mcpService'
 import { browserSession } from '../browserSessionManager'
 import { logger } from '../../utils/logger'
-import type { IntentClassification } from './intentRouter'
+import type { PromptProfile, RouterDiagnostics } from './contextBuilder/auxiliaryRegistry'
 import type { AgentCallbacks } from './types'
+
+/**
+ * Perfil + hints com que um run arranca.
+ *
+ * Vivia no intentRouter.ts, que foi APAGADO na auditoria de 2026-07-28: o
+ * classificador LLM pré-voo estava morto no caminho vivo há muito (uma
+ * classificação "read-only" errada chegou a negar create/edit num run inteiro)
+ * e o ficheiro só sobrevivia por causa deste tipo. Hoje só há dois produtores:
+ * o bootstrap de TMS abaixo e os overrides internos de comandos — nenhum
+ * inspeciona texto livre do utilizador.
+ */
+export interface IntentClassification {
+  profile: PromptProfile
+  readOnly: boolean
+  /** True when this turn should ultimately mutate project files/state. */
+  requiresMutation: boolean
+  source: 'model' | 'fallback' | 'keyword'
+  confidence: 'high' | 'medium' | 'low' | 'none'
+  /** Short reason for logging / export telemetry. */
+  reason: string
+  error?: string
+  diagnostics?: RouterDiagnostics
+}
 import {
   useChatStore,
   appendTextDeltaBuffered,
@@ -119,6 +142,8 @@ export interface BuildMainSystemPromptArgs {
   builder?: ContextBuilder
   /** Contagem de tools do schema — tarefas passam o tamanho do SEU set. */
   coreToolCountOverride?: number
+  /** Mensagem traz imagens — activa o perfil vision (regras de imagem no prompt). */
+  hasImage?: boolean
 }
 
 /**
@@ -150,6 +175,7 @@ export async function buildMainSystemPrompt(args: BuildMainSystemPromptArgs): Pr
     args.userMessageText,
     AgentService.getInstance().getAccessedFilePaths(),
     effectiveIntent ?? undefined,
+    { hasImage: args.hasImage },
   )
 }
 

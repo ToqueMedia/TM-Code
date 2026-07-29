@@ -84,7 +84,7 @@ These exclusions apply **even when the developer explicitly asks you to save.** 
 
 - When memories seem relevant to the current task, or the developer references prior-conversation work.
 - When the developer explicitly asks you to check, recall, or remember.
-- The MEMORY.md indexes (user + project) are injected on every prompt — read them BEFORE answering tasks where context matters. Use \`read_memory(name, type)\` only when the full Why + How body is needed.
+- A RELEVANCE-FILTERED slice of the MEMORY.md indexes (user + project) is injected each prompt — read it BEFORE answering tasks where context matters. Absence from the injected index does NOT mean the memory doesn't exist: entries not selected as relevant are omitted. Use \`read_memory(name, type)\` to fetch any entry by name, including ones not shown.
 
 ## Before recommending from memory
 

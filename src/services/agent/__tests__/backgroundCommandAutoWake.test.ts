@@ -41,18 +41,25 @@ describe('shouldWakeForBackgroundCommands', () => {
   it('wakes on success when tracker still has open work', () => {
     const d = shouldWakeForBackgroundCommands([cmd('completed', 0)], 1)
     expect(d.wake).toBe(true)
-    expect(d.reason).toBe('open_tasks')
+    expect(d.reason).toBe('completed')
   })
 
-  it('does NOT wake on success when tracker is empty (final report)', () => {
+  it('wakes on success MESMO com o tracker vazio — a tool prometeu acordar', () => {
+    // Auditoria 2026-07-28: o schema diz "the system auto-wakes you when the
+    // command exits" e o modelo fecha o turno a contar com isso. Com o tracker
+    // vazio ninguém agia sobre um build bem-sucedido — a tarefa ficava por
+    // fazer depois de o agente ter dito que ia verificar.
     const d = shouldWakeForBackgroundCommands([cmd('completed', 0)], 0)
-    expect(d.wake).toBe(false)
-    expect(d.reason).toBe('no_open_tasks_success')
+    expect(d.wake).toBe(true)
+    expect(d.reason).toBe('completed')
   })
 
   it('does NOT wake on cancel alone with empty tracker', () => {
+    // O utilizador matou-o: ressuscitar o agente para relatar o que a pessoa
+    // acabou de cancelar é ruído.
     const d = shouldWakeForBackgroundCommands([cmd('cancelled', null)], 0)
     expect(d.wake).toBe(false)
+    expect(d.reason).toBe('cancelled_only')
   })
 
   it('wakes on cancel when tracker has open work', () => {

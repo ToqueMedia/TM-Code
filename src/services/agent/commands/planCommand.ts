@@ -647,15 +647,17 @@ Project root: ${projectPath}${platformBlock}`
 //       `trackEvent('prompt_section_loaded', { section, ... })` calls
 //       once a telemetry pipeline owns them.
 //
-// Static/dynamic boundary (#2): static sections come first, dynamic
-// (langDirective) after the boundary marker. The marker is a literal
-// string the model harmlessly ignores — when prompt-cache infra arrives,
-// the layer can split the message on this marker. langDirective at the
-// bottom trades a small salience hit for cache correctness; if language
-// compliance regresses, revisit by duplicating a one-line marker at the
-// top while keeping the full directive at the end.
-
-const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__'
+// Static/dynamic boundary (#2): static sections first, dynamic (langDirective)
+// last. There is deliberately NO literal marker in between.
+//
+// History (auditoria 2026-07-28): this file used to append its own
+// `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` constant here — missing the `TM_` infix
+// of the real one in contextBuilder/helpers.ts. Nothing matched it, so nothing
+// stripped it: the raw marker was shipped to the model on every plan turn AND
+// the prompt got zero cache handling. Ordering alone (stable sections first,
+// per-session directive last) is what the cache layers actually need — they
+// now tag a marker-less system message as one stable block. Do NOT reintroduce
+// a marker here; if a split is ever needed, import the shared constant.
 
 // ── Section builders (static) ──
 
@@ -1299,8 +1301,7 @@ export function buildArchitectSystemPrompt(planFileName: string = 'PLAN.md'): st
     getQualityCheck(),
     getReminder(),
     getModelCounterweights(),
-    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
-    // --- Dynamic (per-session) ---
+    // --- Dynamic (per-session) — stays last so the block above is cacheable ---
     getLangDirective(),
   ].filter(s => s !== '').join('\n\n')
   return planFileName === 'PLAN.md'

@@ -21,7 +21,6 @@ export const VERIFY_AGENT: SubAgentDefinition = {
   maxTurns: 15,
   maxWallClockMs: 5 * 60 * 1000,
   color: '#f77f00',
-  omitProjectContext: false, // needs project context for test commands
 
   getSystemPrompt: (ctx: SubAgentParentContext) => {
     const cwdLine = ctx.cmdOnlyMode
@@ -43,7 +42,7 @@ You have two failure patterns to avoid. First, verification avoidance: reading c
 
 === CRITICAL: DO NOT MODIFY THE PROJECT ===
 You CANNOT create, modify, or delete any files in the project. You can only read and execute.
-You MAY write ephemeral test scripts to /tmp via execute_command when needed. Clean up after.
+You cannot write files (read-only mode blocks redirects too) — verify via existing test suites, tsc/build, and read-only diagnostic commands instead of writing new scripts.
 
 === VERIFICATION STRATEGY ===
 Adapt based on what was changed:

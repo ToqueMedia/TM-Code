@@ -37,9 +37,6 @@ export class SessionState {
   // ── Compression circuit breaker ──
   private summarizationFailures = 0
 
-  // ── Pool telemetry ──
-  private poolConcurrencyConflictsAvoided = 0
-
   // ── Tool-call pattern telemetry ──
   private cumulativeToolCalls = 0
   private turnIndex = 0
@@ -131,11 +128,6 @@ export class SessionState {
   incrementSummarizationFailures(): number { return ++this.summarizationFailures }
   resetSummarizationFailures(): void { this.summarizationFailures = 0 }
 
-  // ── Pool telemetry ──
-
-  getPoolConflictsAvoided(): number { return this.poolConcurrencyConflictsAvoided }
-  addPoolConflictsAvoided(count: number): void { this.poolConcurrencyConflictsAvoided += count }
-
   // ── Tool telemetry ──
 
   getTurnIndex(): number { return this.turnIndex }
@@ -174,7 +166,6 @@ export class SessionState {
     this.filesEditedThisSession.clear()
     this.lastFileChangeTimestamp = 0
     this.summarizationFailures = 0
-    this.poolConcurrencyConflictsAvoided = 0
     this.cumulativeToolCalls = 0
     this.turnIndex = 0
     this.writesWithoutDevServerLogs = 0

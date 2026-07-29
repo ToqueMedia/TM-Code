@@ -2,6 +2,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
+/**
+ * Remove blocos de raciocínio embebidos INLINE no texto da resposta.
+ *
+ * Modelos não-streaming metem `<think>…</think>` (ou `<thought>`) dentro do
+ * `message.content` em vez de o separarem em `reasoning_content`. Este strip
+ * existia só no gerador de mensagens de commit (auditoria 2026-07-28), portanto
+ * todas as outras one-shots — melhoria de prompt, autocompletar, e sobretudo os
+ * SUMÁRIOS DE COMPACTAÇÃO — podiam levar raciocínio cru para a UI ou, pior,
+ * de volta para o histórico do modelo. Os modelos de sidecar vêm da config KV e
+ * não são conhecidos à partida, por isso o strip tem de ser incondicional.
+ *
+ * Fecho não emparelhado é tratado: com um `</think>` sem abertura, tudo o que
+ * vem antes dele é raciocínio.
+ */
+export function stripInlineReasoning(text: string): string {
+  let out = text.replace(/<(think|thought)>[\s\S]*?<\/\1>/gi, '')
+  const lastClose = Math.max(
+    out.toLowerCase().lastIndexOf('</think>'),
+    out.toLowerCase().lastIndexOf('</thought>'),
+  )
+  if (lastClose !== -1) {
+    const closeTag = out.toLowerCase().lastIndexOf('</thought>') === lastClose ? '</thought>' : '</think>'
+    out = out.slice(lastClose + closeTag.length)
+  }
+  return out.replace(/<\/?(think|thought)>/gi, '').trim()
+}
+
 function textFromValue(value: unknown): string {
   if (typeof value === 'string') return value
   if (Array.isArray(value)) {
@@ -58,7 +85,7 @@ export function extractAssistantTextFromCompletion(value: unknown): string {
         textFromMessage(choice.message) ||
         textFromMessage(choice.delta) ||
         textFromValue(choice.text)
-      if (text.trim()) return text.trim()
+      if (text.trim()) return stripInlineReasoning(text)
     }
   }
 
@@ -67,5 +94,5 @@ export function extractAssistantTextFromCompletion(value: unknown): string {
     textFromValue(value.text) ||
     textFromValue(value.content) ||
     textFromResponsesOutput(value.output)
-  return topLevel.trim()
+  return stripInlineReasoning(topLevel)
 }

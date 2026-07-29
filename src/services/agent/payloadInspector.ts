@@ -44,14 +44,31 @@ function roughTokenEstimate(text: string): number {
 // Cheap, collision-resistant enough for duplicate detection across a single
 // payload. Not cryptographic — we only need to spot "this exact block
 // appears N times". Hex string so it's log-friendly.
+/**
+ * Cache conteúdo→hash (auditoria 2026-07-28, B#14): o histórico re-envia as
+ * MESMAS strings todos os turnos e o FNV re-corria os chars todos — num
+ * histórico de 500K+ chars isto era uma das passagens O(N) por pedido na
+ * thread da UI. As strings do histórico mantêm identidade entre turnos, e o
+ * lookup em Map faz fast-path por igualdade de ponteiro — hit ≈ O(1).
+ * Eviction bruta ao passar o teto: simplicidade > LRU aqui (o teto cobre
+ * folgado uma sessão longa; um clear ocasional só re-paga uma passagem).
+ */
+const HASH_CACHE_MAX_ENTRIES = 8192
+const hashCache = new Map<string, string>()
+
 function fnv1aHex(text: string): string {
+  const cached = hashCache.get(text)
+  if (cached !== undefined) return cached
   let hash = 0x811c9dc5
   for (let i = 0; i < text.length; i++) {
     hash ^= text.charCodeAt(i)
     hash = Math.imul(hash, 0x01000193)
   }
   // Force unsigned and to hex
-  return (hash >>> 0).toString(16).padStart(8, '0')
+  const hex = (hash >>> 0).toString(16).padStart(8, '0')
+  if (hashCache.size >= HASH_CACHE_MAX_ENTRIES) hashCache.clear()
+  hashCache.set(text, hex)
+  return hex
 }
 
 // ── Types ──

@@ -11,6 +11,7 @@ import {
   resolveEffectiveEffort,
   resolveEffortModelId,
   effortDescriptionKey,
+  shouldSendEffort,
 } from '../../services/agent/reasoningEffortModels'
 import { t } from '@/i18n'
 
@@ -40,6 +41,12 @@ export function EffortSelector() {
   const headerModel = useAgentStore((s) => s.modelName)
   const modelId = resolveEffortModelId(fsModel, headerModel)
   const options = getEffortOptionsForModel(modelId)
+  // HONESTIDADE do controlo (auditoria 2026-07-28): para modelos fora do mapa
+  // de efforts, o header nunca é enviado (shouldSendEffort=false) — mas o
+  // seletor aparecia na mesma, com escala GLM, e o utilizador escolhia
+  // valores que morriam no cliente com um carimbo `sent:false`. Um controlo
+  // que não controla nada é pior do que nenhum: esconde-se.
+  const effortReachesProvider = shouldSendEffort(modelId)
   const selected = useReasoningEffortStore((s) => s.selected)
   const setSelected = useReasoningEffortStore((s) => s.setSelected)
   const [open, setOpen] = useState(false)
@@ -75,6 +82,8 @@ export function EffortSelector() {
   // modelo, senão o default do modelo — a MESMA função que decide o que se envia
   // (buildExtraHeaders), por isso o que se vê é o que se aplica.
   const activeValue = resolveEffectiveEffort(modelId, selected)
+
+  if (!effortReachesProvider) return null
 
   return (
     <Box flexShrink={0}>

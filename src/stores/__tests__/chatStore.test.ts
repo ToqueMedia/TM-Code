@@ -51,6 +51,7 @@ import {
   useChatStore,
   createDiffApprovalPromise,
   hasPendingDiffApprovals,
+  resolveAllPendingDiffApprovals,
   resolveDiffApproval,
 } from '../chatStore'
 
@@ -451,4 +452,97 @@ describe('chatStore', () => {
       await expect(approval).resolves.toBe(false)
     })
   })
+
+
+  describe('rewindToToolCall (revert + rebobinar chat, opt-in)', () => {
+    it('trunca a conversa ANTES da mensagem que contém o tool call', () => {
+      const sid = useChatStore.getState().createSession('/test/project')
+      useChatStore.getState().addUserMessage('pedido inicial')
+      useChatStore.getState().startAssistantMessage()
+      useChatStore.getState().addPendingToolCall('tc-anchor', 'edit_file')
+      useChatStore.getState().finalizeAssistantMessage()
+      useChatStore.getState().addUserMessage('follow-up')
+
+      const ok = useChatStore.getState().rewindToToolCall('tc-anchor')
+
+      expect(ok).toBe(true)
+      const session = useChatStore.getState().sessions.get(sid)!
+      // A conversa volta a acabar na mensagem do developer que pediu o
+      // trabalho — a mensagem do assistant com o call e tudo depois saem.
+      expect(session.messages).toHaveLength(1)
+      expect(session.messages[0].role).toBe('user')
+      expect(session.messages[0].content).toBe('pedido inicial')
+      expect(useChatStore.getState().conversationHistory.some(m => m.role === 'assistant')).toBe(false)
+    })
+
+    it('devolve false sem tocar em nada quando o call não está no transcript', () => {
+      const sid = useChatStore.getState().createSession('/test/project')
+      useChatStore.getState().addUserMessage('pedido')
+      const before = useChatStore.getState().sessions.get(sid)!.messages.length
+
+      expect(useChatStore.getState().rewindToToolCall('tc-inexistente')).toBe(false)
+      expect(useChatStore.getState().sessions.get(sid)!.messages).toHaveLength(before)
+    })
+  })
+
+  describe('cancelamento com diff por decidir', () => {
+    // Bug reportado 2026-07-28: o agente pediu autorização de um diff, o user
+    // carregou em Stop, e o cartão FICOU com os botões Accept/Reject clicáveis.
+    // Carregar em Accept chamava DiffService.acceptDiff — escrevia o ficheiro de
+    // um run cancelado, com o modelo já informado de que a edição fora recusada.
+    function seedPendingDiff(toolCallId: string) {
+      useChatStore.getState().createSession('/work/proj-diff')
+      useChatStore.getState().startAssistantMessage()
+      useChatStore.getState().addPendingToolCall(toolCallId, 'write_file')
+      useChatStore.getState().updateToolCallWithResult(
+        toolCallId,
+        JSON.stringify({
+          type: 'diff',
+          path: '/work/proj-diff/ApiClient.ts',
+          oldContent: 'a\nb\n',
+          newContent: 'a\n',
+          isNewFile: false,
+        }),
+        false,
+      )
+    }
+
+    function toolCallById(toolCallId: string) {
+      const { activeSessionId, sessions } = useChatStore.getState()
+      const session = sessions.get(activeSessionId!)
+      return session?.messages
+        .flatMap(m => m.toolCalls ?? [])
+        .find(tc => tc.id === toolCallId)
+    }
+
+    it('o Stop marca o diff como recusado — os botões deixam de existir', async () => {
+      seedPendingDiff('tc-stop')
+      expect(toolCallById('tc-stop')?.diffStatus).toBe('pending')
+      expect(useChatStore.getState().pendingDiffs).toHaveLength(1)
+
+      const approval = createDiffApprovalPromise('tc-stop')
+      resolveAllPendingDiffApprovals(false)
+
+      // O agente desbloqueia...
+      await expect(approval).resolves.toBe(false)
+      // ...E a UI passa a dizer o mesmo. É `diffStatus !== 'pending'` que faz o
+      // InlineDiff considerar o diff resolvido e esconder os botões; enquanto
+      // ficasse 'pending' havia um Accept clicável a escrever no disco.
+      expect(toolCallById('tc-stop')?.diffStatus).toBe('denied')
+      expect(useChatStore.getState().pendingDiffs).toHaveLength(0)
+    })
+
+    it('aprovar tudo NÃO passa pelo descarte (esse caminho escreve mesmo)', async () => {
+      seedPendingDiff('tc-approve')
+      const approval = createDiffApprovalPromise('tc-approve')
+
+      resolveAllPendingDiffApprovals(true)
+
+      await expect(approval).resolves.toBe(true)
+      // approveAllPendingDiffs carimba os estados por sua conta depois de
+      // escrever; marcá-lo como recusado aqui apagava uma aprovação real.
+      expect(toolCallById('tc-approve')?.diffStatus).toBe('pending')
+    })
+  })
+
 })

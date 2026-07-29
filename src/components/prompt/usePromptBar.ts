@@ -777,6 +777,7 @@ export function usePromptBar() {
         userMessageText,
         bootstrapOnly,
         mcpToolSummaries,
+        hasImage: display.attachments.some(a => a.type === 'image'),
       })
 
       // The history is canonical (carries content parts when previous

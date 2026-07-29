@@ -424,13 +424,20 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
       // this large_result id, AND coalesce adjacent ranges so the list
       // stays small. trackShownRange returns the first range the new
       // read touches (or null on disjoint).
-      ctx.trackShownRange(id, offset, end)
+      //
+      // O retorno era DESCARTADO (auditoria 2026-07-28): o tracker calculava
+      // o overlap "para o aviso ao modelo" e o aviso nunca existiu — re-ler a
+      // mesma janela pagava os tokens outra vez em silêncio.
+      const overlapped = ctx.trackShownRange(id, offset, end)
+      const overlapNote = overlapped
+        ? `\n\n[note: you already read chars ${overlapped[0]}–${overlapped[1]} of this result earlier in the session — the overlapping part above is a repeat. If you were paging, continue from a fresh offset.]`
+        : ''
 
       const suffix = remaining > 0
         ? `\n\n[read_large_result: showing chars ${offset}–${end} of ${content.length}. ${remaining} chars remain — call again with offset: ${end}]`
         : ''
 
-      return slice + suffix
+      return slice + suffix + overlapNote
     },
   })
 }

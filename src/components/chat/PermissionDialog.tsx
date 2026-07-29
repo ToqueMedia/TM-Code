@@ -65,6 +65,8 @@ export default function PermissionDialog({
 
   const isDangerous =
     promptReason === 'dangerous_command' ||
+    promptReason === 'generated_file' ||
+    promptReason === 'untracked_file' ||
     toolName === 'delete_file'
 
   const isPathAccess = promptReason === 'path_access'
@@ -173,6 +175,8 @@ export default function PermissionDialog({
     promptReason === 'dangerous_command' ? t('perm.dangerousCommand') :
     promptReason === 'browser_action' ? t('perm.browserAction') :
     promptReason === 'path_access' ? t('perm.pathAccess') :
+    promptReason === 'generated_file' ? t('perm.generatedFile') :
+    promptReason === 'untracked_file' ? t('perm.untrackedFile') :
     null
 
   return (

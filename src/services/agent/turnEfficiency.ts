@@ -106,6 +106,16 @@ export function inferContinuationReason(snapshot: TurnSnapshot): string {
     return 'tool failure — recovering'
   }
 
+  // 1b. Edições aplicadas com sucesso — é O trabalho, não giro.
+  //     BUG (auditoria 2026-07-28): EDIT_TOOLS só era consultado no ramo de
+  //     ERRO acima, portanto um turn de edições BEM-SUCEDIDAS caía no fallback
+  //     "sem razão técnica" e, ao fim de 3 turns seguidos, injetava o nudge de
+  //     wrap-up no meio da implementação — exatamente quando o agente estava a
+  //     entregar. Também envenenava o continuationReason da telemetria.
+  if (toolNames.some((n) => EDIT_TOOLS.has(n))) {
+    return 'applying edits'
+  }
+
   // 2. Successful command run — the agent ran a build/test/lint and it
   //    passed (isError would have been true above if it hadn't).
   if (toolNames.includes('execute_command')) {

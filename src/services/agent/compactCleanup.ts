@@ -41,8 +41,6 @@ export async function runPostCompactCleanup(): Promise<void> {
 
   // 4. Context collapse — clear staged summaries (indices invalidated by compaction)
   try {
-    const { resetContextCollapse } = await import('./collapse')
-    resetContextCollapse()
   } catch { /* non-critical */ }
 
   logger.debug('agent', '[compact-cleanup] post-compact cache sweep complete')

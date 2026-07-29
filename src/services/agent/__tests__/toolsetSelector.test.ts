@@ -115,7 +115,10 @@ describe('ToolsetSelector (on-demand)', () => {
       expect(totalCount).toBe(ALL_NAMES.length)
       expect(allActive).toBe(false)
       expect(names).toContain(REQUEST_TOOLS_NAME)
-      expect(names).not.toContain(EDIT_FILE)
+      // EDIT_FILE entrou na base (auditoria 2026-07-28): o perfil default de
+      // trabalho em código tem de conseguir editar sem round-trip. write_file
+      // continua on-demand — reescrita total é a exceção, não a regra.
+      expect(names).toContain(EDIT_FILE)
       expect(names).not.toContain(WRITE_FILE)
     })
 
@@ -135,14 +138,14 @@ describe('ToolsetSelector (on-demand)', () => {
   describe('request_tools', () => {
     it('activates any registered inactive tool on demand', () => {
       const selector = new ToolsetSelector(ALL_NAMES, 'bugfix_local')
-      const result = selector.requestTools([EDIT_FILE, WRITE_FILE, CREATE_FILE, DELETE_FILE, WEB_FETCH])
+      const result = selector.requestTools([WRITE_FILE, CREATE_FILE, DELETE_FILE, WEB_FETCH])
 
-      expect(result.added).toEqual([EDIT_FILE, WRITE_FILE, CREATE_FILE, DELETE_FILE, WEB_FETCH])
+      expect(result.added).toEqual([WRITE_FILE, CREATE_FILE, DELETE_FILE, WEB_FETCH])
       expect(result.denied).toEqual([])
       expect(result.unknown).toEqual([])
       expect(selector.isActive(WRITE_FILE)).toBe(true)
+      // EDIT_FILE já vem na BASE — expanded lista só o pedido on-demand.
       expect(selector.getExpandedNames()).toEqual(expect.arrayContaining([
-        EDIT_FILE,
         WRITE_FILE,
         CREATE_FILE,
         DELETE_FILE,

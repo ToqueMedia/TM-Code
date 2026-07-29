@@ -117,6 +117,15 @@ export function tokenCountWithEstimation(messages: MessageLike[]): number {
         if (block.type === 'thinking') {
           total += roughTokenEstimate(block.thinking)
         }
+        // Imagens contavam ZERO (auditoria 2026-07-28): um primeiro turno
+        // multi-imagem não pesava nada na decisão de compactação/bloqueio —
+        // e o realOccupancy do provider só cobre do turno 2 em diante.
+        // 1600 tokens/imagem é o teto documentado da Anthropic para ~1MP
+        // ((w*h)/750); OpenAI high-detail fica abaixo. Sobre-estimar aqui é
+        // o lado seguro: compacta cedo em vez de estourar.
+        if (block.type === 'image_url') {
+          total += 1600
+        }
         // tool_call arguments — the agent emits large write_file/edit_file
         // payloads HERE, in the assistant's tool-call block. The old estimator
         // ignored them entirely, so a single big-edit turn could under-count
@@ -178,7 +187,46 @@ export interface AutoCompactResult {
 }
 
 /**
- * Summarize the given messages into a single post-compact user message.
+ * Quantos turnos recentes sobrevivem INTACTOS a uma compactação proativa.
+ *
+ * PORQUÊ (auditoria 2026-07-28): a compactação substituía o histórico INTEIRO
+ * por uma única mensagem de sumário — incluindo os tool results que o modelo
+ * acabara de receber e sobre os quais estava a meio de agir. O caminho antigo
+ * (contextManager.compressContext) preservava 4-12 turnos recentes; ao migrar
+ * para o compact via SDK essa propriedade perdeu-se sem que ninguém notasse,
+ * porque compressContext ficou sem callers em vez de ser portado.
+ *
+ * 3 é o compromisso: chega para o turno em curso e o seu contexto imediato,
+ * sem devolver ao prompt o peso que a compactação foi chamada a aliviar.
+ */
+export const KEEP_RECENT_TURNS_ON_COMPACT = 3
+
+/**
+ * Corta o histórico em [antigo | recente] numa fronteira de TURNO.
+ *
+ * O corte é sempre num `assistant`, nunca a meio de um par tool_call/
+ * tool_result: começar num tool result deixaria um resultado órfão, que os
+ * providers rejeitam. Se não houver turnos que cheguem, devolve tudo como
+ * antigo — compactar sem libertar espaço não serviria de nada.
+ */
+export function splitForCompaction(
+  messages: MessageLike[],
+  keepRecentTurns: number,
+): { older: MessageLike[]; recent: MessageLike[] } {
+  if (keepRecentTurns <= 0) return { older: messages, recent: [] }
+
+  const assistantIndexes: number[] = []
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role === 'assistant') assistantIndexes.push(i)
+  }
+  if (assistantIndexes.length <= keepRecentTurns) return { older: messages, recent: [] }
+
+  const keepFrom = assistantIndexes[assistantIndexes.length - keepRecentTurns]
+  return { older: messages.slice(0, keepFrom), recent: messages.slice(keepFrom) }
+}
+
+/**
+ * Summarize the older messages and return [summary, ...recent turns].
  * Returns null when the summarizer produced nothing — the caller decides
  * whether to count a failure or fall back.
  *
@@ -187,16 +235,25 @@ export interface AutoCompactResult {
  * post-compact shape. Kept side-effect-free (no threshold/circuit-breaker
  * logic) so the reactive path can force a compaction it KNOWS is needed
  * (the provider already rejected the prompt).
+ *
+ * `keepRecentTurns: 0` é o modo de emergência: o caminho reativo já levou um
+ * prompt_too_long do provider, portanto liberta tudo o que puder.
+ *
+ * Nota secundária mas real: só o bloco ANTIGO vai para o sumarizador, o que
+ * encolhe o pedido de sumarização — antes ele recebia o histórico completo,
+ * já perto do teto, e podia estourar exatamente quando mais fazia falta.
  */
 export async function compactNow(
   messages: MessageLike[],
   systemPrompt: string,
   compactFn: CompactFn,
+  keepRecentTurns: number = KEEP_RECENT_TURNS_ON_COMPACT,
 ): Promise<MessageLike[] | null> {
-  const summary = await compactFn(messages, systemPrompt)
+  const { older, recent } = splitForCompaction(messages, keepRecentTurns)
+  const summary = await compactFn(older, systemPrompt)
   if (!summary) return null
-  const summaryContent = getCompactUserSummaryMessage(summary, true)
-  return [{ role: 'user', content: summaryContent }]
+  const summaryContent = getCompactUserSummaryMessage(summary, true, recent.length > 0)
+  return [{ role: 'user', content: summaryContent }, ...recent]
 }
 
 /**

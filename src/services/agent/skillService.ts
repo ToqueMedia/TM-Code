@@ -82,6 +82,12 @@ export interface InvokedSkill {
   content: string
   invokedAt: number
 }
+// LIMITAÇÃO CONHECIDA (assumida na auditoria 2026-07-28): este Map é
+// module-level e partilhado por todos os runs do processo. A PERSISTÊNCIA já
+// vai para a sessão do run (ver persistInvokedSkillsNow), mas dois runs
+// simultâneos em projetos diferentes misturam aqui as suas skills em memória.
+// Key-ar por sessão exige threading do sessionId por todos os callers do
+// read_skill — fica para quando o MDI multi-run simultâneo for o caso comum.
 const invokedSkills = new Map<string, InvokedSkill>()
 const INVOKED_SKILL_MAX_CHARS = 20_000   // ~5K tokens per skill
 const INVOKED_SKILLS_TOTAL_BUDGET = 100_000 // ~25K tokens across all skills
@@ -147,7 +153,11 @@ async function persistInvokedSkillsNow(): Promise<void> {
     import('./invokedSkillsPersistence'),
   ])
   const state = useChatStore.getState()
-  const sessionId = state.activeSessionId
+  // Sessão do RUN, não a VISTA (auditoria 2026-07-28): um read_skill durante
+  // um run persistia no ficheiro da sessão que o utilizador estava a OLHAR —
+  // trocar de sessão a meio gravava a recuperação pós-compactação no sítio
+  // errado. Mesmo padrão dos fixes de BYOK-snapshot e memoryWriteTracker.
+  const sessionId = state.streamingSessionId ?? state.activeSessionId
   if (!sessionId) return
   const session = state.sessions.get(sessionId)
   if (!session?.projectPath) return
@@ -201,7 +211,15 @@ const RICH_ARTIFACT_SKILLS = new Set([
 
 class SkillService {
   private static instance: SkillService
-  private cache: SkillCache | null = null
+  /**
+   * Cache POR PROJETO (auditoria 2026-07-28): era um slot único — sob MDI,
+   * dois projetos vivos alternavam builds e cada um invalidava o cache do
+   * outro em todos os turnos (thrash), e um read_skill contra o projeto
+   * "errado" via um cache que acabara de ser substituído. Map pequeno e
+   * bounded: MDI real são 2-4 projetos.
+   */
+  private cacheByProject = new Map<string, SkillCache>()
+  private static readonly CACHE_MAX_PROJECTS = 4
 
   static getInstance(): SkillService {
     if (!SkillService.instance) {
@@ -232,14 +250,14 @@ class SkillService {
     // re-read. Cheap because the skill loaders read ~10 small markdown files.
     const { getFsVersion } = await import('../fsVersion')
     const fsVersion = getFsVersion()
+    const cached = this.cacheByProject.get(projectPath)
     if (
-      this.cache &&
-      this.cache.projectPath === projectPath &&
-      this.cache.mode === mode &&
-      this.cache.fsVersion === fsVersion &&
-      Date.now() - this.cache.timestamp < CACHE_TTL_MS
+      cached &&
+      cached.mode === mode &&
+      cached.fsVersion === fsVersion &&
+      Date.now() - cached.timestamp < CACHE_TTL_MS
     ) {
-      return this.cache.skills
+      return cached.skills
     }
 
     const [bundled, global, project] = await Promise.all([
@@ -250,13 +268,19 @@ class SkillService {
 
     const skills = [...bundled, ...global, ...project]
 
-    this.cache = {
+    // Bounded: descarta a entrada mais antiga acima do teto (inserção em Map
+    // preserva ordem — o primeiro é o mais antigo).
+    if (!this.cacheByProject.has(projectPath) && this.cacheByProject.size >= SkillService.CACHE_MAX_PROJECTS) {
+      const oldest = this.cacheByProject.keys().next().value
+      if (oldest !== undefined) this.cacheByProject.delete(oldest)
+    }
+    this.cacheByProject.set(projectPath, {
       skills,
       timestamp: Date.now(),
       projectPath,
       mode,
       fsVersion,
-    }
+    })
 
     return skills
   }
@@ -265,7 +289,7 @@ class SkillService {
    * Invalidates the cache — call when user creates/deletes skills.
    */
   invalidateCache(): void {
-    this.cache = null
+    this.cacheByProject.clear()
   }
 
   /**
@@ -342,19 +366,27 @@ ${lines.join('\n')}`
    * should not try to read skills that were not loaded for the active context).
    */
   getCachedSkillContent(name: string): { name: string; content: string; references: string[] } | null {
-    if (!this.cache) return null
-    const skill = this.cache.skills.find(s => s.name === name)
-    if (!skill) return null
-    return {
-      name: skill.name,
-      content: skill.content,
-      references: skill.references,
+    // Procura em TODOS os projetos cacheados, do mais recente para o mais
+    // antigo — com o cache por projeto, um read_skill de uma tarefa em
+    // background não pode falhar só porque o projeto FOCADO reconstruiu o
+    // seu cache entretanto (o modo antigo, de slot único, falhava assim).
+    const entries = Array.from(this.cacheByProject.values()).reverse()
+    for (const entry of entries) {
+      const skill = entry.skills.find(s => s.name === name)
+      if (skill) {
+        return { name: skill.name, content: skill.content, references: skill.references }
+      }
     }
+    return null
   }
 
   /** All currently-loaded skill names (for diagnostics / tool error messages). */
   getCachedSkillNames(): string[] {
-    return this.cache?.skills.map(s => s.name) ?? []
+    const names = new Set<string>()
+    for (const entry of this.cacheByProject.values()) {
+      for (const s of entry.skills) names.add(s.name)
+    }
+    return Array.from(names)
   }
 
   /**

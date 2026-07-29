@@ -43,6 +43,25 @@ glob = "0.3"
 # nested .gitignore files. The UI explorer leaves it off so ignored files
 # (e.g. .env) stay visible/openable.
 ignore = "0.4"
+# ── Motor de busca do ripgrep, LINKADO (2026-07-28) ──
+# A busca corria `rg` como processo externo, com fallback silencioso para
+# `grep` quando o binário faltava. Nas máquinas sem ripgrep instalado isso
+# significava que TODA a busca do agente perdia o .gitignore (o `grep` não o
+# conhece), e o transpilado inundava os resultados — enquanto o Glob, que usa
+# o `ignore` acima, filtrava. Duas tools a descrever a mesma árvore de formas
+# contraditórias. Estas três crates SÃO o ripgrep por dentro: linká-las junta
+# as duas metades (walk+gitignore já cá estava, faltava a que procura) e
+# elimina a classe de bug — não há binário para faltar, nem fallback para
+# degradar em silêncio.
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
+# Os include patterns da busca NÃO podem passar pelo `ignore::overrides`: lá,
+# um acerto de whitelist curto-circuita os matchers de .gitignore, e um
+# `includePatterns: ["*.js"]` devolvia o transpilado sem ninguém o pedir
+# (sessão momenu-fact 23:08). Filtram-se à parte, com globset — só estreitam,
+# nunca destrancam. Já vinha transitivamente pelo `ignore`; agora é explícito.
+globset = "0.4"
 reqwest = { version = "0.12", features = ["json", "blocking", "stream"] }
 futures-util = "0.3"
 tauri-plugin-localhost = "2.3.2"

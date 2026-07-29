@@ -5,6 +5,8 @@
  * (no Bun feature flags, no proactive mode).
  */
 
+import { stripInlineReasoning } from '../completionText'
+
 // Aggressive no-tools preamble
 const NO_TOOLS_PREAMBLE = `CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
@@ -78,7 +80,14 @@ export function getCompactPrompt(customInstructions?: string): string {
  * <summary> block parses, fall back to the full raw response (minus a
  * correctly-closed analysis block): a verbose summary beats an empty one.
  */
-export function formatCompactSummary(summary: string): string {
+export function formatCompactSummary(summaryRaw: string): string {
+  // O sumário de compactação é o pior sítio para deixar passar raciocínio cru:
+  // ele volta para o HISTÓRICO como a memória da conversa toda, e um bloco
+  // <think> lá dentro contamina todos os turnos seguintes. O strip só existia
+  // no gerador de mensagens de commit (auditoria 2026-07-28) — e os modelos
+  // de sumarização vêm da config KV, portanto não se sabe à partida se metem
+  // o raciocínio inline no content.
+  const summary = stripInlineReasoning(summaryRaw)
   const summaryMatch = summary.match(/<summary>([\s\S]*?)<\/summary>/)
 
   if (!summaryMatch) {
@@ -113,10 +122,19 @@ export function formatCompactSummary(summary: string): string {
 export function getCompactUserSummaryMessage(
   summary: string,
   suppressFollowUpQuestions?: boolean,
+  recentTurnsPreserved?: boolean,
 ): string {
   const formattedSummary = formatCompactSummary(summary)
 
-  let baseSummary = `This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+  // Quando os turnos recentes sobrevivem à compactação, dizê-lo explicitamente
+  // evita o pior efeito colateral do sumário: o modelo tratar o resumo como a
+  // TOTALIDADE do que sabe e voltar a ler ficheiros cujos resultados estão logo
+  // a seguir, intactos, nas mensagens preservadas.
+  let baseSummary = recentTurnsPreserved
+    ? `This session is being continued from a previous conversation that ran out of context. The summary below covers the EARLIER portion only — the most recent turns follow it verbatim, including their tool results. Trust those directly; do not re-read what they already show.
+
+${formattedSummary}`
+    : `This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
 
 ${formattedSummary}`
 

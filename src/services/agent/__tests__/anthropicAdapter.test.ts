@@ -125,7 +125,7 @@ describe('toAnthropicRequest', () => {
     ])
   })
 
-  it('leaves a boundary-less system as a plain string (no cache breakpoint)', () => {
+  it('leaves a SHORT boundary-less system as a plain string (one-shot side-calls)', () => {
     const out = toAnthropicRequest({
       model: 'm',
       max_tokens: 1000,
@@ -134,7 +134,84 @@ describe('toAnthropicRequest', () => {
         { role: 'user', content: 'Hi' },
       ],
     })
+    // Under Anthropic's minimum cacheable prefix a breakpoint would be ignored,
+    // so compact/title one-shots must not pay the cache-WRITE premium.
     expect(out.system).toBe('You are helpful.')
+  })
+
+  it('caches a LARGE boundary-less system whole (FASE B: the marker never arrives)', () => {
+    // Regression guard for the auditoria 2026-07-28 P0: FASE B moved the split
+    // to build time, so `found:false` became the NORMAL case — and the old code
+    // silently degraded it to "no cache_control at all", re-billing the whole
+    // system prompt on every turn.
+    const bigSystem = 'You are a coding agent. '.repeat(400)
+    const out = toAnthropicRequest({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1000,
+      messages: [
+        { role: 'system', content: bigSystem },
+        { role: 'user', content: 'Hi' },
+      ],
+    })
+    expect(out.system).toEqual([
+      { type: 'text', text: bigSystem, cache_control: { type: 'ephemeral' } },
+    ])
+  })
+
+  it('marks the last message block for incremental history caching when tools are sent', () => {
+    const out = toAnthropicRequest({
+      model: 'm',
+      max_tokens: 100,
+      messages: [
+        { role: 'user', content: 'first' },
+        { role: 'assistant', content: 'answer' },
+        { role: 'user', content: 'second' },
+      ],
+      tools: [{ type: 'function', function: { name: 'read_file', parameters: {} } }],
+    })
+    const messages = out.messages as Array<{ content: Array<Record<string, unknown>> }>
+    const last = messages[messages.length - 1].content.slice(-1)[0]
+    expect(last.cache_control).toEqual({ type: 'ephemeral' })
+    // Earlier turns keep no breakpoint of their own — the prefix is implied.
+    expect(messages[0].content[0].cache_control).toBeUndefined()
+  })
+
+  it('devolve os blocos de thinking assinados PRIMEIRO no turno do assistant', () => {
+    // Com `thinking: enabled` + tool use a Messages API EXIGE que os blocos
+    // assinados voltem; sem isto todo o loop de tools BYOK-Anthropic com
+    // thinking era rejeitado (auditoria 2026-07-28).
+    const out = toAnthropicRequest({
+      model: 'claude-opus-4-8',
+      max_tokens: 1000,
+      thinking: { type: 'enabled', budget_tokens: 4096 },
+      messages: [
+        { role: 'user', content: 'porquê?' },
+        {
+          role: 'assistant',
+          content: 'porque sim',
+          thinking_blocks: [{ type: 'thinking', thinking: 'deixa ver…', signature: 'sig-abc' }],
+          tool_calls: [{ id: 't1', type: 'function', function: { name: 'read_file', arguments: '{}' } }],
+        },
+        { role: 'tool', tool_call_id: 't1', content: 'ficheiro' },
+      ],
+    })
+    const messages = out.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>
+    const assistant = messages.find((m) => m.role === 'assistant')!
+    expect(assistant.content[0]).toEqual({
+      type: 'thinking', thinking: 'deixa ver…', signature: 'sig-abc',
+    })
+    // ...e o resto do turno mantém-se, pela ordem certa.
+    expect(assistant.content.map((b) => b.type)).toEqual(['thinking', 'text', 'tool_use'])
+  })
+
+  it('does NOT mark message blocks when no tools are sent (one-shot payloads)', () => {
+    const out = toAnthropicRequest({
+      model: 'm',
+      max_tokens: 100,
+      messages: [{ role: 'user', content: 'summarize this' }],
+    })
+    const messages = out.messages as Array<{ content: Array<Record<string, unknown>> }>
+    expect(messages[0].content[0].cache_control).toBeUndefined()
   })
 })
 

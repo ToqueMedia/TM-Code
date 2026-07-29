@@ -187,7 +187,16 @@ describe('ContextBuilder', () => {
       expect(fetchMock).toHaveBeenCalledTimes(0)
       expect(selection?.profile).toBe('frontend_ui')
       expect(selection?.contextPlannerStatus).toBe('fallback')
-      expect(selection?.contextPlan.selectedContexts).toEqual([])
+      // Determinística NÃO quer dizer VAZIA (auditoria 2026-07-28): a seleção
+      // vazia deixava auxLoadedContent={} e matava no prompt as secções que só
+      // lêem de lá — git status e estado do dev-server incluídos, apesar de o
+      // gatherGitContext() continuar a correr. A baseline de delivery é sempre
+      // carregada; o resto fica on-demand via request_context.
+      expect(selection?.contextPlan.selectedContexts).toEqual([
+        'delivery.git_status',
+        'delivery.dev_server',
+      ])
+      expect(prompt).not.toContain('__TM_SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
     })
 
     it('includes system section', async () => {

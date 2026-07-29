@@ -76,7 +76,24 @@ export function applyDashScopePromptCache(
     if (msg.role !== 'system' || typeof msg.content !== 'string') continue
     const content = msg.content
     const idx = content.indexOf(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
-    if (idx === -1) continue
+    if (idx === -1) {
+      // Post-FASE-B (auditoria 2026-07-28): the IDE splits the prompt at BUILD
+      // time and the volatile block travels in the user message, so the marker
+      // stopped arriving here — "no marker" now means the system message IS the
+      // byte-stable prefix. Until this branch existed the `continue` below made
+      // explicit caching dead for every DashScope-routed managed model.
+      if (!canCache || content.length < EXPLICIT_CACHE_MIN_STATIC_BYTES) continue
+      msg.content = [{ type: 'text', text: content, cache_control: { type: 'ephemeral' } }]
+      if (!first.found) {
+        first = {
+          found: true,
+          cacheControlApplied: true,
+          staticBytes: content.length,
+          dynamicBytes: 0,
+        }
+      }
+      continue
+    }
 
     const before = content.slice(0, idx).trimEnd()
     const after = content.slice(idx + SYSTEM_PROMPT_DYNAMIC_BOUNDARY.length).trimStart()

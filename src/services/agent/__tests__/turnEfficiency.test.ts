@@ -110,6 +110,21 @@ describe('inferContinuationReason', () => {
     expect(isLegitimateContinuationReason(reason)).toBe(false)
   })
 
+  it('classifies successful edits as "applying edits" (nunca wrap-up a meio da entrega)', () => {
+    // Auditoria 2026-07-28: EDIT_TOOLS só era consultado no ramo de ERRO, por
+    // isso um turn de edições BEM-SUCEDIDAS caía no fallback e, ao fim de 3
+    // seguidos, injetava o nudge de wrap-up no meio da implementação.
+    const reason = inferContinuationReason({
+      toolCalls: [{ name: 'edit_file' }, { name: 'write_file' }],
+      toolResults: [
+        { content: 'File updated: /a.ts', isError: false },
+        { content: 'File written: /b.ts', isError: false },
+      ],
+    })
+    expect(reason).toBe('applying edits')
+    expect(isLegitimateContinuationReason(reason)).toBe(true)
+  })
+
   // ── Categorias produtivas que ANTES caíam no fallback (falsos positivos
   //    da auditoria momenu) e agora são reconhecidas como legítimas ──
   it('classifies update_tasks/memória as "bookkeeping" (progresso, não giro)', () => {

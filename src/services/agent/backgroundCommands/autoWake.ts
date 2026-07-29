@@ -60,15 +60,31 @@ export function acknowledgeBackgroundCommandWake(id: string): void {
   }
 }
 
-/** Pure decision helper — exported for unit tests. */
+/**
+ * Pure decision helper — exported for unit tests.
+ *
+ * Um comando que TERMINOU sozinho (completed ou error) acorda sempre o agente.
+ * A descrição da tool promete-lhe "the system auto-wakes you when the command
+ * exits", e ele termina o turno a contar com isso — dizer "vou ver o resultado
+ * do build" e nunca mais voltar deixa a tarefa por fazer. O gate por tracker
+ * aberto (auditoria 2026-07-28) só cobria a falha e o caso de haver tarefas em
+ * aberto: um build BEM-SUCEDIDO com tracker vazio ficava sem ninguém a agir
+ * sobre ele. Nota: quando este código corre o agente está IDLE, ou seja o turno
+ * já fechou com o comando a correr — é exatamente o caso que a promessa cobre.
+ *
+ * O CANCEL continua a não acordar por si só: foi o utilizador a matá-lo, e
+ * ressuscitar o agente para relatar aquilo que a pessoa acabou de cancelar é
+ * ruído (a menos que haja trabalho em aberto no tracker).
+ */
 export function shouldWakeForBackgroundCommands(
   commands: BackgroundCommandWake[],
   openTaskCount: number,
-): { wake: boolean; reason: 'failure' | 'open_tasks' | 'no_open_tasks_success' } {
+): { wake: boolean; reason: 'failure' | 'completed' | 'open_tasks' | 'cancelled_only' } {
   const failed = commands.some(c => c.status === 'error')
   if (failed) return { wake: true, reason: 'failure' }
+  if (commands.some(c => c.status === 'completed')) return { wake: true, reason: 'completed' }
   if (openTaskCount > 0) return { wake: true, reason: 'open_tasks' }
-  return { wake: false, reason: 'no_open_tasks_success' }
+  return { wake: false, reason: 'cancelled_only' }
 }
 
 function doWake(): void {
@@ -116,10 +132,10 @@ function doWake(): void {
   const decision = shouldWakeForBackgroundCommands(commands, openTasks)
 
   if (!decision.wake) {
-    // Success (or pure cancel) with no open tracker work — report was final.
+    // Só cancelamentos do utilizador, sem trabalho em aberto — nada a relatar.
     logger.info(
       'agent',
-      `→ Background command finished (${summaryParts.join(', ')}) — no open tracker tasks, NOT waking (report was final)`,
+      `→ Background command finished (${summaryParts.join(', ')}) — user-cancelled with no open tracker tasks, NOT waking`,
     )
     void import('../../../stores/chatStore').then(({ useChatStore }) => {
       useChatStore.getState().addSystemMessage(

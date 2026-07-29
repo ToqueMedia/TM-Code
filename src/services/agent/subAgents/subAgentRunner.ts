@@ -21,6 +21,7 @@ import {
   buildByokThinkingConfig,
 } from '../byokRouting'
 import { useParallelTaskStore } from '../../../stores/parallelTaskStore'
+import { useChatStore } from '../../../stores/chatStore'
 import { QueryEngine } from '../queryEngine'
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from '../query'
 import ToolExecutor from '../toolExecutor'
@@ -94,9 +95,15 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   // direct (the conversation's frozen snapshot), never the TM worker. Falls
   // back to the managed sub-agent client when BYOK is off. Herança: sub-agent
   // de uma TAREFA usa o snapshot da sessão do DONO (não o da sessão visível).
+  // Sub-agent do MAIN também tem sessão dona: a que está a fazer streaming.
+  // Sem isto (auditoria 2026-07-28) caía-se em getActiveSession() — a sessão
+  // VISUALIZADA — e bastava o utilizador trocar de sessão/projeto a meio do run
+  // para o sub-agent pinar o snapshot de outra conversa. É a mesma armadilha
+  // que a herança por tarefa já resolvia, deixada em aberto no caminho do main;
+  // a doutrina "sem deus" é explícita: runners novos NUNCA leem a sessão ativa.
   const ownerSessionId = options.ownerTaskId
     ? useParallelTaskStore.getState().runs.get(options.ownerTaskId)?.sessionId
-    : undefined
+    : useChatStore.getState().streamingSessionId ?? undefined
   const { snapshot: byokSnapshot, byokActive } = resolveByokSnapshotForSession(ownerSessionId)
   let client: OpenAI
   let refreshClient: () => Promise<OpenAI | null>
@@ -221,10 +228,16 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
     }
   }, definition.maxWallClockMs)
 
-  // Stale detection — abort if no PROGRESS for 60s (likely stuck in model
-  // loop). Progresso = eventos de stream OU um tool em execução: com um tool
-  // em voo o relógio de staleness fica congelado (ver toolsInFlight acima).
-  const STALE_TIMEOUT_MS = 60_000
+  // Stale detection — abort if no PROGRESS (likely stuck in model loop).
+  // Progresso = eventos de stream OU um tool em execução: com um tool em voo
+  // o relógio de staleness fica congelado (ver toolsInFlight acima).
+  //
+  // 180s = PARIDADE com o watchdog de idle semântico do loop principal
+  // (STREAM_SEMANTIC_IDLE_TIMEOUT_MS). Estava a 60s (auditoria 2026-07-28):
+  // um provider que buffere reasoning longo sem emitir deltas era morto como
+  // "stalled" no sub-agente quando o main lhe daria mais 2 minutos — o mesmo
+  // pedido, dois vereditos.
+  const STALE_TIMEOUT_MS = 180_000
   const staleTimer = setInterval(() => {
     if (toolsInFlight > 0) {
       lastActivityAt = Date.now()

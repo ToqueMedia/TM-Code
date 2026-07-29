@@ -26,7 +26,7 @@ jest.mock('../../../stores/credentialRequestStore', () => ({
   },
 }))
 
-import { createPermissionAwareTimeout } from '../safeToolPool'
+import { createPermissionAwareTimeout } from '../toolExecutor/permissionAwareTimeout'
 import { usePermissionStore } from '../../../stores/permissionStore'
 
 // We toggle pendingPermission directly via the store. resolve() is supplied

@@ -189,6 +189,93 @@ describe('query — streaming tool execution', () => {
     expect(results.length).toBe(2)
   })
 
+  // ── Fecho do stream: o resto do prefixo arranca EM PARALELO ──────────────
+  // O pre-dispatch a meio do SSE só cobre calls com um índice POSTERIOR a
+  // seguir, portanto a última call de cada ronda — e todo o turn de chamada
+  // única — corria serial (auditoria 2026-07-28: 3 web_fetch independentes
+  // custavam 3x a latência).
+
+  it('a ÚLTIMA call da ronda arranca antes de a primeira resolver (paralelo, não serial)', async () => {
+    const events: string[] = []
+    const invoked: string[] = []
+    let call1StartedWhileCall0Pending = false
+
+    // call_0 segura-se enquanto espera ver call_1 arrancar. Em execução
+    // serial isso nunca acontece — call_1 só começaria depois de call_0
+    // devolver — e a flag fica false.
+    const executeTool = jest.fn(async (_name: string, _input: Record<string, unknown>, id: string) => {
+      invoked.push(id)
+      if (id === 'call_0') {
+        for (let i = 0; i < 100 && !invoked.includes('call_1'); i++) {
+          if (invoked.includes('call_1')) break
+          await new Promise((r) => setTimeout(r, 1))
+        }
+        call1StartedWhileCall0Pending = invoked.includes('call_1')
+      }
+      return { content: `result-${id}`, isError: false }
+    })
+
+    const chunks = [
+      toolCallDelta(0, 'call_0', 'read_file', '{"file_path":"/a.ts"}'),
+      toolCallDelta(1, 'call_1', 'read_file', '{"file_path":"/b.ts"}'),
+      FINISH_TOOLS,
+    ]
+    const create = jest
+      .fn()
+      .mockImplementationOnce(() => streamResponse(chunks, events))
+      .mockImplementationOnce(() => streamResponse(STOP_TURN, events))
+
+    const { events: streamEvents } = await drainCollecting(
+      query(baseParams({
+        client: makeClient(create),
+        executeTool,
+        isStreamSafeTool: () => true,
+      })),
+    )
+
+    expect(call1StartedWhileCall0Pending).toBe(true)
+    // Sem execuções a mais e com a ordem dos resultados intacta.
+    expect(executeTool).toHaveBeenCalledTimes(2)
+    const results = streamEvents.filter((e) => e.type === 'tool_result') as Array<{
+      type: 'tool_result'; toolUseId: string
+    }>
+    expect(results.map((r) => r.toolUseId)).toEqual(['call_0', 'call_1'])
+  })
+
+  it('a regra de prefixo continua a valer no fecho: nada arranca depois de um tool não-safe', async () => {
+    const events: string[] = []
+    const chunks = [
+      toolCallDelta(0, 'call_0', 'read_file', '{"file_path":"/a.ts"}'),
+      toolCallDelta(1, 'call_1', 'edit_file', '{"file_path":"/a.ts"}'),
+      toolCallDelta(2, 'call_2', 'read_file', '{"file_path":"/a.ts"}'),
+      FINISH_TOOLS,
+    ]
+    const create = jest
+      .fn()
+      .mockImplementationOnce(() => streamResponse(chunks, events))
+      .mockImplementationOnce(() => streamResponse(STOP_TURN, events))
+
+    // O read DEPOIS do edit tem de observar o ficheiro JÁ editado, portanto
+    // não pode arrancar em paralelo com ele.
+    const order: string[] = []
+    const executeTool = jest.fn(async (_n: string, _i: Record<string, unknown>, id: string) => {
+      order.push(`start:${id}`)
+      await new Promise((r) => setTimeout(r, 1))
+      order.push(`end:${id}`)
+      return { content: `result-${id}`, isError: false }
+    })
+
+    await drainCollecting(
+      query(baseParams({
+        client: makeClient(create),
+        executeTool,
+        isStreamSafeTool: (name) => name !== 'edit_file',
+      })),
+    )
+
+    expect(order.indexOf('start:call_2')).toBeGreaterThan(order.indexOf('end:call_1'))
+  })
+
   it('sem predicado (isStreamSafeTool ausente) nada pre-despacha — comportamento clássico', async () => {
     const events: string[] = []
     const chunks = [

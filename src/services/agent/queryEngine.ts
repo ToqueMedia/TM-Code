@@ -52,6 +52,8 @@ export interface QueryEngineOptions {
   executeTool: ToolExecutorFn
   /** Streaming-execution predicate — see QueryParams.isStreamSafeTool. */
   isStreamSafeTool?: (toolName: string) => boolean
+  /** Re-injeção do reminder crítico — ver QueryParams.reinjectCriticalReminder. */
+  reinjectCriticalReminder?: boolean
   /** Max output tokens override. */
   maxOutputTokensOverride?: number
   /** Thinking config. */
@@ -189,6 +191,7 @@ export class QueryEngine {
       tools: this.options.tools,
       executeTool: this.options.executeTool,
       isStreamSafeTool: this.options.isStreamSafeTool,
+      reinjectCriticalReminder: this.options.reinjectCriticalReminder,
       signal: this.abortController.signal,
       maxTurns: this.options.maxTurns,
       maxOutputTokensOverride: this.options.maxOutputTokensOverride,

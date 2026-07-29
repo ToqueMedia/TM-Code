@@ -16,7 +16,6 @@ import {
 } from '@chakra-ui/react'
 import { FiPlus, FiTrash2, FiSquare, FiRefreshCw } from 'react-icons/fi'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { useAgentStore } from '@/stores/agentStore'
 import { useSkillStore } from '../../stores/skillStore'
 import { useMcpStore, McpServerState } from '../../stores/mcpStore'
 import { useProjectStore } from '../../stores/projectStore'
@@ -25,7 +24,7 @@ import MCPService from '../../services/mcp/mcpService'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
-type TabId = 'editor' | 'skills' | 'mcp' | 'experimental'
+type TabId = 'editor' | 'skills' | 'mcp'
 
 export default function PreferencesDialog(): React.ReactElement | null {
   const [isOpen, setIsOpen] = useState(false)
@@ -48,7 +47,6 @@ export default function PreferencesDialog(): React.ReactElement | null {
     { id: 'editor', label: 'Editor' },
     { id: 'skills', label: 'Skills' },
     { id: 'mcp', label: 'MCP Servers' },
-    { id: 'experimental', label: 'Experimental' },
   ]
 
   return (
@@ -108,7 +106,6 @@ export default function PreferencesDialog(): React.ReactElement | null {
               {activeTab === 'editor' && <EditorTab />}
               {activeTab === 'skills' && <SkillsTab />}
               {activeTab === 'mcp' && <McpTab />}
-              {activeTab === 'experimental' && <ExperimentalTab />}
             </Dialog.Body>
 
             <Dialog.Footer
@@ -242,57 +239,10 @@ function EditorTab(): React.ReactElement {
  *   1234567    → "1.2M"
  * Caps display at "9.9M+" so a runaway counter doesn't blow up the UI.
  */
-function formatCounter(n: number): string {
-  if (n < 1000) return String(n)
-  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`
-  if (n < 10_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  return '9.9M+'
-}
-
-function ExperimentalTab(): React.ReactElement {
-  const conflictsAvoided = useAgentStore(function (s) { return s.poolConcurrencyConflictsAvoided })
-
-  return (
-    <>
-      <Text fontSize="sm" color={tokens.colors.text.primary} mb={3} fontWeight="600">
-        Agent Tool Execution
-      </Text>
-
-      <Field.Root mb={4}>
-        <Field.Label color={tokens.colors.text.primary} fontWeight="600" fontSize="14px">
-          Safe Tool Pool
-        </Field.Label>
-        <Box mt={1} maxW="420px">
-          <Text color={tokens.colors.text.secondary} fontSize="sm">
-            The agent's tool execution uses a concurrency-safe pool. Read-only tools (read_file, glob, search_files, web_fetch) run in parallel; mutating tools (write_file, edit_file, execute_command) are forced to run serially. This prevents race conditions when the agent edits multiple files in one response.
-          </Text>
-
-          <Box
-            mt={3}
-            px={3}
-            py={2}
-            bg={tokens.colors.bg.overlay}
-            border="1px solid"
-            borderColor={tokens.colors.border.default}
-            borderRadius="md"
-          >
-            <Text color={tokens.colors.text.secondary} fontSize="xs" fontWeight="600">
-              Telemetry — current session
-            </Text>
-            <Text color={tokens.colors.text.primary} fontSize="sm" mt={1}>
-              {conflictsAvoided === 0
-                ? 'No races prevented yet this session.'
-                : `${formatCounter(conflictsAvoided)} race${conflictsAvoided === 1 ? '' : 's'} prevented this session`}
-            </Text>
-            <Text color={tokens.colors.text.muted} fontSize="xs" mt={1}>
-              Counts every time the pool blocked a tool from starting because of an in-flight mutating sibling. Resets on new chat sessions.
-            </Text>
-          </Box>
-        </Box>
-      </Field.Root>
-    </>
-  )
-}
+// O separador Experimental foi removido (auditoria 2026-07-28): existia só
+// para o "Safe Tool Pool", que nunca correu em produção — descrevia ao
+// utilizador um mecanismo inexistente. O paralelismo real vive no loop
+// (query.ts) e não precisa de UI.
 
 // === Skills Tab ===
 

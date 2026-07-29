@@ -15,7 +15,6 @@ export const EXPLORE_AGENT: SubAgentDefinition = {
   maxTurns: 15,
   maxWallClockMs: 3 * 60 * 1000,
   color: '#3fb8af',
-  omitProjectContext: true,
 
   getSystemPrompt: (ctx: SubAgentParentContext) => {
     const cwdLine = ctx.cmdOnlyMode

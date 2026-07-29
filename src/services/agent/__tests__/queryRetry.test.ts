@@ -6,11 +6,6 @@ import {
   WRITE_FILE, START_DEV_SERVER, REQUEST_CREDENTIALS,
   READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
 } from '../toolNames'
-import {
-  resetContextCollapse,
-  setContextCollapseEnabled,
-  stageCollapse,
-} from '../collapse/contextCollapse'
 
 function makeStream(chunks: unknown[]): AsyncIterable<unknown> {
   return {
@@ -95,8 +90,6 @@ async function nextEvent(generator: AsyncGenerator<QueryStreamEvent, unknown>): 
 describe('query retry handling', () => {
   afterEach(() => {
     jest.useRealTimers()
-    resetContextCollapse()
-    setContextCollapseEnabled(false)
   })
 
   it('refreshes the SDK client and retries when the Worker rejects an expired auth token', async () => {
@@ -204,9 +197,12 @@ describe('query retry handling', () => {
     expect(refreshedCreate).toHaveBeenCalledTimes(1)
   })
 
-  it('rebuilds the request after prompt_too_long overflow recovery', async () => {
-    stageCollapse(0, 10, 'older turns summary')
-
+  it('rebuilds the request after prompt_too_long overflow recovery (forced snip)', async () => {
+    // NOTA (auditoria 2026-07-28): este teste chamava stageCollapse() antes —
+    // mas o staging esteve sempre inerte (_enabled=false), portanto a
+    // recuperação que ele SEMPRE validou foi a do snip mecânico. O módulo
+    // collapse/ foi apagado; a asserção não mudou porque o comportamento
+    // real nunca dependeu dele.
     const promptTooLong = new Error('prompt_too_long')
     const create = jest
       .fn()

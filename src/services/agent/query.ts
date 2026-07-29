@@ -31,16 +31,16 @@ import {
 import { applyGlobalToolResultBudget } from "./toolResultGlobalBudget";
 import { updateToolResultVisibility } from "./toolExecutor/toolResultVisibility";
 import {
-  applyCollapsesIfNeeded,
-  recoverFromOverflow,
-  withholdPromptTooLong,
-  resetContextCollapse,
-} from "./collapse";
-import {
+  buildToolLoopNudgeText,
   checkForLoop,
+  checkForToolLoop,
+  computeToolBatchFingerprint,
   createLoopDetectorState,
+  createToolLoopState,
   resetLoopDetector,
 } from "./loopDetector";
+import { REMINDER_REINJECT_INTERVAL_TURNS } from "./agentConfig";
+import { getCriticalReinjectionReminder } from "./contextBuilder/sections/chatSections";
 import { isAtBlockingLimit } from "../../utils/contextWindow";
 import { contentAsText } from "./promptValueHelpers";
 import { inspectAndLogPayload } from "./payloadInspector";
@@ -59,6 +59,7 @@ import {
   trackEfficiencyNudge,
   buildEfficiencyNudgeText,
 } from "./turnEfficiency";
+import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
 import { DESTRUCTIVE_TOOLS } from "./toolsetSelector";
 import { EDIT_FILE } from "./toolNames";
 
@@ -115,10 +116,7 @@ function retryAfterMs(error: unknown): number | null {
 function sanitizeToolResultForModel(content: string): string {
   try {
     const parsed = JSON.parse(content) as Record<string, unknown>
-    if (parsed?.type === 'diff') {
-      const path = typeof parsed.path === 'string' ? parsed.path : '(unknown path)'
-      return `File ${parsed.isNewFile ? 'created' : 'updated'}: ${path}`
-    }
+    if (parsed?.type === 'diff') return buildPostEditResultText(parsed)
   } catch {
     // Non-JSON tool result.
   }
@@ -333,6 +331,10 @@ export interface QueryParams {
    * = sem execução mid-stream (comportamento clássico: tudo pós-stream).
    */
   isStreamSafeTool?: (toolName: string) => boolean;
+  /** Re-injeta o reminder crítico a cada N turnos. SÓ para runs cujo system
+   *  prompt contém essas regras (main + tarefas paralelas) — sub-agentes
+   *  partilham este loop com prompts próprios e ficam de fora. */
+  reinjectCriticalReminder?: boolean;
   /** Abort signal for cancellation. */
   signal: AbortSignal;
   /** Maximum turns before stopping (default: Infinity). */
@@ -802,6 +804,21 @@ export function toOpenAIMessages(
     result.push({ role: "system", content: systemPrompt });
   }
 
+  // NOTA (auditoria 2026-07-28): ponderou-se PODAR o reasoning_content dos
+  // turnos já fechados, para não repagar em input o raciocínio antigo. Foi
+  // REJEITADO, por duas razões:
+  //
+  //  1. Custo — podar mutaria o histórico a cada turno (o último turno mantém
+  //     o raciocínio e perde-o no turno seguinte), o que invalida o prefixo de
+  //     cache do provider exatamente na ponta, TODOS os turnos. Tokens em
+  //     cache custam ~10% dos normais: forçar um miss para poupar input não
+  //     compensado sai mais caro do que reenviar o que já está cacheado.
+  //  2. Qualidade — GLM-5 e Grok documentam a continuidade do raciocínio
+  //     entre turnos como intencional (interleaved reasoning em tool calling
+  //     multi-turno), não como peso morto.
+  //
+  // Se algum dia se voltar a este tema, precisa de medição real (A/B de custo
+  // COM os números de cache à frente), não de inferência.
   for (const msg of messages) {
     if (typeof msg.content === "string" || msg.content === null) {
       const textContent = (msg.content ?? "") as string;
@@ -1094,6 +1111,9 @@ export async function* query(
   const executionPhase = params.executionPhase ?? 'original_task';
   const mutableTask = params.mutableTask === true && executionPhase === 'original_task';
   const loopDetectorState = createLoopDetectorState();
+  // Metade do detector que olha para as TOOL CALLS (a de texto só corre em
+  // turns sem tools e era resetada por qualquer tool call).
+  const toolLoopState = createToolLoopState();
   let thinkingOnlyRecoveryCount = 0;
 
   // Guardrail: a bugfix_local run (readOnly=false) that ends without a single
@@ -1214,11 +1234,7 @@ export async function* query(
     //    clearing but with a structured summary that preserves
     //    identifiability + re-read instructions. keepRecent lowered 8→4.)
 
-    // 4. Context collapse (stub for now)
-    const collapseResult = applyCollapsesIfNeeded(messagesForQuery);
-    messagesForQuery = collapseResult.messages;
-
-    // 5. Auto-compact
+    // 4. Auto-compact
     let tracking = autoCompactTracking;
     const compactFn: CompactFn = async (
       msgs: { role: string; content: any }[],
@@ -1288,7 +1304,6 @@ export async function* query(
         beforeTokens: autoResult.preCompactTokenCount ?? 0,
       };
       messagesForQuery = autoResult.postCompactMessages;
-      resetContextCollapse();
       tracking = {
         compacted: true,
         turnId: generateId(),
@@ -1296,10 +1311,10 @@ export async function* query(
         consecutiveFailures: 0,
       };
       // Carry the summary text out so the handler can PERSIST it on the boundary
-      // marker (chatStore.addCompactBoundaryMessage). compactNow returns a single
-      // user message whose content IS the model-ready summary. Without this the
-      // summary stayed loop-local and was discarded — the model lost all
-      // pre-boundary context on the next turn.
+      // marker (chatStore.addCompactBoundaryMessage). O sumário é SEMPRE o
+      // elemento 0 do que compactNow devolve; os turnos recentes preservados
+      // vêm a seguir. Sem isto o sumário ficava local ao loop e era descartado —
+      // o modelo perdia todo o contexto pré-fronteira no turno seguinte.
       const compactSummary =
         typeof autoResult.postCompactMessages[0]?.content === "string"
           ? (autoResult.postCompactMessages[0].content as string)
@@ -2065,14 +2080,14 @@ export async function* query(
 
       // ── Reactive recovery on prompt_too_long ──
       // The provider rejected the prompt as too long. Recover and retry instead
-      // of failing the turn (claude-vaz parity — the old code only tried the
-      // OFF-by-default collapse stub here, so it always fell straight through to
-      // the error). Three rungs, cheapest first:
-      //   (1) drain staged context collapses (no-op unless collapse is enabled);
-      //   (2) forced mechanical snip — drops the oldest turns, instant, always
-      //       makes progress, and bounds the summarizer input for rung 3;
-      //   (3) forced LLM summarization of what remains (when snip can't reduce —
-      //       few but huge messages). Only surface the error when all rungs fail.
+      // of failing the turn (claude-vaz parity). Two rungs, cheapest first:
+      //   (1) forced mechanical snip — drops the oldest turns, instant, always
+      //       makes progress, and bounds the summarizer input for rung 2;
+      //   (2) forced LLM summarization of what remains (when snip can't reduce —
+      //       few but huge messages). Only surface the error when both fail.
+      // Houve um rung 0 (drain de "staged collapses") — era um no-op GARANTIDO:
+      // o staging nunca foi ligado (_enabled=false, stageCollapse sem callers)
+      // e o módulo collapse/ foi apagado na auditoria de 2026-07-28.
       const MAX_REACTIVE_RECOVERY = 3;
       const isPromptTooLong =
         /prompt_too_long|prompt is too long|context_length_exceeded/i.test(
@@ -2083,19 +2098,7 @@ export async function* query(
         isPromptTooLong &&
         state.collapseRecoveryAttempts < MAX_REACTIVE_RECOVERY
       ) {
-        // (1) Staged-collapse drain.
-        withholdPromptTooLong();
-        const recovery = recoverFromOverflow(messagesForQuery);
-        if (recovery.committed > 0) {
-          state = {
-            ...state,
-            messages: recovery.messages as QueryMessage[],
-            collapseRecoveryAttempts: state.collapseRecoveryAttempts + 1,
-          };
-          continue queryLoop;
-        }
-
-        // (2) Forced mechanical snip — drop oldest turns, keep a small tail.
+        // (1) Forced mechanical snip — drop oldest turns, keep a small tail.
         const forcedSnip = snipCompactIfNeeded(messagesForQuery, {
           force: true,
           keepRecentMessages: 8,
@@ -2113,23 +2116,26 @@ export async function* query(
           continue queryLoop;
         }
 
-        // (3) Forced LLM summarization of what remains. compactFn's input is
+        // (2) Forced LLM summarization of what remains. compactFn's input is
         //     already small here (snip ran), so the summary call won't itself
-        //     overflow. resetContextCollapse clears any stale staged indices.
+        //     overflow.
         yield { type: "compact_start", beforeTokens: 0 };
         let reactivePostCompact: QueryMessage[] | null = null;
         try {
+          // keepRecentTurns: 0 — modo de emergência. A compactação PROATIVA
+          // preserva os turnos recentes, mas aqui o provider JÁ rejeitou o
+          // prompt: guardar contexto seria arriscar uma segunda rejeição.
           reactivePostCompact = (await compactNow(
             messagesForQuery,
             systemPrompt,
             compactFn,
+            0,
           )) as QueryMessage[] | null;
         } catch (reactiveErr) {
           console.error("[query] reactive summarization failed:", reactiveErr);
         }
         yield { type: "compact_end", beforeTokens: 0, afterTokens: 0 };
         if (reactivePostCompact) {
-          resetContextCollapse();
           state = {
             ...state,
             messages: reactivePostCompact,
@@ -2811,7 +2817,67 @@ export async function* query(
     resetLoopDetector(loopDetectorState);
     thinkingOnlyRecoveryCount = 0;
 
+    // ── Tool-call loop guard ──
+    // "Tool calls = progress" is true only while the calls CHANGE. The same
+    // call with the same args, over and over, is the most expensive failure
+    // mode there is and the text detector above cannot see it (it only runs on
+    // turns without tool calls). Polling tools are exempt — repeating is what
+    // they are for.
+    const toolLoop = checkForToolLoop(
+      computeToolBatchFingerprint(
+        collectedToolCalls.map((tc) => ({ name: tc.name, argsJson: tc.argsJson })),
+      ),
+      toolLoopState,
+    );
+    if (toolLoop.shouldStop) {
+      yield {
+        type: "error",
+        message: `Stopped: the same tool call was repeated ${toolLoop.repeats} times with identical arguments and no change in result.`,
+      };
+      return {
+        reason: "error",
+        turnCount: state.turnCount,
+        totalInputTokens,
+        totalOutputTokens,
+      };
+    }
+    const pendingToolLoopNudge: string | null = toolLoop.shouldNudge
+      ? buildToolLoopNudgeText(toolLoop.repeats)
+      : null;
+
     // ── Execute tools ──
+
+    // Fecho do stream: o pre-dispatch a meio do SSE só arranca quando um índice
+    // POSTERIOR aparece, portanto o ÚLTIMO tool call de cada ronda — e todo o
+    // turn de chamada única, que é o caso mais comum — nunca beneficiava dele
+    // e corria serial (3 web_fetch independentes = 3x a latência). Aqui a
+    // ronda já está fechada e os args completos: despacha o resto do PREFIXO
+    // stream-safe de uma vez.
+    //
+    // O prefixo é a mesma invariante do mid-stream: o primeiro tool não-seguro
+    // corta os seguintes, para que nada com efeitos colaterais corra fora da
+    // ordem que o modelo pediu. Reavaliado do zero (e não a partir de
+    // `streamDispatchBroken`) porque o que a meio do stream era "args
+    // incompletos" já não é: agora estão todos lá.
+    if (!signal.aborted && isStreamSafeTool) {
+      for (const tc of collectedToolCalls) {
+        if (!tc.id || !tc.name || !isStreamSafeTool(tc.name)) break;
+        if (preDispatched.has(tc.id)) continue;
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = tc.argsJson ? JSON.parse(tc.argsJson) : {};
+        } catch {
+          break;
+        }
+        preDispatched.set(tc.id, {
+          argsJson: tc.argsJson,
+          promise: executeTool(tc.name, parsed, tc.id, signal).catch((err) => ({
+            content: `Tool execution error: ${formatError(err)}`,
+            isError: true,
+          })),
+        });
+      }
+    }
 
     const toolResultBlocks: Array<ContentBlockAPI & { isError?: boolean }> = [];
 
@@ -2970,6 +3036,43 @@ export async function* query(
       } catch {
         // The sweep is best-effort — never let it break the loop.
       }
+    }
+
+    // ── Re-injecção periódica das regras de maior custo ──
+    // O reminder vive no topo do prompt, mas ao fim de muitos turnos de tool
+    // results a cauda — que é onde o modelo mais atende — afasta-se dele e as
+    // regras começam a cair. O bloco existia e estava documentado como
+    // "AgentService re-injects this every N turns"… sem um único caller
+    // (auditoria 2026-07-28): runs longos perdiam exatamente as regras que a
+    // re-injecção foi construída para segurar.
+    //
+    // GATED por params.reinjectCriticalReminder: os SUB-AGENTES correm este
+    // mesmo loop com prompts próprios que não contêm estas regras — injetar
+    // aqui regras de dev-server/credentials num Explore seria contaminação
+    // (a primeira versão desta ligação fazia exatamente isso; apanhada na
+    // própria sessão). Main e tarefas paralelas ligam o flag; sub-agentes não.
+    //
+    // Texto DETERMINISTA de propósito (sem contadores interpolados): cada
+    // re-injecção é byte-idêntica, e como é append no fim do histórico não
+    // toca no prefixo já cacheado.
+    if (params.reinjectCriticalReminder && state.turnCount > 0 && state.turnCount % REMINDER_REINJECT_INTERVAL_TURNS === 0) {
+      interTurnMessages.push({
+        role: "user",
+        content: [{ type: "text", text: getCriticalReinjectionReminder() }],
+      });
+    }
+
+    // Aviso de ronda repetida — antes do nudge de eficiência: "estás a repetir
+    // a mesma chamada" é informação mais acionável do que "já vais em N turns".
+    if (pendingToolLoopNudge) {
+      interTurnMessages.push({
+        role: "user",
+        content: [{ type: "text", text: pendingToolLoopNudge }],
+      });
+      // eslint-disable-next-line no-console
+      console.debug(
+        `[query] tool-loop · same round repeated ${toolLoop.repeats}x · nudging at turn ${state.turnCount}`,
+      );
     }
 
     // Nudge de eficiência (decidido na medição desta ronda) — viaja no mesmo

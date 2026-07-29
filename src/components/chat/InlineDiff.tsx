@@ -127,6 +127,29 @@ function InlineDiff({
     return ranges.map(({ start, end }) => allLines.slice(start, end + 1))
   }, [allLines])
 
+  /**
+   * Onde no ficheiro é que esta alteração acontece — "L177" ou "L177-240".
+   *
+   * O cabeçalho mostrava só o nome do ficheiro. Quando o agente edita DOIS
+   * sítios do mesmo ficheiro (por exemplo a mesma chamada a remover em duas
+   * funções), saíam dois cartões com cabeçalho idêntico e linhas removidas
+   * byte-a-byte iguais — lia-se como se ele tivesse proposto a mesma coisa
+   * duas vezes, e o único distintivo eram os números pequenos na goteira
+   * (sessão momenu-fact 2026-07-28: `useAuthRepository.ts` nas linhas 178 e
+   * 240). Ninguém deve ter de comparar goteiras para saber se está a aprovar
+   * duas alterações ou a mesma repetida.
+   */
+  const changedRange = useMemo(() => {
+    const nums = allLines
+      .filter(l => l.type !== 'normal')
+      .map(l => l.newNum ?? l.oldNum)
+      .filter((n): n is number => n !== null)
+    if (nums.length === 0) return null
+    const first = Math.min(...nums)
+    const last = Math.max(...nums)
+    return first === last ? `L${first}` : `L${first}-${last}`
+  }, [allLines])
+
   const totalDisplayLines = useMemo(
     () => hunks.reduce((n, h) => n + h.length, 0),
     [hunks],
@@ -199,6 +222,17 @@ function InlineDiff({
           >
             {fileName}
           </Text>
+          {changedRange && !isNewFile && (
+            <Text
+              fontSize="10px"
+              color={tokens.colors.text.muted}
+              fontFamily={tokens.fontFamily.mono}
+              flexShrink={0}
+              whiteSpace="nowrap"
+            >
+              {changedRange}
+            </Text>
+          )}
           {isNewFile && (
             <Text
               fontSize="10px"

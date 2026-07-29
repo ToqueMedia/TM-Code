@@ -1497,6 +1497,8 @@ pub fn run() {
             copy_directory,
             scaffold_template,
             glob_files,
+            glob_files_filtered,
+            is_path_gitignored,
             write_env_vars,
             read_env_vars,
             read_agent_state,

@@ -103,17 +103,24 @@ async function isTmsStale(projectPath: string, content: string): Promise<boolean
   const sourceFiles = parseSourceFilesUsed(content)
   if (sourceFiles.length === 0) return false
 
-  for (const rel of sourceFiles.slice(0, 40)) {
-    try {
-      const stat = await invoke<{ modifiedMs: number | null }>('file_stat', {
-        path: `${projectPath}/${rel}`,
-      })
-      if (stat.modifiedMs && stat.modifiedMs > generatedMs) return true
-    } catch {
-      // Missing source files do not block the user's task.
-    }
-  }
-  return false
+  // PARALELO, não em série (auditoria 2026-07-28): eram até 40 IPC seriais
+  // ENTRE o Enter e a montagem do prompt, em TODAS as mensagens — dezenas de
+  // round-trips de latência pura antes de o modelo receber o primeiro byte.
+  // As sondagens são independentes; o custo passa a ser o do stat mais lento.
+  const stats = await Promise.all(
+    sourceFiles.slice(0, 40).map(async (rel) => {
+      try {
+        const stat = await invoke<{ modifiedMs: number | null }>('file_stat', {
+          path: `${projectPath}/${rel}`,
+        })
+        return stat.modifiedMs ?? null
+      } catch {
+        // Missing source files do not block the user's task.
+        return null
+      }
+    }),
+  )
+  return stats.some((modifiedMs) => modifiedMs !== null && modifiedMs > generatedMs)
 }
 
 export function buildTmsBootstrapOnlyPrompt(result: TmsPreflightResult, originalUserMessage?: string): string {

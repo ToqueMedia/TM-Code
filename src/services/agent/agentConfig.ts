@@ -38,6 +38,19 @@ export const LOOP_DETECTION_THRESHOLD = 3
 export const LOOP_SIMILARITY_MIN_LENGTH = 200
 export const LOOP_SIMILARITY_RATIO = 0.7
 
+/**
+ * Repetições IDÊNTICAS de uma ronda de tool calls (mesmos nomes, mesmos args)
+ * antes de o loop intervir. O detector de TEXTO acima nunca via isto: ele só
+ * corre em turns SEM tool calls, e qualquer tool call fazia reset do estado —
+ * portanto um modelo a repetir a mesma chamada falhada para sempre nunca
+ * terminava (run momenu, 151 pedidos). Auditoria 2026-07-28.
+ *
+ * Nudge primeiro (o modelo costuma recuperar quando lhe dizem o que está a
+ * fazer), stop só quando ignora o aviso o dobro das vezes.
+ */
+export const TOOL_LOOP_NUDGE_THRESHOLD = 3
+export const TOOL_LOOP_STOP_THRESHOLD = 6
+
 // ── Context compression ──
 
 export const MIN_KEEP_RECENT_TURNS = 4

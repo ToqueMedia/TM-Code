@@ -10,6 +10,8 @@ export interface SearchOptions {
   exclude_patterns: string[];
   max_results?: number;
   context_lines?: number;
+  /** Respeitar `.gitignore`. Omitido = sim (o Rust assume o default honesto). */
+  respect_gitignore?: boolean;
 }
 
 export interface SearchMatch {
@@ -159,7 +161,9 @@ export default class SearchService {
     includePatterns: string = '',
     excludePatterns: string = '',
     maxResults?: number,
-    contextLines?: number
+    contextLines?: number,
+    /** Ver `.gitignore`'d paths (build output, vendored code). Default: não. */
+    includeIgnored: boolean = false
   ): SearchOptions {
     const defaultOptions = this.getDefaultOptions();
     
@@ -167,6 +171,10 @@ export default class SearchService {
       case_sensitive: caseSensitive,
       whole_word: wholeWord,
       use_regex: useRegex,
+      // O agente ganhou este escape quando a busca passou a filtrar por
+      // omissão; o painel humano ficou sem ele — o developer via menos do que
+      // o modelo podia pedir. Mesma opção, mesma semântica.
+      respect_gitignore: !includeIgnored,
       include_patterns: includePatterns 
         ? this.parsePatterns(includePatterns)
         : [],

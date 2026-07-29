@@ -27,6 +27,9 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
   const [caseSensitive, setCaseSensitive] = useState(false)
   const [useRegex, setUseRegex] = useState(false)
   const [wholeWord, setWholeWord] = useState(false)
+  // Ver output de build / código vendorizado. Desligado por omissão: o que o
+  // projecto declara descartável no .gitignore não é o que se procura.
+  const [includeIgnored, setIncludeIgnored] = useState(false)
   const [fileResults, setFileResults] = useState<FileResult[]>([])
   const [searchResult, setSearchResult] = useState<SearchResult | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -39,6 +42,7 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
   const caseSensitiveRef = useRef(caseSensitive)
   const wholeWordRef = useRef(wholeWord)
   const useRegexRef = useRef(useRegex)
+  const includeIgnoredRef = useRef(includeIgnored)
   const includePatternsRef = useRef(includePatterns)
   const excludePatternsRef = useRef(excludePatterns)
 
@@ -46,6 +50,7 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
   caseSensitiveRef.current = caseSensitive
   wholeWordRef.current = wholeWord
   useRegexRef.current = useRegex
+  includeIgnoredRef.current = includeIgnored
   includePatternsRef.current = includePatterns
   excludePatternsRef.current = excludePatterns
 
@@ -68,7 +73,8 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
   const buildCurrentOpts = useCallback(() =>
     SearchService.shared.buildSearchOptions(
       caseSensitiveRef.current, wholeWordRef.current, useRegexRef.current,
-      includePatternsRef.current, excludePatternsRef.current
+      includePatternsRef.current, excludePatternsRef.current,
+      undefined, undefined, includeIgnoredRef.current
     ),
     [] // stable — reads from refs
   )
@@ -161,11 +167,13 @@ function SearchPanel({ onFileSelect }: SearchPanelProps) {
       <SearchInputArea
         searchTerm={searchTerm} replaceTerm={replaceTerm} isReplaceVisible={isReplaceVisible}
         isSearching={isSearching} caseSensitive={caseSensitive} wholeWord={wholeWord} useRegex={useRegex}
+        includeIgnored={includeIgnored}
         ripgrepAvailable={ripgrepAvailable} hasProject={!!currentProject}
         onSearchTermChange={handleSearchTermChange} onReplaceTermChange={setReplaceTerm} onSearch={handleSearch}
         onToggleCaseSensitive={() => setCaseSensitive(!caseSensitive)}
         onToggleWholeWord={() => setWholeWord(!wholeWord)}
         onToggleRegex={() => setUseRegex(!useRegex)}
+        onToggleIncludeIgnored={() => setIncludeIgnored(!includeIgnored)}
       />
       <SearchFilters
         includePatterns={includePatterns} excludePatterns={excludePatterns}

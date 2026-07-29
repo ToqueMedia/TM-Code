@@ -391,12 +391,21 @@ async function resolveOneMention(token: string, executor: ToolExecutor): Promise
  * readFileTimestamps exactly as if the model had called read_file, so dedup,
  * read-before-write credit and the external-change sweep all see it.
  */
-export async function resolveMentionContext(input: string): Promise<MentionResolution> {
+export async function resolveMentionContext(
+  input: string,
+  executorOverride?: ToolExecutor,
+): Promise<MentionResolution> {
   if (!input || input.trim().startsWith('/')) return EMPTY_RESOLUTION
   const mentions = extractAtMentionedFiles(input)
   if (mentions.length === 0) return EMPTY_RESOLUTION
 
-  const executor = ToolExecutor.getInstance()
+  // MDI (auditoria 2026-07-28): uma TAREFA ligada a um projeto não-focado
+  // resolvia @ficheiros contra o SINGLETON — scope e read-state do projeto
+  // errado, e o crédito de leitura (dedup, read-before-write) ficava no
+  // executor do main enquanto quem executava era o filho isolado da tarefa.
+  // O runner passa agora o SEU executor; o singleton fica como default do
+  // caminho interativo.
+  const executor = executorOverride ?? ToolExecutor.getInstance()
   // Parallel resolution (claude-vaz uses Promise.all); flatten preserves
   // mention order so the transcript reads in the order the user wrote.
   const resolved = await Promise.all(mentions.map(m => resolveOneMention(m, executor)))

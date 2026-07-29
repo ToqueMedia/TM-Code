@@ -60,6 +60,37 @@ export function isEnvFile(filePath: string): boolean {
   return !ENV_TEMPLATE_FILES.has(filename)
 }
 
+/** `.env` / `.env.<suffix>` as a WHOLE token — `.environment` must not match. */
+const ENV_TOKEN_RE = /\.env(\.[A-Za-z0-9_-]+)?(?![A-Za-z0-9_-])/g
+
+/** Flags that HAND the file to another program instead of printing it. */
+const ENV_PASSTHROUGH_FLAG_RE = /--env[-_]?file(=|\s+)$/i
+
+/**
+ * True when a shell command would read a sealed `.env`.
+ *
+ * The path-based seal (`isEnvFile`) only inspects tools that take a file path,
+ * so every shell surface walked straight past it (auditoria 2026-07-28):
+ * `execute_command("cat .env")`, `agent_shell_write("head .env")`, a background
+ * `xxd .env`. Enumerating the printing utilities (cat/head/xxd/strings/base64/
+ * `node -e`/`python -c`/…) is unwinnable, so the token itself is the trigger.
+ *
+ * `--env-file .env` is exempt: docker/compose PASS the file to another process
+ * rather than echoing it into the transcript, and blocking that would cost a
+ * real capability for no secrecy gain.
+ */
+export function commandReferencesSealedEnv(command: string): boolean {
+  if (!command) return false
+  ENV_TOKEN_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = ENV_TOKEN_RE.exec(command)) !== null) {
+    if (!isEnvFile(match[0])) continue
+    if (ENV_PASSTHROUGH_FLAG_RE.test(command.slice(0, match.index))) continue
+    return true
+  }
+  return false
+}
+
 /**
  * Files that may contain secrets — require explicit user authorization.
  */

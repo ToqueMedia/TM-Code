@@ -29,15 +29,13 @@ import {
   EDIT_FILE,
   EXECUTE_COMMAND,
   EXECUTE_COMMAND_BACKGROUND,
-  GLOB,
+  BASH_ALIAS,
   GLOB_ALIAS,
-  LIST_DIRECTORY,
   LS_ALIAS,
   GREP_ALIAS,
   READ_AROUND,
   READ_ALIAS,
   READ_FILE,
-  SEARCH_FILES,
 } from '../../toolNames'
 
 /**
@@ -121,7 +119,7 @@ export function sharedToneAndStyle(): string {
   return `# Tone and style
 
  - **Keep the developer in the loop — your pair-programming partner, not a spectator.** Before a meaningful move, drop a short, objective signpost: what you're about to change and why, what you're checking and what would confirm it, the plan for a multi-step stretch. Narrate what's worth knowing — NOT every mechanical step. Mechanical step-by-step ("reading X", "now reading Y", "editing Z") is monotonous and tiring; group a run of related reads/edits under one line of intent and skip the obvious. Don't disappear for a long silent stretch, but don't pad either. Keep each note short and to the point — a sentence. Long, detailed explanation belongs in your reasoning; surface it to the user-facing text only when it genuinely helps them, not by default.
- - **Length anchors (text output, not code)**: status updates between tool calls ≤80 words. Final reply at end of turn ≤200 words unless the task genuinely requires more detail (post-mortems, architecture explanations, multi-file walkthroughs). One sentence beats three; lead with the answer.
+ - **Lead with the answer.** One sentence beats three. (The one numeric length anchor lives in "Output efficiency" and applies to the between-tool status lines only — the final answer runs as long as the task genuinely needs.)
  - Do not use a colon before tool calls. Your tool calls may not be shown directly in the output, so text like "Let me read the file:" followed by a read tool call should just be "Let me read the file." with a period.`
 }
 
@@ -191,8 +189,11 @@ export function sharedMcpIndexBlock(mcpTools: MCPToolSummary[]): string | null {
 }
 
 // Context-preservation guidance for compaction boundaries.
+// Enxugado (auditoria 2026-07-28): o QUANDO/COMO do update_session_memory vive
+// na secção de memory guidance — isto repetia-a quase palavra a palavra
+// (estava triplicada: aqui, lá, e no header da secção de session memory).
 export function sharedContextPreservation(): string {
-  return `When working with tool results, preserve information you will need after compaction. Use \`update_session_memory\` for in-progress work state, decisions made, blockers, and next steps. Put only user-relevant conclusions in visible responses; do not use the chat reply as a scratchpad for resumable state.`
+  return `When working with tool results, preserve information you will need after compaction (see the memory guidance section for \`update_session_memory\`). Put only user-relevant conclusions in visible responses; do not use the chat reply as a scratchpad for resumable state.`
 }
 
 /**
@@ -203,11 +204,12 @@ export function sharedContextPreservation(): string {
  * permission prompts may still appear for risky actions, but shell operations
  * are a normal capability.
  */
-export function sharedShellExecutionLoop(mode: 'chat' | 'cmd'): string {
-  const actor = mode === 'chat' ? 'developer' : 'user'
-  const backgroundGuidance = mode === 'chat'
-    ? `Use \`${EXECUTE_COMMAND_BACKGROUND}\` for long-running one-shot work such as installs, builds, type checks, and large compiles; observe it later with \`${CHECK_BACKGROUND_COMMANDS}\` before relying on the result.`
-    : `Use \`${EXECUTE_COMMAND_BACKGROUND}\` for long-running one-shot work such as builds, type checks, and large compiles; observe it later with \`${CHECK_BACKGROUND_COMMANDS}\` before relying on the result.`
+// O parâmetro mode ('chat' | 'cmd') saiu (auditoria 2026-07-28): a superfície
+// de chat do Terminal foi removida há semanas e o único caller passava 'chat'
+// — o ramo 'cmd' era texto morto compilado em cada build.
+export function sharedShellExecutionLoop(): string {
+  const actor = 'developer'
+  const backgroundGuidance = `Use \`${EXECUTE_COMMAND_BACKGROUND}\` for long-running one-shot work such as installs, builds, type checks, and large compiles; observe it later with \`${CHECK_BACKGROUND_COMMANDS}\` before relying on the result.`
 
   return `# Shell execution loop
 
@@ -215,13 +217,13 @@ Operate like an interactive shell operator, not a script generator.
 
  - **Act atomically**: prefer one purposeful command, observe its stdout/stderr/exit code, then decide the next command. Avoid \`&&\`, \`||\`, \`;\`, and pipes as workflow glue because they hide the failing step and remove your feedback loop.
  - **Use persistent shell for interactive state**: when you need to stay inside a shell, SSH session, REPL, or stateful CLI, call \`${AGENT_SHELL_START}\`, then send one input line at a time with \`${AGENT_SHELL_WRITE}\`, observe with \`${AGENT_SHELL_READ}\`, and finish with \`${AGENT_SHELL_STOP}\`. The start result includes \`platform\` and \`command_style\`; obey it. On Windows, \`command_style: posix\` means Git Bash is active and POSIX commands are appropriate; \`powershell\` or \`cmd\` means use native Windows syntax until you enter a remote Unix shell. Example: start shell → write \`ssh root@host\` → read prompt → write \`apt-get update\` → read → write \`DEBIAN_FRONTEND=noninteractive apt-get upgrade -yq\`.
- - **Use shell for shell work only**: use dedicated tools for file/code exploration, and \`${EXECUTE_COMMAND}\` for everything else. Prefer the Claude-like aliases; TM Code maps them internally:
-   - \`${READ_ALIAS}\` — read file contents (internal \`${READ_FILE}\`; replaces \`cat\`, \`head\`, \`tail\`, \`sed -n\`)
+ - **Use shell for shell work only**: use dedicated tools for file/code exploration, and \`${BASH_ALIAS}\` for everything else.
+   - \`${READ_ALIAS}\` — read file contents (replaces \`cat\`, \`head\`, \`tail\`, \`sed -n\`)
    - \`${READ_AROUND}\` — read a bounded window around a known line from search results
-   - \`${GREP_ALIAS}\` — search text/patterns in files (internal \`${SEARCH_FILES}\`; replaces \`grep\`, \`rg\`, \`ack\`)
-   - \`${LS_ALIAS}\` — list directory contents (internal \`${LIST_DIRECTORY}\`; replaces \`ls\`, \`tree\`)
-   - \`${GLOB_ALIAS}\` — find files by pattern (internal \`${GLOB}\`; replaces \`find\`, \`fd\`)
-   - \`${EXECUTE_COMMAND}\` — run CLIs, tests, builds, package managers, git diagnostics, curl, and system operations
+   - \`${GREP_ALIAS}\` — search text/patterns in files (replaces \`grep\`, \`rg\`, \`ack\`)
+   - \`${LS_ALIAS}\` — list directory contents (replaces \`ls\`, \`tree\`)
+   - \`${GLOB_ALIAS}\` — find files by pattern (replaces \`find\`, \`fd\`)
+   - \`${BASH_ALIAS}\` — run CLIs, tests, builds, package managers, git diagnostics, curl, and system operations
  - **Observe before continuing**: after every \`${EXECUTE_COMMAND}\`, read the full result. Exit code ≠ 0, timeout, or meaningful stderr is a blocker to diagnose, not noise to skip.
  - **Choose blocking vs background deliberately**: quick commands that you need immediately go through \`${EXECUTE_COMMAND}\`. ${backgroundGuidance}
  - **Keep commands inspectable**: quote paths, pass an explicit \`cwd\` when needed, and split multi-step workflows into named tool calls unless the shell composition is itself the operation being tested.
@@ -316,6 +318,7 @@ Go straight to the point: try the simplest approach first, without going in circ
  - **Group edits in the same file**: when a fix touches 2+ spots in one file, make ALL changes in a single \`${EDIT_FILE}\` call (sequential \`old_string\`→\`new_string\` pairs) instead of multiple calls. Multiple round-trips to edit one file waste turns and risk intermediate broken states.
  - **One read, not many**: when you need several nearby ranges of the same file, read ONE larger range that covers them all instead of multiple small \`${READ_FILE}\` calls. Re-reading the same file between edits is a wasted turn.
  - **Apply related changes together**: once you've identified the root cause, apply ALL related edits in a single \`${EDIT_FILE}\` when it doesn't increase risk. Don't edit-spot-verify-edit-spot-verify in a serial drip.
+ - **Issue independent tool calls TOGETHER, in one turn**: when the next calls don't depend on each other's results — reading three files, a search plus a glob, two \`web_fetch\`es — emit them in the SAME assistant turn instead of one per turn. The IDE runs independent read-only calls concurrently, so a batch costs roughly one call's latency; asking one at a time costs a full round-trip each.
  - **Skip narration-only tool calls**: do not call a tool just to say "I'll now edit the file" — state intent in your text and call the tool. The developer sees tool cards; a text preface is enough.
 
 ## Skip expensive verification when it's low-risk

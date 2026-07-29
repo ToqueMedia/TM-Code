@@ -613,6 +613,8 @@ async function handleChatCompletions(
       // emitida em X-Model-Context-Window para a IDE alinhar a pressão de
       // contexto e o auto-compact com a janela verdadeira do modelo.
       contextWindow: config.contextWindow,
+      // Teto de saída — emitido em X-Model-Max-Output-Tokens pela mesma razão.
+      maxOutputTokens: config.maxOutputTokens,
       // Estado pré-voo — o updateFromHeaders da IDE consome exatamente estes
       // nomes (billingStore.ts). O pós-commit chega nos headers do PRÓXIMO
       // turno; a IDE cobre o intervalo com a estimativa otimista local.

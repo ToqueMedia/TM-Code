@@ -20,13 +20,12 @@
 
 import {
   editFileReplace,
+  editFileReplaceAll,
   duplicateMatchError,
-  sanitizeDiffForModel,
 } from '../editLiteralReplace'
 
 // Alias kept for test readability; the implementation lives in
 // editLiteralReplace.ts and is shared with production.
-const sanitizeForModel = sanitizeDiffForModel
 
 /**
  * Mirror of the field-name normalization logic in the edit_file handler.
@@ -238,45 +237,34 @@ describe('Bug #2: improved error message on non-unique old_string', () => {
   })
 })
 
-describe('Bug #3: diff JSON sanitization for the model tool_result', () => {
-  it('collapses a 44KB diff JSON down to a single one-line summary', () => {
-    const bigFile = 'x'.repeat(44_000)
-    const diffJson = JSON.stringify({
-      type: 'diff',
-      path: '/proj/PLAN.md',
-      oldContent: bigFile,
-      newContent: bigFile + ' edited',
-      isNewFile: false,
-    })
-    const out = sanitizeForModel(diffJson)
-    expect(out).toBe('File updated: /proj/PLAN.md')
-    // The whole point — bytes shipped to the model drop by ~3 orders of magnitude.
-    expect(out.length).toBeLessThan(diffJson.length / 1000)
+// O describe do Bug #3 (sanitizeDiffForModel) saiu com a própria função
+// (auditoria 2026-07-28): o caminho vivo no-turno é buildPostEditResultText
+// (changedFileSnippet) e o slim-down do histórico é a cópia inline do
+// chatStore — este export já não tinha callers.
+
+describe('replace_all: editFileReplaceAll (rename de símbolo em 1 call)', () => {
+  it('substitui TODAS as ocorrências, literalmente', () => {
+    expect(editFileReplaceAll('a foo b foo c foo', 'foo', 'bar')).toBe('a bar b bar c bar')
   })
 
-  it('marks isNewFile diffs as "created" rather than "updated"', () => {
-    const diffJson = JSON.stringify({
-      type: 'diff',
-      path: '/proj/new.ts',
-      oldContent: '',
-      newContent: 'export const x = 1',
-      isNewFile: true,
-    })
-    expect(sanitizeForModel(diffJson)).toBe('File created: /proj/new.ts')
+  it('nunca interpreta $-sequences (a mesma imunidade do Bug #1)', () => {
+    // Com String.replace, `$&` re-injetaria o match e `$` + backtick o prefixo.
+    expect(editFileReplaceAll('x KEY y KEY', 'KEY', '$&-$`-$$')).toBe('x $&-$`-$$ y $&-$`-$$')
   })
 
-  it('passes non-JSON tool results through untouched (search hits, file reads, etc.)', () => {
-    const searchResult = 'src/foo.ts:42: const bar = 1'
-    expect(sanitizeForModel(searchResult)).toBe(searchResult)
+  it('lança quando oldStr não existe (o check de ocorrências vive upstream)', () => {
+    expect(() => editFileReplaceAll('abc', 'zzz', 'x')).toThrow()
   })
 
-  it('passes JSON tool results that are not diffs through untouched', () => {
-    const otherJson = JSON.stringify({ type: 'metrics', count: 5 })
-    expect(sanitizeForModel(otherJson)).toBe(otherJson)
+  it('string vazia como substituição APAGA todas as ocorrências', () => {
+    expect(editFileReplaceAll('a__b__c', '__', '')).toBe('abc')
   })
+})
 
-  it('passes diff-shaped JSON missing the path field through untouched (defensive)', () => {
-    const malformed = JSON.stringify({ type: 'diff', oldContent: 'a', newContent: 'b' })
-    expect(sanitizeForModel(malformed)).toBe(malformed)
+describe('duplicateMatchError ensina o replace_all como primeira opção', () => {
+  it('menciona replace_all quando há duplicados', () => {
+    const msg = duplicateMatchError('/proj/a.ts', 3)
+    expect(msg).toContain('replace_all: true')
+    expect(msg).toContain('3 times')
   })
 })

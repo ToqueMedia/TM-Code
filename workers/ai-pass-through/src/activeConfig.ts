@@ -100,6 +100,14 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     ? Math.floor(obj.contextWindow)
     : undefined
 
+  // Teto de saída do modelo, emitido em X-Model-Max-Output-Tokens. Mesma
+  // tolerância do contextWindow: ausente/inválido → undefined e a IDE usa o
+  // perfil local.
+  const maxOutputTokens = typeof obj.maxOutputTokens === 'number'
+    && Number.isFinite(obj.maxOutputTokens) && obj.maxOutputTokens > 0
+    ? Math.floor(obj.maxOutputTokens)
+    : undefined
+
   return {
     provider: assertString(obj.provider, 'provider'),
     model: assertString(obj.model, 'model'),
@@ -112,6 +120,7 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     enabled,
     extraBody,
     contextWindow,
+    maxOutputTokens,
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
   }
 }

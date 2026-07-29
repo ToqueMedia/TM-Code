@@ -34,7 +34,6 @@ export interface SubAgentDefinition {
    *  preview, recent files) in the sub-agent's system prompt. Saves ~5-15 KB
    *  per spawn. Read-only agents that report findings to the parent don't
    *  need commit/PR/lint guidelines. */
-  omitProjectContext: boolean
 
   /** The sub-agent's system prompt builder. Called with the resolved parent
    *  context (cmdOnlyMode, workingPath, agentLanguage). */

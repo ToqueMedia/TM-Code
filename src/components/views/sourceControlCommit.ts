@@ -1,3 +1,5 @@
+import { stripInlineReasoning } from '../../services/agent/completionText'
+
 export const TM_CODE_COMMIT_SIGNATURE = 'Co-Authored-By: TM Code <tm.code@toquemedia.net>'
 
 // The signature is invisible to the user and appended at commit time.
@@ -17,12 +19,12 @@ export function stripTmCodeCommitSignature(message: string): string {
  * Strip chain-of-thought from the AI message. The commit-message call is
  * non-streaming, so reasoning models can emit `<think>...</think>` inline.
  */
-export function stripReasoningBlocks(text: string): string {
-  let out = text.replace(/<think>[\s\S]*?<\/think>/gi, '')
-  const lastClose = out.toLowerCase().lastIndexOf('</think>')
-  if (lastClose !== -1) out = out.slice(lastClose + '</think>'.length)
-  return out.replace(/<\/?think>/gi, '').trim()
-}
+/**
+ * @deprecated Use `stripInlineReasoning` (services/agent/completionText) — a
+ * cópia local só tratava `<think>`, e o strip passou a ser central para que
+ * TODAS as one-shots fiquem cobertas, não só a geração de commits.
+ */
+export const stripReasoningBlocks = stripInlineReasoning
 
 export function cleanGeneratedCommitMessage(message: string): string {
   const cleaned = stripReasoningBlocks(message)

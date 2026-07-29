@@ -65,7 +65,17 @@ export function applyDashScopePromptCacheForByok(
     if (msg.role !== 'system' || typeof msg.content !== 'string') continue
     const content = msg.content
     const idx = content.indexOf(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
-    if (idx === -1) continue
+    if (idx === -1) {
+      // Post-FASE-B (auditoria 2026-07-28): the builder splits at BUILD time and
+      // the marker never reaches the transport, so "no marker" is now the normal
+      // case — it means the system message already IS the byte-stable block.
+      // Before this branch existed the `continue` below made explicit caching
+      // dead code for every managed/BYOK DashScope model.
+      if (!canCache || content.length < EXPLICIT_CACHE_MIN_STATIC_BYTES) continue
+      msg.content = [{ type: 'text', text: content, cache_control: { type: 'ephemeral' } }]
+      changed = true
+      continue
+    }
 
     const before = content.slice(0, idx).trimEnd()
     const after = content.slice(idx + SYSTEM_PROMPT_DYNAMIC_BOUNDARY.length).trimStart()

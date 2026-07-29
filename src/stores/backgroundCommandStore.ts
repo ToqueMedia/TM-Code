@@ -50,7 +50,16 @@ export const useBackgroundCommandStore = create<BackgroundCommandState & Backgro
       const cmd = state.commands.get(id)
       if (!cmd || cmd.status !== 'running') return state
       const next = new Map(state.commands)
-      next.set(id, { ...cmd, output: cmd.output + data })
+      // Cap do buffer (auditoria 2026-07-28): era ilimitado — um build/watch
+      // tagarela crescia sem tecto na memória do renderer. Mesmo teto do
+      // agent shell (200k), a cortar pela CABEÇA: num comando de background o
+      // que interessa preservar é a cauda (erros, exit).
+      const MAX_BUFFER = 200_000
+      let output = cmd.output + data
+      if (output.length > MAX_BUFFER) {
+        output = `[...earlier output dropped (buffer cap ${MAX_BUFFER} chars)...]\n` + output.slice(-MAX_BUFFER)
+      }
+      next.set(id, { ...cmd, output })
       return { commands: next }
     })
   },
@@ -58,7 +67,10 @@ export const useBackgroundCommandStore = create<BackgroundCommandState & Backgro
   completeCommand: (id, exitCode) => {
     set(state => {
       const cmd = state.commands.get(id)
-      if (!cmd) return state
+      // Só transita a partir de 'running': um cancel do user (UI/Stop) mata o
+      // processo, e o cmd-exit que se segue NÃO pode reescrever 'cancelled'
+      // para completed/error — o estado final pertence a quem terminou primeiro.
+      if (!cmd || cmd.status !== 'running') return state
       const next = new Map(state.commands)
       next.set(id, { ...cmd, status: 'completed', exitCode, completedAt: Date.now() })
       return { commands: next }
@@ -68,7 +80,8 @@ export const useBackgroundCommandStore = create<BackgroundCommandState & Backgro
   failCommand: (id, error) => {
     set(state => {
       const cmd = state.commands.get(id)
-      if (!cmd) return state
+      // Mesma guarda do completeCommand: 'cancelled' é terminal.
+      if (!cmd || cmd.status !== 'running') return state
       const next = new Map(state.commands)
       next.set(id, { ...cmd, status: 'error', output: cmd.output + '\n' + error, completedAt: Date.now() })
       return { commands: next }

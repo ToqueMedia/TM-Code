@@ -52,6 +52,7 @@ import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
 import { ToolsetSelector, REQUEST_TOOLS_NAME, REQUEST_CONTEXT_NAME, requestContextDefinition } from "./toolsetSelector";
 import type { ToolsetGroupName } from "./toolsetSelector";
+import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
 import type { PromptProfile } from "./contextBuilder/auxiliaryRegistry";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 import { classifyExecuteCommandPurpose, convertShellReadCommand } from "./commandPurpose";
@@ -80,6 +81,7 @@ import { SessionState } from "./sessionState";
 import {
   checkForLoop,
   createLoopDetectorState,
+  resetLoopDetector,
   type LoopDetectorState,
 } from "./loopDetector";
 import {
@@ -442,6 +444,13 @@ class AgentService {
       // trabalho dela. O foco/hidratação vivem no trackerFocusSync.
       this.sessionState.resetForNewSession();
       this.toolExecutor.resetSessionState();
+      // Detector de loop CROSS-RUN: o estado é do singleton e sobrevivia a
+      // trocas de sessão/projecto (auditoria 2026-07-28) — três respostas
+      // finais parecidas em SESSÕES diferentes ganhavam um "[Loop detected]"
+      // colado a uma resposta legítima. O reset por sessão preserva o caso
+      // que o guard existe para apanhar (auto-wake/fila a gerar runs
+      // idênticos em série DENTRO da mesma sessão) e mata o vazamento.
+      resetLoopDetector(this.loopState);
     } else if (!this.lightweightOptions) {
       // ── State recovery from conversation history ───────────────────
       // When resuming an existing session, the ToolExecutor's read state
@@ -465,7 +474,6 @@ class AgentService {
     }
     if (isMainAgentNewSession) {
       try {
-        useAgentStore.getState().resetPoolConflictsAvoided();
         useAgentStore.getState().resetToolCallCounters();
       } catch {
         /* non-critical */
@@ -608,11 +616,11 @@ class AgentService {
     // base plus model-planned groups, then expands on demand through the
     // request_tools meta-tool. Reduces tool-schema overhead (~10K tokens for
     // 36 tools) to the few the current task needs. Sub-agents skip selection.
-    // Wire auxiliary-context omissions + the Intent Router's profile/readOnly
-    // into the selector. The selection was computed during buildSystemPrompt
-    // (stored on the ContextBuilder singleton) — the profile + readOnly come
-    // from the Intent Router (qwen3.7-plus) via the agentRunner call. We read
-    // it BEFORE constructing the selector so the constructor can seed the
+    // Wire auxiliary-context omissions + profile/readOnly into the selector.
+    // A seleção foi calculada durante o buildSystemPrompt (guardada no
+    // singleton do ContextBuilder) por heurística LOCAL — não há Intent Router
+    // (removido; ver a nota no contextBuilder). Lemos antes de construir o
+    // selector para o construtor poder semear o
     // active set with the profile's base toolset (bugfix_local/analysis_readonly/…).
     // Profiles are starters, not authorization ceilings. Sub-agents skip this
     // (they already receive a restricted tool set from the subAgentRunner).
@@ -627,6 +635,16 @@ class AgentService {
       : "original_task";
     const enforceReadOnly = auxiliarySelection?.readOnly === true &&
       auxiliarySelection.routerSource === "keyword";
+    // ÓRFÃO desde a remoção do Intent Router (auditoria 2026-07-28):
+    // `requiresMutation` só era produzido por ele, portanto o guard anti-
+    // adiamento no loop nunca arma. NÃO resolver isto com um detetor de texto
+    // sobre a resposta final: o claude-vaz não faz nada disso — o que ele tem
+    // para o mesmo problema é estrutural (system-reminder guiado pelo estado
+    // do TRACKER, que este loop já implementa no guard de reconciliação de
+    // tarefas) mais Stop hooks configuráveis pelo utilizador. E o próprio
+    // turnEfficiency.ts deste repo tem a doutrina escrita: sinais estruturais,
+    // nunca matching de texto. Ou se arranja um sinal estrutural, ou o guard
+    // deve ser APAGADO como código morto — não ressuscitado com heurística.
     const mutableTask = executionPhase === "original_task" &&
       !this.lightweightOptions &&
       !enforceReadOnly &&
@@ -736,6 +754,8 @@ class AgentService {
       isStreamSafeTool: (name) =>
         this.toolExecutor.isConcurrencySafe(name) ||
         this.toolExecutor.isConcurrencySafe(canonicalToolName(name)),
+      // O prompt do main contém o reminder; os sub-agentes (lightweight) não.
+      reinjectCriticalReminder: !this.lightweightOptions,
       thinkingConfig,
       maxTurns: this.lightweightOptions?.maxTurns,
       extraHeaders,
@@ -768,7 +788,7 @@ class AgentService {
       // fresh each iteration because the active model is injected server-side
       // and only known after the first response.
       getContextLimits: () => {
-        const { modelContextWindow, modelName } = useAgentStore.getState();
+        const { modelContextWindow, modelMaxOutputTokens, modelName } = useAgentStore.getState();
         // Resolve the window EXACTLY like the UI pill (ContextWindowIndicator):
         // server header → known profile → conservative
         // FALLBACK_CONTEXT_WINDOW (200K). Unknown model (no header, not in
@@ -784,7 +804,12 @@ class AgentService {
         // a 256K model at ~256K. The admin tunes it in Settings → Admin.
         return {
           contextWindow: modelContextWindow ?? knownProfile?.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
-          maxOutputTokens: profile.maxOutputTokens ?? null,
+          // O header manda sobre o perfil, tal como na janela: um modelo novo
+          // publicado só no KV herdava o teto do fallback (MiMo, 32K) e ficava
+          // calado aí mesmo sendo capaz de gerar 128K+ — e esse valor é também
+          // o teto da escalada anti-truncagem em query.ts, por isso o efeito
+          // era duplo (auditoria 2026-07-28).
+          maxOutputTokens: modelMaxOutputTokens ?? profile.maxOutputTokens ?? null,
         };
       },
       // Usage is reported via message_stop events — do NOT add onUsage
@@ -1169,6 +1194,7 @@ class AgentService {
       const modelProvider = headers.get("X-Model-Provider") ?? headers.get("X-TM-Provider");
       const thinkingModeRaw = headers.get("X-Model-Thinking-Mode");
       const contextWindowRaw = headers.get("X-Model-Context-Window");
+      const maxOutputRaw = headers.get("X-Model-Max-Output-Tokens");
       const byokActiveRaw = headers.get("X-BYOK-Active");
       // Team BYOK: the worker served this via the team's own provider/key
       // (config team:{teamId}). Emitted as true/false every response so a later
@@ -1179,7 +1205,8 @@ class AgentService {
         modelName !== null ||
         modelProvider !== null ||
         thinkingModeRaw !== null ||
-        contextWindowRaw !== null;
+        contextWindowRaw !== null ||
+        maxOutputRaw !== null;
 
       if (hasModelInfo) {
         const parsedContext =
@@ -1199,11 +1226,23 @@ class AgentService {
               ? null
               : undefined;
 
+        // Mesma tolerância do contextWindow: número válido → usa; header
+        // presente mas inválido → null (limpa); ausente → undefined (não toca).
+        const parsedMaxOutput =
+          maxOutputRaw !== null ? Number.parseInt(maxOutputRaw, 10) : undefined;
+        const maxOutputTokens =
+          parsedMaxOutput !== undefined && Number.isFinite(parsedMaxOutput) && parsedMaxOutput > 0
+            ? parsedMaxOutput
+            : maxOutputRaw !== null
+              ? null
+              : undefined;
+
         useAgentStore.getState().setModelInfo(
           modelName,
           modelProvider,
           thinkingMode,
           contextWindow,
+          maxOutputTokens,
         );
         // Alimenta o activeModelStore com o modelo SERVIDO (fallback ao Firestore
         // real-time). O EffortSelector usa-o p/ a lista de efforts; a troca de
@@ -1398,12 +1437,13 @@ class AgentService {
             content: formatShellReadRedirect(command, converted),
             isError: true,
           };
-        } else if (purpose === "file_read") {
-          markShellReadBlocked(false);
-          return {
-            content: formatShellReadRedirect(command, null),
-            isError: true,
-          };
+          // O ramo "file_read SEM conversão" foi removido (auditoria
+          // 2026-07-28): classificava pelo PRIMEIRO token e bloqueava
+          // `cat a.sql b.sql > merged.sql`, `sed -i …`, `find … -delete`
+          // como "inspeção", apontando para Read/Grep — que não fazem esses
+          // trabalhos. Regra: só se redireciona quando há um SUBSTITUTO real
+          // (converted); o resto segue para o fluxo normal, onde os gates de
+          // permissão/perigo continuam a valer.
         }
       }
 
@@ -1534,7 +1574,10 @@ class AgentService {
                 );
               }
               return {
-                content: `File ${parsedDiff.isNewFile ? "created" : "updated"}: ${parsedDiff.path}`,
+                // Mesmo formato do caminho direto (query.ts) — inclui o
+                // excerto numerado do resultado, para o modelo não re-ler o
+                // ficheiro que acabou de editar.
+                content: buildPostEditResultText(parsedDiff),
                 isError: false,
               };
             }

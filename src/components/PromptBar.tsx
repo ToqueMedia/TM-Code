@@ -13,6 +13,7 @@ import HashtagMenu from './prompt/HashtagMenu'
 import QueuedMessagesPreview from './prompt/QueuedMessagesPreview'
 import AgentTasksPanel from './chat/AgentTasksPanel'
 import SubAgentStatusBar from './chat/SubAgentStatusBar'
+import BackgroundCommandsBar from './chat/BackgroundCommandsBar'
 import ParallelTasksDock from './chat/ParallelTasksDock'
 import { usePromptBar } from './prompt/usePromptBar'
 import KeyBindingDisplay from './ui/KeyBindingDisplay'
@@ -231,6 +232,10 @@ function PromptBar() {
         </Flex>
 
         <SubAgentStatusBar />
+        {/* Processos shell que o agente deixou em background
+            (execute_command_background) — a única superfície deles enquanto o
+            agente "dorme" à espera do auto-wake, com cancel do user. */}
+        <BackgroundCommandsBar />
         {/* Multi-project agents (F2/F3): one agent per project. ProjectMenu
             was removed; the dock under the composer is the control surface
             again — project name + task title + Stop. */}

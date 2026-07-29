@@ -38,8 +38,16 @@ export const DEFAULT_COLLAB_SIGNALING_URL = 'ws://localhost:8789'
 /** Production collab signaling Worker (WebSocket) endpoint. */
 export const PRODUCTION_COLLAB_SIGNALING_URL = 'wss://collab-signaling-worker.geral-871.workers.dev'
 
-/** Default local TM Code Web URL used by "Send to Web" while the IDE runs in Vite dev. */
-export const DEFAULT_TM_CODE_WEB_URL = 'http://localhost:5173'
+/**
+ * Default local TM Code Web URL used by "Send to Web" while the IDE runs in Vite dev.
+ *
+ * 15173, não 5173: o projecto Web fixa `port: 15173` com `strictPort: true`
+ * (packages/web/vite.config.ts) precisamente para estar sempre no mesmo sítio.
+ * O default aqui dizia 5173 — a porta que o Vite usaria por omissão se o Web
+ * não a fixasse — e quem não tivesse `VITE_TM_CODE_WEB_URL` no .env ficava a
+ * apontar para uma porta onde não está ninguém.
+ */
+export const DEFAULT_TM_CODE_WEB_URL = 'http://localhost:15173'
 
 /** Production TM Code Web URL. */
 export const PRODUCTION_TM_CODE_WEB_URL = 'https://code.toquemedia.net'

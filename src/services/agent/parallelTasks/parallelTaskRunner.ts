@@ -49,11 +49,10 @@ import { useParallelTaskStore } from '../../../stores/parallelTaskStore'
 import { useChatStore, rebuildConversationHistory } from '../../../stores/chatStore'
 import { toQueryMessages } from '../queryEngine'
 import { withWriteLock } from './writeSerializer'
-import { finalizeTaskWorktree, autoMergeTaskBranch, dirtyFilesInMainCheckout, type TaskWorktree } from './taskWorktree'
+import { dirtyFilesInMainCheckout } from './taskWorktree'
 import { makeTaskPathNormalizer } from './taskPaths'
 import { releaseOwnerClaims } from '../fileClaims'
 import { consumeTaskStopRequest, consumeProjectAgentStop } from './taskStopRequestService'
-import { WORKTREES_REL_DIR } from '../toolExecutor/worktrees'
 import { useAgentStore } from '../../../stores/agentStore'
 import { getProfileForPlan, MODEL_PROFILES } from '../modelProfiles'
 import { pumpParallelTasks } from './parallelTaskManager'
@@ -141,7 +140,6 @@ const TASK_WALL_CLOCK_MS = 30 * 60_000
 
 function buildTaskSystemPrompt(
   projectPath: string,
-  worktree?: TaskWorktree | null,
   /** Pre-built heading + body from TMS or foreign compat instructions. */
   projectInstructions?: { heading: string; body: string } | null,
 ): string {
@@ -149,9 +147,7 @@ function buildTaskSystemPrompt(
     'You are a TM Code parallel task agent — one of up to four agents the developer launched to work on this project AT THE SAME TIME.',
     'You work INDEPENDENTLY on the single task in the user message. Do not wait for or coordinate with the other agents.',
     '',
-    worktree
-      ? `Working directory (your ISOLATED git worktree): ${worktree.path} — you are on branch "${worktree.branch}", checked out from the project at ${worktree.originalRoot}. Your edits do NOT touch the developer's main checkout; they merge the branch when they choose. ALWAYS use paths RELATIVE to your working directory (e.g. "src/App.tsx") — NEVER prefix paths with "${WORKTREES_REL_DIR}/..."; you are ALREADY inside the worktree. When your work is done, stage and commit it on your branch (git add -A && git commit -m "...") so the branch is mergeable.`
-      : `Working directory (your project root): ${projectPath}`,
+    `Working directory (your project root): ${projectPath}`,
     '',
     'How to work:',
     '- Explore before you change: read the relevant files (read_file/search_files/glob/list_directory) to understand the code before editing.',
@@ -159,9 +155,7 @@ function buildTaskSystemPrompt(
     '- Run builds/tests with execute_command when useful to verify your work.',
     '- You may delegate read-only research to team members (delegate tool: Explore/Research/Verify) — their results are DELIVERED to you automatically at your next step; never poll collect_results.',
     '- Other agents may be working on this project in parallel. You can coordinate with them via send_agent_message (target "main" or another task); messages from them arrive automatically between your steps.',
-    worktree
-      ? '- File writes are applied directly in YOUR worktree — the tree is exclusively yours; no other agent touches it.'
-      : '- File writes are applied directly and are serialized with the other agents, so keep your edits scoped to YOUR task to avoid stepping on theirs.',
+    '- File writes are applied directly and are serialized with the other agents, so keep your edits scoped to YOUR task to avoid stepping on theirs.',
     '- If you genuinely need the developer (a decision between options, or credentials for a service), use ask_user_question / request_credentials — the developer is notified on your task row and answers in your task chat. Prefer sensible defaults over asking.',
     '- FILE OWNERSHIP RULE: files being modified by ANOTHER parallel task, or with the developer\'s own uncommitted changes, are OFF-LIMITS — the system blocks writes to them. When a blocked file prevents part of your task, do NOT work around it: skip that part and EXPLAIN exactly which files were blocked and why in your final report.',
     '- When done, finish with a short summary of exactly what you changed (files + what/why), INCLUDING any files you skipped due to the ownership rule. That summary is shown on your task card.',
@@ -263,10 +257,11 @@ export async function runParallelTask(runId: string): Promise<void> {
   }
 
   // F3 (2026-07-23): worktrees-por-tarefa REMOVIDOS com o fan-out
-  // intra-projecto. Project-runs e continuações trabalham sempre no checkout
-  // do projecto (cmdModeCwd = projectPath). Isolação multi-agente no MESMO
-  // projecto já não existe — 1 agente/projecto.
-  const worktree: TaskWorktree | null = null
+  // intra-projecto — project-runs e continuações trabalham sempre no checkout
+  // do projecto (1 agente/projecto). O bloco de finalize/auto-merge que ainda
+  // vivia aqui era inalcançável (`worktree` era a constante null) e foi
+  // apagado na auditoria de 2026-07-28, com createTaskWorktree/
+  // reuseTaskWorktree/finalizeTaskWorktree/autoMergeTaskBranch.
   const sessionForRun = run.sessionId ? useChatStore.getState().sessions.get(run.sessionId) : undefined
   const continuationOfPlainChat = run.continuation === true && sessionForRun?.isParallelTask !== true
 
@@ -415,7 +410,7 @@ export async function runParallelTask(runId: string): Promise<void> {
     // próprio (Fase 5) o lock é desnecessário — árvore exclusiva da tarefa.
     // O registo do claim acontece DENTRO do toolExecutor.execute (registry
     // único) — aqui só resta a serialização física em árvore partilhada.
-    return !worktree && SERIALIZED_WRITE_TOOLS.has(canonical) ? withWriteLock(apply) : apply()
+    return SERIALIZED_WRITE_TOOLS.has(canonical) ? withWriteLock(apply) : apply()
   }
 
   const chatSessionId = run.sessionId
@@ -457,7 +452,7 @@ export async function runParallelTask(runId: string): Promise<void> {
     // FASE B: volátil na mensagem (system prompt da tarefa byte-estável —
     // vale ouro nas CONTINUAÇÕES, que repetem o mesmo prefixo).
     taskVolatileCtx = builder.getLastVolatileContext()
-    systemPrompt = `${base}\n\n${buildTaskSystemPrompt(projectPath, worktree, null)}`
+    systemPrompt = `${base}\n\n${buildTaskSystemPrompt(projectPath, null)}`
   } catch (err) {
     logger.warn('agent', `[parallel] ContextBuilder falhou para ${runId} — prompt degradado: ${formatError(err)}`)
     let projectInstructions: { heading: string; body: string } | null = null
@@ -469,7 +464,7 @@ export async function runParallelTask(runId: string): Promise<void> {
       const bundle = await loadProjectInstructions(projectPath)
       projectInstructions = buildParallelTaskInstructionsBody(bundle)
     } catch { /* sem instruções de projecto — segue sem memória */ }
-    systemPrompt = buildTaskSystemPrompt(projectPath, worktree, projectInstructions)
+    systemPrompt = buildTaskSystemPrompt(projectPath, projectInstructions)
   }
   // Guarda pré-voo (paridade com o main): Stop durante a montagem do prompt
   // (router+planner = segundos) não pode deixar o engine arrancar.
@@ -517,6 +512,9 @@ export async function runParallelTask(runId: string): Promise<void> {
       return undefined
     },
     getContextLimits: () => contextLimits,
+    // O prompt das tarefas é o do main + adenda de tarefa — o reminder crítico
+    // faz parte dele, portanto a re-injeção periódica aplica-se cá também.
+    reinjectCriticalReminder: true,
     tools: openaiTools,
     executeTool,
     isStreamSafeTool: (name) =>
@@ -764,7 +762,9 @@ export async function runParallelTask(runId: string): Promise<void> {
   try {
     if (typeof firstMessage === 'string' && /(^|\s)@\S/.test(firstMessage)) {
       const { resolveMentionContext } = await import('../atMentions')
-      const mention = await resolveMentionContext(firstMessage)
+      // Executor da TAREFA, não o singleton — scope + read-state do projeto
+      // certo (ver a nota em resolveMentionContext).
+      const mention = await resolveMentionContext(firstMessage, toolExecutor)
       if (mention.contextText || mention.imageParts.length > 0) {
         const blocks: ContentBlockAPI[] = [{ type: 'text', text: firstMessage }]
         if (mention.contextText) blocks.push({ type: 'text', text: mention.contextText })
@@ -988,51 +988,6 @@ export async function runParallelTask(runId: string): Promise<void> {
           .then(({ saveTasksForSession }) => saveTasksForSession(projectPath, chatSessionId, closed))
           .catch(() => { /* best-effort */ })
       }
-    }
-
-    // Fase 5: fecho do worktree — auto-commita trabalho solto (branch
-    // consumível) e diz ao developer onde o trabalho vive e como fundir.
-    // O worktree fica SEMPRE no disco; remover é decisão do developer.
-    if (worktree) {
-      const wt = worktree
-      const finishedOk = useParallelTaskStore.getState().runs.get(runId)?.status === 'completed'
-      void finalizeTaskWorktree(wt, run.description)
-        .then(async ({ aheadCount }) => {
-          if (aheadCount === 0) return // nada para fundir — silêncio honesto
-          // AUTO-MERGE (decisão do produto 2026-07-17): tarefa COMPLETA funde
-          // sozinha na branch do developer; a nota manual só aparece como
-          // fallback (conflito/recusa) ou em tarefas paradas/erradas.
-          if (finishedOk) {
-            const outcome = await autoMergeTaskBranch(wt, run.description)
-            if (outcome.merged) {
-              appendToTaskSession(run.sessionId, {
-                role: 'system',
-                level: 'info',
-                content: t('parallel.mergedToBranch')
-                  .replace('{count}', String(aheadCount))
-                  .replace('{branch}', outcome.userBranch || 'main'),
-              })
-              return
-            }
-            if (outcome.conflicted) {
-              appendToTaskSession(run.sessionId, {
-                role: 'system',
-                level: 'warn',
-                content: t('parallel.mergeConflictFallback').replace('{branch}', wt.branch),
-              })
-              return
-            }
-          }
-          appendToTaskSession(run.sessionId, {
-            role: 'system',
-            level: 'info',
-            content: t('parallel.worktreeResult')
-              .replace('{branch}', wt.branch)
-              .replace('{count}', String(aheadCount))
-              .replace('{path}', wt.path),
-          })
-        })
-        .catch(() => { /* best-effort */ })
     }
 
     // H10 (ronda crítica): orientações enfileiradas que o run nunca drenou

@@ -457,6 +457,110 @@ test('DashScope explicit prompt cache is applied for Kimi K2.7 Code', async () =
   assert.equal(system.content[1].text, dynamicPart)
 })
 
+test('emits X-Model-Max-Output-Tokens when the active config declares it', async () => {
+  // Auditoria 2026-07-28: a janela tinha header, o teto de SAÍDA não — um
+  // modelo novo publicado só no KV herdava o teto do perfil de fallback da IDE
+  // (32K) e ficava calado aí, mesmo sendo capaz de gerar muito mais.
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+
+  const res = await handleRequest(
+    request('/v1/chat/completions', { messages: [{ role: 'user', content: 'hi' }] }),
+    env({
+      ACTIVE_AI_CONFIG_JSON: JSON.stringify({
+        ...activeConfig,
+        contextWindow: 1_000_000,
+        maxOutputTokens: 131_072,
+      }),
+    }),
+    { fetcher },
+  )
+
+  assert.equal(res.headers.get('x-model-max-output-tokens'), '131072')
+  assert.equal(res.headers.get('x-model-context-window'), '1000000')
+  assert.match(
+    res.headers.get('access-control-expose-headers') ?? '',
+    /X-Model-Max-Output-Tokens/,
+  )
+})
+
+test('omits X-Model-Max-Output-Tokens when the config does not declare it', async () => {
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+
+  const res = await handleRequest(
+    request('/v1/chat/completions', { messages: [{ role: 'user', content: 'hi' }] }),
+    env({ ACTIVE_AI_CONFIG_JSON: JSON.stringify(activeConfig) }),
+    { fetcher },
+  )
+
+  // Ausente → a IDE cai no perfil local, como antes.
+  assert.equal(res.headers.get('x-model-max-output-tokens'), null)
+})
+
+test('DashScope explicit cache applies to a MARKER-LESS system message (post-FASE-B)', async () => {
+  // Auditoria 2026-07-28: the IDE stopped emitting the boundary marker when the
+  // split moved to build time, so "no marker" became the normal case — and the
+  // old `continue` made explicit caching dead for every DashScope model.
+  const dashscopeConfig = {
+    ...activeConfig,
+    provider: 'dashscope',
+    model: 'kimi-k2.7-code',
+    baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+    authHeader: 'Authorization',
+    authScheme: 'Bearer',
+    apiKeyEnv: 'DASHSCOPE_API_KEY',
+  }
+  const systemPrompt = 'S'.repeat(5000)
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+
+  await handleRequest(
+    request('/v1/chat/completions', {
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: 'hi' },
+      ],
+      stream: true,
+    }),
+    env({
+      ACTIVE_AI_CONFIG_JSON: JSON.stringify(dashscopeConfig),
+      DASHSCOPE_API_KEY: 'dashscope-secret',
+    }),
+    { fetcher },
+  )
+
+  const system = fetcher.calls[0].body.messages[0]
+  assert.equal(Array.isArray(system.content), true)
+  assert.deepEqual(system.content[0].cache_control, { type: 'ephemeral' })
+  assert.equal(system.content[0].text, systemPrompt)
+  assert.equal(system.content.length, 1)
+})
+
+test('DashScope marker-less system stays a plain string below the cache minimum', async () => {
+  const dashscopeConfig = {
+    ...activeConfig,
+    provider: 'dashscope',
+    model: 'kimi-k2.7-code',
+    baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+    authHeader: 'Authorization',
+    authScheme: 'Bearer',
+    apiKeyEnv: 'DASHSCOPE_API_KEY',
+  }
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+
+  await handleRequest(
+    request('/v1/chat/completions', {
+      messages: [{ role: 'system', content: 'short system' }],
+      stream: true,
+    }),
+    env({
+      ACTIVE_AI_CONFIG_JSON: JSON.stringify(dashscopeConfig),
+      DASHSCOPE_API_KEY: 'dashscope-secret',
+    }),
+    { fetcher },
+  )
+
+  assert.equal(fetcher.calls[0].body.messages[0].content, 'short system')
+})
+
 test('DashScope GLM-5.2 managed path uses implicit cache shape without cache_control', async () => {
   const dashscopeConfig = {
     ...activeConfig,

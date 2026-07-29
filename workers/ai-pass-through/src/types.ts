@@ -43,6 +43,17 @@ export interface ActiveAIConfig {
    */
   contextWindow?: number
   /**
+   * Teto de tokens de SAÍDA do modelo ativo. Publicado na config KV pelo admin
+   * e emitido em `X-Model-Max-Output-Tokens`.
+   *
+   * Irmão do contextWindow e pela mesma razão (auditoria 2026-07-28): a janela
+   * já tinha header, o output NÃO — portanto um modelo novo publicado só no KV
+   * herdava o teto do perfil de fallback da IDE (MiMo, 32K) e ficava calado
+   * nesse limite, mesmo sendo capaz de gerar 128K+. Esse valor é também o teto
+   * da escalada anti-truncagem no loop, por isso o efeito era duplo.
+   */
+  maxOutputTokens?: number
+  /**
    * Campos extra de request específicos do provider, merged no corpo de
    * CADA pedido (depois do model, antes do stream_options). Config-driven
    * para o worker continuar provider-agnóstico — ex.: DashScope

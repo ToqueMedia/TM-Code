@@ -9,6 +9,7 @@ import {
   Spinner
 } from '@chakra-ui/react'
 import {
+  FiEyeOff,
   FiSearch,
   FiType,
 } from 'react-icons/fi'
@@ -23,6 +24,7 @@ interface SearchInputAreaProps {
   caseSensitive: boolean
   wholeWord: boolean
   useRegex: boolean
+  includeIgnored: boolean
   ripgrepAvailable: boolean | null
   hasProject: boolean
   onSearchTermChange: (value: string) => void
@@ -31,6 +33,7 @@ interface SearchInputAreaProps {
   onToggleCaseSensitive: () => void
   onToggleWholeWord: () => void
   onToggleRegex: () => void
+  onToggleIncludeIgnored: () => void
 }
 
 function SearchInputArea({
@@ -41,6 +44,7 @@ function SearchInputArea({
   caseSensitive,
   wholeWord,
   useRegex,
+  includeIgnored,
   ripgrepAvailable,
   hasProject,
   onSearchTermChange,
@@ -49,6 +53,7 @@ function SearchInputArea({
   onToggleCaseSensitive,
   onToggleWholeWord,
   onToggleRegex,
+  onToggleIncludeIgnored,
 }: SearchInputAreaProps) {
   return (
     <Box p={3} borderBottom={`1px solid ${tokens.colors.border.default}`}>
@@ -133,6 +138,20 @@ function SearchInputArea({
               transition={`all ${tokens.transition.fast}`}
             >
               <FiSearch size={12} />
+            </IconButton>
+            <IconButton
+              aria-label={t("search.includeIgnored")}
+              title={t("search.includeIgnored")}
+              variant="ghost"
+              size="xs"
+              borderRadius="4px"
+              color={includeIgnored ? tokens.colors.accent.primary : tokens.colors.text.muted}
+              bg={includeIgnored ? tokens.colors.accent.primarySubtle : 'transparent'}
+              _hover={{ bg: tokens.colors.bg.hoverSubtle }}
+              onClick={onToggleIncludeIgnored}
+              transition={`all ${tokens.transition.fast}`}
+            >
+              <FiEyeOff size={12} />
             </IconButton>
           </HStack>
 

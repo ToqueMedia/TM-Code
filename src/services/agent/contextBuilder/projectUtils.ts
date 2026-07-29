@@ -13,7 +13,7 @@ import { cachedBuildFileTree, cachedSafeReadFile } from '../ipcCache'
 import { detectSystemPackageManager } from '../../packageManagerDetector'
 import type { TemplateManifest } from '../../templateService'
 import type { ProjectManifest } from '../../projectManifestService'
-import type { GitContext, PackageSummary, PathAlias, RecentFileEntry } from './types'
+import type { GeneratedPath, GitContext, PackageSummary, PathAlias, RecentFileEntry } from './types'
 
 // Goes through `ipcCache.cachedSafeReadFile` so the dozen-or-so calls a
 // single context-build kicks off (README, TMS, PLAN, TODO, .toquemedia-id,
@@ -154,6 +154,160 @@ export async function readPathAliases(projectPath: string): Promise<PathAlias[]>
     }
   }
   return []
+}
+
+/** Parse tolerante de JSONC — tsconfigs trazem comentários e vírgulas finais. */
+function parseJsonc(raw: string): Record<string, unknown> | null {
+  try {
+    return JSON.parse(
+      raw
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:])\/\/.*$/gm, '$1')
+        .replace(/,(\s*[}\]])/g, '$1'),
+    )
+  } catch {
+    return null
+  }
+}
+
+/** Subdirectórios imediatos, sem dot-dirs nem node_modules. */
+async function listSubdirs(path: string, limit: number): Promise<string[]> {
+  try {
+    const entries = await invoke<Array<{ name: string; is_directory: boolean }>>('list_directory', {
+      path,
+    })
+    return entries
+      .filter(e => e.is_directory && !e.name.startsWith('.') && e.name !== 'node_modules')
+      .map(e => e.name)
+      .slice(0, limit)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Bundlers cujo directório de saída é fixo e documentado quando não é
+ * sobreposto. NUNCA basta o nome: ver `readGeneratedPaths` para as três
+ * condições que têm de coincidir antes de um destes ser declarado.
+ */
+const BUNDLER_DEFAULT_OUTPUT: Array<{ dep: string; outDir: string }> = [
+  { dep: 'vite', outDir: 'dist' },
+  { dep: 'next', outDir: '.next' },
+  { dep: '@angular/cli', outDir: 'dist' },
+  { dep: 'parcel', outDir: 'dist' },
+]
+
+/**
+ * Caminhos que o projecto declara serem GERADOS.
+ *
+ * Existe porque um dev humano recebe isto de graça — ao entrar num projecto
+ * TypeScript sabe que os `.js` ao lado de `src/` são output do compilador — e
+ * o modelo tinha de o inferir do NOME da pasta, que mente nos dois sentidos:
+ * `functions/lib` era gerado e `lib/` noutro projecto é fonte legítima.
+ *
+ * **Precisão antes de cobertura.** Falhar um caminho gerado é uma falha suave
+ * (o modelo perde uma dica; o `.gitignore` continua a proteger a busca e a
+ * guarda de apagar). Declarar fonte real como gerada é uma falha dura — o
+ * modelo recusa-se a editar código verdadeiro. Por isso só entram aqui
+ * declarações que se conseguem LER:
+ *
+ *  1. `outDir` de tsconfig/jsconfig — a raiz, os workspaces declarados no
+ *     package.json, e um nível de subdirectórios. (No momenu-fact quem declara
+ *     é o `functions/tsconfig.json`; a raiz não tem `outDir` nenhum.)
+ *  2. `Cargo.toml` ⇒ `target/` — fixado pela toolchain, não pelo projecto.
+ *  3. Default de bundler, e só com TRÊS sinais independentes a coincidir: a
+ *     ferramenta é dependência declarada, o directório existe, e o próprio
+ *     projecto ignora-o no git. Um `dist/` de fonte real falha o terceiro; um
+ *     `outDir` sobreposto para outro sítio falha o segundo.
+ *
+ * Vite e webpack com saída sobreposta ficam de fora de propósito: o valor vive
+ * numa expressão JavaScript e lê-lo por regex seria adivinhar, não ler.
+ */
+export async function readGeneratedPaths(projectPath: string): Promise<GeneratedPath[]> {
+  const configFiles = ['tsconfig.json', 'jsconfig.json']
+  const found: GeneratedPath[] = []
+  const seen = new Set<string>()
+
+  const push = (rel: string, source: string): void => {
+    if (!rel || rel.startsWith('..') || seen.has(rel)) return
+    seen.add(rel)
+    found.push({ path: rel, source })
+  }
+
+  const collectTsconfig = (raw: string | null, relDir: string, fileName: string): void => {
+    if (!raw) return
+    const json = parseJsonc(raw)
+    const outDir = (json?.compilerOptions as Record<string, unknown> | undefined)?.outDir
+    if (typeof outDir !== 'string' || !outDir.trim()) return
+    // `outDir` é relativo ao tsconfig que o declara, não à raiz do projecto.
+    const cleaned = outDir.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+    if (!cleaned || cleaned.startsWith('..')) return
+    push(relDir ? `${relDir}/${cleaned}` : cleaned, `${relDir ? `${relDir}/` : ''}${fileName} outDir`)
+  }
+
+  // ── Que directórios inspeccionar ──
+  // Os workspaces declarados são a resposta certa para um monorepo; a varredura
+  // de um nível apanha os layouts que não os declaram (`functions/`, `server/`).
+  const rootPkg = parseJsonc((await safeReadFile(`${projectPath}/package.json`)) ?? '')
+  const rawWorkspaces = Array.isArray(rootPkg?.workspaces)
+    ? rootPkg.workspaces
+    : Array.isArray((rootPkg?.workspaces as Record<string, unknown> | undefined)?.packages)
+      ? ((rootPkg!.workspaces as Record<string, unknown>).packages as unknown[])
+      : []
+
+  const dirs = new Set<string>(await listSubdirs(projectPath, 24))
+  for (const entry of rawWorkspaces) {
+    if (typeof entry !== 'string') continue
+    const spec = entry.replace(/\\/g, '/').replace(/\/+$/, '')
+    if (spec.includes('..')) continue
+    if (spec.endsWith('/*')) {
+      // `packages/*` → expande para os filhos reais (profundidade 2).
+      const base = spec.slice(0, -2)
+      for (const child of await listSubdirs(`${projectPath}/${base}`, 40)) {
+        dirs.add(`${base}/${child}`)
+      }
+    } else if (!spec.includes('*')) {
+      dirs.add(spec)
+    }
+  }
+
+  // ── 1. outDir declarado ──
+  for (const file of configFiles) {
+    collectTsconfig(await safeReadFile(`${projectPath}/${file}`), '', file)
+  }
+  for (const dir of dirs) {
+    for (const file of configFiles) {
+      collectTsconfig(await safeReadFile(`${projectPath}/${dir}/${file}`), dir, file)
+    }
+  }
+
+  // ── 2. Cargo: `target/` é da toolchain, não do projecto ──
+  for (const dir of ['', ...dirs]) {
+    const prefix = dir ? `${dir}/` : ''
+    if (await safeReadFile(`${projectPath}/${prefix}Cargo.toml`)) {
+      push(`${prefix}target`, `${prefix}Cargo.toml (target de build do Cargo)`)
+    }
+  }
+
+  // ── 3. Default de bundler, só com os três sinais a coincidir ──
+  const deps = {
+    ...(rootPkg?.dependencies as Record<string, unknown> | undefined),
+    ...(rootPkg?.devDependencies as Record<string, unknown> | undefined),
+  }
+  for (const { dep, outDir } of BUNDLER_DEFAULT_OUTPUT) {
+    if (!(dep in deps) || seen.has(outDir)) continue
+    const absolute = `${projectPath}/${outDir}`
+    // Existe? E o próprio projecto declara-o descartável no git?
+    const [exists, ignored] = await Promise.all([
+      invoke<boolean>('path_exists', { path: absolute }).catch(() => false),
+      invoke<boolean>('is_path_gitignored', { projectPath, filePath: absolute }).catch(() => false),
+    ])
+    if (exists && ignored) {
+      push(outDir, `saída por omissão do ${dep}, confirmada por .gitignore`)
+    }
+  }
+
+  return found.slice(0, 12)
 }
 
 export async function extractPackageSummary(projectPath: string): Promise<PackageSummary | null> {

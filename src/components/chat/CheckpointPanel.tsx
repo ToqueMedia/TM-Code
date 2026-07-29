@@ -73,6 +73,13 @@ function CheckpointPanel({ surface = 'inline' }: CheckpointPanelProps) {
       const failNames = result.failed.map(f => f.path.split('/').pop()).join(', ')
       msg += ` (${t("checkpoint.revertAllFailed")}: ${failNames})`
     }
+    // Emparelhamento revert↔transcript (auditoria 2026-07-28, gap F#8): o
+    // disco volta atrás mas o chat mantinha as afirmações do assistente sobre
+    // o trabalho revertido como se ainda fossem verdade. A nota diz-o ao
+    // UTILIZADOR; o AGENTE é informado automaticamente no turno seguinte pelo
+    // sweep de modificações externas (o revert escreve por fora do read-state
+    // do executor, que é exatamente o que o sweep deteta).
+    msg += ' — assistant messages above may describe work that no longer exists on disk.'
     useChatStore.getState().addSystemMessage(msg)
     clearLastRevertedPaths()
   }, [lastRevertedPaths, lastRevertAllResult, clearLastRevertedPaths])
@@ -148,6 +155,27 @@ function CheckpointPanel({ surface = 'inline' }: CheckpointPanelProps) {
     setConfirmRevertId(null)
     await revertToCheckpoint(confirmRevertId)
   }, [confirmRevertId, revertToCheckpoint])
+
+  // Revert + rewind do CHAT (opt-in — gap F#8 da auditoria): o disco volta
+  // atrás E a conversa volta a acabar na mensagem do developer que pediu esse
+  // trabalho. O toolCallId do checkpoint é a âncora; rebobinar primeiro seria
+  // errado (se o revert falhar, o transcript já tinha sido cortado), portanto
+  // a ordem é revert → rewind.
+  const handleConfirmRevertAndRewind = useCallback(async () => {
+    const { isReverting: busy } = useCheckpointStore.getState()
+    if (!confirmRevertId || busy) return
+    const anchorToolCallId = checkpoints.find(cp => cp.id === confirmRevertId)?.toolCallId
+    setConfirmRevertId(null)
+    await revertToCheckpoint(confirmRevertId)
+    if (anchorToolCallId) {
+      const rewound = useChatStore.getState().rewindToToolCall(anchorToolCallId)
+      if (!rewound) {
+        // Âncora fora do transcript (compactação/limpeza): o revert de disco
+        // aconteceu na mesma; di-lo em vez de fingir que rebobinou.
+        useChatStore.getState().addSystemMessage(t('checkpoint.rewindAnchorMissing'))
+      }
+    }
+  }, [confirmRevertId, checkpoints, revertToCheckpoint])
 
   const handleToggleSessionDiff = useCallback(() => {
     const next = !showSessionDiff
@@ -410,6 +438,23 @@ function CheckpointPanel({ surface = 'inline' }: CheckpointPanelProps) {
               onClick={handleConfirmRevert}
             >
               {t("checkpoint.undoLast")}
+            </Box>
+            <Box
+              as="button"
+              px="10px"
+              py="3px"
+              borderRadius={tokens.radius.md}
+              fontSize="10px"
+              fontWeight="600"
+              color={tokens.colors.accent.red}
+              bg={tokens.colors.accent.redSubtle}
+              cursor="pointer"
+              transition={`all ${tokens.transition.fast}`}
+              _hover={{ bg: tokens.colors.accent.redMuted }}
+              title={t('checkpoint.revertAndRewindHint')}
+              onClick={handleConfirmRevertAndRewind}
+            >
+              {t('checkpoint.revertAndRewind')}
             </Box>
           </Flex>
         </Flex>

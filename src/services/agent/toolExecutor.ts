@@ -13,10 +13,13 @@ import { useCheckpointStore } from '../../stores/checkpointStore'
 import FirebaseAuthService from '../auth/firebaseAuth'
 import { registerTaskTools } from './toolExecutor/taskOps'
 import { registerMemoryTools } from './toolExecutor/memoryOps'
+import { createPermissionAwareTimeout } from './toolExecutor/permissionAwareTimeout'
+import { formatSearchResultsByFile, matchesAnyGlob } from './toolExecutor/searchFormatters'
 import { registerInteractionTools } from './toolExecutor/interactionOps'
 import type { ToolRegistrationContext } from './toolExecutor/context'
 import {
   isEnvFile,
+  commandReferencesSealedEnv,
   isSensitiveFile,
   simpleHash,
   matchDangerousCommand,
@@ -60,7 +63,10 @@ import {
   ENTER_WORKTREE,
   EXIT_WORKTREE,
   canonicalToolName,
+  advertisedToolName,
+  routeTrainedToolCall,
   normalizeToolInputForCanonical,
+  DIVERGENT_TRAINED_TOOLS,
 } from './toolNames'
 import { ENTER_WORKTREE_DESCRIPTION, EXIT_WORKTREE_DESCRIPTION } from './toolExecutor/worktrees'
 import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileState, type FileStateCache } from './toolExecutor/fileStateCache'
@@ -72,7 +78,12 @@ import { addLineNumbers } from './toolExecutor/lineNumbers'
 import { hasBinaryExtension } from './toolExecutor/binaryExtensions'
 import { getSnippetForTwoFileDiff } from './toolExecutor/changedFileSnippet'
 import { extractReadFilesFromMessages } from './toolExecutor/readStateRecovery'
+import { logger } from '../../utils/logger'
 import { getLegacyProjectStateDir, getProjectStateDir } from '../projectStatePaths'
+// Os caminhos que o PROJECTO declara gerados. Partilhado com o system prompt
+// (secção `# Environment`) de propósito: a guarda de apagar e o que o modelo
+// lê têm de vir da mesma fonte, senão divergem.
+import { readGeneratedPaths } from './contextBuilder/projectUtils'
 import { getFsVersion, bumpFsVersion } from '../fsVersion'
 import CheckpointService from './checkpointService'
 import { markReadBeforeWriteBlocked, markTmsCreated, markTmsFullContextSent } from './tmsContext'
@@ -98,7 +109,8 @@ export interface ToolDefinition {
    * (read_file, list_directory, glob, web_fetch, etc.) are safe. Anything that
    * mutates the filesystem, spawns processes, or mutates agent state is not.
    *
-   * Default: false (serial). Used by safeToolPool to gate parallel execution.
+   * Default: false (serial). Gates the loop's parallel dispatch (query.ts
+   * stream-dispatch + post-stream prefix) via isStreamSafeTool.
    * Not sent to the API — getToolDefinitions() only copies name/description/parameters.
    */
   concurrencySafe?: boolean
@@ -181,6 +193,17 @@ interface InteractiveShellInfo {
 
 const AGENT_SHELL_MAX_BUFFER_CHARS = 200_000
 
+/** Teto do backstop MCP — ver o comentário no execute dos MCP tools. */
+const MCP_TOOL_TIMEOUT_MS = 10 * 60_000
+
+/**
+ * Tecto de espera por output do agent shell. TEM de bater certo com o `Max`
+ * anunciado nos schemas do agent_shell_write/read — um tecto mais baixo do que
+ * o prometido devolve o controlo ao modelo antes de o trabalho acabar e
+ * empurra-o para o polling que essas mesmas descrições proíbem.
+ */
+const AGENT_SHELL_MAX_WAIT_MS = 120_000
+
 // Tools whose execution can change git state. After any of these completes,
 // we nudge the shared git poller + Monaco gutters via 'git:refreshGutter'
 // (debounced on the listener side) — in an agent-first IDE the agent's own
@@ -190,7 +213,18 @@ const AGENT_SHELL_MAX_BUFFER_CHARS = 200_000
 // mutate the worktree too.
 const GIT_MUTATING_TOOLS = new Set([
   'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file',
-  'copy_file', 'create_directory', 'execute_command', 'execute_command_background',
+  'create_directory', 'execute_command', 'execute_command_background',
+])
+
+/**
+ * Tools que executam texto de shell arbitrário. Qualquer gate que valha para
+ * uma TEM de valer para as três — o comando é o mesmo, só muda a superfície.
+ * (Auditoria 2026-07-28: o gate de comandos perigosos e o selo do .env viviam
+ * só no execute_command, e o gémeo em background auto-aprovava por scope o que
+ * o de primeiro plano obrigava a confirmar.)
+ */
+const SHELL_COMMAND_TOOLS = new Set([
+  'execute_command', 'execute_command_background', 'agent_shell_write',
 ])
 
 // === Abort helpers ===
@@ -262,7 +296,7 @@ function isStreamingCommand(cmd: string): boolean {
 function formatBackgroundCommandResult(cmd: {
   id: string; command: string; status: string; pid: number;
   exitCode: number | null; output: string; startedAt: number; completedAt: number | null
-}): string {
+}, opts?: { full?: boolean }): string {
   const elapsed = cmd.completedAt
     ? `${Math.round((cmd.completedAt - cmd.startedAt) / 1000)}s`
     : `${Math.round((Date.now() - cmd.startedAt) / 1000)}s (still running)`
@@ -276,9 +310,14 @@ function formatBackgroundCommandResult(cmd: {
   }
 
   if (cmd.output) {
+    // Vista COMPACTA (listagem de todos): cauda de 4k com um ponteiro que
+    // FUNCIONA — pedir pelo id devolve o output completo (via truncateResult,
+    // que guarda o corpo no large-result store com refId real). O pre-slice
+    // antigo dizia só "(truncated)" e a cabeça era irrecuperável (auditoria
+    // 2026-07-28, o mesmo padrão do bug do execute_command).
     const MAX_OUTPUT = 4000
-    const output = cmd.output.length > MAX_OUTPUT
-      ? `...(truncated)\n${cmd.output.slice(-MAX_OUTPUT)}`
+    const output = !opts?.full && cmd.output.length > MAX_OUTPUT
+      ? `...(truncated — call check_background_commands with id: ${cmd.id} for the full output)\n${cmd.output.slice(-MAX_OUTPUT)}`
       : cmd.output
     lines.push(output)
   }
@@ -333,6 +372,107 @@ class ToolExecutor {
    * plan-mode for the other (singleton ToolExecutor under F2 multi-project).
    */
   private planModeOwners: Set<string> = new Set()
+
+  /**
+   * Ficheiros que NÃO existiam antes desta sessão e foram criados pelo agente,
+   * mapeados para o hash do conteúdo que ele escreveu.
+   *
+   * Serve a guarda de apagar. Apagar um ficheiro ignorado força o diálogo
+   * porque o git não o restaura — mas se foi o agente que o criou agora, o
+   * estado anterior é "não existia" e apagá-lo devolve exactamente isso. Aí o
+   * diálogo é atrito puro, e atrito percebido como ruído é o que empurra as
+   * pessoas para o YOLO, que desliga TODAS as guardas. Uma guarda que empurra
+   * para o YOLO tem retorno negativo.
+   *
+   * O hash é a parte que torna a isenção segura: se o conteúdo em disco já não
+   * é o que o agente escreveu, alguém mexeu no ficheiro entretanto e passa a
+   * haver algo a perder — a isenção cai e o diálogo volta.
+   */
+  private createdThisSession: Map<string, number> = new Map()
+
+  /** Regista uma criação (só é chamado onde se sabe que o ficheiro não existia). */
+  private recordCreatedFile(absPath: string, content: string): void {
+    this.createdThisSession.set(absPath, this.simpleHash(content))
+  }
+
+  /**
+   * O agente criou este ficheiro nesta sessão E ele continua como o agente o
+   * deixou? Se alguém lhe mexeu entretanto há algo a perder, e a isenção cai.
+   */
+  private async isUntouchedAgentCreation(absPath: string): Promise<boolean> {
+    const writtenHash = this.createdThisSession.get(absPath)
+    if (writtenHash === undefined) return false
+    try {
+      const current = await invoke<string>('read_file', { path: absPath })
+      return this.simpleHash(typeof current === 'string' ? current : '') === writtenHash
+    } catch {
+      // Não existe / ilegível: não há nada a perder ao apagar.
+      return true
+    }
+  }
+
+  /**
+   * Classifica o que se perde ao apagar/renomear este caminho.
+   *
+   * Distinguir os dois casos não é cosmética. O primeiro desenho tratava
+   * "ignorado pelo git" como sinónimo de "output de build" e dizia isso ao
+   * modelo — mas um `.log`, um `.DS_Store` ou um rascunho também são
+   * ignorados, e afirmar-lhe que são output de build é dizer-lhe uma coisa
+   * falsa. Foi exactamente esse o defeito que originou toda esta série: tools
+   * que asseveram ao modelo aquilo que não sabem.
+   */
+  private async classifyDeletionRisk(
+    toolName: string,
+    input: Record<string, unknown>,
+  ): Promise<{ kind: 'generated' | 'ignored' | 'none'; declaredBy?: string }> {
+    if (toolName !== 'delete_file' && toolName !== 'rename_file') return { kind: 'none' }
+    const target = (input.file_path || input.oldPath || '') as string
+    const projectRoot = this.getProjectRoot()
+    if (!target || !projectRoot) return { kind: 'none' }
+
+    const abs = this.resolveToAbsolute(target)
+    if (await this.isUntouchedAgentCreation(abs)) return { kind: 'none' }
+
+    try {
+      const ignored = await invoke<boolean>('is_path_gitignored', {
+        projectPath: projectRoot,
+        filePath: abs,
+      })
+      if (!ignored) return { kind: 'none' }
+
+      // Ignorado. Está dentro de algo que o projecto DECLARA como output?
+      // Só nesse caso é que "muda a fonte e reconstrói" é conselho verdadeiro.
+      const normalizedRoot = projectRoot.replace(/\\/g, '/').replace(/\/$/, '')
+      const rel = abs.replace(/\\/g, '/').startsWith(`${normalizedRoot}/`)
+        ? abs.replace(/\\/g, '/').slice(normalizedRoot.length + 1)
+        : ''
+      if (rel) {
+        for (const gen of await readGeneratedPaths(normalizedRoot)) {
+          if (rel === gen.path || rel.startsWith(`${gen.path}/`)) {
+            return { kind: 'generated', declaredBy: gen.source }
+          }
+        }
+      }
+      return { kind: 'ignored' }
+    } catch (error) {
+      // Falhar aberto é a escolha certa — uma verificação indisponível não
+      // pode bloquear a tool. Mas falhar CALADO não é: se `is_path_gitignored`
+      // deixar de estar na allow-list de permissões (todo `#[tauri::command]`
+      // novo tem de lá ir, e esquecer é fácil), o invoke é rejeitado antes de
+      // chegar ao Rust, este catch devolve 'none' e a guarda fica MORTA sem
+      // nada o denunciar. Nem os testes: em Jest o invoke é mock.
+      //
+      // Uma guarda de segurança que se desliga em silêncio é pior do que não
+      // existir, porque ninguém volta a olhar para ela. Fica ruidosa.
+      logger.error(
+        'agent',
+        '[deletion-guard] a verificação de gitignore falhou — a guarda de apagar está INACTIVA para este caminho. ' +
+          'Verifica se `is_path_gitignored` continua registado em lib.rs E em permissions/autogenerated.toml.',
+        error,
+      )
+      return { kind: 'none' }
+    }
+  }
 
   /**
    * Memory scope — set per-invocation by execute() when a sub-agent
@@ -590,6 +730,10 @@ class ToolExecutor {
     this.worktreeState = null
     this.readFileTimestamps.clear()
     this.readFileState.clear()
+    // A isenção de "fui eu que o criei" é válida DENTRO da sessão: numa sessão
+    // nova, um ficheiro criado antes já é património do projecto como outro
+    // qualquer, e apagá-lo volta a merecer o diálogo.
+    this.createdThisSession.clear()
     clearReadRangeTracker()
     clearToolResultVisibility()
     this.largeResults.clear()
@@ -996,9 +1140,19 @@ class ToolExecutor {
     const requestedToolName = toolName
     toolName = canonicalToolName(toolName)
     input = normalizeToolInputForCanonical(requestedToolName, input)
+    // Encaminhamento por ARGUMENTOS (ex.: Bash com run_in_background) — ver a
+    // nota em routeTrainedToolCall.
+    toolName = routeTrainedToolCall(requestedToolName, toolName, input)
 
     const tool = this.tools.get(toolName)
     if (!tool) {
+      // Dialecto de treino com contrato divergente: em vez de um beco sem
+      // saída ("Unknown tool: TodoWrite"), nomeia o substituto E a forma dos
+      // argumentos — recuperação num turno em vez de tentativa às cegas.
+      const guidance = DIVERGENT_TRAINED_TOOLS[requestedToolName]
+      if (guidance) {
+        return `Error: "${requestedToolName}" is not a tool in this IDE (it is a Claude Code name). Use ${guidance}`
+      }
       throw new Error(`Unknown tool: ${toolName}`)
     }
 
@@ -1096,32 +1250,50 @@ class ToolExecutor {
       return `Tool ${toolName} is a server-side tool managed by the AI provider. It was not executed locally. Ensure the active model supports this tool natively (e.g., Qwen 3.6 on DashScope).`
     }
 
-    // .env files are ALWAYS blocked — read, write, edit, delete
-    const filePath = (input.file_path || input.oldPath || '') as string
-    if (this.isEnvFile(filePath) && ['read_file', READ_AROUND, 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'].includes(toolName)) {
+    // .env files are ALWAYS blocked — read, write, edit, delete, and SEARCH.
+    //
+    // `directory` is in the list because search_files/Grep accept "a directory
+    // OR a single file to search within": pointing them straight at .env was a
+    // clean bypass of this seal (auditoria 2026-07-28) — auto-approved, no
+    // dialog, secrets returned as match lines. Broad searches that merely
+    // *contain* a .env are handled at the source, in search.rs.
+    const filePath = (input.file_path || input.oldPath || input.directory || '') as string
+    if (this.isEnvFile(filePath) && ['read_file', READ_AROUND, 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file', 'search_files', 'glob'].includes(toolName)) {
       return 'Blocked: .env is sealed (it holds secrets) — the agent cannot read or write it. This block is by design and is NOT a sign that a key is missing. To supply a credential, call request_credentials (it writes straight to .env); once it returns "Credentials saved to .env", that key IS present — trust that result, do not re-read .env to verify, and never ask the developer to edit .env by hand. A .env.example with placeholder values is fine for documentation only.'
+    }
+
+    // Same seal, shell surfaces. A path-based check cannot see `cat .env`, so
+    // the command TEXT is screened (see commandReferencesSealedEnv).
+    const commandText = (
+      toolName === 'agent_shell_write' ? input.input : input.command
+    ) as string | undefined
+    if (
+      commandText &&
+      SHELL_COMMAND_TOOLS.has(toolName) &&
+      commandReferencesSealedEnv(String(commandText))
+    ) {
+      return 'Blocked: .env is sealed (it holds secrets) — shell commands may not read it either, and this block holds in every permission mode. It is NOT a sign that a key is missing. To supply a credential, call request_credentials (it writes straight to .env); once it returns "Credentials saved to .env", that key IS present — trust that result instead of verifying by hand. To check which keys a project EXPECTS, read .env.example. If the file only needs to be handed to another program, pass it via --env-file (allowed) or ask the developer to run that command themselves.'
     }
 
     // Path scope check — file tools targeting paths outside all allowed
     // roots (project + additionalDirectories) prompt the user for access.
     const FILE_SCOPE_TOOLS = new Set([
       'read_file', READ_AROUND, 'write_file', 'edit_file', 'create_file',
-      'create_directory', 'delete_file', 'rename_file', 'copy_file',
-      'list_directory', 'search_files', 'glob', 'path_exists', 'append_file',
+      'create_directory', 'delete_file', 'rename_file',
+      'list_directory', 'search_files', 'glob',
       'execute_command', 'execute_command_background', 'agent_shell_start'
+      // NOTA: copy_file / path_exists / append_file estavam aqui e NÃO existem
+      // — nunca foram registadas (auditoria 2026-07-28). Uma lista de scope com
+      // tools inventadas dá falsa sensação de cobertura: parece que o clamp de
+      // caminhos protege mais superfícies do que as que existem. Ao acrescentar
+      // uma tool que recebe caminhos, acrescenta-a AQUI e regista-a de facto.
     ])
     const pathForScope = (input.file_path || input.oldPath || input.directory || input.cwd || '') as string
     if (pathForScope && FILE_SCOPE_TOOLS.has(toolName)) {
       const scopeCheck = this.checkPathScope(pathForScope)
       if (!scopeCheck.allowed) {
-        // ── TEMP DIAGNOSTIC (remover após reproduzir o "no-prompt") ──
-        // subAgentChild=true → a chamada veio de um isolated child (sub-agente
-        // Explore/Research), a hipótese de bypass do gate.
-        console.log(`[path-scope-debug] GATE tool=${toolName} path=${pathForScope} dir=${scopeCheck.directoryToAdd} subAgentChild=${ToolExecutor.getInstance() !== this} cmdCwd=${!!this.cmdModeCwd}`)
         const decision = await usePermissionStore.getState()
           .requestPathAccess(pathForScope, scopeCheck.directoryToAdd, this.runProjectContext?.projectId)
-        console.log(`[path-scope-debug] GATE decision approved=${decision.approved} path=${pathForScope}`)
-        // ── fim TEMP ──
         this.recordPermission(toolCallId, decision)
         if (!decision.approved) {
           // Uma negação chega SEMPRE do diálogo humano (source:'user'): YOLO
@@ -1167,14 +1339,38 @@ class ToolExecutor {
     // Sensitive files require explicit developer authorization
     const isSensitive = (toolName === 'read_file' || toolName === READ_AROUND) && this.isSensitiveFile(input.file_path as string)
 
+    // Apagar o que o git não restaura força SEMPRE o diálogo, mesmo com
+    // delete_file já concedido para a sessão (sessão momenu-fact 2026-07-28:
+    // 14 delete_file seguidos sobre `functions/lib/*.js`).
+    //
+    // Não é bloqueio: limpar um build partido é legítimo e o humano decide. É
+    // a assimetria que justifica o prompt — um ficheiro RASTREADO apagado por
+    // engano volta com `git checkout --`; um ignorado não volta de lado
+    // nenhum. O grant de scope não pode cobrir o caso irreversível.
+    //
+    // Deliberadamente SEM flag de override na mensagem de recusa: a lição do
+    // mesmo incidente é que uma guarda que documenta o seu próprio contorno
+    // vira lomba (a nota do glob ensinava `includeIgnored: true` e o modelo
+    // usou-a três vezes). Quem levanta isto é o humano no diálogo, não o
+    // modelo num parâmetro.
+    const deletionRisk = await this.classifyDeletionRisk(toolName, input)
+
     // Dangerous commands: all commands in the DANGEROUS_COMMANDS list.
     // - YOLO ON → Settings hard-block + forcePrompt ignored (user accepted risk).
     // - YOLO OFF + BLOCKED in Settings → rejected immediately (never runs)
     // - YOLO OFF + not blocked → always prompts Yes/No (forcePrompt)
     // - Commands NOT in the list → normal permission flow
+    //
+    // As TRÊS superfícies de shell passam por aqui (auditoria 2026-07-28): o
+    // gate só olhava para execute_command, portanto o gémeo em background
+    // — `execute_command_background("rm -rf …")` — auto-aprovava por scope
+    // exatamente onde a versão em primeiro plano forçava um Yes/No, e o
+    // agent_shell_write escapava por completo.
     let dangerousAlreadyApproved = false
-    if (toolName === 'execute_command') {
-      const commandStr = (input.command as string) || ''
+    if (SHELL_COMMAND_TOOLS.has(toolName)) {
+      const commandStr = (
+        toolName === 'agent_shell_write' ? input.input : input.command
+      ) as string || ''
       const dangerousMatch = this.matchDangerousCommand(commandStr)
       if (dangerousMatch) {
         const { isYoloModeEnabled } = await import('../../stores/permissionStore')
@@ -1224,14 +1420,27 @@ class ToolExecutor {
     ])
 
     if (!dangerousAlreadyApproved && !PERMISSION_EXEMPT_TOOLS.has(toolName)) {
-      const decision = await usePermissionStore.getState().requestPermission(toolName, input, isSensitive ? 'sensitive_file' : false, this.resolvePermissionOrigin())
+      const promptReason = deletionRisk.kind !== 'none'
+        ? (deletionRisk.kind === 'generated' ? 'generated_file' : 'untracked_file')
+        : isSensitive ? 'sensitive_file' : false
+      const decision = await usePermissionStore.getState().requestPermission(toolName, input, promptReason, this.resolvePermissionOrigin())
       this.recordPermission(toolCallId, decision)
       if (!decision.approved) {
         const target = (input.file_path || input.command || input.name || '') as string
         // Negação sempre humana (ver nota no gate de path-scope acima).
+        // Cada ramo diz apenas o que é VERDADE para o seu caso: só o primeiro
+        // sabe que aquilo é output de build, e só ele pode aconselhar
+        // "muda a fonte". Ver classifyDeletionRisk.
         const reason = decision.denyReason
           ? ` User says: ${decision.denyReason}`
-          : ' Ask the user what they want instead or suggest an alternative approach.'
+          : deletionRisk.kind === 'generated'
+            // A recusa de um artefacto gerado é a ocasião para corrigir o
+            // raciocínio, não só para dizer não: sem isto o modelo tenta o
+            // ficheiro seguinte da mesma lista, que foi o que aconteceu.
+            ? ` ${target} is build output — the project declares it generated (${deletionRisk.declaredBy}), and it is untracked, so git cannot restore it. Deleting artifacts by hand is also futile: the next build regenerates them. If the goal is to remove this code, remove its SOURCE and let the build follow; if the sources are already gone, say so and leave the stale artifacts alone.`
+            : deletionRisk.kind === 'ignored'
+              ? ` ${target} is untracked (gitignored), so git cannot restore it — there is no history to revert to. Do not retry other paths in the same batch on the assumption that untracked means disposable; ask the developer what should happen to it.`
+              : ' Ask the user what they want instead or suggest an alternative approach.'
         return `Permission denied by user for ${toolName}${target ? ` (${target})` : ''}.${reason}`
       }
       // RACE FIX: aprovação que chega depois de um stop não pode executar a
@@ -1305,18 +1514,31 @@ class ToolExecutor {
 
   /**
    * Returns true iff the tool is safe to execute in parallel with other
-   * concurrency-safe tools. Used by safeToolPool to gate parallel dispatch.
+   * concurrency-safe tools. Gates the loop's parallel dispatch (query.ts).
    * Unknown tools default to false (serial) — defensive.
    */
   isConcurrencySafe(toolName: string): boolean {
-    return this.tools.get(toolName)?.definition.concurrencySafe === true
+    // Canonicaliza porque o modelo emite o nome de TREINO (`Read`) e o registo
+    // é indexado pelo canónico. Sem isto, o despacho paralelo do loop deixava
+    // de reconhecer como seguras exactamente as tools que ele mais chama — os
+    // callers tinham de fazer a dupla chamada à mão, o que só funciona quando
+    // alguém se lembra dela.
+    const key = this.tools.has(toolName) ? toolName : canonicalToolName(toolName)
+    return this.tools.get(key)?.definition.concurrencySafe === true
   }
 
+  /**
+   * Schema enviado ao modelo. É AQUI que a renomeação para o dialecto de
+   * treino acontece — ver ADVERTISED_TOOL_NAMES. Internamente tudo continua a
+   * chamar-se como sempre se chamou (chaves do registo, gates, grants); o
+   * modelo passa a ver `Read`/`Grep`/`Bash`/`Edit`, que é o que ele já emitia
+   * por treino. O caminho de volta é o `canonicalToolName` do execute().
+   */
   getToolDefinitions(): OpenAIToolDefinition[] {
     return Array.from(this.tools.values()).map(t => ({
       type: 'function' as const,
       function: {
-        name: t.definition.name,
+        name: advertisedToolName(t.definition.name),
         description: t.definition.description,
         parameters: t.definition.input_schema
       }
@@ -1367,7 +1589,22 @@ class ToolExecutor {
             const { browserSession } = await import('../browserSessionManager')
             await browserSession.beginSession()
           }
-          return await callToolFn(tool.serverName, tool.name, input)
+          // BACKSTOP anti-pendura (auditoria 2026-07-28): um servidor MCP
+          // encravado nunca devolve nada e o turno ficava preso para SEMPRE —
+          // as tools locais têm todas os seus próprios tetos; o caminho MCP
+          // era o único sem nenhum. 10 min é rede de segurança contra o
+          // infinito, não um timeout afinado — e o relógio PÁRA enquanto um
+          // diálogo de permissão/diff/credenciais está aberto (política do
+          // projecto: espera por humano é ilimitada).
+          const timeout = createPermissionAwareTimeout(fullName, MCP_TOOL_TIMEOUT_MS)
+          try {
+            return await Promise.race([
+              callToolFn(tool.serverName, tool.name, input),
+              timeout.promise,
+            ])
+          } finally {
+            timeout.cleanup()
+          }
         },
       })
     }
@@ -1430,6 +1667,12 @@ class ToolExecutor {
       case CAPTURE_URL_DESIGN:
         // Design handoffs are long on purpose (layout + palette + verbatim text).
         return 24_000
+      case 'web_fetch':
+        // O schema anuncia `maxLength` com default 50000; sem este ramo a tool
+        // caía no default de 12k e a página chegava como um preview de 2k
+        // (auditoria 2026-07-28), obrigando a paginar documentação que o modelo
+        // tinha pedido inteira. O limite do schema é que manda.
+        return 50_000
       default:
         return 12_000
     }
@@ -1822,13 +2065,15 @@ ${preview}
   /**
    * Runs install commands via streaming (run_streaming_command) so the user
    * sees real-time logs in the chat via progressText.
-   * Includes a 180s timeout to prevent hanging if the process stalls.
+   * Timeout vem do `timeout_secs` da chamada (default 300s) — instalar é lento
+   * por natureza e um monorepo grande precisa de pedir mais.
    */
   private async executeInstallStreaming(
     command: string,
     cwd: string,
     toolCallId?: string,
     abortSignal?: AbortSignal,
+    timeoutSecs: number = 300,
   ): Promise<string> {
     const tcId = toolCallId
     const allOutput: string[] = []
@@ -1891,7 +2136,7 @@ ${preview}
       }
 
       // Race: exit vs timeout vs abort (user stops agent)
-      const INSTALL_TIMEOUT = 300_000 // 5 min — large projects can be slow on first install
+      const INSTALL_TIMEOUT = timeoutSecs * 1000
       let timeoutTimer: ReturnType<typeof setTimeout>
       const timeoutPromise = new Promise<number>((_, reject) => {
         timeoutTimer = setTimeout(() => reject(new Error(`Install timed out after ${INSTALL_TIMEOUT / 1000}s`)), INSTALL_TIMEOUT)
@@ -2101,28 +2346,18 @@ ${preview}
       // Detect dev server URL in output
       this.detectServerUrl(fullOutput)
 
-      if (exitCode === 0) {
-        const lines = fullOutput.split('\n')
-        const tail = lines.length > 30 ? lines.slice(-30).join('\n') : fullOutput
-        return `${tail}\nExit code: 0`
-      }
-
-      // Failure: return the last N lines (where errors, stack traces and
-      // test-failure summaries live) + exit code, instead of the full output.
-      // The full body is still accessible: truncateResult (in execute()) will
-      // store it in the large_result store if it exceeds the per-tool limit,
-      // and the model can page it via read_large_result. Token-reduction phase.
-      {
-        const lines = fullOutput.split('\n')
-        const MAX_FAIL_LINES = 50
-        const tail = lines.length > MAX_FAIL_LINES
-          ? lines.slice(-MAX_FAIL_LINES).join('\n')
-          : fullOutput
-        const note = lines.length > MAX_FAIL_LINES
-          ? `\n[showing last ${MAX_FAIL_LINES} of ${lines.length} lines — earlier output available via read_large_result if needed]`
-          : ''
-        return `${tail}${note}\nExit code: ${exitCode}`
-      }
+      // Devolve o output COMPLETO e deixa o truncateResult() do execute()
+      // fazer o corte: ele já está configurado para dar a esta tool um preview
+      // de CAUDA (é onde vivem os erros e o exit code) e guarda o corpo inteiro
+      // no large_result store com um refId REAL.
+      //
+      // BUG (auditoria 2026-07-28): este caminho cortava as linhas ANTES,
+      // e depois dizia ao modelo "earlier output available via read_large_result"
+      // — mentira: o corpo completo nunca chegava ao store, não existia refId
+      // nenhum, e a cabeça do output ficava irrecuperável. Num tsc/webpack longo
+      // o PRIMEIRO erro é o que interessa, e era exatamente esse que se perdia.
+      // O caminho de sucesso era pior: cortava 30 linhas sem marca nenhuma.
+      return `${fullOutput}\nExit code: ${exitCode}`
     } catch (error) {
       cleanup()
       const msg = error instanceof Error ? error.message : String(error)
@@ -2283,13 +2518,7 @@ ${preview}
   private async requirePathAccess(filePath: string): Promise<void> {
     const scope = this.checkPathScope(filePath)
     if (scope.allowed) return
-    // ── TEMP DIAGNOSTIC (remover após reproduzir o "no-prompt") ──
-    // Se isto aparece SEM um "GATE" antes para o mesmo path, o gate foi
-    // saltado e este handler é o único a pedir (cenário do sub-agente).
-    console.log(`[path-scope-debug] HANDLER requirePathAccess path=${filePath} dir=${scope.directoryToAdd} subAgentChild=${ToolExecutor.getInstance() !== this} cmdCwd=${!!this.cmdModeCwd}`)
     const decision = await usePermissionStore.getState().requestPathAccess(filePath, scope.directoryToAdd)
-    console.log(`[path-scope-debug] HANDLER decision approved=${decision.approved} path=${filePath}`)
-    // ── fim TEMP ──
     if (!decision.approved) {
       const reason = decision.denyReason ? ` ${decision.denyReason}` : ''
       throw new Error(`Access denied: path "${filePath}" is outside the ${scope.scopeName}.${reason}`)
@@ -2376,6 +2605,41 @@ ${preview}
   // genuine safety (.env / sensitive-file detection, below).
   private isEnvFile(filePath: string): boolean {
     return isEnvFile(filePath)
+  }
+
+  /**
+   * Checkpoint de uma escrita aplicada DIRETAMENTE ao disco (modo cwd).
+   *
+   * O caminho normal captura o checkpoint na aprovação do diff
+   * (diffService.acceptDiff), mas o modo cwd escreve sem passar por lá — e
+   * TODAS as tarefas paralelas correm em modo cwd. Resultado (auditoria
+   * 2026-07-28): as escritas das tarefas não geravam checkpoint nenhum e o
+   * "Reverter tudo" saltava-as em silêncio, enquanto delete/rename capturavam
+   * sempre — a cobertura era assimétrica.
+   *
+   * Best-effort por desenho: falhar o checkpoint nunca pode bloquear a escrita.
+   */
+  private async captureCmdModeCheckpoint(
+    path: string,
+    originalContent: string,
+    isNewFile: boolean,
+    toolCallId: string | undefined,
+    toolName: string,
+  ): Promise<void> {
+    try {
+      const { default: CheckpointService } = await import('./checkpointService')
+      await CheckpointService.getInstance().captureBeforeWrite(
+        path,
+        originalContent,
+        isNewFile,
+        toolCallId || `cmdmode_${Date.now()}`,
+        toolName,
+      )
+      const { useCheckpointStore } = await import('../../stores/checkpointStore')
+      useCheckpointStore.getState().syncFromService()
+    } catch {
+      // Checkpoint failure must never block the write.
+    }
   }
 
   /**
@@ -2776,8 +3040,18 @@ ${preview}
     return session
   }
 
+  /**
+   * Espera por output novo até `waitMs`.
+   *
+   * O tecto é o mesmo que os schemas anunciam (120s). Estava fixo em 10s
+   * (auditoria 2026-07-28) enquanto as descrições do agent_shell_write/read
+   * prometiam "Max: 120000 (use high values for deploy/upload)... instead of
+   * polling every 1-5s": um deploy voltava sempre ao fim de 10s sem nada e o
+   * modelo era empurrado para exatamente o polling que a descrição proíbe —
+   * gastando um turn inteiro por sondagem.
+   */
   private async waitForAgentShellOutput(session: AgentShellSession, startLength: number, waitMs: number): Promise<void> {
-    const deadline = Date.now() + Math.max(0, Math.min(waitMs, 10_000))
+    const deadline = Date.now() + Math.max(0, Math.min(waitMs, AGENT_SHELL_MAX_WAIT_MS))
     while (Date.now() < deadline) {
       if (session.output.length > startLength || session.exited) return
       await new Promise(resolve => setTimeout(resolve, 50))
@@ -2820,18 +3094,23 @@ ${preview}
     } catch { /* editor refresh is best-effort */ }
   }
 
-  private formatFileTreeCompact(node: Record<string, unknown>, indent: string = ''): string {
+  private formatFileTreeCompact(
+    node: Record<string, unknown>,
+    indent: string = '',
+    ignoreGlobs: string[] = [],
+  ): string {
     if (!node) return ''
     let result = ''
     const name = (node.name || node.fileName || '') as string
     const isDir = node.type === 'directory' || (node.children !== undefined)
+    if (name && ignoreGlobs.length > 0 && matchesAnyGlob(name, ignoreGlobs)) return ''
     if (name) {
       result += `${indent}${isDir ? name + '/' : name}\n`
     }
     if (node.children && Array.isArray(node.children)) {
       const childIndent = name ? indent + '  ' : indent
       for (const child of node.children) {
-        result += this.formatFileTreeCompact(child, childIndent)
+        result += this.formatFileTreeCompact(child, childIndent, ignoreGlobs)
       }
     }
     return result || '(empty directory)'
@@ -3134,15 +3413,21 @@ ${preview}
           // cat -n line numbers (claude-vaz parity — addLineNumbers). The
           // model relies on these to target offset/limit and edit ranges.
           // Only applied when the numbered result stays under the truncation
-          // threshold (12_000 chars = ToolExecutor.getToolResultMaxChars('read_file')):
-          // larger outputs flow through truncateResult → a char-offset preview
-          // + read_large_result paging, where numbering a partial char-window
-          // would mislead (line numbers wouldn't track real file lines across
-          // a sliced preview, and read_large_result's char offset would land
-          // mid-prefix). claude-vaz avoids this by throwing past 25k tokens
-          // instead of previewing; the TM's preview path is a divergence for
-          // large files only.
-          const READ_TRUNCATION_THRESHOLD = 12_000
+          // threshold: acima dela o output segue por truncateResult → preview
+          // por offset de CHARS + paginação read_large_result, e numerar uma
+          // janela parcial enganaria (os números não acompanhariam as linhas
+          // reais do ficheiro, e o offset do read_large_result cairia a meio de
+          // um prefixo). claude-vaz evita isto rebentando acima de 25k tokens
+          // em vez de fazer preview; o preview é uma divergência do TM só para
+          // ficheiros grandes.
+          //
+          // O limiar TEM de ser o mesmo do corte (auditoria 2026-07-28): estava
+          // fixo em 12_000 com um comentário a afirmar que era igual a
+          // getToolResultMaxChars('read_file') — que entretanto subiu para
+          // 100_000. Qualquer leitura entre os dois valores chegava ao modelo
+          // SEM numeração nenhuma, apesar de não ser truncada, e estragava o
+          // offset targeting, o read_around e o "1-based as shown by Read" do LSP.
+          const READ_TRUNCATION_THRESHOLD = ToolExecutor.getToolResultMaxChars('read_file')
           const numbered = addLineNumbers(content, startLine)
           const displayContent =
             numbered.length < READ_TRUNCATION_THRESHOLD ? numbered : content
@@ -3182,7 +3467,7 @@ ${preview}
             }
             return enriched
           }
-          // Re-throw with a real Error so the safeToolPool catch sees a usable
+          // Re-throw with a real Error so the caller's catch sees a usable
           // shape (and the formatError fallback there matches what we logged).
           throw new Error(`read_file failed for ${filePath}: ${msg}`)
         }
@@ -3381,6 +3666,14 @@ ${preview}
       execute: async (input) => {
         const requestedPath = input.file_path as string | undefined
         if (!requestedPath) return 'Error: lsp requires file_path.'
+        // Guard de linguagem à ENTRADA (auditoria 2026-07-28): o serviço é o
+        // worker TS do Monaco — chamá-lo num .py/.rs/.go devolvia um falhanço
+        // opaco que não ensinava nada. O erro diz agora o que a tool É e qual
+        // é o caminho certo para as outras linguagens. (LSP multi-linguagem a
+        // sério = language servers no lado Rust; projeto próprio, assumido.)
+        if (!/\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$/i.test(requestedPath)) {
+          return `Error: lsp only covers TypeScript/JavaScript (the project's TS language service). "${requestedPath}" is outside that. For other languages use ${GREP_ALIAS} for usages, ${READ_ALIAS} for definitions, and the language's own compiler/linter via execute_command for diagnostics.`
+        }
         await this.requirePathAccess(requestedPath)
         const absolute = this.resolveToAbsolute(requestedPath)
         // Lazy import: keeps Monaco out of the agent module graph until the
@@ -3408,7 +3701,10 @@ ${preview}
             file_path: { type: 'string', description: 'Absolute path to the directory to list' },
             path: { type: 'string', description: 'Alias for file_path' },
             directory: { type: 'string', description: 'Alias for file_path' },
-            maxDepth: { type: 'number', description: 'Maximum depth to traverse. Default: 3' }
+            maxDepth: { type: 'number', description: 'Maximum depth to traverse. Default: 3' },
+            showHidden: { type: 'boolean', description: 'Include dotfiles/dot-directories (.github, .env.example, .eslintrc…). Default: false. Pass true when looking for config files that start with a dot.' },
+            includeIgnored: { type: 'boolean', description: 'Include entries excluded by .gitignore (build output like dist/ or lib/, node_modules). Default: false.' },
+            ignore: { type: 'array', items: { type: 'string' }, description: 'Glob patterns of entry NAMES to omit (e.g. ["*.test.ts", "snapshots"]).' }
           },
           required: []
         },
@@ -3421,9 +3717,30 @@ ${preview}
         }
         await this.requirePathAccess(requestedPath)
         const dirPath = this.resolveToAbsolute(requestedPath)
-        const filter = { showHidden: false, maxDepth: (input.maxDepth as number) || 3 }
+        // showHidden estava HARDCODED a false (auditoria 2026-07-28): dotfiles
+        // eram invisíveis ao LS sem alternativa nenhuma — o modelo "provava"
+        // que .github/.eslintrc não existiam. Default mantém-se false (ruído);
+        // agora há opt-in.
+        // respectGitignore: corta output transpilado (lib/, out/…) que a lista
+        // fixa do Rust não cobre com segurança; a UI do explorador fica off.
+        // CONTROLÁVEL pelo modelo (auditoria 2026-07-28): estava cravado a
+        // true, portanto o agente não tinha como listar build output nem sabia
+        // que algo lhe tinha sido escondido.
+        const includeIgnored = input.includeIgnored === true
+        const filter = {
+          showHidden: input.showHidden === true,
+          maxDepth: (input.maxDepth as number) || 3,
+          respectGitignore: !includeIgnored,
+        }
         const tree = await invoke('build_file_tree', { rootPath: dirPath, filter })
-        return this.formatFileTreeCompact(tree as Record<string, unknown>)
+        // `ignore` faz parte do contrato do LS de treino. Sem ele, o modelo
+        // pedia para excluir e recebia tudo — um filtro que ele julgava ter
+        // aplicado e não existia. Aplicado no formatador (o Rust devolve a
+        // árvore completa), com globs simples do dialecto do LS.
+        const ignore = Array.isArray(input.ignore)
+          ? (input.ignore as unknown[]).filter((g): g is string => typeof g === 'string')
+          : []
+        return this.formatFileTreeCompact(tree as Record<string, unknown>, undefined, ignore)
       }
     })
 
@@ -3465,9 +3782,12 @@ ${preview}
             query: { type: 'string', description: 'Search pattern (text or regex)' },
             directory: { type: 'string', description: 'Absolute path to a directory to search in, or a single file to search within' },
             caseSensitive: { type: 'boolean', description: 'Case sensitive search. Default: false' },
-            useRegex: { type: 'boolean', description: 'Interpret query as regex. Default: false' },
+            useRegex: { type: 'boolean', description: 'Interpret query as regex. Default: false for this tool (the Grep alias defaults to TRUE instead — same engine, different default).' },
             includePatterns: { type: 'array', items: { type: 'string' }, description: 'Glob patterns to include (e.g., ["*.tsx", "*.ts"])' },
             contextLines: { type: 'number', description: 'Number of lines before and after each match to include. Default: 0, max: 10.' },
+            outputMode: { type: 'string', enum: ['content', 'files_with_matches', 'count'], description: 'content (default): matching lines. files_with_matches: only file paths — use for broad "where is X used" sweeps. count: per-file match counts. The compact modes cover up to 500 matches; content is capped at maxResults.' },
+            maxResults: { type: 'number', description: 'Max matching lines in content mode. Default: 50, max: 200. When results are truncated, narrow with includePatterns or switch to files_with_matches.' },
+            includeIgnored: { type: 'boolean', description: 'Search .gitignore\'d paths too. Default: false — build output (compiled JS, bundles) is excluded, because the project declares there what is generated rather than authored. Set true only when the generated code is itself the subject, e.g. debugging a broken build. Same flag as glob.' },
           },
           required: ['query', 'directory']
         },
@@ -3480,22 +3800,47 @@ ${preview}
         }
         await this.requirePathAccess(input.directory as string)
         const directory = this.resolveToAbsolute(input.directory as string)
+        // Modos compactos (auditoria 2026-07-28 — paridade Grep do claude-vaz):
+        // files_with_matches/count devolvem ~uma linha por FICHEIRO, portanto
+        // podem varrer até ao teto global do Rust (500) sem inundar o contexto.
+        // O modo content mantém o cap por chamada, agora ajustável até 200.
+        const outputMode = (input.outputMode === 'files_with_matches' || input.outputMode === 'count')
+          ? input.outputMode as 'files_with_matches' | 'count'
+          : 'content'
+        const maxResults = outputMode === 'content'
+          ? Math.min(Math.max(1, Math.floor(Number(input.maxResults) || 50)), 200)
+          : 500
         const options = {
           case_sensitive: (input.caseSensitive as boolean) || false,
           whole_word: false,
           use_regex: (input.useRegex as boolean) || false,
           include_patterns: (input.includePatterns as string[]) || [],
           exclude_patterns: ['node_modules/**', '.git/**', 'dist/**', 'build/**'],
-          max_results: 50,
-          context_lines: typeof input.contextLines === 'number'
+          max_results: maxResults,
+          context_lines: outputMode === 'content' && typeof input.contextLines === 'number'
             ? Math.min(Math.max(0, Math.floor(input.contextLines)), 10)
             : 0,
+          // Sealed .env content is stripped Rust-side. The walk includes
+          // dot-FILES and only dot-DIRECTORIES are pruned, so without this a
+          // broad search would dump secrets into the model's context — with
+          // no permission dialog, since search is auto-approved as a SAFE tool.
+          // Off for the developer's own Search panel (searchService.ts).
+          seal_env_files: true,
+          // Mesmo opt-out do Glob. Antes o Grep nem tinha a noção: caía em
+          // `grep` quando faltava o binário do ripgrep e devolvia transpilado
+          // sem o dizer, enquanto o Glob filtrava — o modelo recebia duas
+          // descrições contraditórias da mesma árvore e resolvia-as escalando
+          // para includeIgnored (sessão momenu-fact 2026-07-28).
+          respect_gitignore: !(input.includeIgnored as boolean),
         }
         const result = await invoke('search_in_files', {
           query: input.query,
           directory: directory,
           options
         })
+        if (outputMode !== 'content') {
+          return formatSearchResultsByFile(result, outputMode)
+        }
         return this.formatSearchResultsCompact(result)
       }
     })
@@ -3563,6 +3908,7 @@ ${preview}
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
           if (dir) await invoke('create_directories_all', { path: dir })
+          await this.captureCmdModeCheckpoint(path, oldContent, isNewFile, input._toolCallId as string | undefined, WRITE_FILE)
           await invoke('write_file', { path, content: newContent })
           if (/[\\/]TMS\.md$/i.test(path)) {
             markTmsCreated(path)
@@ -3627,9 +3973,13 @@ ${preview}
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
           if (dir) await invoke('create_directories_all', { path: dir })
+          // create_file só chega aqui quando o ficheiro NÃO existe (o guard
+          // acima rejeita o contrário), portanto o estado anterior é vazio.
+          await this.captureCmdModeCheckpoint(path, '', true, input._toolCallId as string | undefined, 'create_file')
           await invoke('write_file', { path, content })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(content) })
           this.readFileState.set(path, { content, timestamp: Date.now(), offset: undefined, limit: undefined, source: 'write', hash: this.simpleHash(content), fsVersion: getFsVersion() })
+          this.recordCreatedFile(path, content)
           bumpFsVersion(`create:${path}`)
           this.refreshFileTree()
           this.refreshEditorIfOpen(path)
@@ -3644,6 +3994,11 @@ ${preview}
         }
 
         // Return diff data as JSON for inline display (consistent with write_file)
+        // O guard acima garante que o ficheiro não existia. Se o developer
+        // recusar o diff, ele continua a não existir — e um delete_file sobre
+        // um caminho inexistente falha por si, portanto a isenção não abre
+        // buraco nenhum.
+        this.recordCreatedFile(path, content)
         return jsonMini({
           type: 'diff',
           path,
@@ -3778,13 +4133,14 @@ ${preview}
     this.tools.set('edit_file', {
       definition: {
         name: 'edit_file',
-        description: 'Replace a specific string in a file with new content. The old_string must match exactly and appear only once in the file. Use this for surgical edits instead of rewriting entire files with write_file. Field names match Claude Code\'s Edit tool: `old_string` / `new_string`.',
+        description: 'Replace a specific string in a file with new content. The old_string must match exactly and (unless replace_all is true) appear only once in the file. Use this for surgical edits instead of rewriting entire files with write_file. Field names match Claude Code\'s Edit tool: `old_string` / `new_string` / `replace_all`.',
         input_schema: {
           type: 'object',
           properties: {
             file_path: { type: 'string', description: 'Absolute path to the file to edit' },
-            old_string: { type: 'string', description: 'Exact text to find and replace. Must be unique in the file.' },
-            new_string: { type: 'string', description: 'Text to replace old_string with. Use empty string to delete.' }
+            old_string: { type: 'string', description: 'Exact text to find and replace. Must be unique in the file unless replace_all is true.' },
+            new_string: { type: 'string', description: 'Text to replace old_string with. Use empty string to delete.' },
+            replace_all: { type: 'boolean', description: 'Replace EVERY occurrence of old_string (e.g. renaming a symbol or variable across the file). Default: false.' }
           },
           required: ['file_path', 'old_string', 'new_string']
         }
@@ -3859,10 +4215,14 @@ ${preview}
           void import('../../services/analytics').then(({ trackEvent }) => {
             trackEvent('edit_file_error', { kind: 'not_found', wrong_name: '' })
           }).catch(() => {})
-          return `Error: old_string not found in ${path}. The content you're trying to replace doesn't exist in the file. Use ${READ_ALIAS} first to see the current content.`
+          // As DUAS causas dominantes deste erro na prática (auditoria
+          // 2026-07-28) são auto-infligidas e fáceis de nomear — sem as
+          // nomear, o modelo re-lia o ficheiro e tentava o MESMO match.
+          return `Error: old_string not found in ${path}. The content you're trying to replace doesn't exist in the file. The two most common causes: (1) you pasted the line-number prefix from ${READ_ALIAS} output ("   123→") into old_string — strip it, it is display-only, not file content; (2) whitespace drift — tabs vs spaces or trailing spaces differ from the actual file. Use ${READ_ALIAS} first and copy the text EXACTLY as shown after the → marker.`
         }
 
-        if (occurrences > 1) {
+        const replaceAll = input.replace_all === true
+        if (occurrences > 1 && !replaceAll) {
           // Two failure modes look identical here — see editLiteralReplace.ts
           // for the full reasoning. Pure function so production and tests
           // can't drift.
@@ -3874,16 +4234,19 @@ ${preview}
         }
 
         // Literal substring replace — see editLiteralReplace.ts for the
-        // $-sequence corruption history. Pure function so production and
+        // $-sequence corruption history. Pure functions so production and
         // tests can't drift.
-        const { editFileReplace } = await import('./editLiteralReplace')
-        const newContent = editFileReplace(content, oldStr, newStr)
+        const { editFileReplace, editFileReplaceAll } = await import('./editLiteralReplace')
+        const newContent = replaceAll
+          ? editFileReplaceAll(content, oldStr, newStr)
+          : editFileReplace(content, oldStr, newStr)
 
         // Cwd-scoped execution: write directly to disk, still return diff JSON so the UI
         // renders the before/after. `alreadyApplied` skips approval queue.
         if (this.cmdModeCwd) {
           const dir = path.slice(0, path.lastIndexOf('/'))
           if (dir) await invoke('create_directories_all', { path: dir })
+          await this.captureCmdModeCheckpoint(path, content, false, input._toolCallId as string | undefined, EDIT_FILE)
           await invoke('write_file', { path, content: newContent })
           this.readFileTimestamps.set(path, { timestamp: Date.now(), hash: this.simpleHash(newContent) })
           this.readFileState.set(path, { content: newContent, timestamp: Date.now(), offset: undefined, limit: undefined, source: 'write', hash: this.simpleHash(newContent), fsVersion: getFsVersion() })
@@ -3915,12 +4278,13 @@ ${preview}
     this.tools.set('glob', {
       definition: {
         name: 'glob',
-        description: 'Find files matching a glob pattern. Returns a list of absolute file paths.',
+        description: 'Find files matching a glob pattern. Returns a list of absolute file paths. Build output and vendored code (anything matched by the project\'s .gitignore — dist/, lib/, out/, node_modules/) is EXCLUDED by default; pass includeIgnored: true when those files are the subject (debugging a build, checking what compiled, reading a dependency\'s real code).',
         input_schema: {
           type: 'object',
           properties: {
             pattern: { type: 'string', description: 'Glob pattern (e.g., "**/*.tsx", "src/**/*.test.ts", "**/package.json"). "**" must be its own path segment ("**/name"); to match "contains", use "**/*name*"' },
-            directory: { type: 'string', description: 'Absolute path to search from. Default: project root' }
+            directory: { type: 'string', description: 'Absolute path to search from. Default: project root' },
+            includeIgnored: { type: 'boolean', description: 'Include files excluded by .gitignore (build output, node_modules). Default: false.' }
           },
           required: ['pattern']
         },
@@ -3932,101 +4296,29 @@ ${preview}
 
         await this.requirePathAccess(directory)
 
-        const result = await invoke<string[]>('glob_files', {
+        // Filtro de .gitignore LIGADO por omissão (corta output transpilado que
+        // inundava as buscas) mas CONTROLÁVEL — ver a nota do opt-out em
+        // filesystem.rs::glob_files_filtered.
+        const includeIgnored = input.includeIgnored === true
+        const result = await invoke<string[]>('glob_files_filtered', {
           pattern,
-          directory
+          directory,
+          respectGitignore: !includeIgnored,
         })
 
         if (result.length === 0) {
-          return `No files found matching pattern: ${pattern}`
+          // HONESTIDADE do zero-resultados (auditoria 2026-07-28): sem esta
+          // nota, um glob que só não encontrou nada PORQUE filtrou levava o
+          // modelo a concluir "o ficheiro não existe" — a tool a mentir-lhe.
+          // É precisamente o caso de `**/*.js` num projecto onde `lib/` é
+          // output ignorado.
+          return includeIgnored
+            ? `No files found matching pattern: ${pattern}`
+            : `No files found matching pattern: ${pattern}\n(Note: .gitignore'd paths — build output like dist/ or lib/, and node_modules — were excluded. If the files you want are build output or vendored code, retry with includeIgnored: true.)`
         }
 
         return result.join('\n')
       }
-    })
-
-    // === Claude-like read aliases ===
-    // These names match the tool surface models commonly learn from Claude
-    // Code. ToolExecutor.execute canonicalizes them before execution, so they
-    // reuse the internal read_file/search_files/glob/list_directory handlers.
-    this.tools.set(READ_ALIAS, {
-      definition: {
-        name: READ_ALIAS,
-        description: 'Read a file. Claude Code-compatible alias for TM Code read_file. Use offset + limit for line ranges instead of cat/head/tail/sed.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            file_path: { type: 'string', description: 'File path to read' },
-            path: { type: 'string', description: 'Alias for file_path' },
-            offset: { type: 'number', description: '1-indexed line number to start from' },
-            limit: { type: 'number', description: 'Maximum number of lines to read' },
-            force: { type: 'boolean', description: 'Bypass duplicate-read suppression only when a previous Read range is no longer available after compaction/context loss.' },
-          },
-          required: [],
-        },
-        concurrencySafe: true,
-      },
-      execute: async () => 'Internal alias error: Read should be canonicalized to read_file before execution.',
-    })
-
-    this.tools.set(GREP_ALIAS, {
-      definition: {
-        name: GREP_ALIAS,
-        description: 'Search file contents. Claude Code-compatible alias for TM Code search_files. Use this instead of grep, rg, ack, or ag via shell.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            pattern: { type: 'string', description: 'Search pattern (text or regex)' },
-            query: { type: 'string', description: 'Alias for pattern' },
-            path: { type: 'string', description: 'Directory or file to search. Default: project root/current directory.' },
-            directory: { type: 'string', description: 'Alias for path' },
-            glob: { type: 'string', description: 'Optional include glob, e.g. "*.ts" or "**/*.tsx"' },
-            caseSensitive: { type: 'boolean', description: 'Case sensitive search. Default: false' },
-            useRegex: { type: 'boolean', description: 'Interpret pattern as regex. Default: false' },
-            includePatterns: { type: 'array', items: { type: 'string' }, description: 'Glob patterns to include' },
-          },
-          required: ['pattern'],
-        },
-        concurrencySafe: true,
-      },
-      execute: async () => 'Internal alias error: Grep should be canonicalized to search_files before execution.',
-    })
-
-    this.tools.set(GLOB_ALIAS, {
-      definition: {
-        name: GLOB_ALIAS,
-        description: 'Find files by glob pattern. Claude Code-compatible alias for TM Code glob. Use this instead of find or fd via shell.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            pattern: { type: 'string', description: 'Glob pattern, e.g. "**/*.tsx" or "**/package.json"' },
-            path: { type: 'string', description: 'Directory to search from. Default: project root.' },
-            directory: { type: 'string', description: 'Alias for path' },
-          },
-          required: ['pattern'],
-        },
-        concurrencySafe: true,
-      },
-      execute: async () => 'Internal alias error: Glob should be canonicalized to glob before execution.',
-    })
-
-    this.tools.set(LS_ALIAS, {
-      definition: {
-        name: LS_ALIAS,
-        description: 'List a directory. Claude Code-style alias for TM Code list_directory. Use this instead of ls or tree via shell.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            path: { type: 'string', description: 'Directory path to list. Default: project root/current directory.' },
-            file_path: { type: 'string', description: 'Alias for path' },
-            directory: { type: 'string', description: 'Alias for path' },
-            maxDepth: { type: 'number', description: 'Maximum depth to traverse. Default: 3' },
-          },
-          required: [],
-        },
-        concurrencySafe: true,
-      },
-      execute: async () => 'Internal alias error: LS should be canonicalized to list_directory before execution.',
     })
 
     // === web_search ===
@@ -4346,11 +4638,16 @@ ${preview}
         const callSignal = input._abortSignal as AbortSignal | undefined
 
         if (isInstallCmd) {
+          // timeout_secs vale também aqui (auditoria 2026-07-28): o schema
+          // anuncia Max 600 e o caminho de install ignorava-o, fixo em 300s —
+          // um monorepo grande estourava sem hipótese de o modelo pedir mais.
+          // Default mais generoso (300s) porque instalar é lento por natureza.
           return this.executeInstallStreaming(
             cmd,
             cwd,
             input._toolCallId as string | undefined,
             callSignal,
+            Math.min(Number(input.timeout_secs) || 300, 600),
           )
         }
 
@@ -5090,7 +5387,13 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         this.validateCommand(cmd)
 
         const projectRoot = this.getProjectRoot()
-        const cwd = (input.cwd as string) || (this.cmdModeCwd || projectRoot)
+        // resolveToAbsolute como no execute_command em primeiro plano
+        // (auditoria 2026-07-28): um cwd RELATIVO ("server") era validado
+        // contra o projeto mas seguia cru para o Rust, que o resolvia a partir
+        // do cwd do processo da IDE — o comando corria noutro sítio.
+        const cwd = this.resolveToAbsolute(
+          (input.cwd as string) || (this.cmdModeCwd || projectRoot),
+        )
         await this.requirePathAccess(cwd)
 
         const { useBackgroundCommandStore } = await import('../../stores/backgroundCommandStore')
@@ -5147,7 +5450,13 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
               if (timeoutTimer) clearTimeout(timeoutTimer) // Fix #6
               unOutput(); unExit()
               const code = event.payload.code
-              if (code === 0) {
+              // Cancel do USER (BackgroundCommandsBar / Stop): o store já diz
+              // 'cancelled' e este exit é consequência do kill — reporta
+              // cancel ao auto-wake, não uma falha, e sem notificação de SO
+              // (foi o próprio user a terminar o processo).
+              if (useBackgroundCommandStore.getState().getById(cmdId)?.status === 'cancelled') {
+                wakeForTerminalState('cancelled', code)
+              } else if (code === 0) {
                 useBackgroundCommandStore.getState().completeCommand(cmdId, code)
                 wakeForTerminalState('completed', code)
                 // Send OS notification when command completes successfully
@@ -5230,9 +5539,17 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
             if (!finished) {
               finished = true
               unOutput(); unExit()
+              // Se o user já cancelou mas o kill dele falhou (sem cmd-exit),
+              // o timeout é só o backstop do kill — não reclassificar como erro.
+              const userCancelled =
+                useBackgroundCommandStore.getState().getById(cmdId)?.status === 'cancelled'
               try { await invoke('kill_process', { pid }) } catch { /* best effort */ }
-              useBackgroundCommandStore.getState().failCommand(cmdId, `Timed out after ${timeoutSecs}s`)
-              wakeForTerminalState('error', null)
+              if (userCancelled) {
+                wakeForTerminalState('cancelled', null)
+              } else {
+                useBackgroundCommandStore.getState().failCommand(cmdId, `Timed out after ${timeoutSecs}s`)
+                wakeForTerminalState('error', null)
+              }
             }
           }, timeoutSecs * 1000)
 
@@ -5286,7 +5603,9 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
             const { acknowledgeBackgroundCommandWake } = await import('./backgroundCommands/autoWake')
             acknowledgeBackgroundCommandWake(cmd.id)
           }
-          return formatBackgroundCommandResult(cmd)
+          // Pedido por id = quer o resultado a sério → output COMPLETO; o
+          // truncateResult (preview de cauda, refId real) faz o corte honesto.
+          return formatBackgroundCommandResult(cmd, { full: true })
         }
 
         const all = bgCmdStore.getAll()

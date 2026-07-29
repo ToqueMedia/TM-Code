@@ -41,7 +41,7 @@
 import type OpenAI from 'openai'
 import {
   SEARCH_FILES, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EDIT_FILE,
-  READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
+
   EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS,
   WRITE_FILE, CREATE_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
   LIST_DIRECTORY, GLOB, READ_SKILL,
@@ -49,18 +49,24 @@ import {
   AGENT_SHELL_START, AGENT_SHELL_WRITE, AGENT_SHELL_READ, AGENT_SHELL_STOP,
   START_DEV_SERVER, STOP_DEV_SERVER, READ_DEV_SERVER_LOGS,
   WEB_FETCH,
+  WEB_SEARCH,
   DELEGATE, COLLECT_RESULTS,
   SAVE_MEMORY, FORGET_MEMORY, READ_MEMORY, DISTILL_MEMORY,
   UPDATE_SESSION_MEMORY, READ_SESSION_MEMORY,
   REQUEST_CREDENTIALS, LSP,
+  canonicalToolName,
 } from './toolNames'
 import type { PromptProfile } from './contextBuilder/auxiliaryRegistry'
 
 // ── Tool groups ──────────────────────────────────────────────────────────
+//
+// Estes conjuntos guardam nomes CANÓNICOS. O schema anuncia os nomes de treino
+// (ADVERTISED_TOOL_NAMES) e o filtro do selectForTurn canonicaliza antes de
+// comparar — listar aqui também os aliases duplicava a contagem e, desde que
+// deixaram de ser tools registadas, deixou de fazer sentido nenhum.
 
 /** The minimal toolset for a localized code task. Always active. */
 export const CORE_TOOLS = [
-  GREP_ALIAS, READ_ALIAS, GLOB_ALIAS, LS_ALIAS,
   SEARCH_FILES, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EDIT_FILE, GLOB, LSP,
   EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS, UPDATE_SESSION_MEMORY,
 ] as const
@@ -78,8 +84,10 @@ export const SHELL_TOOLS = [
   START_DEV_SERVER, STOP_DEV_SERVER, READ_DEV_SERVER_LOGS,
 ] as const
 
-/** Web research tools. */
-export const WEB_TOOLS = [WEB_FETCH] as const
+/** Web research tools. WEB_SEARCH incluído (auditoria 2026-07-28): não
+ *  pertencia a grupo nenhum, portanto se os perfis voltarem a ativar-se a
+ *  pesquisa ficaria inatingível para modelos sem search nativa. */
+export const WEB_TOOLS = [WEB_FETCH, WEB_SEARCH] as const
 
 /** Sub-agent delegation tools. */
 export const SUBAGENT_TOOLS = [DELEGATE, COLLECT_RESULTS] as const
@@ -114,15 +122,18 @@ const GROUP_TOOLS: Record<ToolsetGroupName, readonly string[]> = {
 
 // ── Profile starter toolsets ─────────────────────────────────────────────
 //
-// The Intent Router (qwen3.7-plus) classifies the user's request into a
-// PromptProfile + a readOnly hint. Each profile declares only the tools that
-// should be active on the first model step. request_tools/model-planned groups
+// NOTA (2026-07-28): já NÃO há Intent Router — foi removido, e desde a FASE A
+// o toolset vai congelado e completo por run. Este selector só sobrevive para
+// o caso de SEGURANÇA (enforceReadOnly). O texto abaixo descreve o desenho
+// original dos perfis, que hoje está inativo.
+//
+// O router classificava o pedido num PromptProfile + hint readOnly. Cada perfil
+// declara só as tools ativas no primeiro passo do modelo. request_tools/grupos
 // may activate any registered tool later; profile selection is a cost/context
 // optimisation, not an authorization boundary.
 
 /** Verification/audit without editing files (Parte B: read-only set). */
 const READONLY_BASE = [
-  READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   READ_FILE, READ_AROUND, SEARCH_FILES, GLOB, LIST_DIRECTORY, READ_LARGE_RESULT, LSP,
   // Shell no perfil read-only DE PROPÓSITO: perguntas de verificação
   // ("qual é o username do admin?") muitas vezes respondem-se pelo ESTADO
@@ -137,17 +148,18 @@ const READONLY_BASE = [
 /** Project bootstrap for TMS.md: inspect focused files, then write only the
  *  project profile. No shell by default. */
 const PROJECT_BOOTSTRAP_BASE = [
-  LS_ALIAS, GLOB_ALIAS, GREP_ALIAS, READ_ALIAS,
   LIST_DIRECTORY, GLOB, SEARCH_FILES, READ_FILE, READ_AROUND, WRITE_FILE, CREATE_FILE,
   ASK_USER_QUESTION, UPDATE_SESSION_MEMORY,
 ] as const
 
-/** Localised bugfix — reading + execute + ask (Parte B). edit_file is
- *  intentionally OUT of the base so the model must request it explicitly;
- *  this keeps a verification-style bugfix at ~6 tools, not 8. */
+/** Localised bugfix — reading + edit + execute + ask (Parte B). */
 const BUGFIX_BASE = [
-  READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
   READ_FILE, READ_AROUND, SEARCH_FILES, GLOB, READ_LARGE_RESULT, LSP, EXECUTE_COMMAND,
+  // EDIT_FILE estava deliberadamente FORA — o que era uma armadilha adormecida
+  // (auditoria 2026-07-28): com o toolset congelado da FASE A isto é inerte,
+  // mas se os perfis voltarem, o perfil DEFAULT de trabalho em código não
+  // conseguiria editar sem um round-trip de request_tools. Um bugfix edita.
+  EDIT_FILE,
   ASK_USER_QUESTION, UPDATE_SESSION_MEMORY,
 ] as const
 /** Exported for tests + the usage-log to reference the bugfix base set. */
@@ -465,8 +477,11 @@ export class ToolsetSelector {
     _userText = '',
   ): ToolsetSelection {
     // Build the filtered list, preserving the original order.
+    // canonicalToolName porque o schema anuncia o nome de TREINO (`Read`) e o
+    // conjunto activo guarda o CANÓNICO (`read_file`) — sem isto o filtro
+    // deixaria cair todas as tools renomeadas.
     const activeTools = allTools.filter((t) =>
-      this.activeToolNames.has(t.function.name),
+      this.activeToolNames.has(canonicalToolName(t.function.name)),
     )
 
     const requestable = this.getRequestableToolNames()

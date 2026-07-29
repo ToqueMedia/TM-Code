@@ -24,7 +24,6 @@ import {
   buildExternalAgentSessionsSection,
   type ExternalAgentSessions,
 } from './externalAgents'
-import { logger } from '../../utils/logger'
 import {
   CRITICAL_SECTIONS_MAX_BYTES,
   PROMPT_CACHE_TTL_MS,
@@ -53,6 +52,7 @@ import {
   gatherRecentFiles,
   getLangInstruction,
   readPathAliases,
+  readGeneratedPaths,
   readProjectManifest,
   readTemplateManifest,
   safeReadFile,
@@ -110,9 +110,10 @@ import {
   getTrackerStateSection,
 } from './contextBuilder/sections/chatSections'
 
-import { ContextPlannerError, planContextWithModel } from './contextPlanner'
+import type { ContextPlanClassification } from './contextPlanner'
 import {
   classifyPromptIntent,
+  fallbackContextPlanForProfile,
   selectAuxiliaries,
   buildOnDemandIndex,
   getAuxiliaryMeta,
@@ -566,7 +567,7 @@ class ContextBuilder {
     }
   }
 
-  async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[], coreToolCount?: number, userMessage?: string, accessedPaths?: string[], intentOverride?: IntentOverride): Promise<string> {
+  async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[], coreToolCount?: number, userMessage?: string, accessedPaths?: string[], intentOverride?: IntentOverride, signals?: { hasImage?: boolean }): Promise<string> {
     this.lastVolatileContext = null
     // Cache key must include everything that affects the prompt shape.
     // Plan is read below; include it in the key so plan switches bypass the cache.
@@ -605,77 +606,54 @@ class ContextBuilder {
     // turns, since reads don't increment fsVersion.
     const accessedCount = accessedPaths?.length ?? 0
     // ── Auxiliary context selection (on-demand architecture) ──
-    // Intent Router supplies profile/readOnly. Context Planner (utility model)
-    // supplies the actual domain/capability plan and initial tool groups. The
-    // planner is model-owned: utility sidecar retries first, then the code
-    // model. If both fail, do not block the main agent: continue without
-    // preloaded auxiliary context and let the primary model request context
-    // on demand. This fallback deliberately does not inspect the user text or
-    // choose a semantic domain.
+    // NÃO há classificador nenhum antes do modelo principal: o Intent Router
+    // foi REMOVIDO (uma classificação "read-only" errada chegou a negar
+    // create/edit num run inteiro) e o Context Planner por modelo está
+    // desligado. O perfil vem de uma heurística LOCAL sem poder de negação
+    // (hasImage → vision, senão bugfix_local) e a seleção da tabela
+    // determinista abaixo. Comentários que descreviam estes dois como vivos
+    // foram corrigidos na auditoria de 2026-07-28 — eram um convite a
+    // ressuscitá-los.
     const auxProfile = intentOverride?.profile ?? classifyPromptIntent(userMessage, {
       mentionedFiles: accessedPaths,
+      hasImage: signals?.hasImage,
     })
     const readOnly = intentOverride?.readOnly ?? false
     const requiresMutation = !readOnly && intentOverride?.requiresMutation === true
-    // FASE C (recalibração de cache 2026-07-17): o planner de contexto por
-    // MODELO está DESLIGADO — poupa uma chamada sidecar por run e elimina o
-    // vetor de viés da seleção (auditoria pg/bundler: o planner empurrava
-    // hipóteses). A seleção fica no caminho determinístico + on-demand: o
-    // índice request_context continua no prompt e o agente pede o que
-    // precisar. Repor: flag a true (código do planner intacto).
-    const MODEL_CONTEXT_PLANNER_ENABLED = false as boolean
-    let contextPlan: Awaited<ReturnType<typeof planContextWithModel>>
-    let plannerFailure: ContextPlannerError | null = null
-    if (!MODEL_CONTEXT_PLANNER_ENABLED) {
-      contextPlan = {
-        plan: {
-          taskDomain: `${auxProfile}.planner_disabled`,
-          requiredCapabilities: [],
-          minimumContextNeeded: 'index',
-          candidateContexts: [],
-          selectedContexts: [],
-          rejectedContexts: [],
-          toolGroups: readOnly ? [] : ['FILE_OPS'],
-          fallbackRisk: 'low',
-          reason: 'Model context planner disabled (cache recalibration): auxiliary context is on-demand via request_context.',
-        },
-        source: 'fallback',
-        confidence: 'none',
-        reason: 'planner disabled; on-demand selection by the primary agent',
-      }
-    } else try {
-      contextPlan = await planContextWithModel(userMessage ?? '', auxProfile, readOnly)
-    } catch (err) {
-      if (err instanceof ContextPlannerError) {
-        plannerFailure = err
-        logger.warn('context-builder', 'context planner failed; continuing without preloaded auxiliary context', {
-          error: err.message,
-          fallbackReason: err.fallbackReason,
-          diagnostics: err.diagnostics,
-          rawOutput: err.rawOutput?.slice(0, 500),
-        })
-        contextPlan = {
-          plan: {
-            taskDomain: `${auxProfile}.planner_unavailable`,
-            requiredCapabilities: [],
-            minimumContextNeeded: 'index',
-            candidateContexts: [],
-            selectedContexts: [],
-            rejectedContexts: [],
-            toolGroups: readOnly ? [] : ['FILE_OPS'],
-            fallbackRisk: 'medium',
-            reason: 'Context planner failed after model retries; no auxiliary context was preloaded. The primary agent must request context on demand.',
-          },
-          source: 'fallback',
-          confidence: 'none',
-          reason: 'planner unavailable; delegated context selection to primary agent',
-          error: err.message,
-          fallbackReason: err.fallbackReason,
-          diagnostics: err.diagnostics,
-        }
-      } else {
-        throw err
-      }
+    // SELEÇÃO DE CONTEXTO: DETERMINISTA, sem chamar modelo nenhum.
+    //
+    // Houve aqui um planner por MODELO (chamada sidecar pré-voo). Foi desligado
+    // na FASE C — poupava uma chamada por run e eliminava um vetor de viés real
+    // (auditoria pg/bundler: o planner empurrava hipóteses de causa) — e APAGADO
+    // na auditoria de 2026-07-28: ficava atrás de uma flag local com um convite
+    // a religar, e o caminho que ela reabria valia até ~4 minutos de latência
+    // pré-voo no pior caso (3 tentativas utility + 1 code, 60s cada, em série)
+    // ANTES do primeiro token do modelo principal.
+    //
+    // A seleção vem da tabela por perfil + a baseline de delivery sempre ativa.
+    // Esta última é o que impede o bug irmão: com selectedContexts vazio,
+    // auxLoadedContent ficava {} e TODAS as secções que só leem dele rendiam
+    // null — git status, estado do dev-server (com a regra "não arranques um
+    // segundo servidor"), visão, scaffold — enquanto o gatherGitContext()
+    // continuava a correr e a ser deitado fora. project_bootstrap fica
+    // deliberadamente lean (inspeção focada + escrita de TMS.md).
+    const basePlan = fallbackContextPlanForProfile(auxProfile)
+    const deliveryBaseline = auxProfile === 'project_bootstrap'
+      ? []
+      : ['delivery.git_status', 'delivery.dev_server']
+    const contextPlan: ContextPlanClassification = {
+      plan: {
+        ...basePlan,
+        taskDomain: `${auxProfile}.deterministic`,
+        candidateContexts: Array.from(new Set([...basePlan.candidateContexts, ...deliveryBaseline])),
+        selectedContexts: Array.from(new Set([...basePlan.selectedContexts, ...deliveryBaseline])),
+        rejectedContexts: [],
+        toolGroups: Array.from(new Set([...(basePlan.toolGroups ?? []), ...(readOnly ? [] : ['FILE_OPS' as const])])),
+        reason: 'Deterministic per-profile selection + always-on delivery baseline; anything else on-demand via request_context.',
+      },
+      source: 'fallback',
+      confidence: 'none',
+      reason: 'deterministic selection (no model call, no bias) + on-demand by the primary agent',
     }
     const plannerReason = `${contextPlan.source === 'model' ? 'model context planner' : 'context planner fallback'}: ${contextPlan.reason}`
     const auxSelection = selectAuxiliaries(
@@ -686,12 +664,8 @@ class ContextBuilder {
       intentOverride?.source ? { source: intentOverride.source, confidence: intentOverride.confidence, error: intentOverride.error, diagnostics: intentOverride.diagnostics } : undefined,
       contextPlan.plan,
       {
-        status: contextPlan.source === 'model' ? 'parsed' : 'fallback',
+        status: 'fallback',
         source: contextPlan.source,
-        modelTier: contextPlan.modelTier,
-        error: contextPlan.error ?? plannerFailure?.message,
-        rawOutput: contextPlan.diagnostics?.contentPreview ?? contextPlan.diagnostics?.rawBodyPreview ?? plannerFailure?.rawOutput?.slice(0, 500),
-        fallbackReason: contextPlan.fallbackReason,
         selectionReason: contextPlan.reason,
       },
       requiresMutation,
@@ -719,7 +693,7 @@ class ContextBuilder {
     // Gather context in parallel for speed. Project instructions (TMS + foreign
     // AGENTS/CLAUDE) go through loadProjectInstructions so compat repos without
     // TMS.md still surface developer rules at runtime.
-    const [treeString, pkgSummary, readme, projectManifest, templateManifest, instructions, planContent, todoContent, toquemediaIdRaw, gitContext, recentFiles, pathAliases] = await Promise.all([
+    const [treeString, pkgSummary, readme, projectManifest, templateManifest, instructions, planContent, todoContent, toquemediaIdRaw, gitContext, recentFiles, pathAliases, generatedPaths] = await Promise.all([
       buildFileTree(projectPath),
       extractPackageSummary(projectPath),
       safeReadFile(`${projectPath}/README.md`),
@@ -732,6 +706,7 @@ class ContextBuilder {
       gatherGitContext(projectPath),
       gatherRecentFiles(projectPath),
       readPathAliases(projectPath),
+      readGeneratedPaths(projectPath),
     ])
     const tmsContent = instructions.tms?.content ?? null
     const foreignInstructions = instructions.foreignPrimary
@@ -833,6 +808,7 @@ class ContextBuilder {
       gitContext,
       recentFiles,
       pathAliases,
+      generatedPaths,
       readme,
       tmsContent,
       foreignInstructions,
@@ -958,7 +934,7 @@ class ContextBuilder {
       // (Preview vs "corre yarn dev", branch chip, fila de tarefas, …).
       getIdeUiGuideSection(),
       getExecutingActionsSection(),
-      sharedShellExecutionLoop('chat'),
+      sharedShellExecutionLoop(),
       getClosedLoopSection(),
       getToolsSection(ctx),
       getConstraintsSection(ctx),
@@ -993,11 +969,11 @@ class ContextBuilder {
       // caching them would serve stale content.
       dynamicSection('scaffold_workflow', () => auxLoadedContent['scaffold.workflow'] ?? null,
         'scaffold workflow auxiliary is selected only for project-bootstrap tasks'),
-      dynamicSection('additional_constraints', () => [
-        auxLoadedContent['vision.image_rules'] ?? '',
-        auxLoadedContent['delivery.dev_server'] ?? '',
-      ].filter(Boolean).join('\n\n') || null,
-        'constraint auxiliaries are selected per intent/project and may be absent'),
+      // dev_server saiu daqui (2026-07-28): com o baseline delivery sempre
+      // seleccionado, mantê-lo aqui E em dev_server_status duplicava o bloco
+      // inteiro no prompt.
+      dynamicSection('additional_constraints', () => auxLoadedContent['vision.image_rules'] ?? null,
+        'vision-rules auxiliary is selected only when the message carries images'),
       dynamicSection('design_system_semantic_tokens', () => auxLoadedContent['design_system.semantic_tokens'] ?? null,
         'design-system auxiliary is selected per intent/project and may be absent'),
       dynamicSection('design_system_theme_config', () => auxLoadedContent['design_system.theme_config'] ?? null,

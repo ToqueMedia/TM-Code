@@ -14,12 +14,24 @@
  * Pure functions / standard web streams only (no Tauri / React / store
  * imports) so the translation is unit-testable in isolation.
  *
- * Prompt caching: the contextBuilder marks a literal boundary between the
- * cross-session-stable system sections (~47K tokens) and the per-session
- * suffix. `toAnthropicRequest` splits on that boundary and tags the static
- * prefix + the tool catalog with `cache_control: { type: 'ephemeral' }` so
- * the first request creates the cache and subsequent turns read it. The
- * real `cache_creation_input_tokens` / `cache_read_input_tokens` reported
+ * Prompt caching: Anthropic orders the cached prefix tools → system → messages,
+ * so we place breakpoints at all three levels (limit is 4):
+ *   1. last tool definition  — the catalog is frozen per run
+ *   2. the system prompt     — byte-stable since FASE B (see below)
+ *   3. last message block    — incremental history caching, agent loop only
+ *
+ * FASE B history (2026-07-17 → auditoria 2026-07-28): the contextBuilder used
+ * to embed a literal boundary marker separating the stable sections from the
+ * per-turn suffix, and this adapter split on it. FASE B moved the split to
+ * BUILD time — `buildSystemPrompt` now returns ONLY the static block and the
+ * volatile context travels in the user message — so the marker never reaches
+ * the transport and `splitOnBoundary` always reported `found: false`. That
+ * silently degraded to "no cache_control at all": the whole system prompt and
+ * the entire conversation were re-billed at full price on every turn. The
+ * no-marker path below is the fix — post-FASE-B the whole system string IS
+ * the stable prefix.
+ *
+ * The real `cache_creation_input_tokens` / `cache_read_input_tokens` reported
  * by Anthropic are propagated through the usage object so query.ts can
  * log hit/miss and the session export can show cached vs non-cached tokens.
  */
@@ -27,6 +39,15 @@
 import { splitOnBoundary } from './contextBuilder/helpers'
 
 const ANTHROPIC_VERSION = '2023-06-01'
+
+/**
+ * Anthropic ignores a cache breakpoint whose prefix is under the per-model
+ * minimum (1024 tokens on Sonnet/Opus, 2048 on Haiku). 4096 chars ≈ 1.2K
+ * tokens: above it caching is worth requesting, below it we keep the plain
+ * string shape so one-shot side-calls (compact / title) don't pay the 1.25x
+ * cache-WRITE premium for an entry nothing will ever read.
+ */
+const ANTHROPIC_MIN_CACHEABLE_CHARS = 4096
 
 // ── Request translation ──
 
@@ -51,7 +72,12 @@ const ANTHROPIC_VERSION = '2023-06-01'
 function buildCacheableSystem(fullSystem: string): unknown {
   const { staticPrefix, dynamicSuffix, stats } = splitOnBoundary(fullSystem)
   if (!stats.found) {
-    return fullSystem
+    // Post-FASE-B: no marker means the caller already did the split and handed
+    // us the stable block alone — cache it whole. Short system strings (compact
+    // /title one-shots) stay plain: below Anthropic's minimum the breakpoint
+    // would be ignored anyway, and the write premium is pure loss.
+    if (fullSystem.length < ANTHROPIC_MIN_CACHEABLE_CHARS) return fullSystem
+    return [{ type: 'text', text: fullSystem, cache_control: { type: 'ephemeral' } }]
   }
   const blocks: AnthropicBlock[] = []
   if (staticPrefix) {
@@ -74,6 +100,8 @@ interface OpenAIMessage {
   content?: unknown
   tool_calls?: OpenAIToolCall[]
   tool_call_id?: string
+  /** Blocos de thinking assinados, do round-trip nativo — ver toAnthropicRequest. */
+  thinking_blocks?: unknown
 }
 
 type AnthropicBlock = Record<string, unknown>
@@ -133,6 +161,16 @@ export function toAnthropicRequest(openai: Record<string, unknown>): Record<stri
     if (m.role === 'system') continue
     if (m.role === 'assistant') {
       const blocks: AnthropicBlock[] = []
+      // Blocos de thinking assinados PRIMEIRO — a Messages API exige-os no
+      // início do turno do assistant e rejeita o pedido se faltarem quando
+      // `thinking` está ligado e há tool use. Chegam aqui pelo round-trip
+      // nativo (_native é espalhado sobre a mensagem em toOpenAIMessages).
+      const thinkingBlocks = m.thinking_blocks
+      if (Array.isArray(thinkingBlocks)) {
+        for (const tb of thinkingBlocks) {
+          if (tb && typeof tb === 'object') blocks.push(tb as AnthropicBlock)
+        }
+      }
       const text = typeof m.content === 'string' ? m.content : ''
       if (text) blocks.push({ type: 'text', text })
       else if (Array.isArray(m.content)) blocks.push(...partsToAnthropicBlocks(m.content))
@@ -203,9 +241,31 @@ export function toAnthropicRequest(openai: Record<string, unknown>): Record<stri
     // so the full tool catalog is cached alongside the static system prefix.
     tools[tools.length - 1].cache_control = { type: 'ephemeral' }
     out.tools = tools
+
+    // Incremental history caching: a breakpoint on the LAST block makes the
+    // whole conversation so far cacheable, so the next turn (which appends to
+    // it) reads the prefix at 0.1x instead of re-billing it. The breakpoint
+    // walks forward every turn — that is the intended pattern; Anthropic
+    // matches the LONGEST cached prefix.
+    //
+    // Gated on `tools.length` deliberately: only the agent loop sends tools.
+    // One-shot side-calls (compact / title) are single-use, so caching their
+    // payload would pay the write premium for an entry nothing re-reads.
+    const lastMessage = messages[messages.length - 1]
+    const lastBlock = lastMessage?.content[lastMessage.content.length - 1]
+    if (lastBlock) lastBlock.cache_control = { type: 'ephemeral' }
   }
   if (thinking) out.thinking = thinking
   if (openai.output_config && typeof openai.output_config === 'object') out.output_config = openai.output_config
+  // Sampling passa (auditoria 2026-07-28): as one-shots auxiliares BYOK pedem
+  // temperature (byokAuxCompletion) e o adapter deitava-a fora em silêncio —
+  // corriam sempre no default do provider. top_p idem. Nunca enviar os dois ao
+  // mesmo tempo com thinking ligado: a Messages API rejeita temperature≠1
+  // nesse modo, por isso só copiamos quando o thinking está desligado.
+  if (!thinking) {
+    if (typeof openai.temperature === 'number') out.temperature = openai.temperature
+    if (typeof openai.top_p === 'number') out.top_p = openai.top_p
+  }
   return out
 }
 
@@ -306,6 +366,21 @@ export function anthropicSSEToOpenAISSE(): TransformStream<Uint8Array, Uint8Arra
   let cacheReadInputTokens: number | undefined
   let finishReason: string | null = null
 
+  // ── Thinking blocks + assinaturas (auditoria 2026-07-28) ──
+  // Com `thinking: enabled` E tool use, a Messages API EXIGE que os blocos de
+  // thinking assinados voltem no turno do assistant. O adapter mapeava
+  // thinking_delta → reasoning_content e deitava fora o signature_delta, e o
+  // toAnthropicRequest reconstruía o turno só a partir de texto + tool_calls —
+  // portanto todo o loop de tools em BYOK-Anthropic com thinking ligado era
+  // rejeitado pelo provider.
+  //
+  // Cada bloco é acumulado aqui e a LISTA COMPLETA é emitida no
+  // content_block_stop. Emitir a lista inteira (e não o bloco novo) é
+  // deliberado: o acumulador de campos extra do query.ts faz overwrite por
+  // chave, não append — a última emissão tem de ser auto-suficiente.
+  const thinkingByBlock = new Map<number, { type: string; thinking: string; signature?: string; data?: string }>()
+  const completedThinkingBlocks: Array<Record<string, unknown>> = []
+
   const created = Math.floor(0) // deterministic; not used by the loop
   const baseChunk = (delta: Record<string, unknown>, finish: string | null = null, extra: Record<string, unknown> = {}) => ({
     id: 'byok-anthropic',
@@ -346,6 +421,15 @@ export function anthropicSSEToOpenAISSE(): TransformStream<Uint8Array, Uint8Arra
     if (type === 'content_block_start') {
       const index = evt.index as number
       const block = evt.content_block as Record<string, unknown> | undefined
+      if (block?.type === 'thinking' || block?.type === 'redacted_thinking') {
+        thinkingByBlock.set(index, {
+          type: block.type as string,
+          thinking: typeof block.thinking === 'string' ? block.thinking : '',
+          signature: typeof block.signature === 'string' ? block.signature : undefined,
+          data: typeof block.data === 'string' ? block.data : undefined,
+        })
+        return
+      }
       if (block?.type === 'tool_use') {
         const toolIndex = nextToolIndex++
         toolIndexByBlock.set(index, toolIndex)
@@ -379,7 +463,30 @@ export function anthropicSSEToOpenAISSE(): TransformStream<Uint8Array, Uint8Arra
         }
       } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
         // query.ts surfaces reasoning_content on its own channel.
+        const acc = thinkingByBlock.get(index)
+        if (acc) acc.thinking += delta.thinking
         emit(controller, baseChunk({ reasoning_content: delta.thinking }))
+      } else if (delta.type === 'signature_delta' && typeof delta.signature === 'string') {
+        // A assinatura NÃO é texto para o utilizador — é o que prova ao
+        // provider que o bloco de raciocínio é autêntico quando volta.
+        const acc = thinkingByBlock.get(index)
+        if (acc) acc.signature = (acc.signature ?? '') + delta.signature
+      }
+      return
+    }
+
+    if (type === 'content_block_stop') {
+      const index = evt.index as number
+      const acc = thinkingByBlock.get(index)
+      if (acc) {
+        thinkingByBlock.delete(index)
+        completedThinkingBlocks.push(
+          acc.type === 'redacted_thinking'
+            ? { type: 'redacted_thinking', data: acc.data ?? '' }
+            : { type: 'thinking', thinking: acc.thinking, signature: acc.signature ?? '' },
+        )
+        // Lista COMPLETA de cada vez — ver a nota no acumulador acima.
+        emit(controller, baseChunk({ thinking_blocks: [...completedThinkingBlocks] }))
       }
       return
     }

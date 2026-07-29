@@ -79,6 +79,15 @@ interface AgentState {
    */
   modelContextWindow: number | null;
   /**
+   * Teto de tokens de SAÍDA do modelo ativo, reportado em
+   * `X-Model-Max-Output-Tokens`. Irmão do modelContextWindow e pela mesma
+   * razão (auditoria 2026-07-28): a janela tinha header, o output não —
+   * portanto um modelo novo publicado só no KV herdava o teto do perfil de
+   * fallback local (32K) e ficava calado nesse limite mesmo sendo capaz de
+   * gerar muito mais. Null até chegar a primeira resposta que o declare.
+   */
+  modelMaxOutputTokens: number | null;
+  /**
    * Whether the most recent response was actually served via BYOK (the
    * server-side X-BYOK-Active header). This is the authoritative source for
    * the chat-header pill — the byokStore.enabled toggle says what the user
@@ -92,14 +101,6 @@ interface AgentState {
    * back to false when a managed-path request follows.
    */
   teamByokActive: boolean;
-  /**
-   * Phase A telemetry: cumulative count of times the safe tool pool blocked
-   * a tool from starting because of an in-flight non-concurrency-safe sibling.
-   * Each increment represents a "would-have-been-a-race" today's Promise.all
-   * dispatch could not have prevented. Surfaced in Settings → Experimental
-   * for dogfood validation. Reset on session start.
-   */
-  poolConcurrencyConflictsAvoided: number;
   /**
    * Cumulative tool calls across the current agent run. Used by the Phase A
    * tool-call-pattern telemetry to calibrate when critical reminders should
@@ -126,6 +127,7 @@ interface AgentActions {
     provider: string | null,
     thinkingMode?: "none" | "toggleable" | "mandatory" | null,
     contextWindow?: number | null,
+    maxOutputTokens?: number | null,
   ) => void;
   setByokActive: (active: boolean) => void;
   setTeamByokActive: (active: boolean) => void;
@@ -141,9 +143,6 @@ interface AgentActions {
   /** Atalhos ligados à sessão FOCADA (compat + main). */
   setTasks: (tasks: AgentTask[]) => void;
   clearTasks: () => void;
-  // Phase A telemetry mirror
-  bumpPoolConflictsAvoided: (delta: number) => void;
-  resetPoolConflictsAvoided: () => void;
   // Tool-call pattern counters (Phase A)
   bumpCumulativeToolCalls: (delta: number) => void;
   setWritesWithoutDevServerLogs: (n: number) => void;
@@ -164,9 +163,9 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
   modelProvider: null,
   thinkingMode: null,
   modelContextWindow: null,
+  modelMaxOutputTokens: null,
   byokActive: false,
   teamByokActive: false,
-  poolConcurrencyConflictsAvoided: 0,
   cumulativeToolCalls: 0,
   writesWithoutDevServerLogs: 0,
 
@@ -186,7 +185,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
     set({ workerStatus });
   },
 
-  setModelInfo: (name, provider, thinkingMode, contextWindow) => {
+  setModelInfo: (name, provider, thinkingMode, contextWindow, maxOutputTokens) => {
     set({
       modelName: name,
       modelProvider: provider,
@@ -201,6 +200,10 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
       // source of truth.
       ...(contextWindow !== undefined
         ? { modelContextWindow: contextWindow }
+        : {}),
+      // Mesmo padrão opt-in do contextWindow.
+      ...(maxOutputTokens !== undefined
+        ? { modelMaxOutputTokens: maxOutputTokens }
         : {}),
     });
   },
@@ -261,17 +264,6 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
     else set({ tasks: [] });
   },
 
-  bumpPoolConflictsAvoided: (delta: number) => {
-    if (delta <= 0) return;
-    set((state) => ({
-      poolConcurrencyConflictsAvoided:
-        state.poolConcurrencyConflictsAvoided + delta,
-    }));
-  },
-
-  resetPoolConflictsAvoided: () => {
-    set({ poolConcurrencyConflictsAvoided: 0 });
-  },
 
   bumpCumulativeToolCalls: (delta: number) => {
     if (delta <= 0) return;
@@ -298,10 +290,10 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
       modelProvider: null,
       thinkingMode: null,
       modelContextWindow: null,
+      modelMaxOutputTokens: null,
       byokActive: false,
       teamByokActive: false,
-      poolConcurrencyConflictsAvoided: 0,
-      cumulativeToolCalls: 0,
+          cumulativeToolCalls: 0,
       writesWithoutDevServerLogs: 0,
     });
   },
@@ -319,10 +311,10 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
       modelProvider: null,
       thinkingMode: null,
       modelContextWindow: null,
+      modelMaxOutputTokens: null,
       byokActive: false,
       teamByokActive: false,
-      poolConcurrencyConflictsAvoided: 0,
-      cumulativeToolCalls: 0,
+          cumulativeToolCalls: 0,
       writesWithoutDevServerLogs: 0,
     });
   },

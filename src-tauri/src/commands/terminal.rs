@@ -37,6 +37,42 @@ pub struct InteractiveShellInfo {
 type CommandHistory = Mutex<Vec<String>>;
 pub type ProcessMap = Mutex<HashMap<u32, std::process::Child>>;
 
+/// PIDs spawned by `run_streaming_command`, tracked for `kill_process`.
+///
+/// Why a second registry instead of `ProcessMap` (auditoria 2026-07-28): the
+/// map OWNS a `std::process::Child`, but `run_streaming_command` must move its
+/// child into a reaper thread to emit `cmd-exit` — it cannot also hand it to
+/// the map, and holding the map lock across `wait()` would freeze every other
+/// caller. So `kill_process` used to reject EVERY streaming PID with "not a
+/// process managed by this application": the agent's command timeouts, aborts
+/// and background cancels all failed silently inside `catch {}` while the model
+/// was told the process had been killed. It hadn't — it ran on, orphaned.
+///
+/// Tracking the bare PID restores the kill without weakening the containment
+/// check: only processes WE spawned can be targeted, so an arbitrary PID (e.g.
+/// hallucinated by the model) is still refused.
+static SPAWNED_PIDS: Mutex<std::collections::BTreeSet<u32>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
+fn register_spawned_pid(pid: u32) {
+    if let Ok(mut pids) = SPAWNED_PIDS.lock() {
+        pids.insert(pid);
+    }
+}
+
+fn forget_spawned_pid(pid: u32) {
+    if let Ok(mut pids) = SPAWNED_PIDS.lock() {
+        pids.remove(&pid);
+    }
+}
+
+fn is_spawned_pid(pid: u32) -> bool {
+    SPAWNED_PIDS
+        .lock()
+        .map(|pids| pids.contains(&pid))
+        .unwrap_or(false)
+}
+
 // ─── PTY Session Management ──────────────────────────────────────────────────
 
 /// Holds a live PTY session: the master PTY, a writer for sending input,
@@ -907,6 +943,9 @@ pub async fn run_streaming_command(
         .map_err(|e| format!("Failed to start command: {}", e))?;
 
     let pid = child.id();
+    // Register BEFORE streaming starts: a timeout/abort can fire while the very
+    // first chunk is still in flight, and an unregistered PID is unkillable.
+    register_spawned_pid(pid);
 
     // Stream stdout — chunk-based to capture progress bars (\r without \n).
     // Reads raw from pipe (no BufReader) for minimal latency on small writes.
@@ -930,6 +969,9 @@ pub async fn run_streaming_command(
     let app_clone = app.clone();
     std::thread::spawn(move || {
         let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+        // Drop the registration once reaped so the set can't grow unbounded and
+        // a recycled PID never inherits kill rights from a dead command.
+        forget_spawned_pid(pid);
         let _ = app_clone.emit("cmd-exit", serde_json::json!({ "pid": pid, "code": code }));
     });
 
@@ -1822,7 +1864,11 @@ pub async fn kill_process(pid: u32, process_map: State<'_, ProcessMap>) -> Resul
         let map = process_map
             .lock()
             .map_err(|_| "Failed to lock process map")?;
-        if !map.contains_key(&pid) {
+        // Two ownership registries, one guarantee: `ProcessMap` holds long-running
+        // children we own outright (dev servers), `SPAWNED_PIDS` the streaming
+        // commands whose Child lives in a reaper thread. A PID in neither was not
+        // spawned by us and is still refused.
+        if !map.contains_key(&pid) && !is_spawned_pid(pid) {
             return Err(format!(
                 "Cannot kill PID {}: not a process managed by this application",
                 pid
@@ -1870,6 +1916,7 @@ pub async fn kill_process(pid: u32, process_map: State<'_, ProcessMap>) -> Resul
             .map_err(|_| "Failed to lock process map")?;
         map.remove(&pid);
     }
+    forget_spawned_pid(pid);
 
     Ok(true)
 }

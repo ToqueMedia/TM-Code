@@ -54,6 +54,7 @@ export function buildCorsHeaders(request: Request): Headers {
     // Sem este nome no expose-list, o browser não consegue LER o header
     // cross-origin mesmo que seja enviado.
     'X-Model-Context-Window',
+    'X-Model-Max-Output-Tokens',
     'X-TM-Speed-Applied',
     'X-TM-Upstream-Status',
     'X-TM-Config-Source',
@@ -205,6 +206,9 @@ export function buildResponseHeaders(upstream: Response, meta: {
   /** Janela de contexto (tokens) do modelo ativo, vinda da config KV. Ausente
    *  → o header não é emitido e a IDE cai no fallback de perfil local. */
   contextWindow?: number
+  /** Teto de tokens de SAÍDA do modelo ativo, vindo da config KV. Mesma
+   *  semântica de ausência do contextWindow. */
+  maxOutputTokens?: number
   /** Estado de billing pré-voo (ausente quando o lookup falhou ou billing off). */
   budget?: BudgetHeaderMeta
 }): Headers {
@@ -241,6 +245,12 @@ export function buildResponseHeaders(upstream: Response, meta: {
   // auto-compactação (substitui a adivinha da tabela de perfis local).
   if (typeof meta.contextWindow === 'number' && meta.contextWindow > 0) {
     headers.set('x-model-context-window', String(meta.contextWindow))
+  }
+  // Teto de SAÍDA — o irmão que faltava. Sem ele a IDE usava o perfil local e
+  // um modelo novo publicado só no KV ficava calado no teto do fallback (32K),
+  // que é também o teto da escalada anti-truncagem do loop.
+  if (typeof meta.maxOutputTokens === 'number' && meta.maxOutputTokens > 0) {
+    headers.set('x-model-max-output-tokens', String(meta.maxOutputTokens))
   }
 
   // Billing pré-voo — nomes exatos que billingStore.updateFromHeaders já

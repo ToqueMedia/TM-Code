@@ -4,7 +4,12 @@
  * forcePrompt='sensitive_file', que salta o Modo Auto por desenho → diálogo
  * humano para um ficheiro de exemplo).
  */
-import { isEnvFile, isSensitiveFile, ENV_TEMPLATE_FILES } from '../checks'
+import {
+  isEnvFile,
+  isSensitiveFile,
+  ENV_TEMPLATE_FILES,
+  commandReferencesSealedEnv,
+} from '../checks'
 
 export {}
 
@@ -38,5 +43,45 @@ describe('env template exemption — sincronizada entre gates', () => {
 
   it('o Set partilhado é a fonte única das 4 convenções', () => {
     expect(ENV_TEMPLATE_FILES.size).toBe(4)
+  })
+})
+
+/**
+ * O selo baseado em PATH só vê tools com file_path — as superfícies de shell
+ * passavam ao lado (auditoria 2026-07-28: `cat .env` via execute_command ou
+ * agent_shell_write devolvia os segredos sem diálogo nenhum).
+ */
+describe('commandReferencesSealedEnv — selo nas superfícies de shell', () => {
+  it.each([
+    'cat .env',
+    'head -n 5 .env.local',
+    'xxd .env',
+    'grep SECRET .env.production',
+    "python -c \"print(open('.env').read())\"",
+    'cp .env /tmp/leak',
+  ])('bloqueia: %s', (cmd) => {
+    expect(commandReferencesSealedEnv(cmd)).toBe(true)
+  })
+
+  it.each([
+    'cat .env.example',
+    'ls -la',
+    'yarn build',
+    'cat src/environment.ts',
+    'echo "environment ready"',
+  ])('deixa passar: %s', (cmd) => {
+    expect(commandReferencesSealedEnv(cmd)).toBe(false)
+  })
+
+  it('--env-file é passagem para outro processo, não leitura para o contexto', () => {
+    expect(commandReferencesSealedEnv('docker compose --env-file .env up')).toBe(false)
+    expect(commandReferencesSealedEnv('docker run --env-file=.env img')).toBe(false)
+    // ... mas um cat depois do flag continua a ser leitura.
+    expect(commandReferencesSealedEnv('docker compose --env-file .env up && cat .env')).toBe(true)
+  })
+
+  it('estado do regex global não vaza entre chamadas', () => {
+    expect(commandReferencesSealedEnv('cat .env')).toBe(true)
+    expect(commandReferencesSealedEnv('cat .env')).toBe(true)
   })
 })

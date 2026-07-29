@@ -299,6 +299,9 @@ interface ChatActions {
   addPendingDiff: (diff: DiffResult) => void
   removePendingDiff: (diffId: string) => void
   clearPendingDiffs: () => void
+  /** Descarta os diffs à espera de decisão e marca-os como recusados na UI.
+   *  Ver a implementação — é o que impede o cartão zombie depois de um Stop. */
+  discardPendingDiffs: () => void
   // Persistence actions
   saveSessionToDisk: () => Promise<void>
   loadSessionFromDisk: (projectPath: string, sessionId: string) => Promise<void>
@@ -374,6 +377,10 @@ interface ChatActions {
    *  the card is a transient UI element, not a permanent log entry, and stacking
    *  several at the end of the chat displaces the actual conversation flow. */
   removeMessage: (messageId: string) => void
+  /** Trunca a sessão ativa ANTES da mensagem que contém este tool call —
+   *  o rewind opt-in emparelhado com o Revert de checkpoint. Devolve false
+   *  quando o call não está no transcript (nada foi tocado). */
+  rewindToToolCall: (toolCallId: string) => boolean
   /** Append a sub-agent run ID to a message's subAgentRunIds array.
    *  Called by the task tool after spawning a sub-agent so the UI can
    *  render SubAgentCard for that run. */
@@ -760,6 +767,21 @@ export function resolveAllPendingDiffApprovals(approved: boolean) {
     resolve(approved)
   }
   pendingDiffApprovals.clear()
+
+  // Desbloquear o agente NÃO chega: o `diffStatus` dos tool calls ficava em
+  // `pending`, portanto o cartão de diff mantinha os botões Accept/Reject vivos
+  // e carregar em Accept escrevia o ficheiro de um run que já tinha morrido —
+  // com o modelo informado do contrário (bug reportado 2026-07-28).
+  //
+  // Fica aqui, e não em cada `stopAgentRun`, porque este é o ponto por onde
+  // passam TODOS os caminhos de cancelamento: Stop, `cancelLoop`, o `onError`
+  // do mainDispatch e a troca de sessão. Corrigir caller a caller deixaria os
+  // outros a repetir o mesmo bug.
+  //
+  // Só no caminho de recusa: com `approved: true` quem chama é o
+  // `approveAllPendingDiffs`, que escreve os ficheiros e carimba os estados por
+  // sua conta.
+  if (!approved) useChatStore.getState().discardPendingDiffs()
 }
 
 /**
@@ -3027,11 +3049,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     },
 
     rejectAllAndStop: async () => {
-      const { activeSessionId, sessions, pendingDiffs } = get()
+      const { activeSessionId, sessions } = get()
       if (!activeSessionId) return
-
-      const session = sessions.get(activeSessionId)
-      if (!session) return
+      if (!sessions.get(activeSessionId)) return
 
       // 1. Cancel the agent loop FIRST (lazy imports to avoid circular dependency)
       const [agentMod, agentStoreMod] = await Promise.all([
@@ -3041,29 +3061,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       agentMod.default.getInstance().cancelLoop()
       agentStoreMod.useAgentStore.getState().setStatus('idle')
 
-      // 2. Reject all pending diffs in DiffService
-      const diffService = DiffService.getInstance()
-      for (const diff of pendingDiffs) {
-        diffService.rejectDiff(diff.id)
-      }
-
-      // 3. Mark all pending tool call diffs as denied in the store
-      const messages = session.messages.map(msg => {
-        if (!msg.toolCalls) return msg
-        const toolCalls = msg.toolCalls.map(tc =>
-          tc.diffStatus === 'pending' ? { ...tc, diffStatus: 'denied' as const } : tc
-        )
-        return { ...msg, toolCalls }
-      })
-
-      const updatedSessions = new Map(sessions)
-      updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
-      set({ sessions: updatedSessions, pendingDiffs: [] })
-
-      // 4. Reject all pending diff approval promises
+      // 2. Reject all pending diff approval promises — e, por dentro, descartar
+      //    os diffs no DiffService e marcá-los como recusados na UI.
       resolveAllPendingDiffApprovals(false)
 
-      // 5. Clear pending permission + finalize
+      // 3. Clear pending permission + finalize
       usePermissionStore.getState().clearPending()
       get().finalizeAssistantMessage()
     },
@@ -3603,6 +3605,50 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
     clearPendingDiffs: () => {
       set({ pendingDiffs: [] })
+    },
+
+    /**
+     * Descarta os diffs à espera de decisão: recusa-os no DiffService, marca os
+     * tool calls `pending` como `denied` e esvazia `pendingDiffs`.
+     *
+     * Isto existia só dentro do `rejectAllAndStop` (o botão "Reject all"), e por
+     * isso o STOP do agente não o fazia: o `stopAgentRun` resolvia as promessas
+     * com `false` — o modelo ficava a saber que a edição foi recusada — mas
+     * deixava o `diffStatus` em `pending`. Resultado (bug reportado 2026-07-28):
+     * o cartão de diff continuava com os botões Accept/Reject depois do Stop, e
+     * carregar em Accept chamava `DiffService.acceptDiff`, que ESCREVE O FICHEIRO.
+     * Ficava-se com a alteração em disco de um run que o utilizador cancelou, e
+     * com o histórico do modelo a dizer o contrário — divergência silenciosa
+     * entre o que o modelo acredita e o que está no disco.
+     *
+     * Marcar como `denied` resolve os dois lados de uma vez: `isResolved` passa
+     * a true no InlineDiff (os botões desaparecem) e o estado passa a bater
+     * certo com o que o modelo já foi informado.
+     */
+    discardPendingDiffs: () => {
+      const diffService = DiffService.getInstance()
+      for (const diff of get().pendingDiffs) {
+        diffService.rejectDiff(diff.id)
+      }
+
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return { pendingDiffs: [] }
+        const session = sessions.get(activeSessionId)
+        if (!session) return { pendingDiffs: [] }
+
+        const messages = session.messages.map(msg => {
+          if (!msg.toolCalls?.some(tc => tc.diffStatus === 'pending')) return msg
+          const toolCalls = msg.toolCalls.map(tc =>
+            tc.diffStatus === 'pending' ? { ...tc, diffStatus: 'denied' as const } : tc
+          )
+          return { ...msg, toolCalls }
+        })
+
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+        return { sessions: updatedSessions, pendingDiffs: [] }
+      })
     },
 
     approveAllPendingDiffs: async () => {
@@ -4402,6 +4448,44 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
 
       debouncedSave()
+    },
+
+    rewindToToolCall: (toolCallId) => {
+      // Rewind do transcript emparelhado com o Revert de checkpoint (gap F#8
+      // da auditoria — o /rewind do claude-vaz restaura DISCO e CONVERSA; o
+      // TM restaurava só o disco e o chat continuava a afirmar o trabalho
+      // revertido). OPT-IN: só corre quando o utilizador escolhe o botão
+      // "reverter + rebobinar" — truncar histórico nunca é automático.
+      //
+      // Corte: a mensagem do assistant que CONTÉM o tool call do checkpoint
+      // sai, com tudo o que veio depois — a conversa volta a acabar na
+      // mensagem do developer que pediu esse trabalho. conversationHistory é
+      // derivada, portanto rebuild em vez de cirurgia paralela.
+      let didRewind = false
+      set(state => {
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return state
+        const session = sessions.get(activeSessionId)
+        if (!session) return state
+
+        const idx = session.messages.findIndex(msg =>
+          (msg.toolCalls ?? []).some(tc => tc.id === toolCallId) ||
+          (msg.contentBlocks ?? []).some(b => b.type === 'tool_call' && (b as { id?: string }).id === toolCallId),
+        )
+        if (idx <= 0) return state // não encontrado, ou é a 1.ª mensagem — nada a rebobinar
+
+        const messages = session.messages.slice(0, idx)
+        const updatedSessions = new Map(sessions)
+        updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
+        didRewind = true
+        return {
+          sessions: updatedSessions,
+          conversationHistory: rebuildConversationHistory(messages),
+        }
+      })
+
+      if (didRewind) debouncedSave()
+      return didRewind
     },
 
     appendSubAgentRunId: (messageId, runId) => {

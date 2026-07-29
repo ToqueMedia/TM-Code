@@ -12,8 +12,12 @@ import { READ_FILE, WRITE_FILE } from './toolNames'
  *      `String.prototype.replace` $-sequence corruption).
  *   - `duplicateMatchError` → multi-option recovery message (Bug #2: the
  *      "add more context" hint that sent the model into a loop).
- *   - `sanitizeDiffForModel` → diff-JSON slim-down before injecting into
- *      the next API turn's tool_result (Bug #3: the file-echo bloat).
+ *   - `editFileReplaceAll` → variante replace_all (rename de símbolo em 1 call).
+ *   - (removido 2026-07-28) `sanitizeDiffForModel` (Bug #3, file-echo bloat) —
+ *     ficou sem callers: o resultado NO-TURNO inclui agora o excerto
+ *     pós-edição (changedFileSnippet.buildPostEditResultText) e o rebuild de
+ *     histórico usa a sua cópia inline de uma linha (chatStore) — correto lá:
+ *     turnos históricos não precisam de excerto.
  *
  * Pure functions, no Tauri / no React / no store imports — safe to unit
  * test in isolation without webview / project-store mocks.
@@ -66,33 +70,27 @@ export function duplicateMatchError(path: string, occurrences: number): string {
   // manual) so a future rename of read_file/write_file propagates here
   // without text drift.
   return `Error: old_string appears ${occurrences} times in ${path}. It must be unique. Options: ` +
-    `(a) add more surrounding context to old_string/new_string so the match is unique; ` +
-    `(b) if you did not expect a duplicate (the file may have been corrupted by a previous edit), ` +
+    `(a) if ALL ${occurrences} occurrences should change (renaming a symbol/variable), retry with replace_all: true; ` +
+    `(b) add more surrounding context to old_string/new_string so the match is unique; ` +
+    `(c) if you did not expect a duplicate (the file may have been corrupted by a previous edit), ` +
     `re-read the file with ${READ_FILE} to confirm, then use ${WRITE_FILE} to overwrite with the corrected full content in one call — ` +
     `do NOT chase the duplicate with successive edits.`
 }
 
+
 /**
- * Collapse a diff-result JSON to a one-line summary for injection into
- * the next API turn's tool_result. The UI consumes the full JSON via
- * `chatStore.updateToolCallResult` to render `InlineDiff` — the MODEL
- * only needs to know the edit happened.
+ * Replace EVERY occurrence of `oldStr`, literally — `split().join()` nunca
+ * interpreta `$&`/`` $` ``/`$'`/`$$`/`$n`, portanto herda a imunidade à
+ * corrupção do Bug #1 sem regex nenhum.
  *
- * Without this, 14 `edit_file` calls on a file growing from 1KB to 44KB
- * shipped ~700KB / ~175K tokens of pure file echo to the model in one
- * /plan turn (May 2026 PLAN.md postmortem). The same sanitization already
- * runs in `rebuildConversationHistory` for on-disk history; this mirrors
- * it for the WITHIN-TURN tool result that goes into the very next API
- * call.
- *
- * Non-diff and non-JSON results pass through untouched.
+ * Existe para o `replace_all` do edit_file (auditoria 2026-07-28): renomear um
+ * símbolo com N ocorrências obrigava a N edits com contexto único inventado, ou
+ * a reescrever o ficheiro inteiro com write_file — token-caro e propenso ao
+ * próprio Bug #1 que este módulo documenta.
  */
-export function sanitizeDiffForModel(rawResult: string): string {
-  try {
-    const parsed = JSON.parse(rawResult)
-    if (parsed?.type === 'diff' && typeof parsed.path === 'string') {
-      return `File ${parsed.isNewFile ? 'created' : 'updated'}: ${parsed.path}`
-    }
-  } catch { /* not JSON — pass through */ }
-  return rawResult
+export function editFileReplaceAll(content: string, oldStr: string, newStr: string): string {
+  if (!content.includes(oldStr)) {
+    throw new Error('editFileReplaceAll: oldStr not found in content (occurrence check upstream is broken)')
+  }
+  return content.split(oldStr).join(newStr)
 }

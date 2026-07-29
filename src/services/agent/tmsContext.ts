@@ -131,18 +131,6 @@ export function setTmsTurnTelemetry(patch: Partial<TmsTurnTelemetry>): void {
   }
 }
 
-export function markTmsStubSent(stub: string): void {
-  const available = extractAvailableSections(stub)
-  const tokens = estimateTokens(stub)
-  currentTelemetry = {
-    ...currentTelemetry,
-    tmsContextStubTokens: tokens,
-    tmsStubTokens: tokens,
-    tmsSectionsAvailable: available.length
-      ? unique([...currentTelemetry.tmsSectionsAvailable, ...available])
-      : currentTelemetry.tmsSectionsAvailable,
-  }
-}
 
 export function markTmsFullContextSent(section: string): void {
   const requested = unique([...currentTelemetry.tmsRequestedSections, section])
@@ -298,25 +286,6 @@ export function getTmsTurnTelemetry(): TmsTurnTelemetry {
   }
 }
 
-function extractAvailableSections(stub: string): string[] {
-  const marker = 'Available sections:'
-  const idx = stub.indexOf(marker)
-  if (idx === -1) return []
-  const tail = stub.slice(idx + marker.length)
-  const lines = tail.split('\n')
-  const out: string[] = []
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    if (!trimmed.startsWith('- ')) {
-      if (out.length > 0) break
-      continue
-    }
-    const section = trimmed.slice(2).replace(/^`|`$/g, '').trim()
-    if (section) out.push(section)
-  }
-  return out
-}
 
 export function decorateTmsRequestUsage<T extends RequestUsageEntry>(
   entry: T,

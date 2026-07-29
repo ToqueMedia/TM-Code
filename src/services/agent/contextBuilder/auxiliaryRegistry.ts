@@ -776,6 +776,12 @@ export function fallbackContextPlanForProfile(profile: PromptProfile): ContextPl
     }
   }
 
+  // RESERVADOS (auditoria 2026-07-28): deploy_publish e auth_database são
+  // perfis da era pré-pivot dev-only — nada os produz hoje (classifyPromptIntent
+  // só devolve vision/bugfix_local; os overrides internos usam
+  // project_bootstrap/scaffold_project). Ficam como dados inertes porque
+  // remover o valor do union PromptProfile tocaria em tipos partilhados;
+  // não há código a alcançá-los.
   if (profile === 'deploy_publish') {
     return {
       taskDomain: 'delivery',

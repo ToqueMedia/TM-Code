@@ -36,6 +36,22 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
     return (input._memoryScope as string | null) ?? ctx.getMemoryScopeAgentType()
   }
 
+  /**
+   * Projeto DESTE run — não o que o utilizador está a ver.
+   *
+   * As memórias resolviam o caminho por `useProjectStore.currentProject`, o
+   * projeto FOCADO (auditoria 2026-07-28). Sob MDI, um run em background sobre
+   * o projeto B enquanto o utilizador olha para o A escrevia as memórias de B
+   * dentro do memdir de A — contaminação silenciosa entre projetos, e o
+   * corredor paralelo liga explicitamente a memória persistente nas tarefas.
+   * `ctx.getProjectRoot()` é a raiz ligada a ESTE executor (o runner faz
+   * setProjectContext por tarefa); o store fica só como último recurso, para
+   * caminhos que corram antes de haver raiz ligada.
+   */
+  function resolveRunProjectPath(): string | undefined {
+    return ctx.getProjectRoot() || useProjectStore.getState().currentProject?.path
+  }
+
   // === save_memory ===
   ctx.tools.set('save_memory', {
     definition: {
@@ -89,7 +105,7 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
 
       const scope = defaultScopeForType(type)
       const filename = memoryFilenameFor(type, name)
-      const projectPath = useProjectStore.getState().currentProject?.path
+      const projectPath = resolveRunProjectPath()
       // Sub-agent memory isolation: reads scope from ToolExecutor state.
       // Safe because JS is single-threaded and the runner sets/clears
       // the scope synchronously around each agent turn.
@@ -145,7 +161,12 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
       ).catch(() => { /* noop */ })
       import('../memoryWriteTracker').then(async (m) => {
         const { useChatStore } = await import('../../../stores/chatStore')
-        const sessionId = useChatStore.getState().activeSessionId
+        // Sessão do RUN, não a VISTA (auditoria 2026-07-28): um save_memory a
+        // correr enquanto o utilizador olha para outra sessão marcava a errada
+        // e o skip-gate do extractor disparava (ou deixava de disparar) na
+        // sessão errada. Mesmo padrão do fix do snapshot BYOK.
+        const chat = useChatStore.getState()
+        const sessionId = chat.streamingSessionId ?? chat.activeSessionId
         if (sessionId) m.recordMemoryWrite(sessionId)
       }).catch(() => { /* noop */ })
 
@@ -186,7 +207,7 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
 
       const scope = defaultScopeForType(type)
       const filename = memoryFilenameFor(type, name)
-      const projectPath = useProjectStore.getState().currentProject?.path
+      const projectPath = resolveRunProjectPath()
       const memoryScope = getMemoryScope(input)
 
       // Delete the topic file (idempotent).
@@ -225,7 +246,12 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
       import('../memorySelector').then(m => m.invalidateMemorySelectorCache()).catch(() => {})
       import('../memoryWriteTracker').then(async (m) => {
         const { useChatStore } = await import('../../../stores/chatStore')
-        const sessionId = useChatStore.getState().activeSessionId
+        // Sessão do RUN, não a VISTA (auditoria 2026-07-28): um save_memory a
+        // correr enquanto o utilizador olha para outra sessão marcava a errada
+        // e o skip-gate do extractor disparava (ou deixava de disparar) na
+        // sessão errada. Mesmo padrão do fix do snapshot BYOK.
+        const chat = useChatStore.getState()
+        const sessionId = chat.streamingSessionId ?? chat.activeSessionId
         if (sessionId) m.recordMemoryWrite(sessionId)
       }).catch(() => { /* noop */ })
       return `Memory forgotten: ${scope}/${filename}.`
@@ -265,7 +291,7 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
 
       const scope = defaultScopeForType(type)
       const filename = memoryFilenameFor(type, name)
-      const projectPath = useProjectStore.getState().currentProject?.path
+      const projectPath = resolveRunProjectPath()
       const memoryScope = getMemoryScope(input)
       const { loadMemoryMtimes } = await import('../memdir')
       const { memoryAgeWarning } = await import('../memoryAge')
@@ -303,7 +329,7 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
         import('../memdir'),
       ])
 
-      const projectPath = useProjectStore.getState().currentProject?.path
+      const projectPath = resolveRunProjectPath()
 
       const memoryScopeDistill = getMemoryScope(input)
       const [userIdx, projectIdx] = await Promise.all([

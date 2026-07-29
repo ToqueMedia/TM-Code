@@ -244,6 +244,13 @@ jest.mock('../../browserSessionManager', () => ({
 
 import ToolExecutor from '../toolExecutor'
 import { clearReadRangeTracker } from '../toolExecutor/readRangeTracker'
+import {
+  TOOL_NAMES,
+  canonicalToolName,
+  normalizePersistedToolName,
+  DIVERGENT_TRAINED_TOOLS,
+} from '../toolNames'
+import { DESTRUCTIVE_TOOLS } from '../toolsetSelector'
 // agentStore is NOT mocked — update_tasks drives the real Zustand store, so
 // the evidence-guard tests seed and assert against it directly.
 import { useAgentStore } from '../../../stores/agentStore'
@@ -471,7 +478,7 @@ describe('A: execute() orchestration', () => {
       if (cmd === 'search_in_files') {
         return { query: 'foo', total_files: 0, total_matches: 0, files: [], file_name_matches: [], duration_ms: 0, truncated: false }
       }
-      if (cmd === 'glob_files') return ['/projects/test-app/src/App.tsx']
+      if (cmd === 'glob_files' || cmd === 'glob_files_filtered') return ['/projects/test-app/src/App.tsx']
       if (cmd === 'build_file_tree') return { name: 'src', type: 'directory', children: [] }
       return undefined
     })
@@ -485,13 +492,14 @@ describe('A: execute() orchestration', () => {
       directory: '/projects/test-app/src',
       options: expect.objectContaining({ include_patterns: ['*.ts'] }),
     }))
-    expect(mockInvokeImpl).toHaveBeenCalledWith('glob_files', {
+    expect(mockInvokeImpl).toHaveBeenCalledWith('glob_files_filtered', {
       pattern: '**/*.tsx',
       directory: '/projects/test-app/src',
+      respectGitignore: true,
     })
     expect(mockInvokeImpl).toHaveBeenCalledWith('build_file_tree', {
       rootPath: '/projects/test-app/src',
-      filter: { showHidden: false, maxDepth: 1 },
+      filter: { showHidden: false, maxDepth: 1, respectGitignore: true },
     })
   })
 
@@ -800,6 +808,89 @@ describe('B: Security blocks', () => {
     const exec = freshExecutor()
     const result = await exec.execute('rename_file', { oldPath: '/projects/test-app/.env', newName: '.env.bak' })
     expect(result).toContain('Blocked')
+  })
+
+  // ── Superfícies que contornavam o selo (auditoria 2026-07-28) ───────────
+  // O selo só olhava para tools com file_path. Search e shell passavam ao
+  // lado — e search é auto-aprovada, portanto sem diálogo nenhum.
+
+  it('blocks search_files pointed straight at .env', async () => {
+    const exec = freshExecutor()
+    const result = await exec.execute('search_files', {
+      query: '.', directory: '/projects/test-app/.env',
+    })
+    expect(result).toContain('Blocked')
+    expect(result).toContain('secrets')
+  })
+
+  it('blocks a shell command that reads .env (execute_command)', async () => {
+    const exec = freshExecutor()
+    const result = await exec.execute('execute_command', { command: 'cat .env' })
+    expect(result).toContain('Blocked')
+  })
+
+  it('blocks the BACKGROUND twin too — mesma capacidade, mesmo gate', async () => {
+    const exec = freshExecutor()
+    const result = await exec.execute('execute_command_background', { command: 'grep KEY .env.production' })
+    expect(result).toContain('Blocked')
+  })
+
+  it('blocks agent_shell_write reading .env', async () => {
+    const exec = freshExecutor()
+    const result = await exec.execute('agent_shell_write', { input: 'head -5 .env' })
+    expect(result).toContain('Blocked')
+  })
+
+  // A isenção do --env-file (entregar o ficheiro a outro processo em vez de o
+  // imprimir) é lógica pura e vive em toolExecutor/__tests__/checks.test.ts.
+
+  // ── Descoberta de ficheiros ignorados (2026-07-28) ──────────────────────
+  // Esconder output transpilado por omissão é acertado (é o que o ripgrep faz,
+  // logo o que o Grep do claude-vaz faz). Mas o Glob/LS do claude-vaz NÃO
+  // filtram: sem opt-out E sem aviso, um glob que não encontra nada PORQUE
+  // filtrou leva o modelo a concluir "não existe" — a tool a mentir-lhe.
+
+  it('glob filtra .gitignore por omissão', async () => {
+    const exec = freshExecutor()
+    mockInvokeImpl.mockResolvedValue(['/projects/test-app/src/a.ts'])
+    await exec.execute('glob', { pattern: '**/*.ts' })
+    expect(mockInvoke).toHaveBeenLastCalledWith('glob_files_filtered', expect.objectContaining({
+      respectGitignore: true,
+    }))
+  })
+
+  it('includeIgnored desliga o filtro (depurar um build precisa de dist/)', async () => {
+    const exec = freshExecutor()
+    mockInvokeImpl.mockResolvedValue(['/projects/test-app/dist/bundle.js'])
+    const out = await exec.execute('glob', { pattern: '**/*.js', includeIgnored: true })
+    expect(mockInvoke).toHaveBeenLastCalledWith('glob_files_filtered', expect.objectContaining({
+      respectGitignore: false,
+    }))
+    expect(out).toContain('dist/bundle.js')
+  })
+
+  it('zero resultados COM filtro diz porquê e como repetir', async () => {
+    const exec = freshExecutor()
+    mockInvokeImpl.mockResolvedValue([])
+    const out = await exec.execute('glob', { pattern: '**/*.js' })
+    expect(out).toContain('includeIgnored: true')
+    expect(out).toContain('excluded')
+  })
+
+  it('zero resultados SEM filtro não inventa uma desculpa', async () => {
+    const exec = freshExecutor()
+    mockInvokeImpl.mockResolvedValue([])
+    const out = await exec.execute('glob', { pattern: '**/*.js', includeIgnored: true })
+    expect(out).not.toContain('includeIgnored: true')
+  })
+
+  it('list_directory expõe o mesmo opt-out', async () => {
+    const exec = freshExecutor()
+    mockInvokeImpl.mockResolvedValue({ name: 'x', type: 'directory', children: [] })
+    await exec.execute('list_directory', { path: '/projects/test-app', includeIgnored: true })
+    expect(mockInvoke).toHaveBeenLastCalledWith('build_file_tree', expect.objectContaining({
+      filter: expect.objectContaining({ respectGitignore: false }),
+    }))
   })
 
   it('ALLOWS .env.example (the one exception)', async () => {
@@ -1690,27 +1781,27 @@ describe('I: Tool definitions and metadata', () => {
     }
   })
 
-  it('getToolDefinitions includes core tools', () => {
+  it('getToolDefinitions anuncia os nomes de TREINO, uma vez cada', () => {
+    // Contrato pós-renomeação (2026-07-28): o modelo vê `Read`/`Grep`/`Bash`,
+    // não `read_file`/`search_files`/`execute_command`. Uma etiqueta por
+    // capacidade — antes iam as DUAS (~1017 tokens duplicados por request) e o
+    // modelo escolhia sempre a de treino de qualquer maneira.
     const exec = freshExecutor()
-    const defs = exec.getToolDefinitions()
-    const names = defs.map(d => d.function.name)
+    const names = exec.getToolDefinitions().map(d => d.function.name)
 
-    expect(names).toContain('read_file')
-    expect(names).toContain('read_around')
-    expect(names).toContain('Read')
-    expect(names).toContain('Grep')
-    expect(names).toContain('Glob')
-    expect(names).toContain('LS')
-    expect(names).toContain('write_file')
-    expect(names).toContain('execute_command')
-    expect(names).toContain('start_dev_server')
-    expect(names).toContain('stop_dev_server')
-    expect(names).toContain('agent_shell_start')
-    expect(names).toContain('agent_shell_write')
-    expect(names).toContain('agent_shell_read')
-    expect(names).toContain('agent_shell_stop')
-    expect(names).toContain('update_tasks')
-    expect(names).toContain('ask_user_question')
+    for (const trained of ['Read', 'Grep', 'Glob', 'LS', 'Bash', 'Edit', 'Write', 'Task', 'WebFetch', 'WebSearch']) {
+      expect(names).toContain(trained)
+    }
+    // O canónico NÃO é anunciado — se aparecesse seria a duplicação de volta.
+    for (const canonical of ['read_file', 'search_files', 'list_directory', 'glob', 'execute_command', 'edit_file', 'write_file', 'delegate', 'web_fetch', 'web_search']) {
+      expect(names).not.toContain(canonical)
+    }
+    // Tools sem equivalente de treino mantêm o nome próprio.
+    for (const own of ['read_around', 'create_file', 'start_dev_server', 'stop_dev_server', 'update_tasks']) {
+      expect(names).toContain(own)
+    }
+    // Sem duplicados: uma etiqueta por tool.
+    expect(new Set(names).size).toBe(names.length)
   })
 
   it('getCoreToolCount returns count of non-MCP tools', () => {
@@ -1881,9 +1972,11 @@ describe('J: Path validation', () => {
 
     await exec.execute('list_directory', { path: '/projects/test-app/src', maxDepth: 1 })
 
+    // respectGitignore entrou no filtro (2026-07-28): o LS do agente esconde
+    // output transpilado por omissão, e `includeIgnored: true` desliga-o.
     expect(mockInvoke).toHaveBeenLastCalledWith('build_file_tree', {
       rootPath: '/projects/test-app/src',
-      filter: { showHidden: false, maxDepth: 1 },
+      filter: { showHidden: false, maxDepth: 1, respectGitignore: true },
     })
   })
 
@@ -1999,7 +2092,7 @@ describe('J: Path validation', () => {
     await exec.execute('list_directory', { file_path: root })
     expect(mockInvoke).toHaveBeenLastCalledWith('build_file_tree', {
       rootPath: root,
-      filter: { showHidden: false, maxDepth: 3 },
+      filter: { showHidden: false, maxDepth: 3, respectGitignore: true },
     })
 
     mockInvokeImpl.mockResolvedValueOnce({ query: 'ReportsPage', total_files: 0, total_matches: 0, files: [], file_name_matches: [], duration_ms: 0, truncated: false } as never)
@@ -2011,9 +2104,10 @@ describe('J: Path validation', () => {
 
     mockInvokeImpl.mockResolvedValueOnce([`${root}/src/App.tsx`] as never)
     await exec.execute('glob', { pattern: 'src/**/*.tsx', directory: root })
-    expect(mockInvoke).toHaveBeenLastCalledWith('glob_files', {
+    expect(mockInvoke).toHaveBeenLastCalledWith('glob_files_filtered', {
       pattern: 'src/**/*.tsx',
       directory: root,
+      respectGitignore: true,
     })
   })
 })
@@ -2211,5 +2305,289 @@ describe('update_tasks evidence guard', () => {
 
     expect(result).not.toContain('BLOCKED')
     expect(statusOf('1.1')).toBe('in_progress')
+  })
+})
+
+// ── Invariantes do REGISTO (rede da renomeação, 2026-07-28) ─────────────────
+//
+// Estes testes não afirmam NOMES, afirmam RELAÇÕES — um teste que dissesse
+// `toContain('read_file')` teria de ser reescrito pela própria migração que
+// devia vigiar, e um teste que se reescreve com a mudança não protege nada.
+// Os invariantes valem IGUAIS antes e depois de virar os nomes.
+describe('Z: invariantes do registo de tools', () => {
+  function registeredNames(): Set<string> {
+    return new Set(freshExecutor().getToolDefinitions().map(t => t.function.name))
+  }
+
+  it('tudo o que TOOL_NAMES declara resolve para uma tool registada', () => {
+    // TOOL_NAMES é a lista do que pode aparecer em texto de prompt — contém
+    // canónicos E nomes de treino. O schema anuncia o de treino, portanto o
+    // invariante é sobre RESOLUÇÃO, não sobre igualdade literal.
+    const advertised = registeredNames()
+    const resolvable = new Set([...advertised, ...[...advertised].map(canonicalToolName)])
+    expect(TOOL_NAMES.filter(n => !resolvable.has(n) && !resolvable.has(canonicalToolName(n)))).toEqual([])
+  })
+
+  it('tudo o que está registado é declarado (sem MCP nem meta-tools)', () => {
+    const declared = new Set<string>(TOOL_NAMES)
+    const META = new Set(['request_tools', 'request_context'])
+    const undeclared = [...registeredNames()]
+      .filter(n => !n.startsWith('mcp__') && !META.has(n))
+      .filter(n => !declared.has(n) && !declared.has(canonicalToolName(n)))
+    expect(undeclared).toEqual([])
+  })
+
+  it('toda a tool destrutiva existe — gate órfão é gate que não guarda nada', () => {
+    // DESTRUCTIVE_TOOLS guarda canónicos; o schema anuncia nomes de treino.
+    const canonicalRegistered = new Set([...registeredNames()].map(canonicalToolName))
+    expect([...DESTRUCTIVE_TOOLS].filter(n => !canonicalRegistered.has(n))).toEqual([])
+  })
+
+  it('os nomes de treino resolvem para tools registadas', () => {
+    // Agora são os nomes ANUNCIADOS: o modelo vê-os directamente no schema.
+    const registered = registeredNames()
+    for (const n of ['Read', 'Grep', 'Glob', 'LS', 'Bash', 'Edit', 'Write', 'Task', 'WebFetch', 'WebSearch']) {
+      expect(registered.has(n)).toBe(true)
+    }
+  })
+
+  it('os divergentes NÃO resolvem — têm de cair no erro que ensina', () => {
+    const registered = registeredNames()
+    for (const n of Object.keys(DIVERGENT_TRAINED_TOOLS)) {
+      expect(registered.has(n)).toBe(false)
+    }
+  })
+
+  it('um grant guardado com o nome ANTIGO continua a casar', () => {
+    // A regressão mais cara e mais silenciosa desta migração: o utilizador
+    // clicou "permitir sempre" quando a tool se chamava `read_file`; se o
+    // grant deixar de casar, é interrogado outra vez por tudo o que já tinha
+    // autorizado. normalizePersistedToolName é a ponte na LEITURA.
+    // As chaves internas NÃO mudaram (a renomeação é só na etiqueta do
+    // schema), portanto um grant antigo casa por identidade. Este teste fixa
+    // essa promessa: se algum dia as chaves mudarem, LEGACY_TOOL_NAMES tem de
+    // ser preenchido no mesmo commit ou isto fica vermelho.
+    const exec = freshExecutor()
+    const LEGACY = [
+      'read_file', 'search_files', 'list_directory', 'glob', 'execute_command',
+      'edit_file', 'write_file', 'delegate', 'web_fetch', 'web_search',
+    ]
+    for (const legacy of LEGACY) {
+      expect(exec.isConcurrencySafe(normalizePersistedToolName(legacy)) !== undefined).toBe(true)
+      expect(canonicalToolName(normalizePersistedToolName(legacy))).toBe(legacy)
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════
+// Guarda de apagar — "derivado ≠ apagável"
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Regressão momenu-fact (2026-07-28): o agente confirmou por `git check-ignore`
+// que os ficheiros eram ignorados e concluiu que podia apagá-los. É a leitura
+// invertida — "o git não rastreia isto" quer dizer "o git não to devolve".
+// Estes testes exercitam a LIGAÇÃO toda (classificação → promptReason →
+// mensagem de recusa), que era o que faltava: o comando Rust e o detector
+// tinham testes, a costura entre eles não.
+describe('deletion guard', () => {
+  const IGNORED = '/projects/test-app/functions/lib/seed.js'
+  const TRACKED = '/projects/test-app/functions/src/seed.ts'
+
+  /** Faz o Rust dizer que `ignoredPaths` são gitignored, e serve o tsconfig. */
+  function mockProjectShape(opts: { ignored: string[]; outDir?: string }) {
+    mockInvokeImpl.mockImplementation(((cmd: string, args: Record<string, unknown>) => {
+      if (cmd === 'is_path_gitignored') {
+        return Promise.resolve(opts.ignored.includes(String(args?.filePath ?? '')))
+      }
+      if (cmd === 'list_directory') {
+        return Promise.resolve(
+          String(args?.path ?? '') === '/projects/test-app'
+            ? [{ name: 'functions', is_directory: true }]
+            : [],
+        )
+      }
+      if (cmd === 'read_file') {
+        const path = String(args?.path ?? '')
+        if (path === '/projects/test-app/functions/tsconfig.json' && opts.outDir) {
+          return Promise.resolve(JSON.stringify({ compilerOptions: { outDir: opts.outDir } }))
+        }
+        return Promise.reject(new Error('ENOENT'))
+      }
+      if (cmd === 'path_exists') return Promise.resolve(false)
+      return Promise.resolve(undefined)
+    }) as never)
+  }
+
+  /**
+   * Nega SEM razão escrita. Quando o humano escreve uma, é a dele que segue
+   * para o modelo — e é assim que deve ser. O texto que estes testes verificam
+   * é o fallback, o único sítio onde a classificação se torna visível.
+   */
+  function denySilently() {
+    mockRequestPermission.mockResolvedValue({
+      approved: false,
+      prompted: true,
+      source: 'permission_dialog',
+    })
+  }
+
+  beforeEach(() => {
+    // O `readGeneratedPaths` lê tsconfigs via ipcCache (estado de módulo): sem
+    // reset, o resultado de um teste é servido ao seguinte.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('../ipcCache').__resetIpcCacheForTests?.()
+  })
+
+  it('forces the dialog with generated_file when the project declares the path as output', async () => {
+    const exec = freshExecutor()
+    mockProjectShape({ ignored: [IGNORED], outDir: 'lib' })
+    denySilently()
+
+    const result = await exec.execute('delete_file', { file_path: IGNORED })
+
+    expect(mockRequestPermission).toHaveBeenCalledWith(
+      'delete_file',
+      expect.objectContaining({ file_path: IGNORED }),
+      'generated_file',
+      undefined,
+    )
+    // A mensagem só pode afirmar "build output" quando o projecto o DECLARA,
+    // e tem de nomear a declaração.
+    expect(result).toContain('is build output')
+    expect(result).toContain('functions/tsconfig.json outDir')
+    expect(result).toContain('remove its SOURCE')
+  })
+
+  it('says untracked — NOT build output — for an ignored path nothing declares', async () => {
+    const exec = freshExecutor()
+    // Ignorado, mas nenhum tsconfig o declara: um .log, um rascunho, um
+    // .DS_Store. Chamar-lhe "build output" seria afirmar ao modelo uma coisa
+    // falsa — o defeito que originou toda esta série.
+    mockProjectShape({ ignored: [IGNORED] })
+    denySilently()
+
+    const result = await exec.execute('delete_file', { file_path: IGNORED })
+
+    expect(mockRequestPermission).toHaveBeenCalledWith(
+      'delete_file',
+      expect.anything(),
+      'untracked_file',
+      undefined,
+    )
+    expect(result).toContain('is untracked (gitignored)')
+    expect(result).not.toContain('build output')
+    expect(result).not.toContain('rebuild')
+  })
+
+  it('leaves tracked files on the normal permission flow — git can restore those', async () => {
+    const exec = freshExecutor()
+    mockProjectShape({ ignored: [] })
+    approveAllPermissions()
+
+    await exec.execute('delete_file', { file_path: TRACKED })
+
+    expect(mockRequestPermission).toHaveBeenCalledWith(
+      'delete_file',
+      expect.anything(),
+      false,
+      undefined,
+    )
+  })
+
+  it('does not nag about a file the agent created this session and nobody touched', async () => {
+    const exec = freshExecutor()
+    const scratch = '/projects/test-app/scratch.log'
+    mockProjectShape({ ignored: [scratch] })
+    approveAllPermissions()
+
+    // O agente cria o ficheiro (caminho do diff: o guard de existência rejeita
+    // se já existir, portanto chegar aqui significa que não existia).
+    await exec.execute('create_file', { file_path: scratch, content: 'temp' })
+    mockRequestPermission.mockClear()
+
+    // Agora em disco está exactamente o que ele escreveu.
+    mockInvokeImpl.mockImplementation(((cmd: string, args: Record<string, unknown>) => {
+      if (cmd === 'read_file' && String(args?.path ?? '') === scratch) {
+        return Promise.resolve('temp')
+      }
+      if (cmd === 'is_path_gitignored') return Promise.resolve(true)
+      return Promise.resolve(undefined)
+    }) as never)
+
+    await exec.execute('delete_file', { file_path: scratch })
+
+    // Apagar devolve o estado a "não existia": nada a perder, nada a perguntar.
+    expect(mockRequestPermission).toHaveBeenCalledWith(
+      'delete_file',
+      expect.anything(),
+      false,
+      undefined,
+    )
+  })
+
+  it('shouts when the gitignore check itself fails instead of dying quietly', async () => {
+    // Se `is_path_gitignored` sair da allow-list de permissões, o invoke é
+    // rejeitado antes do Rust e a guarda deixa de existir. O fail-open está
+    // certo (uma verificação avariada não pode bloquear a tool), o silêncio
+    // não: uma guarda que se desliga sem avisar é pior que nenhuma, porque
+    // ninguém volta a olhar. Em Jest o invoke é mock, portanto NENHUM outro
+    // teste apanharia isto.
+    const exec = freshExecutor()
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { logger } = require('../../../utils/logger')
+    const spy = jest.spyOn(logger, 'error').mockImplementation(() => {})
+    mockInvokeImpl.mockImplementation(((cmd: string) => {
+      if (cmd === 'is_path_gitignored') {
+        return Promise.reject(new Error('is_path_gitignored not allowed'))
+      }
+      return Promise.resolve(undefined)
+    }) as never)
+    approveAllPermissions()
+
+    await exec.execute('delete_file', { file_path: IGNORED })
+
+    // Fail-open: a tool segue o fluxo normal, não fica bloqueada.
+    expect(mockRequestPermission).toHaveBeenCalledWith(
+      'delete_file',
+      expect.anything(),
+      false,
+      undefined,
+    )
+    // E o alarme tocou.
+    expect(spy).toHaveBeenCalledWith(
+      'agent',
+      expect.stringContaining('[deletion-guard]'),
+      expect.anything(),
+    )
+    spy.mockRestore()
+  })
+
+  it('nags again once someone else has edited the file the agent created', async () => {
+    const exec = freshExecutor()
+    const scratch = '/projects/test-app/scratch.log'
+    mockProjectShape({ ignored: [scratch] })
+    approveAllPermissions()
+
+    await exec.execute('create_file', { file_path: scratch, content: 'temp' })
+    mockRequestPermission.mockClear()
+
+    // Conteúdo em disco divergiu do que o agente escreveu → há algo a perder.
+    mockInvokeImpl.mockImplementation(((cmd: string, args: Record<string, unknown>) => {
+      if (cmd === 'read_file' && String(args?.path ?? '') === scratch) {
+        return Promise.resolve('o developer escreveu aqui')
+      }
+      if (cmd === 'is_path_gitignored') return Promise.resolve(true)
+      if (cmd === 'list_directory') return Promise.resolve([])
+      return Promise.resolve(undefined)
+    }) as never)
+
+    await exec.execute('delete_file', { file_path: scratch })
+
+    expect(mockRequestPermission).toHaveBeenCalledWith(
+      'delete_file',
+      expect.anything(),
+      'untracked_file',
+      undefined,
+    )
   })
 })
