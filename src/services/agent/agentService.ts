@@ -1423,28 +1423,34 @@ class AgentService {
         };
       }
 
-      // Nome CANÓNICO desde a primeira linha.
+      // DUAS variáveis, de propósito — e a distinção é cara.
       //
-      // Sem isto, `WRITE_TOOLS.has(effectiveToolName)` comparava o nome do
-      // dialecto de treino (`Edit`, `Write`) contra os nomes canónicos
-      // (`edit_file`, `write_file`) e devolvia false — portanto o portão de
-      // aprovação de diffs abaixo era SALTADO por inteiro. O agente publicava
-      // o diff, não esperava por decisão nenhuma e seguia para a tool
-      // seguinte, com o utilizador ainda a olhar para os botões
-      // Accept/Reject (sessão momenu-fact 29-07: três Edits e a seguir Grep,
-      // Read e Bash, tudo antes de qualquer clique).
+      // `canonicalName` serve as comparações LOCAIS desta função: o
+      // `WRITE_TOOLS.has(...)` que abre o portão de aprovação de diffs, o
+      // desvio de leituras-por-shell, os gates do selector. Sem canonizar,
+      // comparavam o nome do dialecto de treino (`Edit`, `Bash`) contra nomes
+      // canónicos e devolviam sempre false — foi assim que o portão dos diffs
+      // esteve morto e o agente seguiu para a tool seguinte com o utilizador
+      // ainda a olhar para os botões Accept/Reject (sessão momenu-fact 29-07).
       //
-      // Efeito colateral do mesmo salto: o modelo recebia o JSON CRU do diff
-      // — ficheiro velho e novo por inteiro — em vez do resumo compacto
-      // pós-edição. O `toolExecutor` e o `planMode` já normalizavam; este
-      // call site ficou para trás na renomeação para o dialecto de treino.
-      let effectiveToolName = canonicalToolName(toolName);
+      // `effectiveToolName` fica RAW porque é o que segue para o
+      // `toolExecutor.execute`, e o executor precisa de saber o que o MODELO
+      // escreveu: `normalizeToolInputForCanonical` e `routeTrainedToolCall`
+      // (toolExecutor.ts:1147-1152) derivam do nome pedido, não do canónico.
+      // Canonizar aqui matava os dois em silêncio — `Grep({pattern})` perdia o
+      // mapeamento para `query`, `Grep` perdia o default de regex, `Bash` com
+      // `run_in_background` deixava de ser reencaminhado para background e
+      // bloqueava o turno, `Glob({path})` passava a varrer a raiz do projecto.
+      // Os caminhos de sub-agente e de tarefa paralela sempre passaram o nome
+      // raw; era só o agente principal que ficava sem normalização.
+      const canonicalName = canonicalToolName(toolName);
+      let effectiveToolName = toolName;
       let effectiveToolInput = toolInput;
 
-      // Canónico também aqui: com o dialecto de treino chega `Bash`, e a
-      // comparação crua deixava a redirecção de leituras-por-shell
-      // (`cat`, `head` → Read) sem efeito nenhum.
-      if (effectiveToolName === "execute_command") {
+      // Canónico: com o dialecto de treino chega `Bash`, e a comparação crua
+      // deixava a redirecção de leituras-por-shell (`cat`, `head` → Read) sem
+      // efeito nenhum.
+      if (canonicalName === "execute_command") {
         const command = typeof toolInput.command === "string" ? toolInput.command : "";
         const converted = convertShellReadCommand(command);
         const purpose = converted ? "file_read" : classifyExecuteCommandPurpose(command);
@@ -1467,7 +1473,7 @@ class AgentService {
 
       const selector = this.currentToolsetSelector;
       const isTmsBootstrap = selector?.getProfile() === "project_bootstrap";
-      if (isTmsBootstrap && WRITE_TOOLS.has(effectiveToolName)) {
+      if (isTmsBootstrap && WRITE_TOOLS.has(canonicalName)) {
         const targetPath = this.getToolInputPath(effectiveToolInput);
         if (!(await this.isProjectRootTmsPath(targetPath))) {
           return {
@@ -1478,10 +1484,10 @@ class AgentService {
         markTmsWriteAttempt(toolUseId, targetPath ?? undefined);
       }
 
-      if (selector && !selector.isActive(effectiveToolName)) {
-        const activated = selector.expandForToolName(effectiveToolName);
+      if (selector && !selector.isActive(canonicalName)) {
+        const activated = selector.expandForToolName(canonicalName);
         if (!activated) {
-          selector.noteDeniedToolName(effectiveToolName);
+          selector.noteDeniedToolName(canonicalName);
           return {
             content: `Tool blocked: ${effectiveToolName} is not available for the current explicit policy or registry.`,
             isError: true,
@@ -1512,7 +1518,7 @@ class AgentService {
         this.sessionState.trackFileAccess(effectiveToolName, effectiveToolInput);
 
         // Diff approval for write/edit/create tools
-        if (WRITE_TOOLS.has(effectiveToolName) && !this.lightweightOptions?.readOnly) {
+        if (WRITE_TOOLS.has(canonicalName) && !this.lightweightOptions?.readOnly) {
           let parsedDiff: {
             type: string;
             path: string;

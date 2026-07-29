@@ -690,9 +690,27 @@ export async function createDiffApprovalPromise(toolCallId: string): Promise<boo
         await inflight
       } catch (err) {
         logger.error('chat', 'Auto-approve acceptDiff failed:', String(err))
-      } finally {
         autoAcceptDiffPromises.delete(toolCallId)
+        // Uma escrita FALHADA não é uma aprovação (2026-07-29).
+        //
+        // Isto devolvia `true` incondicionalmente: em YOLO, um write_file que
+        // rejeitasse — ficheiro read-only, disco cheio, EPERM, pasta-pai
+        // desaparecida a meio do run — era reportado ao modelo como
+        // "File updated: <path>", com um excerto construído a partir do
+        // conteúdo que ELE gerou e nunca foi lido do disco. Pior: o
+        // updateReadStateAfterWrite passava a cachear esse conteúdo como sendo
+        // o estado actual do ficheiro. O modelo ficava a acreditar numa edição
+        // que não existe, e a divergência não voltava a ser detectada.
+        //
+        // O comentário do próprio ficheiro (ver `alreadyApplied` mais abaixo)
+        // já dizia que o badge "accepted" só pode aparecer depois de uma
+        // escrita REAL em disco, "senão uma escrita abortada/falhada deixava a
+        // UI a afirmar que o ficheiro foi gravado quando não foi". A garantia
+        // valia para a aprovação manual e era quebrada exactamente aqui, no
+        // caminho automático — o único onde ninguém está a olhar.
+        return false
       }
+      autoAcceptDiffPromises.delete(toolCallId)
       return true
     }
 
@@ -2925,6 +2943,31 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           autoAcceptDiffPromises.set(toolId, writePromise)
           writePromise.catch(err => {
             logger.error('chat', 'Auto-mode acceptDiff failed:', String(err))
+            // O badge é carimbado 'approved' OPTIMISTICAMENTE logo abaixo, no
+            // mesmo commit, para a UI nunca pintar botões em YOLO. Se a escrita
+            // rejeitar, esse optimismo passa a ser uma afirmação falsa: o
+            // cartão dizia "aceite" para um ficheiro que nunca foi gravado.
+            // Reverter aqui é a única forma de o optimismo continuar honesto.
+            useChatStore.setState(state => {
+              const sessions = new Map(state.sessions)
+              for (const [sid, s] of sessions) {
+                if (!s.messages.some(m => m.toolCalls?.some(tc => tc.id === toolId))) continue
+                sessions.set(sid, {
+                  ...s,
+                  messages: s.messages.map(m =>
+                    m.toolCalls?.some(tc => tc.id === toolId)
+                      ? {
+                          ...m,
+                          toolCalls: m.toolCalls.map(tc =>
+                            tc.id === toolId ? { ...tc, diffStatus: 'denied' as const } : tc,
+                          ),
+                        }
+                      : m,
+                  ),
+                })
+              }
+              return { sessions, conversationVersion: state.conversationVersion + 1 }
+            })
           })
           // Flip pending → approved in the same commit so UI never paints buttons.
           const session2 = updatedSessions.get(targetSessionId)

@@ -61,7 +61,7 @@ import {
 } from "./turnEfficiency";
 import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
 import { DESTRUCTIVE_TOOLS } from "./toolsetSelector";
-import { EDIT_FILE } from "./toolNames";
+import { EDIT_FILE, canonicalToolName } from "./toolNames";
 
 // ── Constants ──
 
@@ -2899,7 +2899,7 @@ export async function* query(
         toolInput = {};
       }
 
-      if (toolsetSelector?.isReadOnly() && DESTRUCTIVE_TOOLS.has(tc.name)) {
+      if (toolsetSelector?.isReadOnly() && DESTRUCTIVE_TOOLS.has(canonicalToolName(tc.name))) {
         toolsetSelector.noteDeniedToolName(tc.name);
         const blocked = `Tool blocked: ${tc.name} cannot run because the latest user request is read-only/no-edit.`;
         yield {
@@ -2944,7 +2944,13 @@ export async function* query(
         });
         // Track whether any file-mutating tool ran successfully this run.
         // Drives the "stopped without editing" guardrail at the stop path.
-        if (!result.isError && DESTRUCTIVE_TOOLS.has(tc.name)) {
+        // canonicalToolName: `tc.name` é o que o MODELO escreveu (`Edit`,
+        // `Write`), e DESTRUCTIVE_TOOLS guarda nomes canónicos. Sem isto,
+        // runHasEdited/writeActionCount/firstWriteTurn ficavam permanentemente
+        // falsos para o agente principal — a instrumentação de onde estas
+        // auditorias saem reportava "run sem edições" em TODOS os runs que
+        // editaram ficheiros.
+        if (!result.isError && DESTRUCTIVE_TOOLS.has(canonicalToolName(tc.name))) {
           runHasEdited = true;
           writeActionCount++;
           if (firstWriteTurn === undefined) {
