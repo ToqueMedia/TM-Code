@@ -85,7 +85,7 @@ import {
   getIdeUiGuideSection,
   getScaffoldingInstallSection,
   getVisionSection,
-  getDevServerRulesSection,
+  getDevServerAuthoringRulesSection,
   getDevServerStatusSection,
   getEnvironmentSection,
   getExecutingActionsSection,
@@ -363,7 +363,10 @@ class ContextBuilder {
           getMemoryToolsGuidanceSection(),
         ].filter(Boolean).join('\n\n') || null
       case 'delivery.dev_server':
-        return [getDevServerRulesSection(), getDevServerStatusSection()].filter(Boolean).join('\n\n')
+        // Só o ESTADO. As regras de autoria mudaram-se para o bloco estático
+        // (getDevServerAuthoringRulesSection) — ver a nota lá sobre o custo de
+        // casar bytes estáveis com bytes voláteis na mesma secção.
+        return getDevServerStatusSection()
       case 'delivery.build_scripts':
         if (!ctx?.promptCtx) return null
         return [
@@ -999,6 +1002,12 @@ class ContextBuilder {
       sharedShellExecutionLoop(),
       getClosedLoopSection(),
       getToolsSection(ctx),
+      // Regras de AUTORIA de dev server. Estáticas de propósito: aplicam-se ao
+      // escrever os scripts do projecto, portanto antes de existir servidor
+      // nenhum — condicioná-las ao servidor estar vivo entregava-as tarde
+      // demais. Estavam abaixo da fronteira, coladas ao estado volátil do
+      // servidor (2026-07-30).
+      getDevServerAuthoringRulesSection(),
       getConstraintsSection(ctx),
       sharedToneAndStyle(),
       sharedOutputEfficiency(),
