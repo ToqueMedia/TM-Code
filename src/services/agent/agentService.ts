@@ -50,12 +50,11 @@ import { useByokStore } from "../../stores/byokStore";
 import { buildByokClientFromSnapshot, buildByokThinkingConfig } from "./byokRouting";
 import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
-import { ToolsetSelector, REQUEST_TOOLS_NAME, REQUEST_CONTEXT_NAME, requestContextDefinition } from "./toolsetSelector";
-import type { ToolsetGroupName } from "./toolsetSelector";
+import { REQUEST_CONTEXT_NAME, requestContextDefinition } from "./toolPolicy";
 import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 import { classifyExecuteCommandPurpose, convertShellReadCommand } from "./commandPurpose";
-import { EDIT_FILE, WEB_FETCH, canonicalToolName } from "./toolNames";
+import { canonicalToolName } from "./toolNames";
 import { formatShellReadRedirect } from "./shellReadRedirect";
 import {
   decorateTmsRequestUsage,
@@ -126,7 +125,6 @@ class AgentService {
   // (lightweight) which use their own restricted tool set. Set per run in
   // runQueryEngineLoop; the createToolExecutorBridge reads it to intercept
   // the request_tools meta-tool.
-  private currentToolsetSelector: ToolsetSelector | null = null;
   // Fase do run corrente, para o bridge do executor. `executionPhase` é local
   // ao runQueryEngineLoop e o bridge é outro método — sem este campo o portão
   // de confinação de escrita do bootstrap não tinha como ver a fase.
@@ -664,22 +662,8 @@ class AgentService {
     // bloqueio de tools destrutivas passa a olhar para `readOnlyRun`
     // (alcançável pelos sub-agentes read-only). O selector fica só com o que
     // é otimização de custo — e essa, se nunca correr, não mente a ninguém.
-    const toolsetSelector = (this.lightweightOptions || !enforceReadOnly)
-      ? null
-      : new ToolsetSelector(
-        openaiTools.map((t) => t.function.name),
-        auxiliarySelection?.profile ?? 'bugfix_local',
-        auxiliarySelection?.readOnly ?? false,
-        (auxiliarySelection?.contextPlan.toolGroups ?? []) as ToolsetGroupName[],
-        enforceReadOnly,
-      );
-    this.currentToolsetSelector = toolsetSelector;
     this.currentExecutionPhase = executionPhase;
 
-    if (toolsetSelector && auxiliarySelection) {
-      toolsetSelector.setOmittedAuxiliaries(auxiliarySelection.omitted.length);
-      toolsetSelector.setOmittedAuxiliaryIds(auxiliarySelection.omitted.map((o) => o.id));
-    }
     if (!this.lightweightOptions) {
       if (executionPhase === "original_task") {
         markOriginalTaskStarted(mutableTask);
@@ -687,26 +671,13 @@ class AgentService {
         setTmsTurnTelemetry({ executionPhase: "project_bootstrap" });
       }
     }
-    if (mutableTask && toolsetSelector && !toolsetSelector.isActive(EDIT_FILE)) {
-      toolsetSelector.requestTools([EDIT_FILE]);
-    }
-
-    // Deterministic web_fetch pre-activation: if the user pasted a URL, activate
-    // web_fetch from turn 1 so the agent can read it immediately, instead of
-    // relying on the Intent Router to plan the `web` group or on a request_tools
-    // round-trip. Mirrors the mutableTask→EDIT_FILE guarantee above. The fetch
-    // itself is CORS-free and login-free (Rust reqwest proxy), so activating it
-    // is pure upside. Sub-agents (lightweight) are skipped — they get their own set.
-    if (toolsetSelector && !toolsetSelector.isActive(WEB_FETCH)) {
-      const userText = typeof userMessage === "string"
-        ? userMessage
-        : userMessage
-          .map((p) => (p && typeof p === "object" && "text" in p ? String((p as { text?: unknown }).text ?? "") : ""))
-          .join(" ");
-      if (/\bhttps?:\/\/[^\s)<>"']+/i.test(userText)) {
-        toolsetSelector.requestTools([WEB_FETCH]);
-      }
-    }
+    // As pré-activações determinísticas que viviam aqui (EDIT_FILE quando a
+    // tarefa é mutável, WEB_FETCH quando o utilizador colou um URL) saíram
+    // com o ToolsetSelector a 2026-07-30: eram ambas `if (toolsetSelector &&
+    // …)` sobre um objecto que é null em todos os runs, portanto nunca
+    // correram — e não fazem falta nenhuma, porque sem selector o toolset vai
+    // COMPLETO desde o turno 1. Garantiam acesso a ferramentas que já lá
+    // estão.
 
     // REGRESSÃO APANHADA NA RONDA CRÍTICA (2026-07-18): o schema do
     // request_context era injetado pelo ToolsetSelector — que, sem
@@ -716,7 +687,7 @@ class AgentService {
     // omitidos é fixa no build do prompt → o def é estável o run inteiro
     // (prefixo de cache intacto). A intercepção já existia (REQUEST_CONTEXT_NAME
     // no bridge) e funciona com selector null.
-    if (!this.lightweightOptions && !toolsetSelector) {
+    if (!this.lightweightOptions) {
       const omittedIds = auxiliarySelection?.omitted.map((o) => o.id) ?? [];
       if (omittedIds.length > 0) {
         openaiTools.push(requestContextDefinition(omittedIds));
@@ -828,7 +799,6 @@ class AgentService {
       // (not in message_stop) — pure observability, no double-counting.
       onRequestUsage: (entry) => callbacks.onRequestUsage?.(decorateTmsRequestUsage(entry, this.systemPrompt)),
       // Dynamic toolset selector (null for sub-agents).
-      toolsetSelector: toolsetSelector ?? undefined,
       // Política de read-only, separada do selector: cobre os sub-agentes
       // lightweight (verify, /review) que antes não tinham bloqueio nenhum.
       readOnlyRun: this.lightweightOptions?.readOnly === true || enforceReadOnly,
@@ -1427,30 +1397,6 @@ class AgentService {
       // registry. The agent calls it to ask for capabilities that aren't in the
       // current active toolset; we expand the selector so they're available on
       // the next turn. Never reaches the toolExecutor.
-      if (toolName === REQUEST_TOOLS_NAME) {
-        const requested = Array.isArray(toolInput.tools) ? (toolInput.tools as string[]) : [];
-        const selector = this.currentToolsetSelector;
-        if (!selector) {
-          return {
-            content: 'All tools are already available (no dynamic selection active).',
-            isError: false,
-          };
-        }
-        const result = selector.requestTools(requested);
-        const parts: string[] = [];
-        if (result.added.length) parts.push(`Activated for next model step: ${result.added.join(', ')}.`);
-        if (result.alreadyActive.length) parts.push(`Already active: ${result.alreadyActive.join(', ')}.`);
-        if (result.unknown.length) parts.push(`Unknown (not in registry): ${result.unknown.join(', ')}.`);
-        if (result.denied.length) parts.push(`Denied: ${result.denied.join(', ')} — this RUN was classified as read-only from the wording of the USER'S REQUEST (an explicit no-edit instruction), not by any project/settings policy. If the task genuinely requires edits, say so plainly and ask the developer to resend/confirm (e.g. "aplica as alterações") — do NOT send them hunting for a settings toggle.`);
-        if (parts.length === 0) parts.push('No tools requested.');
-        return { content: parts.join(' '), isError: false };
-      }
-
-      // Intercept the request_context meta-tool — fetches an auxiliary context
-      // block that was omitted from the system prompt (publishing, scaffolding,
-      // vision, auth/db — see auxiliaryRegistry). The content is returned as a
-      // tool_result so the agent can use it this turn. Never reaches the
-      // toolExecutor.
       if (toolName === REQUEST_CONTEXT_NAME) {
         const auxiliaryId = typeof toolInput.auxiliary === 'string' ? toolInput.auxiliary : '';
         if (!auxiliaryId) {
@@ -1525,7 +1471,6 @@ class AgentService {
         }
       }
 
-      const selector = this.currentToolsetSelector;
       // `executionPhase`, não `selector.getProfile()`: o selector é null em
       // todos os runs (ver a nota na sua construção), e com ele morria a
       // confinação de escrita do /init — que podia escrever qualquer ficheiro
@@ -1543,17 +1488,6 @@ class AgentService {
           };
         }
         markTmsWriteAttempt(toolUseId, targetPath ?? undefined);
-      }
-
-      if (selector && !selector.isActive(canonicalName)) {
-        const activated = selector.expandForToolName(canonicalName);
-        if (!activated) {
-          selector.noteDeniedToolName(canonicalName);
-          return {
-            content: `Tool blocked: ${effectiveToolName} is not available for the current explicit policy or registry.`,
-            isError: true,
-          };
-        }
       }
 
       // Announce + start the tool at execution time. The query loop runs tools
@@ -1601,8 +1535,15 @@ class AgentService {
           }
 
           if (parsedDiff) {
+            // FASE, não perfil do selector (auditoria 2026-07-30). Este era o
+            // TERCEIRO portão pendurado no ToolsetSelector — que é null em
+            // todos os runs — e escapou à migração de 07-29 porque a asserção
+            // negativa do deadGateRewiring.test.ts procura `selector?.` em
+            // minúsculas e aqui está `currentToolsetSelector?.`. Enquanto
+            // esteve morto, o /init nunca auto-aplicava o TMS.md: a escrita do
+            // ficheiro que o /init existe para criar caía no diálogo de diff.
             const autoApplyTmsBootstrap =
-              this.currentToolsetSelector?.getProfile() === "project_bootstrap" &&
+              this.currentExecutionPhase === "project_bootstrap" &&
               /[\\/]TMS\.md$/i.test(parsedDiff.path) &&
               parsedDiff.newContent !== undefined;
             if (autoApplyTmsBootstrap) {

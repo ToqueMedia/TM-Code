@@ -112,9 +112,8 @@ import {
   getTrackerStateSection,
 } from './contextBuilder/sections/chatSections'
 
-import type { ContextPlanClassification } from './contextPlanner'
 import {
-  classifyPromptIntent,
+  type ContextPlanClassification,
   fallbackContextPlanForProfile,
   selectAuxiliaries,
   buildOnDemandIndex,
@@ -653,10 +652,14 @@ class ContextBuilder {
     // determinista abaixo. Comentários que descreviam estes dois como vivos
     // foram corrigidos na auditoria de 2026-07-28 — eram um convite a
     // ressuscitá-los.
-    const auxProfile = intentOverride?.profile ?? classifyPromptIntent(userMessage, {
-      mentionedFiles: accessedPaths,
-      hasImage: signals?.hasImage,
-    })
+    // Inline desde 2026-07-30. Havia aqui um `profileForSignals(userMessage,
+    // { mentionedFiles, hasImage })` — uma função de "classificação" que
+    // ignorava a mensagem E os ficheiros mencionados e devolvia um enum a
+    // partir de um único booleano, para a tabela abaixo o converter de volta
+    // numa lista de secções. Dois passos de indirecção sobre `hasImage`, com
+    // um nome que prometia inferência e convidava a ressuscitar o router.
+    const auxProfile: PromptProfile = intentOverride?.profile
+      ?? (signals?.hasImage ? 'vision' : 'bugfix_local')
     const readOnly = intentOverride?.readOnly ?? false
     const requiresMutation = !readOnly && intentOverride?.requiresMutation === true
     // SELEÇÃO DE CONTEXTO: DETERMINISTA, sem chamar modelo nenhum.
@@ -687,7 +690,6 @@ class ContextBuilder {
         candidateContexts: Array.from(new Set([...basePlan.candidateContexts, ...deliveryBaseline])),
         selectedContexts: Array.from(new Set([...basePlan.selectedContexts, ...deliveryBaseline])),
         rejectedContexts: [],
-        toolGroups: Array.from(new Set([...(basePlan.toolGroups ?? []), ...(readOnly ? [] : ['FILE_OPS' as const])])),
         reason: 'Deterministic per-profile selection + always-on delivery baseline; anything else on-demand via request_context.',
       },
       source: 'fallback',
@@ -714,7 +716,6 @@ class ContextBuilder {
       auxSelection.contextPlan.taskDomain,
       auxSelection.contextPlan.selectedContexts.join(','),
       auxSelection.contextPlan.candidateContexts.join(','),
-      auxSelection.contextPlan.toolGroups?.join(',') ?? '',
     ].join('|')
     const cacheKeyBase = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|${mcpSig}|${stickyHashtagSig}|fs${fsVersion}|ac${accessedCount}|p${auxProfile}|ro${auxSelection.readOnly ? 1 : 0}|mut${auxSelection.requiresMutation ? 1 : 0}|cp${contextPlanSig}`
 

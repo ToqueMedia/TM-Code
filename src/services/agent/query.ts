@@ -62,14 +62,9 @@ import {
   shouldRemindTaskTracker,
   buildTaskTrackerReminderText,
 } from "./turnEfficiency";
-import {
-  createBudgetTracker,
-  checkTokenBudget,
-  type BudgetTracker,
-} from "./tokenBudget";
 import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
-import { DESTRUCTIVE_TOOLS } from "./toolsetSelector";
-import { EDIT_FILE, canonicalToolName } from "./toolNames";
+import { DESTRUCTIVE_TOOLS } from "./toolPolicy";
+import { canonicalToolName } from "./toolNames";
 
 // ── Constants ──
 
@@ -348,10 +343,6 @@ export interface QueryParams {
    * and parallel tasks share the query loop but do not own that tracker.
    */
   enableTaskTrackerReminder?: boolean;
-  /** Maximum token budget for the run before nudging or stopping. */
-  maxTokenBudget?: number;
-  /** Sub-agent identifier (if running as a subagent). */
-  agentId?: string;
   /** Abort signal for cancellation. */
   signal: AbortSignal;
   /** Maximum turns before stopping (default: Infinity). */
@@ -413,15 +404,6 @@ export interface QueryParams {
    * (utils/contextWindow via autoCompact), never a 1M assumption.
    */
   getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null };
-  /**
-   * Dynamic toolset selector — when present, the loop filters the tool
-   * definitions to the active subset each turn. It starts from the
-   * model-selected profile base plus model-planned groups, then expands
-   * through `request_tools`. On-demand additions are transient per model step.
-   * Null/undefined → send all tools
-   * (legacy behaviour).
-   */
-  toolsetSelector?: import('./toolsetSelector').ToolsetSelector;
   /**
    * Run é read-only por POLÍTICA, independente do selector.
    *
@@ -1072,7 +1054,6 @@ export async function* query(
     getExtraHeaders,
     onResponseHeaders,
     getContextLimits,
-    toolsetSelector,
     readOnlyRun,
     auxiliarySelection,
     isStreamSafeTool,
@@ -1159,9 +1140,11 @@ export async function* query(
   let runTouchedTaskTracker = false;
   let taskGuardCount = 0;
   const taskTrackerReminderState = createTaskTrackerReminderState();
-  const budgetTracker = createBudgetTracker();
   let lastTaskTrackerUpdateTurn = 0;
   let writesSinceTaskTrackerUpdate = 0;
+  /** First mutation in the current not-yet-reconciled batch. Anchors the
+   * cadence so a late write cannot trigger an immediate reminder. */
+  let unreconciledWritesStartedTurn: number | null = null;
   /** Turn number of the first successful file mutation (1-indexed). */
   let firstWriteTurn: number | undefined;
   /** Total count of successful file-mutating tool calls this run. */
@@ -1437,30 +1420,18 @@ export async function* query(
     // model-planned groups, then expands through request_tools. Reduces
     // tool-schema overhead (~10K tokens for 36 tools) to the few the current
     // task needs. When the selector is absent, send all tools (legacy).
-    const toolSelection = toolsetSelector
-      ? toolsetSelector.selectForTurn(tools)
-      : {
-          tools,
-          activeCount: tools.length,
-          totalCount: tools.length,
-          allActive: true,
-        };
-    const activeTools = toolSelection.tools;
+    // Sem selecção dinâmica: o toolset vai COMPLETO em todos os turnos. A
+    // classe que o filtrava (ToolsetSelector) foi apagada a 2026-07-30 — a
+    // sua condição de nascimento nunca se verificava, portanto este ramo era
+    // já o único que corria.
+    const activeTools = tools;
 
     // ── Payload inspection (token-cost diagnostics) ──
     // Best-effort: sizes + hashes + top-10 blocks logged to console.debug
     // before every provider request. Never throws, never blocks the send.
     const payloadReport = inspectAndLogPayload(
       apiMessages, systemPrompt, activeTools, model, state.turnCount,
-      toolSelection.totalCount, lastContinuationReason, auxiliarySelection,
-      // Sinais de saúde da seleção dinâmica de tools: frequência de
-      // request_tools (perfil mal calibrado → round-trips extra) e base para
-      // o churn do toolset (invalidação de prompt cache) — ver toolsetChurn
-      // no PayloadReport. typeof-guard: testes injetam mocks parciais do
-      // seletor sem este método.
-      typeof toolsetSelector?.getInstrumentationStats === 'function'
-        ? toolsetSelector.getInstrumentationStats()
-        : undefined,
+      tools.length, lastContinuationReason, auxiliarySelection,
     );
 
     // ── Stream from model ──
@@ -2424,7 +2395,7 @@ export async function* query(
           // split, the savings, and which tools were requested vs denied by
           // explicit policy.
           selectedPromptProfile: auxiliarySelection?.profile,
-          selectedToolProfile: toolsetSelector?.getProfile() ?? auxiliarySelection?.profile,
+          selectedToolProfile: auxiliarySelection?.profile,
           coreContextTokens: payloadReport?.coreContextTokens,
           coreSystemTokens: payloadReport?.coreSystemTokens,
           onDemandIndexTokens: payloadReport?.onDemandIndexTokens,
@@ -2466,8 +2437,6 @@ export async function* query(
           contextPlannerSelectedContexts: auxiliarySelection?.contextPlan?.selectedContexts,
           contextPlannerRejectedContexts: auxiliarySelection?.contextPlannerRejectedContexts,
           contextPlannerSelectionReason: auxiliarySelection?.contextPlannerSelectionReason,
-          expandedToolNames: toolsetSelector?.getExpandedNames(),
-          deniedToolNames: toolsetSelector?.getDeniedNames(),
           // ── Read Range Tracker telemetry ──
           // Quais intervalos foram lidos entre o pedido anterior e este. Os
           // contadores skippedOverlappingReads/adjustedReadRanges saíram com a
@@ -2771,14 +2740,14 @@ export async function* query(
         mutableTask &&
         !runHasEdited &&
         noEditRecoveryCount < 1 &&
-        // FASE A: selector null = toolset completo congelado (o caso normal);
-        // o guard continua vivo — read-only explícito continua a desarmá-lo.
-        !readOnlyRun &&
-        (!toolsetSelector || !toolsetSelector.isReadOnly())
+        // O toolset vai completo em todos os turnos desde que o ToolsetSelector
+        // foi apagado (2026-07-30), portanto edit_file está SEMPRE disponível
+        // aqui — a recuperação nunca é "pede a ferramenta", é sempre "aplica a
+        // alteração". Read-only explícito continua a desarmar o guard.
+        !readOnlyRun
       ) {
-        const hasEditFile = !toolsetSelector || toolsetSelector.isActive(EDIT_FILE);
         noEditGuardReason = "mutable original_task attempted to stop without file edit";
-        noEditRecoveryAction = hasEditFile ? "apply_edit" : "request_tools:edit_file";
+        noEditRecoveryAction = "apply_edit";
         state = {
           ...state,
           messages: [
@@ -2791,9 +2760,11 @@ export async function* query(
               // esta dependência"), isso empurrava o modelo para remendos de
               // config/bundler em vez de fechar a decisão. A porta de saída
               // explícita mantém o guardrail (não adiar) sem forçar o remendo.
-              content: hasEditFile
-                ? "You have edit_file available but have not applied any edit yet. If a code change is genuinely the right outcome, apply it now — do not defer to the next turn. But if your investigation concluded that NO edit is appropriate (the correct outcome is an architecture/runtime decision, a recommendation, or the cause lies outside this codebase), do not force one: state that conclusion explicitly and decisively as your final answer."
-                : "You have not applied any file edit yet. If a code change is genuinely the right outcome, call request_tools to activate edit_file and apply it now — do not defer. But if your investigation concluded that NO edit is appropriate (architecture/runtime decision, recommendation, or external cause), do not force one: state that conclusion explicitly and decisively as your final answer.",
+              // O ramo "call request_tools to activate edit_file" saiu com o
+              // ToolsetSelector (2026-07-30): o toolset vai completo, logo
+              // edit_file está sempre disponível — e mandar o modelo activar
+              // uma tool que já tem custava-lhe um round-trip por nada.
+              content: "You have edit_file available but have not applied any edit yet. If a code change is genuinely the right outcome, apply it now — do not defer to the next turn. But if your investigation concluded that NO edit is appropriate (the correct outcome is an architecture/runtime decision, a recommendation, or the cause lies outside this codebase), do not force one: state that conclusion explicitly and decisively as your final answer.",
             },
           ],
           continuationCount: 0,
@@ -2973,8 +2944,7 @@ export async function* query(
         toolInput = {};
       }
 
-      if ((readOnlyRun || toolsetSelector?.isReadOnly()) && DESTRUCTIVE_TOOLS.has(canonicalToolName(tc.name))) {
-        toolsetSelector?.noteDeniedToolName(tc.name);
+      if (readOnlyRun && DESTRUCTIVE_TOOLS.has(canonicalToolName(tc.name))) {
         const blocked = `Tool blocked: ${tc.name} cannot run because this run is read-only (no file mutations).`;
         yield {
           type: "tool_result",
@@ -3027,6 +2997,9 @@ export async function* query(
         if (!result.isError && DESTRUCTIVE_TOOLS.has(canonicalToolName(tc.name))) {
           runHasEdited = true;
           writeActionCount++;
+          if (writesSinceTaskTrackerUpdate === 0) {
+            unreconciledWritesStartedTurn = state.turnCount;
+          }
           writesSinceTaskTrackerUpdate++;
           if (firstWriteTurn === undefined) {
             firstWriteTurn = state.turnCount;
@@ -3040,6 +3013,7 @@ export async function* query(
           runTouchedTaskTracker = true;
           lastTaskTrackerUpdateTurn = state.turnCount;
           writesSinceTaskTrackerUpdate = 0;
+          unreconciledWritesStartedTurn = null;
         }
       } catch (err) {
         const errMsg = formatError(err);
@@ -3200,6 +3174,7 @@ export async function* query(
         if (shouldRemindTaskTracker(taskTrackerReminderState, {
           turnCount: state.turnCount,
           lastTaskUpdateTurn: lastTaskTrackerUpdateTurn,
+          unreconciledWritesStartedTurn,
           writesSinceTaskUpdate: writesSinceTaskTrackerUpdate,
           unfinishedTaskCount,
         })) {
@@ -3216,36 +3191,6 @@ export async function* query(
         }
       } catch {
         // Tracker state is advisory; it must never interrupt the run.
-      }
-    }
-
-    // ── Token Budget & Diminishing Returns Evaluation ──
-    if (params.maxTokenBudget && params.maxTokenBudget > 0) {
-      const globalTokens = state.messages.reduce(
-        (acc, m) => acc + (m.role === "assistant" ? 500 : 100),
-        0,
-      );
-      const budgetDecision = checkTokenBudget(
-        budgetTracker,
-        params.agentId,
-        params.maxTokenBudget,
-        globalTokens,
-      );
-
-      if (budgetDecision.action === "continue" && budgetDecision.nudgeMessage) {
-        interTurnMessages.push({
-          role: "user",
-          content: [{ type: "text", text: budgetDecision.nudgeMessage }],
-        });
-      } else if (budgetDecision.action === "stop") {
-        if (budgetDecision.completionEvent?.diminishingReturns) {
-          yield {
-            type: "text_delta",
-            text: "\n\n[Run stopped: token budget limit / diminishing returns reached]",
-          };
-          yield { type: "message_stop", finish_reason: "stop" };
-          return;
-        }
       }
     }
 

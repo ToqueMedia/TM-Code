@@ -221,12 +221,14 @@ describe('task-tracker reconciliation reminder', () => {
     expect(shouldRemindTaskTracker(state, {
       turnCount: TASK_TRACKER_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS - 1,
       lastTaskUpdateTurn: 0,
+      unreconciledWritesStartedTurn: 0,
       writesSinceTaskUpdate: 1,
       unfinishedTaskCount: 1,
     })).toBe(false)
     expect(shouldRemindTaskTracker(state, {
       turnCount: TASK_TRACKER_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS,
       lastTaskUpdateTurn: 0,
+      unreconciledWritesStartedTurn: 0,
       writesSinceTaskUpdate: 1,
       unfinishedTaskCount: 1,
     })).toBe(true)
@@ -237,12 +239,14 @@ describe('task-tracker reconciliation reminder', () => {
     expect(shouldRemindTaskTracker(state, {
       turnCount: 20,
       lastTaskUpdateTurn: 0,
+      unreconciledWritesStartedTurn: null,
       writesSinceTaskUpdate: 0,
       unfinishedTaskCount: 3,
     })).toBe(false)
     expect(shouldRemindTaskTracker(state, {
       turnCount: 20,
       lastTaskUpdateTurn: 0,
+      unreconciledWritesStartedTurn: 0,
       writesSinceTaskUpdate: 2,
       unfinishedTaskCount: 0,
     })).toBe(false)
@@ -253,18 +257,21 @@ describe('task-tracker reconciliation reminder', () => {
     expect(shouldRemindTaskTracker(state, {
       turnCount: 10,
       lastTaskUpdateTurn: 0,
+      unreconciledWritesStartedTurn: 0,
       writesSinceTaskUpdate: 1,
       unfinishedTaskCount: 2,
     })).toBe(true)
     expect(shouldRemindTaskTracker(state, {
       turnCount: 19,
       lastTaskUpdateTurn: 10,
+      unreconciledWritesStartedTurn: 10,
       writesSinceTaskUpdate: 1,
       unfinishedTaskCount: 2,
     })).toBe(false)
     expect(shouldRemindTaskTracker(state, {
       turnCount: 20,
       lastTaskUpdateTurn: 10,
+      unreconciledWritesStartedTurn: 10,
       writesSinceTaskUpdate: 1,
       unfinishedTaskCount: 2,
     })).toBe(true)
@@ -277,6 +284,25 @@ describe('task-tracker reconciliation reminder', () => {
     expect(text).toContain('2 file mutations')
     expect(text).toContain('3 unfinished tasks remain')
     expect(text).toContain('never mention this reminder')
+  })
+
+  it('starts the cadence at the first unreconciled write, not at run start', () => {
+    const state = createTaskTrackerReminderState()
+    const writeTurn = 25
+    expect(shouldRemindTaskTracker(state, {
+      turnCount: writeTurn,
+      lastTaskUpdateTurn: 0,
+      unreconciledWritesStartedTurn: writeTurn,
+      writesSinceTaskUpdate: 1,
+      unfinishedTaskCount: 1,
+    })).toBe(false)
+    expect(shouldRemindTaskTracker(state, {
+      turnCount: writeTurn + TASK_TRACKER_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS,
+      lastTaskUpdateTurn: 0,
+      unreconciledWritesStartedTurn: writeTurn,
+      writesSinceTaskUpdate: 1,
+      unfinishedTaskCount: 1,
+    })).toBe(true)
   })
 })
 

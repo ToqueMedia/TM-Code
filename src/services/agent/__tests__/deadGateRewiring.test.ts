@@ -38,7 +38,23 @@ describe('portões de segurança fora do ToolsetSelector', () => {
       'if (this.currentExecutionPhase === "project_bootstrap" && WRITE_TOOLS.has(canonicalName)) {',
     )
     // O que não pode voltar: a condição do portão a ler um selector null.
-    expect(agentService).not.toContain('selector?.getProfile() === "project_bootstrap"')
+    // CASE-INSENSITIVE de propósito (2026-07-30): a versão anterior procurava
+    // `selector?.` em minúsculas e por isso NÃO via `currentToolsetSelector?.`
+    // — o auto-apply do TMS.md ficou pendurado num selector null durante toda
+    // a migração de 07-29 sem que este guarda desse por isso. Um teste que só
+    // apanha a grafia que o autor tinha à frente não é um guarda.
+    expect(agentService).not.toMatch(/[sS]elector\?\.getProfile\(\) === "project_bootstrap"/)
+  })
+
+  it('nenhum portão sobra pendurado no selector', () => {
+    // Varredura genérica: qualquer leitura do selector numa CONDIÇÃO é um
+    // portão morto por construção enquanto o selector for null em todo o lado.
+    const suspicious = [agentService, query].flatMap(src =>
+      src.split('\n').filter(line =>
+        /[sS]elector\?\./.test(line) && /(if\s*\(|&&|\|\||\? )/.test(line),
+      ),
+    )
+    expect(suspicious).toEqual([])
   })
 
   it('a fase do run é publicada no campo que o bridge do executor lê', () => {
@@ -46,13 +62,21 @@ describe('portões de segurança fora do ToolsetSelector', () => {
     expect(agentService).toContain('this.currentExecutionPhase = executionPhase;')
   })
 
-  it('o bloqueio de tools destrutivas aceita a política sem selector', () => {
+  it('o bloqueio de tools destrutivas corre só sobre a política', () => {
+    // O ramo `|| toolsetSelector?.isReadOnly()` saiu com a classe (07-30):
+    // era uma alternativa que nunca podia ser verdadeira. Fica a flag, que é
+    // o que sempre decidiu de facto.
     expect(query).toContain(
-      'if ((readOnlyRun || toolsetSelector?.isReadOnly()) && DESTRUCTIVE_TOOLS.has(canonicalToolName(tc.name))) {',
+      'if (readOnlyRun && DESTRUCTIVE_TOOLS.has(canonicalToolName(tc.name))) {',
     )
-    // `noteDeniedToolName` tem de ser opcional aqui: com selector null, um
-    // acesso direto rebentaria exatamente no caminho que devia bloquear.
-    expect(query).toContain('toolsetSelector?.noteDeniedToolName(tc.name);')
+    // A nota histórica no topo do query.ts NOMEIA o selector de propósito
+    // (explica porque é que `readOnlyRun` existe) — por isso a varredura
+    // ignora comentários e procura só uma leitura a sério.
+    const codeLines = query
+      .split('\n')
+      .filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l))
+      .join('\n')
+    expect(codeLines).not.toMatch(/toolsetSelector[?.]*\.\w/)
   })
 
   it('a política read-only é passada ao loop pelo agentService', () => {
@@ -68,7 +92,7 @@ describe('portões de segurança fora do ToolsetSelector', () => {
       query.indexOf('mutable original_task attempted to stop without file edit') - 900,
       query.indexOf('mutable original_task attempted to stop without file edit'),
     )
-    expect(guard).toContain('!readOnlyRun &&')
+    expect(guard).toContain('!readOnlyRun')
   })
 
   it('o perfil pós-bootstrap sem chamadores foi apagado, não deixado a parecer vivo', () => {

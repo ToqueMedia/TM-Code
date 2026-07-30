@@ -5,7 +5,6 @@
  * the gating criteria from the Phase-1 spec.
  */
 import {
-  classifyPromptIntent,
   selectAuxiliaries,
   buildOnDemandIndex,
   AUXILIARY_METAS,
@@ -26,26 +25,7 @@ function plan(overrides: Partial<ContextPlan>): ContextPlan {
 }
 
 describe('auxiliaryRegistry', () => {
-  // ── classifyPromptIntent ──────────────────────────────────────
-  describe('classifyPromptIntent', () => {
-    it('defaults to bugfix_local when there is no message', () => {
-      expect(classifyPromptIntent(undefined)).toBe('bugfix_local')
-      expect(classifyPromptIntent('')).toBe('bugfix_local')
-    })
-
-    it('does not infer profiles from free text in fallback mode', () => {
-      expect(classifyPromptIntent('fix the off-by-one in the retry loop')).toBe('bugfix_local')
-      expect(classifyPromptIntent('create a new React app with Vite')).toBe('bugfix_local')
-      expect(classifyPromptIntent('deploy this to production')).toBe('bugfix_local')
-      expect(classifyPromptIntent('add login with Google')).toBe('bugfix_local')
-      expect(classifyPromptIntent('redesign the button styles')).toBe('bugfix_local')
-    })
-
-    it('classifies vision when an image is present', () => {
-      expect(classifyPromptIntent('what is wrong here?', { hasImage: true })).toBe('vision')
-    })
-
-  })
+  // ── profileForSignals ──────────────────────────────────────
 
   // ── selectAuxiliaries ─────────────────────────────────────────
   describe('selectAuxiliaries', () => {
@@ -64,26 +44,8 @@ describe('auxiliaryRegistry', () => {
       expect(sel.loadedTokens).toBe(0)
     })
 
-    it('loads scaffold workflow for scaffold_project without broad project full context', () => {
-      const sel = selectAuxiliaries('scaffold_project', 'create a new react app')
-      const loadedIds = sel.loaded.map((l) => l.id)
-      expect(loadedIds).toContain('scaffold.workflow')
-      expect(loadedIds).toContain('project.package_map')
-      expect(loadedIds).not.toContain('project.structure_full')
-      expect(loadedIds).not.toContain('vision.image_rules')
-    })
-
-    it('loads build context for deploy_publish (managed deploy auxiliary removed)', () => {
-      const sel = selectAuxiliaries('deploy_publish', 'deploy to production')
-      const loadedIds = sel.loaded.map((l) => l.id)
-      expect(loadedIds).toContain('delivery.build_scripts')
-      // MANAGED-PLATFORM cut (2026-07): the 'delivery.deploy' publishing
-      // auxiliary was removed — deploy guidance lives in TM Code Web.
-      expect(loadedIds).not.toContain('delivery.deploy')
-      expect(loadedIds).not.toContain('scaffold.workflow')
-      expect(loadedIds).not.toContain('vision.image_rules')
-    })
-
+  
+  
     it('loads only vision.image_rules for the vision profile', () => {
       const sel = selectAuxiliaries('vision', 'look at this screenshot')
       const loadedIds = sel.loaded.map((l) => l.id)
@@ -99,7 +61,7 @@ describe('auxiliaryRegistry', () => {
 
     it('does not load UI baseline for an MCP audit just because the profile is frontend_ui', () => {
       const sel = selectAuxiliaries(
-        'frontend_ui',
+        'bugfix_local',
         'audit the MCP routing in src/screens/account/Settings.tsx',
         false,
         'test',
@@ -134,7 +96,7 @@ describe('auxiliaryRegistry', () => {
 
     it('golden: semantic tokens choose design-system context before project structure', () => {
       const sel = selectAuxiliaries(
-        'frontend_ui',
+        'bugfix_local',
         'Implemente os semantic tokens sidebar.session.item e sidebar.session.itemActive no design system/theme.',
         false,
         'test',
@@ -160,7 +122,7 @@ describe('auxiliaryRegistry', () => {
     })
 
     it('golden: MCP audit chooses agent runtime routing only', () => {
-      const sel = selectAuxiliaries('analysis_readonly', 'Faça uma auditoria read-only da integração MCP.', true, 'test', undefined, plan({
+      const sel = selectAuxiliaries('bugfix_local', 'Faça uma auditoria read-only da integração MCP.', true, 'test', undefined, plan({
         taskDomain: 'agent_runtime',
         requiredCapabilities: ['mcp_routing'],
         candidateContexts: ['agent_runtime.mcp_routing', 'agent_runtime.tool_profiles', 'project.structure_overview'],
@@ -190,7 +152,7 @@ describe('auxiliaryRegistry', () => {
     })
 
     it('golden: UI polish chooses design system and UI patterns', () => {
-      const sel = selectAuxiliaries('frontend_ui', 'Melhore visualmente a lista de sessões.', false, 'test', undefined, plan({
+      const sel = selectAuxiliaries('bugfix_local', 'Melhore visualmente a lista de sessões.', false, 'test', undefined, plan({
         taskDomain: 'design_system/ui',
         requiredCapabilities: ['component_patterns', 'semantic_tokens', 'spacing_typography'],
         candidateContexts: ['design_system.component_patterns', 'design_system.semantic_tokens', 'ui_patterns', 'project.structure_overview'],
@@ -223,7 +185,7 @@ describe('auxiliaryRegistry', () => {
     })
 
     it('every loaded entry has a reason', () => {
-      const sel = selectAuxiliaries('scaffold_project', 'create app')
+      const sel = selectAuxiliaries('bugfix_local', 'create app')
       for (const l of sel.loaded) {
         expect(l.reason).toBeTruthy()
         expect(l.reason.length).toBeGreaterThan(5)
@@ -247,7 +209,7 @@ describe('auxiliaryRegistry', () => {
 
     it('infers parsed status when a model plan is provided without telemetry', () => {
       const sel = selectAuxiliaries(
-        'frontend_ui',
+        'bugfix_local',
         'audit the MCP routing',
         false,
         'test',
@@ -286,7 +248,7 @@ describe('auxiliaryRegistry', () => {
 
     it('golden: design-system refactor surfaces parsed status + rejected entrypoints', () => {
       const sel = selectAuxiliaries(
-        'frontend_ui',
+        'bugfix_local',
         'Refatora a lista de sessões com semantic tokens e data relativa.',
         false,
         'test',
@@ -333,7 +295,7 @@ describe('auxiliaryRegistry', () => {
     it('returns null when nothing is omitted', () => {
       // Manually craft a selection with no omissions.
       const sel = {
-        profile: 'scaffold_project' as const,
+        profile: 'bugfix_local' as const,
         loaded: [],
         omitted: [],
         loadedTokens: 0,

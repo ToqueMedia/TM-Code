@@ -1,11 +1,4 @@
 import { query, type QueryParams, type QueryStreamEvent } from '../query'
-import { ToolsetSelector, REQUEST_TOOLS_NAME, BUGFIX_BASE } from '../toolsetSelector'
-import {
-  SEARCH_FILES, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EDIT_FILE, GLOB, LSP,
-  EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS, UPDATE_SESSION_MEMORY,
-  WRITE_FILE, START_DEV_SERVER, REQUEST_CREDENTIALS,
-  READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
-} from '../toolNames'
 
 function makeStream(chunks: unknown[]): AsyncIterable<unknown> {
   return {
@@ -56,12 +49,6 @@ function makeStreamingCreate(chunks: unknown[]) {
   }))
 }
 
-function makeTool(name: string) {
-  return {
-    type: 'function' as const,
-    function: { name, description: `tool ${name}`, parameters: { type: 'object' as const, properties: {} } },
-  }
-}
 
 function baseParams(overrides: Partial<QueryParams> = {}): QueryParams {
   const client = makeClient(makeStreamingCreate([
@@ -283,49 +270,6 @@ describe('query retry handling', () => {
     }))
   })
 
-  it('selects tools from human-authored text, not synthetic @mention/tool_result content', async () => {
-    const names = [
-      READ_ALIAS, GREP_ALIAS, GLOB_ALIAS, LS_ALIAS,
-      SEARCH_FILES, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EDIT_FILE, GLOB, LSP,
-      EXECUTE_COMMAND, ASK_USER_QUESTION, UPDATE_TASKS, UPDATE_SESSION_MEMORY,
-      WRITE_FILE, START_DEV_SERVER, REQUEST_CREDENTIALS,
-    ]
-    const create = makeStreamingCreate([
-      { choices: [{ delta: { content: 'done' } }] },
-      { choices: [{ delta: {}, finish_reason: 'stop' }] },
-    ])
-
-    const generator = query(baseParams({
-      client: makeClient(create),
-      tools: names.map(makeTool),
-      toolsetSelector: new ToolsetSelector(names),
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: 'fix a typo in this file' },
-            {
-              type: 'tool_result',
-              toolCallId: 'mention-read',
-              content: 'deploy auth create file dev server database',
-            },
-          ],
-        },
-      ],
-    }))
-
-    expect(await nextEvent(generator)).toEqual({ type: 'message_start' })
-    expect(await nextEvent(generator)).toEqual({ type: 'text_delta', text: 'done' })
-
-    const sentToolNames = (create.mock.calls as any)[0][0].tools.map((t: any) => t.function.name)
-    for (const core of BUGFIX_BASE) {
-      expect(sentToolNames).toContain(core)
-    }
-    expect(sentToolNames).toContain(REQUEST_TOOLS_NAME)
-    expect(sentToolNames).not.toContain(WRITE_FILE)
-    expect(sentToolNames).not.toContain(START_DEV_SERVER)
-    expect(sentToolNames).not.toContain(REQUEST_CREDENTIALS)
-  })
 
   it('retries provider credential/configuration errors 3 times with 30s backoff before failing', async () => {
     jest.useFakeTimers()

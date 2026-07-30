@@ -40,7 +40,7 @@ import {
   canonicalToolName,
   WRITE_FILE, EDIT_FILE, CREATE_FILE, DELETE_FILE, RENAME_FILE, CREATE_DIRECTORY,
 } from '../toolNames'
-import { REQUEST_TOOLS_NAME, REQUEST_CONTEXT_NAME, requestContextDefinition } from '../toolsetSelector'
+import { REQUEST_CONTEXT_NAME, requestContextDefinition } from '../toolPolicy'
 import type ContextBuilderT from '../contextBuilder'
 import { formatError } from '../../../utils/errors'
 import { useBillingStore } from '../../../stores/billingStore'
@@ -364,13 +364,13 @@ export async function runParallelTask(runId: string): Promise<void> {
   const executeTool: ToolExecutorFn = async (toolName, toolInput, toolUseId, signal) => {
     // Mid-run `/plan` may arrive after this child was created — sync lease.
     syncLivePlanToChild()
-    // Meta-tools do prompt construído (fusão 4b) — nunca chegam ao toolExecutor.
-    // request_tools: sem seleção dinâmica nas tarefas (toolset completo desde
-    // o turno 1). request_context: secções auxiliares omitidas pelo planner,
-    // resolvidas na instância EFÉMERA desta tarefa.
-    if (toolName === REQUEST_TOOLS_NAME) {
-      return { content: 'All tools are already available (parallel tasks run with the full toolset).', isError: false }
-    }
+    // Meta-tool do prompt construído (fusão 4b) — nunca chega ao toolExecutor.
+    // request_context: secções auxiliares omitidas pelo planner, resolvidas na
+    // instância EFÉMERA desta tarefa.
+    //
+    // A intercepção irmã de `request_tools` saiu a 2026-07-30 com o
+    // ToolsetSelector: era a única coisa que injectava aquele meta-tool, logo
+    // o modelo nunca o via e esta resposta nunca podia ser alcançada.
     if (toolName === REQUEST_CONTEXT_NAME) {
       const auxiliaryId = typeof toolInput.auxiliary === 'string' ? toolInput.auxiliary : ''
       if (!auxiliaryId || !taskBuilder) {

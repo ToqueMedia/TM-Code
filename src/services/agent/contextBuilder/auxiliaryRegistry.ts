@@ -6,15 +6,24 @@
  * specific capability > domain summary > broad project context.
  */
 
+/**
+ * Perfis de prompt COM PRODUTOR. Eram nove; seis (`core`, `analysis_readonly`,
+ * `frontend_ui`, `scaffold_project`, `deploy_publish`, `auth_database`) foram
+ * apagados a 2026-07-30 — nada os conseguia seleccionar desde o pivot dev-only
+ * e a remoção do Intent Router, mas cada um trazia a sua tabela de contexto
+ * escrita, o que os fazia ler como capacidades vivas. Duas auditorias
+ * anteriores documentaram-nos como "RESERVADOS" em vez de os remover; a nota
+ * de 07-29 di-lo bem: "é exactamente como um perfil morto continua a parecer
+ * vivo".
+ *
+ * Produtores actuais — se acrescentares um valor aqui, acrescenta o produtor
+ * no mesmo commit:
+ *   - `profileForSignals` → 'vision' (há imagem) | 'bugfix_local' (resto)
+ *   - `intentOverride` → 'project_bootstrap' (/init e o preflight de TMS)
+ */
 export type PromptProfile =
-  | 'core'
   | 'bugfix_local'
   | 'project_bootstrap'
-  | 'analysis_readonly'
-  | 'frontend_ui'
-  | 'scaffold_project'
-  | 'deploy_publish'
-  | 'auth_database'
   | 'vision'
 
 export type AuxiliaryType =
@@ -56,8 +65,6 @@ export interface AuxiliaryMeta {
   /** Rough token cost when loaded (ceil(chars/3) of the typical body). */
   estTokens: number
   type: AuxiliaryType
-  /** Profiles that may auto-include this auxiliary inline. */
-  profiles: PromptProfile[]
   /** Compatibility aliases accepted by request_context. */
   aliases?: string[]
   /** 1 = loadable now; 2 = registered for later/no loader. */
@@ -101,9 +108,31 @@ export interface ContextPlan {
   /** Contexts the planner considered but did NOT select (audit). Derived
    *  from candidateContexts minus selectedContexts when the model omits it. */
   rejectedContexts?: string[]
-  toolGroups?: Array<'FILE_OPS' | 'SHELL' | 'WEB' | 'SUBAGENT' | 'MEMORY' | 'PROVISION'>
   fallbackRisk: ContextFallbackRisk
   reason: string
+}
+
+/**
+ * Classificação de um plano de contexto. Vivia no `contextPlanner.ts` — 271
+ * linhas cujo runtime (parser + validador do plano devolvido por um modelo)
+ * deixou de ter chamadores quando o Context Planner foi desligado. O ficheiro
+ * foi apagado a 2026-07-30; só este tipo estava vivo, e só porque o
+ * contextBuilder o usava para carimbar o plano determinista.
+ *
+ * `source` é sempre 'fallback' hoje. Fica no tipo porque o export de sessão
+ * lê o campo — se algum dia voltar um planner por modelo, é aqui que o
+ * 'model' passa a ser possível.
+ */
+export interface ContextPlanClassification {
+  plan: ContextPlan
+  source: 'model' | 'fallback'
+  modelTier?: 'utility' | 'code'
+  attempts?: number
+  confidence: 'high' | 'medium' | 'low' | 'none'
+  reason: string
+  error?: string
+  fallbackReason?: string
+  diagnostics?: RouterDiagnostics
 }
 
 export interface AuxiliarySelection {
@@ -160,24 +189,6 @@ export interface RouterDiagnostics {
   parseError?: string
 }
 
-export interface IntentSignals {
-  hasImage?: boolean
-  mentionedFiles?: string[]
-}
-
-export function classifyPromptIntent(
-  _userMessage: string | undefined,
-  signals?: IntentSignals,
-): PromptProfile {
-  const hasImage = signals?.hasImage ?? false
-
-  if (hasImage) {
-    return 'vision'
-  }
-  // Intent routing is model-owned. This function is a conservative fallback
-  // for paths that cannot call the router; do not infer from free text here.
-  return 'bugfix_local'
-}
 
 const cx = (meta: AuxiliaryMeta): AuxiliaryMeta => meta
 
@@ -208,7 +219,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: false,
     estTokens: 160,
     type: 'static',
-    profiles: [],
     phase: 1,
   }),
   cx({
@@ -231,7 +241,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 220,
     type: 'static',
-    profiles: [],
     phase: 1,
   }),
   cx({
@@ -254,7 +263,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 220,
     type: 'static',
-    profiles: [],
     phase: 1,
   }),
   cx({
@@ -277,7 +285,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 160,
     type: 'static',
-    profiles: [],
     phase: 1,
   }),
   cx({
@@ -300,7 +307,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 180,
     type: 'static',
-    profiles: [],
     phase: 1,
   }),
   cx({
@@ -323,7 +329,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 650,
     type: 'static',
-    profiles: [],
     aliases: ['ui_baseline_full'],
     phase: 1,
   }),
@@ -347,7 +352,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 350,
     type: 'static',
-    profiles: [],
     aliases: ['taste_defaults'],
     phase: 1,
   }),
@@ -371,7 +375,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 300,
     type: 'dynamic',
-    profiles: [],
     phase: 1,
   }),
   cx({
@@ -394,7 +397,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: false,
     estTokens: 220,
     type: 'dynamic',
-    profiles: [],
     phase: 1,
   }),
   cx({
@@ -417,7 +419,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: false,
     estTokens: 220,
     type: 'dynamic',
-    profiles: [],
     phase: 1,
   }),
   cx({
@@ -440,7 +441,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: false,
     estTokens: 900,
     type: 'dynamic',
-    profiles: [],
     aliases: ['project_symbol_index', 'symbol_index', 'code_map'],
     phase: 1,
   }),
@@ -464,7 +464,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 1500,
     type: 'dynamic',
-    profiles: [],
     aliases: ['project_structure_full'],
     phase: 1,
   }),
@@ -488,7 +487,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 600,
     type: 'dynamic',
-    profiles: [],
     aliases: ['mcp_routing_detail'],
     phase: 1,
   }),
@@ -512,7 +510,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: false,
     estTokens: 180,
     type: 'static',
-    profiles: [],
     phase: 1,
   }),
   cx({
@@ -535,7 +532,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: false,
     estTokens: 220,
     type: 'static',
-    profiles: [],
     phase: 1,
   }),
   cx({
@@ -558,7 +554,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 500,
     type: 'dynamic',
-    profiles: [],
     phase: 1,
   }),
   cx({
@@ -581,7 +576,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 350,
     type: 'dynamic',
-    profiles: [],
     aliases: ['dev_server_status_detail'],
     phase: 1,
   }),
@@ -605,7 +599,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: false,
     estTokens: 220,
     type: 'dynamic',
-    profiles: [],
     phase: 1,
   }),
   cx({
@@ -628,7 +621,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 450,
     type: 'dynamic',
-    profiles: [],
     aliases: ['git_status_detail'],
     phase: 1,
   }),
@@ -652,7 +644,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: false,
     estTokens: 160,
     type: 'dynamic',
-    profiles: [],
     phase: 1,
   }),
   cx({
@@ -675,7 +666,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 1200,
     type: 'static',
-    profiles: ['scaffold_project'],
     aliases: ['scaffolding_install'],
     phase: 1,
   }),
@@ -699,7 +689,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 200,
     type: 'static',
-    profiles: ['vision'],
     aliases: ['vision_rules'],
     phase: 1,
   }),
@@ -726,7 +715,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: true,
     estTokens: 2000,
     type: 'project-doc',
-    profiles: [],
     aliases: ['project_docs_full'],
     phase: 1,
   }),
@@ -763,55 +751,6 @@ export function fallbackContextPlanForProfile(profile: PromptProfile): ContextPl
     }
   }
 
-  // RESERVADO como o deploy_publish/auth_database abaixo (auditoria 2026-07-29):
-  // `scaffold_project` também não tem produtor. `classifyPromptIntent` devolve
-  // só vision/bugfix_local e os dois produtores de intentOverride (/init e o
-  // preflight de TMS) pedem project_bootstrap. Ficou de fora da nota de 07-28
-  // por engano — que é exactamente como um perfil morto continua a parecer vivo.
-  if (profile === 'scaffold_project') {
-    return {
-      taskDomain: 'project/scaffold',
-      requiredCapabilities: ['scaffold_workflow', 'package_map'],
-      minimumContextNeeded: 'summary',
-      candidateContexts: ['scaffold.workflow', 'project.package_map', 'delivery.build_scripts', 'project.structure_overview'],
-      selectedContexts: ['scaffold.workflow', 'project.package_map'],
-      toolGroups: ['FILE_OPS', 'SHELL'],
-      fallbackRisk: 'medium',
-      reason: 'Scaffold profile: load workflow and package map before broader project context.',
-    }
-  }
-
-  // RESERVADOS (auditoria 2026-07-28): deploy_publish e auth_database são
-  // perfis da era pré-pivot dev-only — nada os produz hoje (classifyPromptIntent
-  // só devolve vision/bugfix_local; o único override interno usa
-  // project_bootstrap). Ficam como dados inertes porque
-  // remover o valor do union PromptProfile tocaria em tipos partilhados;
-  // não há código a alcançá-los.
-  if (profile === 'deploy_publish') {
-    return {
-      taskDomain: 'delivery',
-      requiredCapabilities: ['build'],
-      minimumContextNeeded: 'summary',
-      candidateContexts: ['delivery.build_scripts', 'project.package_map', 'project.structure_overview'],
-      selectedContexts: ['delivery.build_scripts'],
-      toolGroups: ['SHELL'],
-      fallbackRisk: 'medium',
-      reason: 'Deploy profile: build context before project structure fallback.',
-    }
-  }
-
-  if (profile === 'auth_database') {
-    return {
-      taskDomain: 'auth_database',
-      requiredCapabilities: ['package_map'],
-      minimumContextNeeded: 'summary',
-      candidateContexts: ['project.package_map', 'delivery.build_scripts'],
-      selectedContexts: ['project.package_map'],
-      fallbackRisk: 'medium',
-      reason: 'Auth/database profile: package map first; developer-owned credentials go through request_credentials.',
-    }
-  }
-
   if (profile === 'vision') {
     return {
       taskDomain: 'vision',
@@ -819,7 +758,6 @@ export function fallbackContextPlanForProfile(profile: PromptProfile): ContextPl
       minimumContextNeeded: 'summary',
       candidateContexts: ['vision.image_rules', 'design_system.component_patterns'],
       selectedContexts: ['vision.image_rules'],
-      toolGroups: ['WEB'],
       fallbackRisk: 'low',
       reason: 'Vision profile: image rules are enough unless visual implementation is also needed.',
     }
@@ -915,11 +853,8 @@ export function selectAuxiliaries(
     requestContextFallbackFrom: [],
     requestContextFallbackTo: [],
     requestedButNotLoadedSections: [],
-    readOnly: profile === 'analysis_readonly' ? true : readOnlyHint === true,
-    requiresMutation:
-      profile === 'analysis_readonly' || readOnlyHint === true
-        ? false
-        : requiresMutationHint === true,
+    readOnly: readOnlyHint === true,
+    requiresMutation: readOnlyHint === true ? false : requiresMutationHint === true,
     reason: reason ?? `context planner (taskDomain=${contextPlan.taskDomain})`,
     routerSource: routerInfo?.source ?? 'keyword',
     routerConfidence: routerInfo?.confidence ?? 'none',

@@ -287,6 +287,8 @@ export function shouldRemindTaskTracker(
   input: {
     turnCount: number
     lastTaskUpdateTurn: number
+    /** First successful file mutation since the last tracker update. */
+    unreconciledWritesStartedTurn: number | null
     writesSinceTaskUpdate: number
     unfinishedTaskCount: number
   },
@@ -295,7 +297,11 @@ export function shouldRemindTaskTracker(
     return false
   }
 
-  const lastRelevantTurn = Math.max(state.lastReminderTurn, input.lastTaskUpdateTurn)
+  const lastRelevantTurn = Math.max(
+    state.lastReminderTurn,
+    input.lastTaskUpdateTurn,
+    input.unreconciledWritesStartedTurn ?? 0,
+  )
   if (input.turnCount - lastRelevantTurn < TASK_TRACKER_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS) {
     return false
   }

@@ -1,5 +1,4 @@
 import { query, type QueryParams, type QueryStreamEvent } from '../query'
-import type { ToolsetSelector } from '../toolsetSelector'
 
 // ── Harness (mirrors querySteering.test.ts) ──────────────────────────────
 
@@ -78,27 +77,6 @@ function steeredInto(create: jest.Mock, callIndex: number, needle: string): bool
   )
 }
 
-/** Minimal ToolsetSelector mock for guardrail tests. */
-function makeSelector(opts: {
-  profile?: string
-  readOnly?: boolean
-  editFileActive?: boolean
-}): ToolsetSelector {
-  return {
-    getProfile: () => opts.profile ?? 'bugfix_local',
-    isReadOnly: () => opts.readOnly ?? false,
-    isActive: (name: string) => (name === 'edit_file' ? opts.editFileActive ?? false : false),
-    selectForTurn: (allTools: unknown[]) => ({
-      tools: allTools,
-      activeCount: 1,
-      totalCount: 1,
-      allActive: true,
-    }),
-    getExpandedNames: () => [],
-    getDeniedNames: () => [],
-    noteDeniedToolName: jest.fn(),
-  } as unknown as ToolsetSelector
-}
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
@@ -113,7 +91,6 @@ describe('query — "stopped without editing" guardrail', () => {
       query(
         baseParams({
           client: makeClient(create),
-          toolsetSelector: makeSelector({ editFileActive: false }),
           executionPhase: 'original_task',
           mutableTask: true,
         }),
@@ -122,8 +99,11 @@ describe('query — "stopped without editing" guardrail', () => {
 
     expect(terminal).toMatchObject({ reason: 'completed' })
     expect(create).toHaveBeenCalledTimes(2)
-    // The steering message should ride the second request.
-    expect(steeredInto(create, 1, 'request_tools')).toBe(true)
+    // The steering message should ride the second request. Procura a frase do
+    // guard, não 'request_tools': o ramo que mandava activar edit_file saiu com
+    // o ToolsetSelector (2026-07-30) — sem selecção dinâmica a ferramenta já
+    // está sempre no toolset, e a recuperação é sempre "aplica a alteração".
+    expect(steeredInto(create, 1, 'have not applied any edit yet')).toBe(true)
   })
 
   it('does NOT fire when hard readOnly enforcement is true', async () => {
@@ -133,7 +113,7 @@ describe('query — "stopped without editing" guardrail', () => {
       query(
         baseParams({
           client: makeClient(create),
-          toolsetSelector: makeSelector({ readOnly: true }),
+          readOnlyRun: true,
           executionPhase: 'original_task',
           mutableTask: true,
         }),
@@ -155,7 +135,7 @@ describe('query — "stopped without editing" guardrail', () => {
       query(
         baseParams({
           client: makeClient(create),
-          toolsetSelector: makeSelector({ readOnly: true }),
+          readOnlyRun: true,
           executeTool,
         }),
       ),
@@ -172,7 +152,6 @@ describe('query — "stopped without editing" guardrail', () => {
       query(
         baseParams({
           client: makeClient(create),
-          toolsetSelector: makeSelector({ profile: 'frontend_ui' }),
           executionPhase: 'original_task',
           mutableTask: false,
         }),
@@ -193,7 +172,6 @@ describe('query — "stopped without editing" guardrail', () => {
       query(
         baseParams({
           client: makeClient(create),
-          toolsetSelector: makeSelector({ profile: 'frontend_ui', editFileActive: true }),
           executionPhase: 'original_task',
           mutableTask: true,
         }),
@@ -214,7 +192,6 @@ describe('query — "stopped without editing" guardrail', () => {
       query(
         baseParams({
           client: makeClient(create),
-          toolsetSelector: makeSelector({ editFileActive: true }),
           executeTool: jest.fn().mockResolvedValue({ content: 'edited', isError: false }),
           executionPhase: 'original_task',
           mutableTask: true,
@@ -238,7 +215,6 @@ describe('query — "stopped without editing" guardrail', () => {
       query(
         baseParams({
           client: makeClient(create),
-          toolsetSelector: makeSelector({ editFileActive: false }),
           executionPhase: 'original_task',
           mutableTask: true,
         }),
@@ -259,7 +235,6 @@ describe('query — "stopped without editing" guardrail', () => {
       query(
         baseParams({
           client: makeClient(create),
-          toolsetSelector: makeSelector({ editFileActive: true }),
           executionPhase: 'original_task',
           mutableTask: true,
         }),
@@ -304,7 +279,6 @@ describe('query — "stopped without editing" guardrail', () => {
       query(
         baseParams({
           client: makeClient(create),
-          toolsetSelector: makeSelector({ editFileActive: true }),
           executeTool: jest.fn().mockResolvedValue({ content: 'edited', isError: false }),
           onRequestUsage: (entry) => { usageEntries.push(entry) },
           executionPhase: 'original_task',

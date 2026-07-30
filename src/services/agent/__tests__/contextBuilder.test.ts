@@ -113,6 +113,31 @@ describe('ContextBuilder', () => {
       return `${staticPart}\n\n${builder.getLastVolatileContext() ?? ''}`
     }
 
+    // A decisão hasImage → perfil 'vision' foi INLINADA no contextBuilder
+    // (2026-07-30) quando `profileForSignals` — que ignorava a mensagem e os
+    // ficheiros mencionados para devolver um enum a partir de um booleano —
+    // foi apagada. O teste que a cobria morreu com ela; este trava o mesmo
+    // comportamento no sítio onde ele passou a viver, que é o que interessa:
+    // com imagem, as regras de visão entram no prompt.
+    it('uma imagem faz o perfil ser vision e carrega vision.image_rules', async () => {
+      await builder.buildSystemPrompt(
+        '/test/project', 'web', undefined, undefined, 'olha este screenshot',
+        undefined, undefined, { hasImage: true },
+      )
+      const sel = builder.getLastAuxiliarySelection()
+      expect(sel?.profile).toBe('vision')
+      expect(sel?.loaded.map(l => l.id)).toContain('vision.image_rules')
+    })
+
+    it('sem imagem fica em bugfix_local e NÃO carrega as regras de visão', async () => {
+      await builder.buildSystemPrompt(
+        '/test/project', 'web', undefined, undefined, 'corrige este bug',
+      )
+      const sel = builder.getLastAuxiliarySelection()
+      expect(sel?.profile).toBe('bugfix_local')
+      expect(sel?.loaded.map(l => l.id)).not.toContain('vision.image_rules')
+    })
+
     it('returns a string', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
       expect(typeof prompt).toBe('string')
@@ -173,7 +198,7 @@ describe('ContextBuilder', () => {
         'Rota: /billing ou /payments. Detectar NIF e abrir modal.',
         [],
         {
-          profile: 'frontend_ui',
+          profile: 'bugfix_local',
           readOnly: false,
           source: 'model',
           confidence: 'high',
@@ -185,7 +210,7 @@ describe('ContextBuilder', () => {
       expect(prompt).toContain('# Role')
       // Planner desligado: ZERO chamadas sidecar; seleção determinística.
       expect(fetchMock).toHaveBeenCalledTimes(0)
-      expect(selection?.profile).toBe('frontend_ui')
+      expect(selection?.profile).toBe('bugfix_local')
       expect(selection?.contextPlannerStatus).toBe('fallback')
       // Determinística NÃO quer dizer VAZIA (auditoria 2026-07-28): a seleção
       // vazia deixava auxLoadedContent={} e matava no prompt as secções que só
@@ -304,7 +329,7 @@ describe('ContextBuilder', () => {
         'Create a new React app with auth from a screenshot',
         [],
         {
-          profile: 'scaffold_project',
+          profile: 'bugfix_local',
           readOnly: false,
           source: 'model',
           confidence: 'high',
