@@ -145,12 +145,33 @@ export interface ToolLoopState {
   repeatCount: number
   /** One nudge per streak — repeating it every turn would be its own spam. */
   nudged: boolean
+  /**
+   * TODAS as impressões digitais já vistas neste run → a ronda em que apareceram.
+   *
+   * `lastFingerprint` só compara com a ronda ANTERIOR, portanto uma repetição
+   * espaçada é invisível: qualquer ronda diferente pelo meio põe o contador a 1.
+   * Medido na sessão yyyy (2026-07-30): `Grep("seed-premium", functions/)` foi
+   * feito na ronda 2 e EXACTAMENTE outra vez na ronda 12 — mesma tool, mesmos
+   * args, mesmo resultado ("No matches found.") — com 9 rondas diferentes pelo
+   * meio. O detector nunca viu nada. Não é um ciclo infinito, é desperdício
+   * puro: um turno inteiro para reconfirmar um "não existe" já conhecido.
+   */
+  seenFingerprints: Map<string, number>
+  /** Impressões já assinaladas, para não repetir o aviso sobre a mesma. */
+  flaggedFingerprints: Set<string>
+  /** Contador de rondas com tool calls neste run. */
+  round: number
 }
 
 export interface ToolLoopCheckResult {
   repeats: number
   shouldNudge: boolean
   shouldStop: boolean
+  /**
+   * Ronda em que esta chamada exacta já foi feita antes, quando NÃO é uma
+   * repetição consecutiva (essa já é coberta por `repeats`). `null` = inédita.
+   */
+  repeatedFromRound: number | null
 }
 
 /**
@@ -197,14 +218,31 @@ export function checkForToolLoop(
     state.lastFingerprint = null
     state.repeatCount = 0
     state.nudged = false
-    return { repeats: 0, shouldNudge: false, shouldStop: false }
+    return { repeats: 0, shouldNudge: false, shouldStop: false, repeatedFromRound: null }
   }
+
+  state.round++
+
+  // Repetição ESPAÇADA: já vimos esta chamada exacta antes, mas não na ronda
+  // imediatamente anterior. Assinala-se UMA vez por impressão digital — o
+  // objectivo é o modelo mudar de estratégia, não levar um sermão por ronda.
+  let repeatedFromRound: number | null = null
+  const previousRound = state.seenFingerprints.get(fingerprint)
+  if (
+    previousRound !== undefined &&
+    fingerprint !== state.lastFingerprint &&
+    !state.flaggedFingerprints.has(fingerprint)
+  ) {
+    repeatedFromRound = previousRound
+    state.flaggedFingerprints.add(fingerprint)
+  }
+  if (previousRound === undefined) state.seenFingerprints.set(fingerprint, state.round)
 
   if (fingerprint !== state.lastFingerprint) {
     state.lastFingerprint = fingerprint
     state.repeatCount = 1
     state.nudged = false
-    return { repeats: 1, shouldNudge: false, shouldStop: false }
+    return { repeats: 1, shouldNudge: false, shouldStop: false, repeatedFromRound }
   }
 
   state.repeatCount++
@@ -213,11 +251,36 @@ export function checkForToolLoop(
     !shouldStop && !state.nudged && state.repeatCount >= TOOL_LOOP_NUDGE_THRESHOLD
   if (shouldNudge) state.nudged = true
 
-  return { repeats: state.repeatCount, shouldNudge, shouldStop }
+  return { repeats: state.repeatCount, shouldNudge, shouldStop, repeatedFromRound }
+}
+
+/**
+ * Aviso de repetição espaçada.
+ *
+ * NÃO esconde nada: a chamada corre, o resultado chega inteiro. A lição do
+ * read-dedup (sessão katondo-queue: 175 read_file em 127 turnos porque um stub
+ * negava conteúdo alegando que já estava no contexto) é que suprimir informação
+ * empurra o modelo para contornos mais caros do que o desperdício original.
+ * Aqui só se nomeia o facto e se aponta o que fazer em vez de repetir.
+ */
+export function buildRepeatedCallNoteText(round: number): string {
+  return (
+    `[repeated call] You already made this exact call (same tool, same arguments) earlier in this run, on round ${round}. ` +
+    `The result below is what you got then. If it did not answer your question the first time, asking again will not either — ` +
+    `change the question: widen or narrow the path, drop a filter, search for a different symbol, or read a file directly. ` +
+    `If it DID answer it, act on it now.`
+  )
 }
 
 export function createToolLoopState(): ToolLoopState {
-  return { lastFingerprint: null, repeatCount: 0, nudged: false }
+  return {
+    lastFingerprint: null,
+    repeatCount: 0,
+    nudged: false,
+    seenFingerprints: new Map(),
+    flaggedFingerprints: new Set(),
+    round: 0,
+  }
 }
 
 /** Corrective text injected on the first detection of a repeated round. */

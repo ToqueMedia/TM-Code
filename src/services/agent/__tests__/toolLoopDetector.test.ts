@@ -7,6 +7,7 @@
  * o run momenu chegou a 151 pedidos.
  */
 import {
+  buildRepeatedCallNoteText,
   buildToolLoopNudgeText,
   checkForLoop,
   checkForToolLoop,
@@ -135,5 +136,89 @@ describe('checkForLoop — detector de TEXTO vê a janela inteira', () => {
     ]
     const results = texts.map((t) => checkForLoop(t, state))
     expect(results.every(r => !r.isLoop)).toBe(true)
+  })
+})
+
+/**
+ * Repetição ESPAÇADA — a que o detector consecutivo não vê.
+ *
+ * `lastFingerprint` só compara com a ronda anterior: qualquer ronda diferente
+ * pelo meio põe o contador a 1. Medido na sessão yyyy (2026-07-30):
+ * `Grep("seed-premium", functions/)` correu na ronda 2 e EXACTAMENTE outra vez
+ * na ronda 12 — mesma tool, mesmos args, mesmo "No matches found." — com 9
+ * rondas diferentes entre as duas. O detector não viu nada. Não é um ciclo
+ * infinito; é um turno inteiro gasto a reconfirmar um "não existe" que já
+ * estava no contexto.
+ *
+ * O aviso NÃO esconde nada: a chamada corre e o resultado chega inteiro. A
+ * medição do próprio claude-vaz mostra porquê — duas Greps idênticas devolveram
+ * resultados DIFERENTES (1 e 2 acertos) porque o ficheiro mudou entre elas.
+ * Suprimir seria repetir o erro do read-dedup.
+ */
+describe('repetição espaçada da mesma chamada', () => {
+  const fp = (name: string, args: string) =>
+    computeToolBatchFingerprint([{ name, argsJson: args }])
+
+  it('assinala a chamada exacta repetida rondas mais tarde', () => {
+    const state = createToolLoopState()
+    const target = fp('search_files', '{"query":"seed-premium"}')
+
+    expect(checkForToolLoop(target, state).repeatedFromRound).toBeNull()
+    // Nove rondas diferentes pelo meio — como na sessão real.
+    for (let i = 0; i < 9; i++) {
+      expect(checkForToolLoop(fp('search_files', `{"query":"q${i}"}`), state).repeatedFromRound).toBeNull()
+    }
+    const again = checkForToolLoop(target, state)
+    expect(again.repeatedFromRound).toBe(1)
+    // E não é confundido com um ciclo: nada de stop nem de nudge consecutivo.
+    expect(again.shouldStop).toBe(false)
+    expect(again.shouldNudge).toBe(false)
+  })
+
+  it('assinala UMA vez por impressão digital — o aviso não é spam', () => {
+    const state = createToolLoopState()
+    const target = fp('glob', '{"pattern":"**/*.ts"}')
+
+    checkForToolLoop(target, state)
+    checkForToolLoop(fp('glob', '{"pattern":"x"}'), state)
+    expect(checkForToolLoop(target, state).repeatedFromRound).toBe(1)
+    checkForToolLoop(fp('glob', '{"pattern":"y"}'), state)
+    expect(checkForToolLoop(target, state).repeatedFromRound).toBeNull()
+  })
+
+  it('não assinala a repetição CONSECUTIVA — essa já tem o seu próprio caminho', () => {
+    const state = createToolLoopState()
+    const target = fp('search_files', '{"query":"a"}')
+
+    checkForToolLoop(target, state)
+    const second = checkForToolLoop(target, state)
+    expect(second.repeats).toBe(2)
+    expect(second.repeatedFromRound).toBeNull()
+  })
+
+  it('args diferentes nunca são repetição, mesmo com a mesma tool', () => {
+    const state = createToolLoopState()
+    checkForToolLoop(fp('search_files', '{"query":"a"}'), state)
+    checkForToolLoop(fp('search_files', '{"query":"b"}'), state)
+    expect(checkForToolLoop(fp('search_files', '{"query":"c"}'), state).repeatedFromRound).toBeNull()
+  })
+
+  it('rondas de polling não contam nem contaminam o registo', () => {
+    const state = createToolLoopState()
+    const target = fp('search_files', '{"query":"a"}')
+
+    checkForToolLoop(target, state)
+    // fingerprint null (ronda só de polling) reseta o consecutivo mas NÃO pode
+    // apagar a memória do run — senão a repetição espaçada volta a ser invisível.
+    expect(checkForToolLoop(null, state).repeatedFromRound).toBeNull()
+    expect(checkForToolLoop(target, state).repeatedFromRound).toBe(1)
+  })
+
+  it('o texto do aviso diz a ronda e o que fazer em vez de repetir', () => {
+    const text = buildRepeatedCallNoteText(2)
+    expect(text).toContain('round 2')
+    expect(text).toContain('asking again will not either')
+    // O resultado é SERVIDO — nada de "usa o que já tens".
+    expect(text).toContain('The result below is what you got then')
   })
 })

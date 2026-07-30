@@ -30,6 +30,7 @@ import {
 } from "./compact";
 import { applyGlobalToolResultBudget } from "./toolResultGlobalBudget";
 import {
+  buildRepeatedCallNoteText,
   buildToolLoopNudgeText,
   checkForLoop,
   checkForToolLoop,
@@ -3130,6 +3131,24 @@ export async function* query(
       // eslint-disable-next-line no-console
       console.debug(
         `[query] tool-loop · same round repeated ${toolLoop.repeats}x · nudging at turn ${state.turnCount}`,
+      );
+    }
+
+    // Repetição ESPAÇADA da mesma chamada exacta (mesma tool, mesmos args).
+    // Distinta do bloco acima, que só vê rondas consecutivas: com uma ronda
+    // diferente pelo meio o contador reinicia e a repetição fica invisível.
+    // Medido na sessão yyyy (2026-07-30): a mesma busca na ronda 2 e na ronda
+    // 12, com o mesmo "No matches found." — um turno inteiro para reconfirmar
+    // um "não existe" que já estava no contexto. Nada é escondido: a chamada
+    // correu e o resultado chegou inteiro; isto só nomeia o facto.
+    if (toolLoop.repeatedFromRound !== null && !pendingToolLoopNudge) {
+      interTurnMessages.push({
+        role: "user",
+        content: [{ type: "text", text: buildRepeatedCallNoteText(toolLoop.repeatedFromRound) }],
+      });
+      // eslint-disable-next-line no-console
+      console.debug(
+        `[query] tool-loop · exact call repeated from round ${toolLoop.repeatedFromRound} at turn ${state.turnCount}`,
       );
     }
 

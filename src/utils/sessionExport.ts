@@ -255,16 +255,27 @@ function renderToolCallMd(tc: ToolCallDisplay): string {
     lines.push(String(tc.input))
   }
   lines.push('```')
-  if (tc.result !== undefined) {
+  const hasDiffFields = Boolean(tc.diffOldContent || tc.diffNewContent)
+  // Num diff, o "resultado" é um marcador — o conteúdo vive nos campos
+  // diffOldContent/diffNewContent. Imprimi-lo aqui era despejar o ficheiro
+  // inteiro duas vezes dentro de um bloco de código (sessão yyyy, 2026-07-30:
+  // 136 KB para uma mudança de 8 linhas). A linha do Diff abaixo é a
+  // informação que resta e é a que interessa.
+  if (tc.result !== undefined && !hasDiffFields) {
     lines.push(``)
     lines.push(`**${t('export.result')}**`)
     lines.push('```')
     lines.push(typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2))
     lines.push('```')
   }
-  if (tc.diffOldContent || tc.diffNewContent) {
+  if (hasDiffFields) {
+    const oldLines = (tc.diffOldContent || '').split('\n').length
+    const newLines = (tc.diffNewContent || '').split('\n').length
     lines.push(``)
-    lines.push(`**Diff:** \`${tc.diffStatus ?? 'pending'}\` (${tc.isNewFile ? t('export.newFile') : t('export.edit')})`)
+    lines.push(
+      `**Diff:** \`${tc.diffStatus ?? 'pending'}\` (${tc.isNewFile ? t('export.newFile') : t('export.edit')}` +
+      `, ${oldLines} → ${newLines} ${t('export.lines')})`,
+    )
   }
   lines.push(`</details>`)
   return lines.join('\n')

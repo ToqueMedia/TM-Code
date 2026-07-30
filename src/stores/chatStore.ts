@@ -820,8 +820,6 @@ function appendTextToStreamingMessage(msg: ChatMessage, delta: string, uiOnly = 
   if (msg.reasoningStartedAt && !msg.reasoningDurationMs) {
     msg.reasoningDurationMs = Date.now() - msg.reasoningStartedAt
   }
-  msg.content = msg.content + delta
-
   // Maintain interleaved contentBlocks: append to the last compatible text
   // block or create a new one. UI-only progress must stay separate from
   // model-visible text so rebuildConversationHistory can omit it precisely.
@@ -831,11 +829,25 @@ function appendTextToStreamingMessage(msg: ChatMessage, delta: string, uiOnly = 
     last.durationMs = Date.now() - last.startedAt
   }
   const refreshedLast = blocks[blocks.length - 1]
+  const continuesExistingText = Boolean(
+    refreshedLast && refreshedLast.type === 'text' && Boolean(refreshedLast.uiOnly) === uiOnly,
+  )
   if (refreshedLast && refreshedLast.type === 'text' && Boolean(refreshedLast.uiOnly) === uiOnly) {
     refreshedLast.text += delta
   } else {
     blocks.push(uiOnly ? { type: 'text', text: delta, uiOnly: true } : { type: 'text', text: delta })
   }
+
+  // `content` é a versão PLANA da mensagem: alimenta o export, a detecção de
+  // loop e o copiar. Os contentBlocks abrem um bloco NOVO quando uma tool call
+  // ou um raciocínio se mete pelo meio, mas o `content` era só concatenação —
+  // e as frases de turnos diferentes ficavam coladas: "…do storefront.Vou
+  // procurar a definição…" (sessão yyyy, 2026-07-30). Quem lê um export lê
+  // isso. A separação segue a fronteira que os blocos já conhecem.
+  const needsSeparator = !continuesExistingText
+    && msg.content.length > 0
+    && !/\s$/.test(msg.content)
+  msg.content = needsSeparator ? `${msg.content}\n\n${delta}` : msg.content + delta
 }
 
 // Streaming delta buffer (50ms flush window).
@@ -2929,10 +2941,33 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
               ? { ...toolCalls[i].input, file_path: diffPath }
               : toolCalls[i].input
 
+            // O `result` de um diff era guardado CRU — o JSON com o conteúdo
+            // antigo E o novo do ficheiro inteiro — ao lado de
+            // diffOldContent/diffNewContent, que carregam exactamente o mesmo.
+            // Medido na sessão yyyy (2026-07-30): um Edit de 8 linhas num
+            // ficheiro de 1891 gastou 261 KB (136 KB de `result` + 62 KB + 62
+            // KB), 37% do export inteiro, com cada versão do ficheiro
+            // duplicada. E ninguém lê esse `result`: o modelo recebe o resumo
+            // do sanitizeToolResultForModel, a UI desenha a partir dos campos
+            // dedicados (ToolCallDisplay devolve o InlineDiff antes de chegar
+            // ao painel de resultado) e a escrita na aprovação sai do
+            // DiffResult. Os únicos consumidores eram o disco e o export em
+            // markdown, que imprimia o ficheiro duas vezes dentro de um bloco
+            // de código.
+            const storedResult = diffNewContent !== undefined || diffOldContent !== undefined
+              ? JSON.stringify({
+                type: 'diff',
+                path: diffPath,
+                isNewFile: isNewFile ?? false,
+                // O conteúdo vive em diffOldContent/diffNewContent.
+                contentInDiffFields: true,
+              })
+              : result
+
             toolCalls[i] = {
               ...toolCalls[i],
               input: mergedInput,
-              result,
+              result: storedResult,
               isError,
               status: isError ? 'failed' : 'completed',
               ...(diffOldContent !== undefined && { diffOldContent }),
