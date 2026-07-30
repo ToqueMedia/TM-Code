@@ -62,6 +62,11 @@ import {
   shouldRemindTaskTracker,
   buildTaskTrackerReminderText,
 } from "./turnEfficiency";
+import {
+  createBudgetTracker,
+  checkTokenBudget,
+  type BudgetTracker,
+} from "./tokenBudget";
 import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
 import { DESTRUCTIVE_TOOLS } from "./toolsetSelector";
 import { EDIT_FILE, canonicalToolName } from "./toolNames";
@@ -343,6 +348,10 @@ export interface QueryParams {
    * and parallel tasks share the query loop but do not own that tracker.
    */
   enableTaskTrackerReminder?: boolean;
+  /** Maximum token budget for the run before nudging or stopping. */
+  maxTokenBudget?: number;
+  /** Sub-agent identifier (if running as a subagent). */
+  agentId?: string;
   /** Abort signal for cancellation. */
   signal: AbortSignal;
   /** Maximum turns before stopping (default: Infinity). */
@@ -1150,6 +1159,7 @@ export async function* query(
   let runTouchedTaskTracker = false;
   let taskGuardCount = 0;
   const taskTrackerReminderState = createTaskTrackerReminderState();
+  const budgetTracker = createBudgetTracker();
   let lastTaskTrackerUpdateTurn = 0;
   let writesSinceTaskTrackerUpdate = 0;
   /** Turn number of the first successful file mutation (1-indexed). */
@@ -3206,6 +3216,36 @@ export async function* query(
         }
       } catch {
         // Tracker state is advisory; it must never interrupt the run.
+      }
+    }
+
+    // ── Token Budget & Diminishing Returns Evaluation ──
+    if (params.maxTokenBudget && params.maxTokenBudget > 0) {
+      const globalTokens = state.messages.reduce(
+        (acc, m) => acc + (m.role === "assistant" ? 500 : 100),
+        0,
+      );
+      const budgetDecision = checkTokenBudget(
+        budgetTracker,
+        params.agentId,
+        params.maxTokenBudget,
+        globalTokens,
+      );
+
+      if (budgetDecision.action === "continue" && budgetDecision.nudgeMessage) {
+        interTurnMessages.push({
+          role: "user",
+          content: [{ type: "text", text: budgetDecision.nudgeMessage }],
+        });
+      } else if (budgetDecision.action === "stop") {
+        if (budgetDecision.completionEvent?.diminishingReturns) {
+          yield {
+            type: "text_delta",
+            text: "\n\n[Run stopped: token budget limit / diminishing returns reached]",
+          };
+          yield { type: "message_stop", finish_reason: "stop" };
+          return;
+        }
       }
     }
 
