@@ -58,7 +58,7 @@ describe('messageQueue — basic operations', () => {
 
   it('enqueue defaults priority to next', () => {
     enqueue(mk('hello'))
-    expect(getCommandQueueSnapshot()[0]!.priority).toBe('next')
+    expect(dequeue()?.priority).toBe('next')
   })
 
   it('enqueue preserves explicit priority', () => {
@@ -370,6 +370,30 @@ describe('messageQueue — steering drains respect the task boundary', () => {
     enqueue(mk('t1', { uuid: 'T1', asTask: true }))
     expect(drainSteerableMessages()).toEqual([])
     expect(getCommandQueueSnapshot()).toHaveLength(2)
+  })
+
+  it('keeps later-priority prompts for the idle drain by default', () => {
+    enqueue(mk('normal', { uuid: 'N', priority: 'next' }))
+    enqueue(mk('background', { uuid: 'L', priority: 'later' }))
+
+    expect(drainSteerableMessages().map(c => c.uuid)).toEqual(['N'])
+    expect(getCommandQueueSnapshot().map(c => c.uuid)).toEqual(['L'])
+
+    expect(drainSteerableMessages('later').map(c => c.uuid)).toEqual(['L'])
+  })
+
+  // O corte por prioridade é um prefixo: com o `later` EM CIMA, absorver o
+  // `next` de baixo executá-lo-ia primeiro enquanto a strip mostrava o
+  // `later` acima — a mesma mentira de ordem que a fronteira de tarefas
+  // impede. A janela tem de fechar na primeira mensagem segurada.
+  it('nothing below a held later-priority prompt jumps ahead of it', () => {
+    enqueue(mk('background', { uuid: 'L', priority: 'later' }))
+    enqueue(mk('normal', { uuid: 'N', priority: 'next' }))
+
+    expect(drainSteerableMessages()).toEqual([])
+    expect(getCommandQueueSnapshot().map(c => c.uuid)).toEqual(['L', 'N'])
+
+    expect(drainSteerableMessages('later').map(c => c.uuid)).toEqual(['L', 'N'])
   })
 
   it('removeSteerableMessages drops steer everywhere, keeps tasks and slash', () => {

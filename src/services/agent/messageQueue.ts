@@ -384,17 +384,35 @@ export function isSteerable(cmd: QueuedCommand): boolean {
 }
 
 /**
- * Drain the steerable messages the live run may absorb NOW: only those
- * enqueued BEFORE the first task in queue order. A steer message the user
- * placed (or reordered) BELOW a task belongs to the run that task will
- * start, not to the current one — draining it here would make the strip's
- * order a lie. This is the steering-collector counterpart of the batch
- * window in queueProcessor; both enforce "queue order is execution order".
+ * Drain the steerable messages the live run may absorb NOW: only those at or
+ * above `maxPriority` and enqueued BEFORE the first task in queue order. A
+ * steer message the user placed (or reordered) BELOW a task belongs to the
+ * run that task will start, not to the current one — draining it here would
+ * make the strip's order a lie. `later` messages stay queued for the idle
+ * drain; the default carries only immediate (`now`) and normal (`next`)
+ * steering into a live run.
+ *
+ * O corte por prioridade é um PREFIXO, não um filtro: ao encontrar a primeira
+ * mensagem segurada por prioridade a janela FECHA ali. Filtrar salteado
+ * partia o mesmo invariante que a fronteira de tarefas protege — com a fila
+ * [L(later), N(next)], absorver o N e deixar o L para trás executava o N
+ * primeiro enquanto a strip mostrava o L por cima. Nada abaixo de uma
+ * mensagem segurada pode saltar-lhe à frente.
+ *
+ * This is the steering-collector counterpart of the batch window in
+ * queueProcessor; both enforce "queue order is execution order".
  */
-export function drainSteerableMessages(): QueuedCommand[] {
+export function drainSteerableMessages(
+  maxPriority: QueuePriority = 'next',
+): QueuedCommand[] {
   const firstTaskIdx = commandQueue.findIndex(c => c.asTask === true)
   const window = firstTaskIdx === -1 ? commandQueue : commandQueue.slice(0, firstTaskIdx)
-  const eligible = new Set(window.filter(isSteerable))
+  const threshold = PRIORITY_ORDER[maxPriority]
+  const eligible = new Set<QueuedCommand>()
+  for (const cmd of window) {
+    if (PRIORITY_ORDER[cmd.priority ?? 'next'] > threshold) break
+    if (isSteerable(cmd)) eligible.add(cmd)
+  }
   if (eligible.size === 0) return []
   return dequeueAllMatching(c => eligible.has(c))
 }
