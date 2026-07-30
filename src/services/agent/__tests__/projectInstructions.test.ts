@@ -228,7 +228,11 @@ describe('getProjectMemorySection inject policy', () => {
     } as PromptContext
     const section = getProjectMemorySection(ctx)!
     expect(section).toContain('truncated TMS.md')
-    expect(section.length).toBeLessThan(STATIC_PROJECT_INSTRUCTIONS_MAX_CHARS + 500)
+    // +900 e não +500: quando o TMS falha a validação o cabeçalho nomeia as
+    // secções em falta (2026-07-30), o que é mais longo do que o "Follow Agent
+    // Rules…" de um TMS válido — e este fixture não tem nenhuma delas. O
+    // overhead é de UMA vez por run, no prefixo estático em cache.
+    expect(section.length).toBeLessThan(STATIC_PROJECT_INSTRUCTIONS_MAX_CHARS + 900)
   })
 
   it('foreign only → full AGENTS/CLAUDE body', () => {

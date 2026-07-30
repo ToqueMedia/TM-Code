@@ -65,10 +65,36 @@ function parseSectionNames(content: string): string[] {
 }
 
 function validateTms(content: string): boolean {
+  return missingTmsSections(content).length === 0
+}
+
+/**
+ * Quais secções obrigatórias faltam a este TMS.md.
+ *
+ * PORQUÊ ISTO É PÚBLICO (auditoria 2026-07-30): a validação existia, corria, e
+ * o resultado morria numa flag de telemetria (`already_exists_invalid`). O
+ * `shouldBootstrap` é `false` por decisão de produto — /init é o único caminho
+ * de criação, paridade com o claude-vaz — portanto um TMS inválido não é
+ * reparado, e como o FICHEIRO existe o aviso de "/init" (gated em
+ * `projectStore.noTmsFile`) também não aparece. Resultado: o mapa parcial é
+ * injetado como se estivesse completo.
+ *
+ * Medido na sessão yyyy (momenu-fact, 2026-07-30): o TMS declarava "Firebase
+ * Cloud Functions" no enquadramento mas a sua "Visão Geral do Diretório" só
+ * listava `src/**`. Faltavam-lhe `structure`, `entrypoints`, `commands` e
+ * `agent rules` — exactamente o que diria onde vivem as rotas do backend. O
+ * modelo gastou 12 das 20 tool calls a descobrir `functions/src/routes/` à
+ * força, e o prompt ainda lhe mandava "Follow Agent Rules, Commands, and
+ * Confirmed facts below" — três secções inexistentes.
+ *
+ * Nomear o que falta transforma uma armadilha silenciosa num desconhecido
+ * conhecido: o modelo deixa de tratar o mapa como completo.
+ */
+export function missingTmsSections(content: string): string[] {
   const sections = parseSectionNames(content)
-  return REQUIRED_SECTION_ALIASES.every(aliases =>
-    aliases.some(required => sections.some(section => section.includes(required))),
-  )
+  return REQUIRED_SECTION_ALIASES.filter(
+    aliases => !aliases.some(required => sections.some(section => section.includes(required))),
+  ).map(aliases => aliases[0])
 }
 
 function parseLastGeneratedAt(content: string): string | null {

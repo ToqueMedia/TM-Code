@@ -23,6 +23,7 @@ import {
   LSP,
 } from '../../toolNames'
 import { extractCriticalSectionsWithStats, sanitizeProjectContent } from '../helpers'
+import { missingTmsSections } from '../../tmsBootstrap'
 import { renderCounterweights } from '../../modelProfiles'
 import { markTmsFullContextSent } from '../../tmsContext'
 import {
@@ -866,10 +867,26 @@ export function getProjectMemorySection(ctx: PromptContext): string | null {
       STATIC_PROJECT_INSTRUCTIONS_MAX_CHARS,
       'TMS.md',
     )
+    // O mapa pode estar INCOMPLETO, e dizê-lo vale mais do que fingir que não.
+    //
+    // Medido na sessão yyyy (momenu-fact, 2026-07-30): este TMS declarava
+    // "Firebase Cloud Functions" mas a sua visão geral de diretórios só listava
+    // `src/**`. Faltavam-lhe structure/entrypoints/commands/agent rules — o que
+    // diria onde vivem as rotas do backend — e o prompt ainda mandava "Follow
+    // Agent Rules, Commands, and Confirmed facts below", três secções
+    // inexistentes. O modelo gastou 12 das 20 tool calls a redescobrir
+    // `functions/src/routes/` à força. Um mapa parcial que se apresenta como
+    // completo é pior do que nenhum mapa: convida a confiar nele.
+    const missing = missingTmsSections(ctx.tmsContent)
+    const header = missing.length === 0
+      ? 'Operational project memory for this repository. Follow Agent Rules, Commands, and Confirmed facts below.'
+      : `Operational project memory for this repository — INCOMPLETE (missing: ${missing.join(', ')}). `
+        + `Any directory overview below may cover only PART of the repo: confirm layout with your own tools `
+        + `before concluding something does not exist. Mention once that \`/init\` regenerates this file.`
     const body = [
       '# Project memory (TMS.md)',
       `Path: ${ctx.normalizedProjectPath}/TMS.md`,
-      'Operational project memory for this repository. Follow Agent Rules, Commands, and Confirmed facts below.',
+      header,
       'At FINAL CHECKPOINT of a significant task, if durable facts changed (commands, entrypoints, patterns, agent rules, confirmed/inferred/pending), write those updates into TMS.md before you stop.',
       '',
       sanitizeProjectContent(capped),
