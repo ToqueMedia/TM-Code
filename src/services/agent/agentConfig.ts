@@ -97,3 +97,28 @@ export const API_MAX_RETRIES = 3
 export const API_RETRY_DELAYS = [3000, 5000, 10000]
 export const API_CF520_DELAYS = [10000, 20000, 30000]
 export const API_RATE_LIMIT_DELAY = 20000
+
+// ── Orçamento de descrições MCP ──
+//
+// As descrições de ferramentas MCP são texto de TERCEIROS que entra em TODOS
+// os pedidos: em `registerMCPTools` vão para as tool definitions da API, e no
+// bloco `agent_runtime.mcp_routing` vão para o system prompt. Um servidor
+// gerado a partir de OpenAPI pode trazer dezenas de milhares de caracteres
+// sem que ninguém neste repo os tenha escrito ou revisto.
+//
+// Os cortes são SEMPRE marcados (nunca silenciosos) — um corte invisível faz
+// o modelo tratar uma descrição truncada como a especificação completa.
+//
+// NOTA DE ÂMBITO: só a DESCRIÇÃO é limitada. O `input_schema` fica intacto de
+// propósito — é JSON estruturado que o provider valida, e cortá-lo por
+// caracteres produzia um schema inválido em vez de um schema mais pequeno.
+// Reduzir schemas gordos exige podar propriedades, não truncar texto.
+
+/** Teto por descrição de uma ferramenta MCP. */
+export const MCP_TOOL_DESCRIPTION_MAX_CHARS = 1_500
+
+/** Teto agregado das descrições de UM servidor MCP. */
+export const MCP_SERVER_DESCRIPTIONS_MAX_CHARS = 20_000
+
+/** Teto agregado de TODAS as descrições MCP juntas. */
+export const MCP_TOTAL_DESCRIPTIONS_MAX_CHARS = 60_000

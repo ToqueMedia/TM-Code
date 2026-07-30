@@ -255,7 +255,7 @@ import {
   normalizePersistedToolName,
   DIVERGENT_TRAINED_TOOLS,
 } from '../toolNames'
-import { DESTRUCTIVE_TOOLS } from '../toolsetSelector'
+import { DESTRUCTIVE_TOOLS } from '../toolPolicy'
 // agentStore is NOT mocked — update_tasks drives the real Zustand store, so
 // the evidence-guard tests seed and assert against it directly.
 import { useAgentStore } from '../../../stores/agentStore'

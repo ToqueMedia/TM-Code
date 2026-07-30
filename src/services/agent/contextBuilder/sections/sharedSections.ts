@@ -20,6 +20,7 @@
  */
 
 import type { MCPToolSummary } from '../types'
+import { budgetMcpDescriptions } from '../../mcpDescriptionBudget'
 import {
   AGENT_SHELL_READ,
   AGENT_SHELL_START,
@@ -145,7 +146,11 @@ Separate distinct actions with a blank line (\`\\n\\n\`). Without it, sentences 
 
 export function sharedMcpBlock(mcpTools: MCPToolSummary[], actor: string): string | null {
   if (!mcpTools || mcpTools.length === 0) return null
-  const list = mcpTools.map(t => `- mcp__${t.serverName}__${t.name} → ${t.description}`).join('\n')
+  // Descrições orçamentadas: são texto de terceiros (o servidor MCP escreve-o,
+  // não este repo) e esta secção entra inteira no system prompt quando o
+  // agente pede `agent_runtime.mcp_routing`. Ver mcpDescriptionBudget.ts.
+  const { tools: budgeted } = budgetMcpDescriptions(mcpTools)
+  const list = budgeted.map(t => `- mcp__${t.serverName}__${t.name} → ${t.description}`).join('\n')
   // Canva guidance is keyed on serverName, which is stable: the slash command always
   // writes the entry under name 'canva'. Tool-name matching (the prior heuristic) was
   // too permissive — any MCP with 'canva' in a tool name would trigger it.

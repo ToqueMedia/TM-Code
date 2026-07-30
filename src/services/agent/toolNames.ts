@@ -81,9 +81,12 @@ export const WEB_FETCH = 'web_fetch'
 export const CAPTURE_URL_DESIGN = 'capture_url_design'
 export const SEND_AGENT_MESSAGE = 'send_agent_message'
 export const GET_PROJECT_STATE_DIR = 'get_project_state_dir'
-export const VERIFY = 'verify'
 
 // Sub-agent delegation (v0.7.0 — replaces research, verify, spawn_background_agent)
+// A tool `verify` legacy foi finalmente REMOVIDA (2026-07-30): coexistia com o
+// sub-agente Verify — dois prompts de sistema a divergir, tetos de 200 vs 100
+// turnos, e só o sub-agente tinha UI, store, wall-clock, stale detection e
+// marcação de resultado parcial. O caminho único é `delegate('Verify', …)`.
 export const DELEGATE = 'delegate'
 export const COLLECT_RESULTS = 'collect_results'
 
@@ -129,7 +132,7 @@ export const TOOL_NAMES = [
   AGENT_SHELL_START, AGENT_SHELL_WRITE, AGENT_SHELL_READ, AGENT_SHELL_STOP,
   START_DEV_SERVER, STOP_DEV_SERVER,
   WEB_SEARCH, WEB_FETCH, CAPTURE_URL_DESIGN,
-  DELEGATE, COLLECT_RESULTS, VERIFY, SEND_AGENT_MESSAGE,
+  DELEGATE, COLLECT_RESULTS, SEND_AGENT_MESSAGE,
   ENTER_WORKTREE, EXIT_WORKTREE,
   UPDATE_TASKS, GET_PROJECT_STATE_DIR,
   REQUEST_CREDENTIALS, ASK_USER_QUESTION,

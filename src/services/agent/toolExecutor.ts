@@ -46,6 +46,7 @@ import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import {
   GLOB_ALIAS,
+  BASH_ALIAS,
   GREP_ALIAS,
   LS_ALIAS,
   READ_AROUND,
@@ -77,6 +78,7 @@ import { hasBinaryExtension } from './toolExecutor/binaryExtensions'
 import { getSnippetForTwoFileDiff } from './toolExecutor/changedFileSnippet'
 import { extractReadFilesFromMessages } from './toolExecutor/readStateRecovery'
 import { logger } from '../../utils/logger'
+import { budgetMcpDescriptions } from './mcpDescriptionBudget'
 import { getLegacyProjectStateDir, getProjectStateDir } from '../projectStatePaths'
 // Os caminhos que o PROJECTO declara gerados. Partilhado com o system prompt
 // (secção `# Environment`) de propósito: a guarda de apagar e o que o modelo
@@ -86,8 +88,7 @@ import { getFsVersion, bumpFsVersion } from '../fsVersion'
 import CheckpointService from './checkpointService'
 import { markReadBeforeWriteBlocked, markTmsCreated, markTmsFullContextSent } from './tmsContext'
 import type { MCPTool } from '../mcp/mcpService'
-import type { AgentCallbacks } from './types'
-import { useChatStore, appendTextDeltaBuffered, appendReasoningDeltaBuffered, hasPendingDiffApprovals } from '../../stores/chatStore'
+import { useChatStore, hasPendingDiffApprovals } from '../../stores/chatStore'
 import { useAskUserQuestionStore } from '../../stores/askUserQuestionStore'
 import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
 
@@ -224,29 +225,6 @@ const GIT_MUTATING_TOOLS = new Set([
 const SHELL_COMMAND_TOOLS = new Set([
   'execute_command', 'execute_command_background', 'agent_shell_write',
 ])
-
-// === Abort helpers ===
-
-/**
- * Create a child AbortController linked to an optional parent signal.
- * When the parent fires, the child fires too. If the parent is already
- * aborted at call time, the child is aborted immediately.
- *
- * Used by sub-agents to propagate
- * the per-call abort signal to sub-agent loops without duplicating the
- * 5-line linking pattern at each call site.
- */
-function createLinkedAbortController(parentSignal?: AbortSignal): AbortController {
-  const child = new AbortController()
-  if (parentSignal) {
-    if (parentSignal.aborted) {
-      child.abort()
-    } else {
-      parentSignal.addEventListener('abort', () => child.abort(), { once: true })
-    }
-  }
-  return child
-}
 
 // === Tool Executor ===
 
@@ -1570,8 +1548,22 @@ class ToolExecutor {
       }
     }
 
+    // Orçamento das descrições ANTES de registar: são texto de terceiros que
+    // segue em TODOS os pedidos dentro das tool definitions. Sem teto, ligar
+    // um MCP gerado por OpenAPI degradava todos os turnos da sessão sem que
+    // nada na UI o mostrasse. Só a descrição é cortada — o input_schema segue
+    // intacto (ver mcpDescriptionBudget.ts, "ÂMBITO").
+    const { tools: budgetedMcpTools, stats: mcpBudgetStats } = budgetMcpDescriptions(mcpTools)
+    if (mcpBudgetStats.truncated > 0 || mcpBudgetStats.omitted > 0) {
+      logger.warn(
+        'MCP',
+        `descrições orçamentadas: ${mcpBudgetStats.truncated} truncada(s), ` +
+        `${mcpBudgetStats.omitted} omitida(s), ${mcpBudgetStats.totalChars} chars totais`,
+      )
+    }
+
     // Register new MCP tools
-    for (const tool of mcpTools) {
+    for (const tool of budgetedMcpTools) {
       const fullName = `mcp__${tool.serverName}__${tool.name}`
       // Browser tools share a single trust gate: the user already opted into
       // the /te2e command, which is itself a slash command they explicitly
@@ -5173,7 +5165,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('delegate', {
       definition: {
         name: 'delegate',
-        description: `Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (${GLOB_ALIAS}, ${GREP_ALIAS}, ${READ_ALIAS}, ${LS_ALIAS}). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup + read-only diagnostics (web_search, web_fetch, read_skill, curl via execute_command). Use for "find the API docs for X", "what's the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done.\n\nAll tasks run in parallel. Results are DELIVERED to you automatically when each member finishes — mid-run at your next step if you are still working, or by an auto-wake if you are idle. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn — results will arrive as you work.\n  • If you have nothing else to do, end your turn and tell the user you delegated and will synthesize when the results arrive.\n  • NEVER poll collect_results while members are running — it is a manual fallback for full untruncated text, not a waiting mechanism.\n\nWhen NOT to use:\n  • The task is a single ${READ_ALIAS} call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.`,
+        description: `Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (${GLOB_ALIAS}, ${GREP_ALIAS}, ${READ_ALIAS}, ${LS_ALIAS}). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup + read-only diagnostics (web_search, web_fetch, read_skill, curl via execute_command). Use for "find the API docs for X", "what's the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done. Its prompt MUST state what the task was, how you implemented it, and the EXACT files you changed — it sees nothing of your conversation and cannot verify what it cannot locate. Ends with a verdict: PASS, FAIL, or PARTIAL. For a quick type-check alone, prefer ${BASH_ALIAS}("npx tsc --noEmit 2>&1") — it is faster and more direct than delegating.\n\nAll tasks run in parallel. Results are DELIVERED to you automatically when each member finishes — mid-run at your next step if you are still working, or by an auto-wake if you are idle. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn — results will arrive as you work.\n  • If you have nothing else to do, end your turn and tell the user you delegated and will synthesize when the results arrive.\n  • NEVER poll collect_results while members are running — it is a manual fallback for full untruncated text, not a waiting mechanism.\n\nWhen NOT to use:\n  • The task is a single ${READ_ALIAS} call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -5945,224 +5937,6 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         }
 
         return lines.join('\n\n---\n\n')
-      }
-    })
-
-    // === verify (adversarial verification sub-agent) ===
-
-
-
-
-
-
-    this.tools.set('verify', {
-      definition: {
-        name: 'verify',
-        description: 'Launch an independent verification agent that checks your implementation by running tests, reading code, and executing diagnostic commands. The verifier CANNOT edit files — it can only read and execute. Use after completing non-trivial changes (3+ files, backend/API work, complex logic) to catch issues before reporting done. Returns a verdict: PASS, FAIL, or PARTIAL. NOTE: For quick TypeScript type checking, prefer execute_command("npx tsc --noEmit 2>&1") instead — it is faster and more direct than launching the full verify sub-agent.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            task_description: { type: 'string', description: 'What was the original task/requirement' },
-            files_changed: { type: 'array', items: { type: 'string' }, description: 'List of absolute file paths that were modified' },
-            approach: { type: 'string', description: 'Brief description of how you implemented it' }
-          },
-          required: ['task_description', 'files_changed']
-        }
-      },
-      execute: async (input) => {
-        const taskDescription = input.task_description as string
-        const filesChanged = (input.files_changed as string[]) || []
-        const approach = (input.approach as string) || ''
-
-        const { default: AgentService } = await import('./agentService')
-
-        // Verification agent: read-only + execute (NO write/edit/create tools).
-        // execute_command gets a modified description warning about read-only restrictions.
-        const verifierToolNames = new Set([
-          'read_file', READ_AROUND, 'list_directory', 'search_files', 'glob',
-          'execute_command', 'read_dev_server_logs',
-          'read_large_result',
-        ])
-        // canonicalToolName no filtro: getToolDefinitions() emite o nome
-        // ANUNCIADO (`Read`, `LS`, `Grep`, `Glob`, `Bash`) e este conjunto
-        // guarda canónicos. Sem a conversão, a intersecção era só
-        // read_around/read_dev_server_logs/read_large_result — os três em que
-        // anunciado e canónico coincidem. O verificador ficava SEM shell, sem
-        // Read por caminho e sem Grep, enquanto o seu próprio prompt lhe manda
-        // correr o build e os testes ("Broken build = automatic FAIL").
-        const verifierTools = this.getToolDefinitions()
-          .filter(t => verifierToolNames.has(canonicalToolName(t.function.name)))
-          .map(t => {
-            // Annotate execute_command description with read-only constraint
-            if (canonicalToolName(t.function.name) === 'execute_command') {
-              return {
-                ...t,
-                function: {
-                  ...t.function,
-                  description: t.function.description + ' RESTRICTION: You are a read-only verification agent. Only run diagnostic commands (tests, linters, type checkers, curl). Do NOT run commands that modify files (no redirects >, >>, no sed -i, no mv/cp/rm, no tee, no mkdir/touch).',
-                }
-              }
-            }
-            return t
-          })
-
-        // Phase B: derive verify agent abort from the per-call signal.
-        const verifyAbort = createLinkedAbortController(input._abortSignal as AbortSignal | undefined)
-        const subAgent = AgentService.createLightweight({
-          tools: verifierTools,
-          readOnly: true,
-          maxTurns: 200,
-          abortController: verifyAbort,
-        })
-
-        const projectRoot = this.getProjectRoot()
-        const systemPrompt = `You are a verification specialist. Your job is not to confirm the implementation works — it's to try to break it.
-
-You have two failure patterns to avoid. First, verification avoidance: reading code, narrating what you would test, writing "PASS," and moving on. Second, being seduced by the first 80%: a passing test suite while half the logic is broken on edge cases.
-
-=== CRITICAL: DO NOT MODIFY THE PROJECT ===
-You CANNOT create, modify, or delete any files in the project. You can only read and execute.
-You MAY write ephemeral test scripts to /tmp via execute_command when needed. Clean up after.
-
-=== VERIFICATION STRATEGY ===
-Adapt based on what was changed:
-- **Frontend**: Check read_dev_server_logs for errors → run frontend tests if they exist
-- **Backend/API**: Start server → curl/fetch endpoints → verify response shapes → test error handling → edge cases
-- **Bug fixes**: Reproduce the original bug → verify fix → check for side effects
-- **Refactoring**: Existing tests MUST pass unchanged → spot-check behavior is identical
-
-=== REQUIRED STEPS ===
-1. Read TMS.md / package.json for build/test commands.
-2. Run the build (if applicable). Broken build = automatic FAIL.
-3. Run the project's test suite (if it exists). Failing tests = automatic FAIL.
-4. Run linters/type-checkers if configured (eslint, tsc --noEmit).
-5. Apply the type-specific strategy above.
-
-=== RECOGNIZE YOUR OWN RATIONALIZATIONS ===
-- "The code looks correct based on my reading" — reading is not verification. Run it.
-- "The implementer's tests already pass" — verify independently.
-- "This is probably fine" — probably is not verified. Run it.
-If you catch yourself writing an explanation instead of a command, stop. Run the command.
-
-=== OUTPUT FORMAT ===
-Every check MUST follow this structure:
-
-### Check: [what you're verifying]
-**Command run:** [exact command]
-**Output observed:** [actual output — copy-paste, not paraphrased]
-**Result: PASS** (or FAIL — with Expected vs Actual)
-
-A check without a Command run block is not a PASS — it's a skip.
-
-End with exactly one of:
-VERDICT: PASS
-VERDICT: FAIL
-VERDICT: PARTIAL
-
-PARTIAL is for environmental limitations only (no test framework, tool unavailable) — not for "I'm unsure."
-
-Project root: ${projectRoot}`
-
-        subAgent.setSystemPrompt(systemPrompt)
-
-        const prompt = `## Task
-${taskDescription}
-
-## Approach
-${approach || '(not provided)'}
-
-## Files changed
-${filesChanged.map(f => `- ${f}`).join('\n')}
-
-Verify this implementation. Run tests, type checks, and any other relevant validation. End with your VERDICT.`
-
-        let result = ''
-        let totalTokens = 0
-        let toolsCalled = 0
-        const toolCallId = input._toolCallId as string | undefined
-
-        const updateProgress = (status: string) => {
-          if (toolCallId) {
-            const tokenStr = totalTokens > 0 ? ` | ${Math.round(totalTokens / 1000)}K tokens` : ''
-            useChatStore.getState().updateToolCallProgress(toolCallId, `🔍 ${status}${tokenStr}`)
-          }
-        }
-
-        updateProgress('Starting verification...')
-
-        // Activate read-only mode to block file-writing shell commands.
-        // Uses a scoped context ID so concurrent background agents aren't affected.
-        const readOnlyId = this.enterReadOnlyMode()
-        try {
-        // Forward every sub-agent event to the main chatStore — see
-        // src/services/agent/subAgentVisibility.ts for the shared wiring.
-        const chatStore = useChatStore.getState()
-        const { useAgentStore } = await import('../../stores/agentStore')
-        const agentStore = useAgentStore.getState()
-        const { createSubAgentVisibility } = await import('./subAgentVisibility')
-
-        const visibility = createSubAgentVisibility({
-          parentToolCallId: toolCallId,
-          reasoningLabel: 'verify sub-agent',
-          hooks: {
-            // Buffered variants — sub-agent SSE bumps streamingVersion at
-            // the same 50ms cadence as the parent agent loop. Without the
-            // swap, every sub-agent token was a fresh re-render of the
-            // streaming bubble even though the parent had already batched
-            // its own.
-            appendTextDelta: appendTextDeltaBuffered,
-            appendReasoningDelta: appendReasoningDeltaBuffered,
-            addPendingToolCall: chatStore.addPendingToolCall,
-            updateToolCallWithArgs: chatStore.updateToolCallWithArgs,
-            updateToolCallWithResult: chatStore.updateToolCallWithResult,
-            setStatus: (s) => agentStore.setStatus(s),
-          },
-        })
-
-        await subAgent.runAgentLoop(prompt, [], {
-          onTextDelta: (delta) => {
-            result += delta
-            visibility.callbacks.onTextDelta(delta)
-          },
-          onReasoningDelta: (delta) => {
-            visibility.callbacks.onReasoningDelta(delta)
-            updateProgress('Analyzing...')
-          },
-          onToolCallPending: (childId, toolName) => {
-            toolsCalled++
-            visibility.callbacks.onToolCallPending(childId, toolName)
-            updateProgress(`${toolName}...`)
-          },
-          onToolCallStart: (childId, toolName, args) => {
-            visibility.callbacks.onToolCallStart(childId, toolName, args)
-            const target = (args.file_path as string)?.replace(/\\/g, '/').split('/').pop()
-              || (args.command as string)?.slice(0, 40)
-              || (args.query as string)
-              || ''
-            updateProgress(`${toolName}: ${target}`)
-          },
-          onToolResult: (childId, toolName, res, isError) => {
-            visibility.callbacks.onToolResult(childId, toolName, res, isError)
-          },
-          onTurnComplete: () => {},
-          onDone: (finalText) => {
-            if (finalText && !result) result = finalText
-            updateProgress(`Done — ${toolsCalled} checks`)
-          },
-          onError: (error) => {
-            result = `Verification error: ${error.message}`
-            visibility.cleanupOrphans(`aborted: verify sub-agent failed — ${error.message}`)
-            updateProgress('Error')
-          },
-          onUsageUpdate: (inputTokens, outputTokens) => {
-            totalTokens += inputTokens + outputTokens
-          },
-        } satisfies AgentCallbacks)
-
-        return result || 'Verification produced no output.'
-        } finally {
-          this.exitReadOnlyMode(readOnlyId)
-        }
       }
     })
   }

@@ -3,7 +3,7 @@ import { Box, Flex, Text, Image } from '@chakra-ui/react'
 import {
   FiFolder, FiSearch, FiTerminal,
   FiGlobe, FiTool, FiChevronRight, FiChevronDown,
-  FiCheck, FiX, FiLoader, FiCpu, FiClock,
+  FiCheck, FiX, FiLoader, FiClock,
 } from 'react-icons/fi'
 import { ToolCallDisplay as ToolCallDisplayType } from '../../types/chat'
 import InlineDiff from './InlineDiff'
@@ -30,8 +30,6 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ size?: number | string }>
   execute_command_background: FiTerminal,
   create_directory: FiFolder,
   web_fetch: FiGlobe,
-  research: FiCpu,
-  spawn_background_agent: FiCpu,
   check_background_agents: FiSearch,
   check_background_commands: FiSearch,
 }
@@ -60,10 +58,7 @@ const TOOL_LABELS: Record<string, string> = {
   read_dev_server_logs: t('toolLabel.readingLogs'),
   read_large_result: t('toolLabel.readingOutput'),
   web_fetch: t('toolLabel.fetching'),
-  research: t('toolLabel.researching'),
-  spawn_background_agent: t('toolLabel.backgroundTask'),
   check_background_agents: t('toolLabel.checkingAgents'),
-  verify: t('toolLabel.verifying'),
   update_tasks: t('toolLabel.updatingTasks'),
   request_thinking: t('toolLabel.activatingReasoning'),
   read_skill: t('toolLabel.loadingGuide'),
@@ -176,17 +171,8 @@ export function getInputSummary(
       return String(input.pattern || '')
     case 'web_fetch':
       return String(input.url || '').replace(/^https?:\/\//, '').slice(0, 50)
-    case 'research':
-    case 'spawn_background_agent': {
-      const q = String(input.question || '')
-      return q.length > 50 ? q.slice(0, 47) + '...' : q
-    }
     case 'check_background_agents':
       return ''
-    case 'verify': {
-      const desc = String(input.task_description || '')
-      return desc.length > 50 ? desc.slice(0, 47) + '...' : desc
-    }
     case 'update_tasks': {
       // update_tasks uses patch semantics: input.tasks is only the patch the
       // agent just sent, not the full tracker. For completed calls, prefer the
@@ -226,7 +212,11 @@ function isWriteTool(toolName: string): boolean {
   return toolName === 'write_file' || toolName === 'edit_file' || toolName === 'create_file'
 }
 
-const SUBAGENT_SPAWNERS = new Set(['research', 'verify', 'spawn_background_agent'])
+// As tools `research`, `verify` e `spawn_background_agent` foram substituídas
+// pelo `delegate` (v0.7.0) e a última — `verify` — saiu do executor a
+// 2026-07-30. O `delegate` NÃO entra aqui: ele devolve de imediato e o
+// resultado do sub-agente é entregue à parte (SubAgentCard), portanto o seu
+// painel de resultado não duplica nada e deve continuar visível.
 
 function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps) {
   const [expanded, setExpanded] = useState(false)
@@ -341,10 +331,6 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
     )
   }
 
-  // Sub-agent spawners emit their output inline via the text stream + nested
-  // child tool calls. Their `result` duplicates that content, so suppress the
-  // result panel on the parent to avoid showing the same text twice.
-  const isSubAgentSpawner = SUBAGENT_SPAWNERS.has(displayToolName)
   // read_skill body carries platform/provider names + implementation
   // details aimed at the agent. Render the friendly description in the
   // header (via getInputSummary) and keep the body hidden — no expand
@@ -353,7 +339,7 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
 
   // Standard tool call rendering
   const resultLines = resultText.split('\n')
-  const hasOutput = resultText.length > 0 && !isRunning && !isSubAgentSpawner && !isSkillRead
+  const hasOutput = resultText.length > 0 && !isRunning && !isSkillRead
   const showExpand = resultLines.length > 4 && !expanded
 
   // For execute_command, surface the full command on expand. The header
