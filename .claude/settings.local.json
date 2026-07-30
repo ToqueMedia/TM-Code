@@ -521,7 +521,9 @@
       "Bash(crane export *)",
       "Bash(tar -x -C /tmp/fycargo-app app/server app/package.json)",
       "Bash(rg -rn \"SplitEditorLayout\" /Users/ithustle/dev/deskotp/exodus-ide/src -l)",
-      "Bash(set -o pipefail)"
+      "Bash(set -o pipefail)",
+      "Read(//Users/ithustle/.codex/**)",
+      "Bash(xargs -0 ls -lt)"
     ]
   }
 }

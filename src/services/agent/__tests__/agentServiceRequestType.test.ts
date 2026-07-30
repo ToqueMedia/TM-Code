@@ -113,6 +113,7 @@ jest.mock('../../../stores/agentStore', () => ({
       modelName: mockAgentModelName,
       setModelInfo: jest.fn(),
       setByokActive: jest.fn(),
+      setWorkerStatus: jest.fn(),
     }),
   },
 }))
@@ -341,5 +342,17 @@ describe('AgentService X-TM-Speed header', () => {
 
     expect(mockQueryEngineOptions).toHaveLength(1)
     expect(mockQueryEngineOptions[0].extraHeaders).toBeUndefined()
+  })
+
+  it('enables tracker reconciliation reminders only for the main agent', async () => {
+    const main = AgentService.getInstance()
+    await main.runAgentLoop('main task', [], speedCallbacks)
+
+    const lightweight = AgentService.createLightweight({ tools: [], maxTurns: 1 })
+    await lightweight.runAgentLoop('sidecar task', [], speedCallbacks)
+
+    expect(mockQueryEngineOptions).toHaveLength(2)
+    expect(mockQueryEngineOptions[0].enableTaskTrackerReminder).toBe(true)
+    expect(mockQueryEngineOptions[1].enableTaskTrackerReminder).toBe(false)
   })
 })

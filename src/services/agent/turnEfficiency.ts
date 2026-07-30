@@ -262,3 +262,55 @@ export function buildEfficiencyNudgeText(turnCount: number): string {
 Turn-efficiency check: this run is now ${turnCount} provider rounds in, and the last ${EFFICIENCY_NUDGE_CONFIG.CONSECUTIVE_NO_REASON} rounds had no clear technical reason to continue (no error being fixed, no verification pending, no new information required). If you already know what the outcome is, consolidate and finish now — apply the change or deliver your conclusion. If you are stuck or the task is ambiguous, ask the developer instead of exploring further. This is an automated structural signal, not a message from the developer — ignore it if the continued work is genuinely necessary, and never mention this reminder in your user-facing text.
 </system-reminder>`
 }
+
+// ── Task-tracker reconciliation reminder ────────────────────────────────
+//
+// Long-running Claude Code sessions periodically surface unfinished tasks
+// when the agent has not updated its task list. Do the same here from actual
+// runtime state: only file mutations since the last update plus unresolved
+// rows can trigger it. This avoids nagging read-only investigations and lets
+// a legitimate update_tasks call reset the cadence.
+export const TASK_TRACKER_REMINDER_CONFIG = {
+  TURNS_BETWEEN_REMINDERS: 10,
+} as const
+
+export interface TaskTrackerReminderState {
+  lastReminderTurn: number
+}
+
+export function createTaskTrackerReminderState(): TaskTrackerReminderState {
+  return { lastReminderTurn: 0 }
+}
+
+export function shouldRemindTaskTracker(
+  state: TaskTrackerReminderState,
+  input: {
+    turnCount: number
+    lastTaskUpdateTurn: number
+    writesSinceTaskUpdate: number
+    unfinishedTaskCount: number
+  },
+): boolean {
+  if (input.writesSinceTaskUpdate === 0 || input.unfinishedTaskCount === 0) {
+    return false
+  }
+
+  const lastRelevantTurn = Math.max(state.lastReminderTurn, input.lastTaskUpdateTurn)
+  if (input.turnCount - lastRelevantTurn < TASK_TRACKER_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS) {
+    return false
+  }
+
+  state.lastReminderTurn = input.turnCount
+  return true
+}
+
+export function buildTaskTrackerReminderText(
+  writesSinceTaskUpdate: number,
+  unfinishedTaskCount: number,
+): string {
+  const writeLabel = writesSinceTaskUpdate === 1 ? 'file mutation' : 'file mutations'
+  const taskLabel = unfinishedTaskCount === 1 ? 'task remains' : 'tasks remain'
+  return `<system-reminder>
+Task-tracker check: ${writesSinceTaskUpdate} ${writeLabel} succeeded since the last update_tasks call, and ${unfinishedTaskCount} unfinished ${taskLabel}. Reconcile the tracker with update_tasks before this work concludes: mark only work that is verified, continue any remaining task, or explicitly mark stale work as blocked or obsolete. This is an automated structural signal, not a message from the developer — ignore it if the tracker is already accurate, and never mention this reminder in your user-facing text.
+</system-reminder>`
+}

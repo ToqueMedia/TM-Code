@@ -763,6 +763,9 @@ class AgentService {
         this.toolExecutor.isConcurrencySafe(canonicalToolName(name)),
       // O prompt do main contém o reminder; os sub-agentes (lightweight) não.
       reinjectCriticalReminder: !this.lightweightOptions,
+      // Só o agente principal é dono do tracker visível no chat. Sub-agentes
+      // usam o mesmo QueryEngine, mas não devem receber pendências alheias.
+      enableTaskTrackerReminder: !this.lightweightOptions,
       thinkingConfig,
       maxTurns: this.lightweightOptions?.maxTurns,
       extraHeaders,

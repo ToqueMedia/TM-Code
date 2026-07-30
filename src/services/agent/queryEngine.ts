@@ -54,6 +54,8 @@ export interface QueryEngineOptions {
   isStreamSafeTool?: (toolName: string) => boolean
   /** Re-injeção do reminder crítico — ver QueryParams.reinjectCriticalReminder. */
   reinjectCriticalReminder?: boolean
+  /** Lembrete de reconciliação do tracker — exclusivo do agente principal. */
+  enableTaskTrackerReminder?: boolean
   /** Max output tokens override. */
   maxOutputTokensOverride?: number
   /** Thinking config. */
@@ -194,6 +196,7 @@ export class QueryEngine {
       executeTool: this.options.executeTool,
       isStreamSafeTool: this.options.isStreamSafeTool,
       reinjectCriticalReminder: this.options.reinjectCriticalReminder,
+      enableTaskTrackerReminder: this.options.enableTaskTrackerReminder,
       signal: this.abortController.signal,
       maxTurns: this.options.maxTurns,
       maxOutputTokensOverride: this.options.maxOutputTokensOverride,

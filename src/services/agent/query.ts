@@ -58,6 +58,9 @@ import {
   createEfficiencyNudgeState,
   trackEfficiencyNudge,
   buildEfficiencyNudgeText,
+  createTaskTrackerReminderState,
+  shouldRemindTaskTracker,
+  buildTaskTrackerReminderText,
 } from "./turnEfficiency";
 import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
 import { DESTRUCTIVE_TOOLS } from "./toolsetSelector";
@@ -335,6 +338,11 @@ export interface QueryParams {
    *  prompt contém essas regras (main + tarefas paralelas) — sub-agentes
    *  partilham este loop com prompts próprios e ficam de fora. */
   reinjectCriticalReminder?: boolean;
+  /**
+   * Enables periodic reconciliation against the main task tracker. Sub-agents
+   * and parallel tasks share the query loop but do not own that tracker.
+   */
+  enableTaskTrackerReminder?: boolean;
   /** Abort signal for cancellation. */
   signal: AbortSignal;
   /** Maximum turns before stopping (default: Infinity). */
@@ -1141,6 +1149,9 @@ export async function* query(
    *  task-reconciliation guardrail at the stop path. */
   let runTouchedTaskTracker = false;
   let taskGuardCount = 0;
+  const taskTrackerReminderState = createTaskTrackerReminderState();
+  let lastTaskTrackerUpdateTurn = 0;
+  let writesSinceTaskTrackerUpdate = 0;
   /** Turn number of the first successful file mutation (1-indexed). */
   let firstWriteTurn: number | undefined;
   /** Total count of successful file-mutating tool calls this run. */
@@ -3006,6 +3017,7 @@ export async function* query(
         if (!result.isError && DESTRUCTIVE_TOOLS.has(canonicalToolName(tc.name))) {
           runHasEdited = true;
           writeActionCount++;
+          writesSinceTaskTrackerUpdate++;
           if (firstWriteTurn === undefined) {
             firstWriteTurn = state.turnCount;
           }
@@ -3016,6 +3028,8 @@ export async function* query(
         // the "claims done, tracker says 0/N" failure mode.
         if (!result.isError && tc.name === "update_tasks") {
           runTouchedTaskTracker = true;
+          lastTaskTrackerUpdateTurn = state.turnCount;
+          writesSinceTaskTrackerUpdate = 0;
         }
       } catch (err) {
         const errMsg = formatError(err);
@@ -3161,6 +3175,38 @@ export async function* query(
         content: [{ type: "text", text: pendingEfficiencyNudge }],
       });
       pendingEfficiencyNudge = null;
+    }
+
+    // ── Periodic task-tracker reconciliation ──
+    // The end-of-run guard catches a contradictory completion claim, but a
+    // long implementation needs a gentle, structural reminder before that
+    // point. Read the live tracker only after successful mutations and use a
+    // throttled pure decision function so no reminder becomes prompt noise.
+    if (params.enableTaskTrackerReminder && writesSinceTaskTrackerUpdate > 0) {
+      try {
+        const { useAgentStore } = await import("../../stores/agentStore");
+        const unfinishedTaskCount = useAgentStore.getState().tasks
+          .filter((task) => task.status !== "completed").length;
+        if (shouldRemindTaskTracker(taskTrackerReminderState, {
+          turnCount: state.turnCount,
+          lastTaskUpdateTurn: lastTaskTrackerUpdateTurn,
+          writesSinceTaskUpdate: writesSinceTaskTrackerUpdate,
+          unfinishedTaskCount,
+        })) {
+          interTurnMessages.push({
+            role: "user",
+            content: [{
+              type: "text",
+              text: buildTaskTrackerReminderText(
+                writesSinceTaskTrackerUpdate,
+                unfinishedTaskCount,
+              ),
+            }],
+          });
+        }
+      } catch {
+        // Tracker state is advisory; it must never interrupt the run.
+      }
     }
 
     // ── Queued-message steering (claude-vaz parity) ──

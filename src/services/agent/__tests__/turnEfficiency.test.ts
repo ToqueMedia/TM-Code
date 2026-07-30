@@ -15,6 +15,10 @@ import {
   createEfficiencyNudgeState,
   trackEfficiencyNudge,
   buildEfficiencyNudgeText,
+  TASK_TRACKER_REMINDER_CONFIG,
+  createTaskTrackerReminderState,
+  shouldRemindTaskTracker,
+  buildTaskTrackerReminderText,
   type TurnSnapshot,
 } from '../turnEfficiency'
 
@@ -208,6 +212,71 @@ describe('inferContinuationReason', () => {
     const snapshot: TurnSnapshot = { toolCalls: [], toolResults: [] }
     const reason = inferContinuationReason(snapshot)
     expect(isLegitimateContinuationReason(reason)).toBe(false)
+  })
+})
+
+describe('task-tracker reconciliation reminder', () => {
+  it('waits for the configured cadence after a successful mutation', () => {
+    const state = createTaskTrackerReminderState()
+    expect(shouldRemindTaskTracker(state, {
+      turnCount: TASK_TRACKER_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS - 1,
+      lastTaskUpdateTurn: 0,
+      writesSinceTaskUpdate: 1,
+      unfinishedTaskCount: 1,
+    })).toBe(false)
+    expect(shouldRemindTaskTracker(state, {
+      turnCount: TASK_TRACKER_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS,
+      lastTaskUpdateTurn: 0,
+      writesSinceTaskUpdate: 1,
+      unfinishedTaskCount: 1,
+    })).toBe(true)
+  })
+
+  it('does not remind read-only work or a tracker with no unfinished tasks', () => {
+    const state = createTaskTrackerReminderState()
+    expect(shouldRemindTaskTracker(state, {
+      turnCount: 20,
+      lastTaskUpdateTurn: 0,
+      writesSinceTaskUpdate: 0,
+      unfinishedTaskCount: 3,
+    })).toBe(false)
+    expect(shouldRemindTaskTracker(state, {
+      turnCount: 20,
+      lastTaskUpdateTurn: 0,
+      writesSinceTaskUpdate: 2,
+      unfinishedTaskCount: 0,
+    })).toBe(false)
+  })
+
+  it('resets its cadence after update_tasks and throttles repeated reminders', () => {
+    const state = createTaskTrackerReminderState()
+    expect(shouldRemindTaskTracker(state, {
+      turnCount: 10,
+      lastTaskUpdateTurn: 0,
+      writesSinceTaskUpdate: 1,
+      unfinishedTaskCount: 2,
+    })).toBe(true)
+    expect(shouldRemindTaskTracker(state, {
+      turnCount: 19,
+      lastTaskUpdateTurn: 10,
+      writesSinceTaskUpdate: 1,
+      unfinishedTaskCount: 2,
+    })).toBe(false)
+    expect(shouldRemindTaskTracker(state, {
+      turnCount: 20,
+      lastTaskUpdateTurn: 10,
+      writesSinceTaskUpdate: 1,
+      unfinishedTaskCount: 2,
+    })).toBe(true)
+  })
+
+  it('uses a system reminder that reports only structural facts', () => {
+    const text = buildTaskTrackerReminderText(2, 3)
+    expect(text.startsWith('<system-reminder>')).toBe(true)
+    expect(text.trimEnd().endsWith('</system-reminder>')).toBe(true)
+    expect(text).toContain('2 file mutations')
+    expect(text).toContain('3 unfinished tasks remain')
+    expect(text).toContain('never mention this reminder')
   })
 })
 
