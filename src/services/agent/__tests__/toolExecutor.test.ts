@@ -2832,3 +2832,105 @@ describe('agent_shell_write: uma acção por chamada', () => {
     expect(() => validate('   ')).toThrow(/cannot be empty/)
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════════
+// CONTRATO ANUNCIADO ⇒ CONTRATO IMPLEMENTADO
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Durante a auditoria de 2026-07-28/30 fecharam-se 40 achados. Vistos um a um
+// pareciam 40 bugs. Vistos com a lente certa são UM, quarenta vezes: um
+// contrato ANUNCIADO ao modelo sem ponto de IMPOSIÇÃO no código, e nada no
+// repositório que detectasse a divergência.
+//
+//   · `save_memory` anunciava `paths` no schema e nunca lia `input.paths` — a
+//     memória ficava incondicional e o modelo acreditava ter pedido activação
+//     condicional.
+//   · `read_file`/`read_around` anunciavam `force` depois de o mecanismo sair.
+//   · `delete_file` prometia um checkpoint que, para directórios, nunca tirava.
+//   · O prompt afirmava dois bloqueios de instalação inexistentes.
+//
+// A documentação do Claude Code nomeia a distinção que o TM Code misturava:
+// regras de settings são impostas pelo cliente independentemente do que o modelo
+// decida; texto de instruções MOLDA comportamento e não é camada de imposição.
+// Um parâmetro de schema é a forma mais dura do contrato — o modelo lê-o como
+// capacidade e conta com ela.
+//
+// Isto verifica que cada propriedade declarada num `input_schema` aparece no
+// corpo do `execute` dessa tool. NÃO prova que o parâmetro é honrado; prova que
+// é LIDO, que é a parte verificável mecanicamente e o degrau que faltou acima.
+// Cada excepção tem de ser declarada com a razão — a lista é o inventário da
+// dívida, visível em revisão, em vez de silêncio.
+describe('conformidade do contrato das tools', () => {
+  /** Parâmetros consumidos INDIRECTAMENTE, com a razão de cada um. */
+  const INDIRECT_CONSUMERS: Record<string, string> = {
+    _toolCallId: 'injectado pelo bridge; lido por helpers de checkpoint/streaming',
+    _abortSignal: 'injectado pelo bridge; passado ao invoke/fetch',
+    // DEPRECIADA de propósito (F3, ONE_AGENT_PER_PROJECT): a tool fica
+    // registada só para dar um erro honesto a transcrições antigas e a modelos
+    // que ainda a conheçam, portanto NÃO lê os seus parâmetros — é o único caso
+    // em que ignorar o input é o comportamento certo. Foi este portão que
+    // revelou que o prompt das tarefas paralelas ainda a anunciava como viva.
+    'send_agent_message.target': 'tool depreciada: erra sempre, sem ler input',
+    'send_agent_message.message': 'tool depreciada: erra sempre, sem ler input',
+  }
+
+  /** Um parâmetro citado num COMENTÁRIO não é consumo. */
+  const stripComments = (src: string): string =>
+    src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+
+  const readsProperty = (body: string, prop: string): boolean => {
+    const p = prop.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return (
+      new RegExp(`\\binput\\s*\\.\\s*${p}\\b`).test(body) ||
+      new RegExp(`\\binput\\s*\\[\\s*['"\`]${p}['"\`]\\s*\\]`).test(body) ||
+      new RegExp(`\\{[^}]*\\b${p}\\b[^}]*\\}\\s*=\\s*input\\b`).test(body) ||
+      new RegExp(`\\b${p}\\b`).test(body)
+    )
+  }
+
+  type Entry = { tool: string; prop: string; body: string }
+  const collect = (): Entry[] => {
+    const registry = (freshExecutor() as unknown as {
+      tools: Map<string, {
+        definition: { input_schema?: { properties?: Record<string, unknown> } }
+        execute?: unknown
+      }>
+    }).tools
+    const out: Entry[] = []
+    for (const [tool, def] of registry) {
+      if (tool.startsWith('mcp__')) continue // schema é do servidor MCP, não nosso
+      if (typeof def.execute !== 'function') continue // passive: sem execute local
+      const props = def.definition?.input_schema?.properties
+      if (!props) continue
+      const body = stripComments(String(def.execute))
+      for (const prop of Object.keys(props)) out.push({ tool, prop, body })
+    }
+    return out
+  }
+
+  it('o registo tem tools e parâmetros suficientes para isto provar algo', () => {
+    const entries = collect()
+    expect(entries.length).toBeGreaterThan(40)
+    expect(new Set(entries.map(e => e.tool)).size).toBeGreaterThan(15)
+  })
+
+  it('todo o parâmetro anunciado no schema é lido pelo execute', () => {
+    const orphans = collect()
+      .filter(e => !(e.prop in INDIRECT_CONSUMERS))
+      .filter(e => !(`${e.tool}.${e.prop}` in INDIRECT_CONSUMERS))
+      .filter(e => !readsProperty(e.body, e.prop))
+      .map(e => `${e.tool}.${e.prop}`)
+
+    // A mensagem tem de nomear o par exacto: um "0 !== 1" não diz a ninguém
+    // qual contrato ficou por implementar.
+    expect(orphans).toEqual([])
+  })
+
+  it('o detector reconhece as três formas de leitura e rejeita o comentário', () => {
+    // Sem isto, o teste acima podia estar a passar por não detectar nada.
+    expect(readsProperty('const x = input.foo', 'foo')).toBe(true)
+    expect(readsProperty("const x = input['foo']", 'foo')).toBe(true)
+    expect(readsProperty('const { foo, bar } = input', 'foo')).toBe(true)
+    expect(readsProperty(stripComments('// usa input.foo aqui\nreturn 1'), 'foo')).toBe(false)
+  })
+})

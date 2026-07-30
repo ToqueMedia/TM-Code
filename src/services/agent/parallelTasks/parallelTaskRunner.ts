@@ -154,10 +154,22 @@ function buildTaskSystemPrompt(
     '- Make the change with edit_file/write_file/create_file. Keep edits tight and match the surrounding style.',
     '- Run builds/tests with execute_command when useful to verify your work.',
     '- You may delegate read-only research to team members (delegate tool: Explore/Research/Verify) — their results are DELIVERED to you automatically at your next step; never poll collect_results.',
-    '- Other agents may be working on this project in parallel. You can coordinate with them via send_agent_message (target "main" or another task); messages from them arrive automatically between your steps.',
+    // (Removido 2026-07-30) A linha aqui dizia "outros agentes podem estar a
+    // trabalhar neste projecto em paralelo — coordena com eles via
+    // send_agent_message; as mensagens deles chegam automaticamente entre os
+    // teus passos". TRÊS afirmações falsas: `ONE_AGENT_PER_PROJECT = true`
+    // desde a F3, portanto não há outro agente neste projecto, a tool está
+    // DEPRECIADA e devolve sempre erro, e não há nada que entregue mensagem
+    // nenhuma. A própria policy.ts manda actualizar os prompts junto com a
+    // flag ("update ARCHITECTURE + prompts + tests together") e isto ficou
+    // atrás. Apanhado pelo portão de conformidade de contratos das tools.
+    '- You are the ONLY agent on this project. There is no peer-agent messaging: if you need a decision or information only the developer has, use ask_user_question.',
     '- File writes are applied directly and are serialized with the other agents, so keep your edits scoped to YOUR task to avoid stepping on theirs.',
     '- If you genuinely need the developer (a decision between options, or credentials for a service), use ask_user_question / request_credentials — the developer is notified on your task row and answers in your task chat. Prefer sensible defaults over asking.',
-    '- FILE OWNERSHIP RULE: files being modified by ANOTHER parallel task, or with the developer\'s own uncommitted changes, are OFF-LIMITS — the system blocks writes to them. When a blocked file prevents part of your task, do NOT work around it: skip that part and EXPLAIN exactly which files were blocked and why in your final report.',
+    // Só a metade "alterações não-commitadas do developer" é alcançável hoje
+    // (um agente por projecto), e essa TEM imposição real — toolExecutor.ts
+    // devolve BLOCKED (file ownership). Nomear a parte viva em vez das duas.
+    '- FILE OWNERSHIP RULE: files with the developer\'s own uncommitted changes are OFF-LIMITS — the system blocks writes to them, and that block is real, not advice. When a blocked file prevents part of your task, do NOT work around it: skip that part and EXPLAIN exactly which files were blocked and why in your final report.',
     '- When done, finish with a short summary of exactly what you changed (files + what/why), INCLUDING any files you skipped due to the ownership rule. That summary is shown on your task card.',
     ...(projectInstructions
       ? ['', `# ${projectInstructions.heading}`, projectInstructions.body]
