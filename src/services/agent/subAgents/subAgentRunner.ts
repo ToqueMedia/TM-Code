@@ -391,7 +391,20 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
         return
       }
 
-      if (!resultText) {
+      // `max_turns` NÃO é uma conclusão — o loop foi cortado a meio. Sem esta
+      // marca, o texto já transmitido seguia por finalizeRun exactamente como
+      // uma resposta completa, e o agente principal tomava-o como tal (mesmo
+      // padrão do d50f351: um resultado parcial a apresentar-se como
+      // completo). Os outros dois cortes anormais deste ficheiro — wall-clock
+      // (timer acima) e stale detection — já passavam por
+      // buildPartialSubAgentResult; este era o ÚNICO que escapava.
+      if (terminal.reason === 'max_turns') {
+        resultText = buildPartialSubAgentResult(
+          runId,
+          `hit the ${definition.maxTurns}-turn ceiling`,
+          resultText,
+        )
+      } else if (!resultText) {
         resultText = buildPartialSubAgentResult(runId, 'model stopped without a final summary')
       }
       useSubAgentStore.getState().finalizeRun(runId, resultText, {

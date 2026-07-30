@@ -1,7 +1,16 @@
 /**
  * Verify agent — adversarial verification.
  *
- * Port of the existing verify tool's system prompt into the definition model.
+ * CAMINHO ÚNICO desde 2026-07-30. Até aí coexistia com uma tool `verify`
+ * registada no toolExecutor que lançava um `createLightweight` próprio: dois
+ * prompts de sistema quase iguais a divergir devagar, tetos de 200 vs 15
+ * turnos, e listas de ferramentas diferentes — ambos alcançáveis pelo modelo
+ * no mesmo turno. Ficou este porque é o único com UI (SubAgentCard), store,
+ * notificações, wall-clock, deteção de stagnação e marcação de resultado
+ * parcial. A intenção já estava escrita em toolNames.ts desde a v0.7.0
+ * ("delegate replaces research, verify, spawn_background_agent"); só a
+ * remoção é que nunca tinha sido feita.
+ *
  * Can read files + execute commands (read-only enforcement via annotation).
  * Cannot write, edit, or create files.
  */
@@ -18,8 +27,8 @@ export const VERIFY_AGENT: SubAgentDefinition = {
     READ_LARGE_RESULT,
   ],
   disallowedTools: [WRITE_FILE, EDIT_FILE, CREATE_FILE, DELETE_FILE, RENAME_FILE],
-  maxTurns: 15,
-  maxWallClockMs: 5 * 60 * 1000,
+  maxTurns: 100,
+  maxWallClockMs: 20 * 60 * 1000,
   color: '#f77f00',
 
   getSystemPrompt: (ctx: SubAgentParentContext) => {
@@ -39,6 +48,8 @@ export const VERIFY_AGENT: SubAgentDefinition = {
 ${depthGuide}
 
 You have two failure patterns to avoid. First, verification avoidance: reading code, narrating what you would test, writing "PASS," and moving on. Second, being seduced by the first 80%: a passing test suite while half the logic is broken on edge cases.
+
+If the task you were given does not say WHICH FILES changed, do not guess and do not verify the project at large: say so in your verdict, verify what you can locate, and return PARTIAL.
 
 === CRITICAL: DO NOT MODIFY THE PROJECT ===
 You CANNOT create, modify, or delete any files in the project. You can only read and execute.

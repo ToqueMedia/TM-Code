@@ -12,8 +12,8 @@ export const RESEARCH_AGENT: SubAgentDefinition = {
   agentType: 'Research',
   whenToUse: 'Find API docs, external documentation, or technical information online',
   tools: [WEB_SEARCH, WEB_FETCH, READ_SKILL, READ_FILE, READ_AROUND, READ_LARGE_RESULT, EXECUTE_COMMAND],
-  maxTurns: 15,
-  maxWallClockMs: 3 * 60 * 1000,
+  maxTurns: 100,
+  maxWallClockMs: 15 * 60 * 1000,
   color: '#a371f7',
 
   getSystemPrompt: (ctx: SubAgentParentContext) => {

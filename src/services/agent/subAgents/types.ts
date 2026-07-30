@@ -23,9 +23,14 @@ export interface SubAgentDefinition {
   /** Tools blocked even if present in `tools`. Effective = tools ∖ disallowedTools. */
   disallowedTools?: string[]
 
-  /** Hard caps. */
-  maxTurns: number              // default 30
-  maxWallClockMs: number        // default 5 * 60 * 1000
+  /** Tectos duros. Deliberadamente GENEROSOS: o TM Code corre tarefas longas
+   *  e um tecto por contagem não distingue trabalho legítimo de um loop —
+   *  corta os dois. Quem apanha o loop é o `staleTimer` do subAgentRunner
+   *  (180s SEM PROGRESSO, com o relógio congelado enquanto há um tool em voo):
+   *  esse é um sinal de progresso, não uma contagem, por isso é ele o guarda
+   *  real e estes ficam como rede de segurança contra o infinito. */
+  maxTurns: number              // default 100
+  maxWallClockMs: number        // default 15-20 min
 
   /** UI border accent — hex color for the SubAgentCard left border. */
   color: SubAgentColor
