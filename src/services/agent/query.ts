@@ -23,7 +23,7 @@ import {
   snipCompactIfNeeded,
   autoCompact,
   compactNow,
-  tokenCountWithEstimation,
+  resolveOccupancyWithSource,
   getCompactPrompt,
   type AutoCompactTrackingState,
   type CompactFn,
@@ -41,7 +41,11 @@ import {
 } from "./loopDetector";
 import { REMINDER_REINJECT_INTERVAL_TURNS } from "./agentConfig";
 import { getCriticalReinjectionReminder } from "./contextBuilder/sections/chatSections";
-import { isAtBlockingLimit } from "../../utils/contextWindow";
+import {
+  isAtBlockingLimit,
+  getToolResultBudgetTokens,
+  getPostCompactRecoveryMaxChars,
+} from "../../utils/contextWindow";
 import { contentAsText } from "./promptValueHelpers";
 import { inspectAndLogPayload } from "./payloadInspector";
 import { getReadRanges } from "./toolExecutor/readRangeTracker";
@@ -282,7 +286,7 @@ export type QueryStreamEvent =
       isError: boolean;
     }
   | { type: "compact_start"; beforeTokens: number }
-  | { type: "compact_end"; beforeTokens: number; afterTokens: number; summary?: string }
+  | { type: "compact_end"; beforeTokens: number; afterTokens: number; summary?: string; recovery?: string }
   | {
       type: "agent_status";
       phase: "attempting" | "retrying" | "connected";
@@ -405,6 +409,29 @@ export interface QueryParams {
    */
   getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null };
   /**
+   * Grava em disco as mensagens que a compactação vai substituir pelo sumário e
+   * devolve o caminho (ou null). O caminho entra na mensagem de sumário, para o
+   * modelo poder ir buscar o que o resumo colapsou — a citação literal, a
+   * mensagem de erro exata, o snippet.
+   *
+   * Best-effort por contrato: uma falha de escrita NUNCA pode impedir a
+   * compactação (o loop está a compactar porque está sem espaço; falhar aqui
+   * trocava um arquivo em falta por um prompt_too_long garantido).
+   */
+  archivePreCompact?: (older: { role: 'user' | 'assistant'; content: unknown }[]) => Promise<string | null>;
+  /**
+   * Reconstrói o estado de trabalho que a compactação levou (conteúdo dos
+   * ficheiros recentes, texto das skills invocadas, log de operações) — ver
+   * contextManager.buildPostCompactRecoveryBlock. Injetado como mensagem `user`
+   * logo a seguir ao sumário. Sem isto o modelo continua com uma narrativa e
+   * nenhum material, e a primeira coisa que faz a seguir a compactar é reler
+   * tudo o que a compactação acabou de pagar para deitar fora.
+   *
+   * `maxChars` é derivado da janela ativa pelo loop e passado ao produtor — o
+   * produtor vive no agentService e não tem de voltar a resolver a janela.
+   */
+  buildPostCompactRecovery?: (maxChars?: number) => Promise<string | null>;
+  /**
    * Run é read-only por POLÍTICA, independente do selector.
    *
    * O bloqueio de tools destrutivas vivia atrás de `toolsetSelector.isReadOnly()`
@@ -420,8 +447,6 @@ export interface QueryParams {
   auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection;
   /** Execution phase for bootstrap/original-task telemetry and guardrails. */
   executionPhase?: 'project_bootstrap' | 'original_task';
-  /** True when the original user request asks to implement/change/fix files. */
-  mutableTask?: boolean;
   /** Returns telemetry from the last delegate call, or null if delegate
    *  wasn't called this run. Populated by the ToolExecutor bridge. */
   getDelegateTelemetry?: () => {
@@ -442,16 +467,10 @@ export interface QueryTerminal {
   totalOutputTokens: number;
   /** ── Guardrail telemetry (populated on the final return) ── */
   runHasEdited?: boolean;
-  noEditRecoveryCount?: number;
-  noEditGuardTriggered?: boolean;
   firstWriteTurn?: number;
   writeActionCount?: number;
   originalTaskWriteActionCount?: number;
   originalTaskFirstWriteTurn?: number;
-  noEditGuardReason?: string;
-  noEditRecoveryAction?: string;
-  completionGuardDecision?: string;
-  completionGuardReason?: string;
 }
 
 // ── Internal state ──
@@ -1054,6 +1073,8 @@ export async function* query(
     getExtraHeaders,
     onResponseHeaders,
     getContextLimits,
+    archivePreCompact,
+    buildPostCompactRecovery,
     readOnlyRun,
     auxiliarySelection,
     isStreamSafeTool,
@@ -1086,6 +1107,13 @@ export async function* query(
   // active model's real window instead of a hardcoded 1M char-estimate.
   // Undefined until the first response is recorded.
   let lastTurnRealOccupancy: number | undefined;
+  /** Nº de mensagens do pedido que produziu `lastTurnRealOccupancy`. */
+  let lastTurnRealOccupancyMessageCount: number | undefined;
+  /** Como a ocupação foi resolvida no turno corrente — vai para o usage log.
+   *  Sem isto, uma sessão em que a âncora nunca se aplica (e portanto corre
+   *  com o estimador inflacionado) é indistinguível de uma em que se aplica
+   *  sempre. */
+  let lastOccupancySource: import('./compact').OccupancySource | undefined;
 
   // Turn-efficiency tracking — the continuation reason inferred at the END of
   // the previous turn (why the loop kept going past the 3-4-request target).
@@ -1120,21 +1148,18 @@ export async function* query(
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   const executionPhase = params.executionPhase ?? 'original_task';
-  const mutableTask = params.mutableTask === true && executionPhase === 'original_task';
   const loopDetectorState = createLoopDetectorState();
   // Metade do detector que olha para as TOOL CALLS (a de texto só corre em
   // turns sem tools e era resetada por qualquer tool call).
   const toolLoopState = createToolLoopState();
   let thinkingOnlyRecoveryCount = 0;
 
-  // Guardrail: a bugfix_local run (readOnly=false) that ends without a single
-  // file mutation likely stopped prematurely — the model diagnosed the bug but
-  // deferred the fix ("No próximo turno, aplicarei…") without requesting
-  // edit_file (which is intentionally excluded from the bugfix_local base).
-  // Track whether any mutating tool ran successfully this run, and allow one
-  // recovery attempt to nudge the model back on track.
+  // Write-action tracking: whether/when file mutations ran this run. Feeds
+  // the per-request usage telemetry and the task-reconciliation guardrail at
+  // the stop path. (O guard anti-adiamento que também lia isto foi APAGADO a
+  // 2026-07-31 — órfão desde a remoção do Intent Router, `mutableTask` nunca
+  // armava; o cli-vaz não tem equivalente.)
   let runHasEdited = false;
-  let noEditRecoveryCount = 0;
   /** Whether any successful update_tasks ran this run — see the
    *  task-reconciliation guardrail at the stop path. */
   let runTouchedTaskTracker = false;
@@ -1149,10 +1174,6 @@ export async function* query(
   let firstWriteTurn: number | undefined;
   /** Total count of successful file-mutating tool calls this run. */
   let writeActionCount = 0;
-  /** Set when the no-edit guardrail fires; reported on the NEXT request's usage entry. */
-  let guardTriggeredLastTurn = false;
-  let noEditGuardReason: string | undefined;
-  let noEditRecoveryAction: string | undefined;
   /**
    * Cap de output escalado após truncagem (finish_reason "length" — OpenAI-
    * compat — ou "max_tokens", Anthropic). null = usa o cap normal. Sobe uma
@@ -1219,16 +1240,28 @@ export async function* query(
     let messagesForQuery = [...messages];
 
     // 0. Global tool-result budget — cap TOTAL tool-result tokens across all
-    //    messages at ~40K. UNDER budget nothing is touched (the model keeps a
-    //    full working set — hardcoding it to the last 4 results starved
-    //    multi-file tasks and caused the re-read→stub→force:true dance, raiz
-    //    corrigida 2026-07-13); OVER budget the oldest results are compacted
-    //    to a structured summary (tool name, path/range, hash, preview,
-    //    re-read hint) until back under, keepRecent=4 protected. Compacted ≠
-    //    deleted — o modelo relê via read_file / read_large_result, e o read
-    //    NUNCA lhe recusa a releitura (a supressão saiu em 2026-07-29).
-    //    Token-reduction phase 2026-06-26, budget real 07-13.
-    const budgetResult = applyGlobalToolResultBudget(messagesForQuery);
+    //    messages at 30% da janela EFETIVA do modelo ativo. UNDER budget nothing
+    //    is touched (the model keeps a full working set — hardcoding it to the
+    //    last 4 results starved multi-file tasks and caused the
+    //    re-read→stub→force:true dance, raiz corrigida 2026-07-13); OVER budget
+    //    the oldest results are compacted to a structured summary (tool name,
+    //    path/range, hash, preview, re-read hint) até à marca de água BAIXA,
+    //    keepRecent=4 protected. Compacted ≠ deleted — o modelo relê via
+    //    read_file / read_large_result, e o read NUNCA lhe recusa a releitura
+    //    (a supressão saiu em 2026-07-29).
+    //    Token-reduction phase 2026-06-26, budget real 07-13, ligado à janela
+    //    e estabilizado para o cache de prefixo 07-31.
+    const budgetLimits = getContextLimits?.();
+    const dynamicBudget = budgetLimits?.contextWindow
+      ? getToolResultBudgetTokens(
+          budgetLimits.contextWindow,
+          budgetLimits.maxOutputTokens ?? null,
+        )
+      : undefined;
+    const budgetResult = applyGlobalToolResultBudget(
+      messagesForQuery,
+      dynamicBudget ? { budgetTokens: dynamicBudget } : undefined,
+    );
     if (budgetResult.compactedCount > 0) {
       messagesForQuery = budgetResult.messages;
       console.debug(
@@ -1312,7 +1345,9 @@ export async function* query(
         contextWindow: ctxLimits?.contextWindow ?? null,
         maxOutputTokens: ctxLimits?.maxOutputTokens ?? null,
         realOccupancyTokens: lastTurnRealOccupancy ?? null,
+        realOccupancyMessageCount: lastTurnRealOccupancyMessageCount ?? null,
       },
+      archivePreCompact,
     );
 
     if (autoResult.wasCompacted && autoResult.postCompactMessages) {
@@ -1321,6 +1356,46 @@ export async function* query(
         beforeTokens: autoResult.preCompactTokenCount ?? 0,
       };
       messagesForQuery = autoResult.postCompactMessages;
+
+      // ── Recuperação do estado de trabalho (paridade claude-vaz) ──
+      // O sumário conta a história; não devolve o conteúdo dos ficheiros nem o
+      // texto das skills. Entra na posição 1 — logo a seguir ao sumário e ANTES
+      // dos turnos preservados — para a ordem se ler cronologicamente
+      // (resumo do antigo → material recuperado → turnos recentes verbatim) e
+      // para os tool_results mais frescos continuarem a ser a última coisa que
+      // o modelo lê. Falhar aqui não pode desfazer a compactação: o pior caso é
+      // continuar sem o material, que é exatamente o comportamento anterior.
+      let compactRecovery: string | undefined;
+      if (buildPostCompactRecovery) {
+        try {
+          // Teto derivado da janela ATIVA, não de uma constante: 8% da janela
+          // efetiva. O que é ruído num modelo de 1M seria 12% da janela num de
+          // 128K — injetado logo a seguir a uma compactação, ou seja, no pior
+          // momento possível para voltar a cruzar o limiar.
+          const recovery = await buildPostCompactRecovery(
+            ctxLimits?.contextWindow
+              ? getPostCompactRecoveryMaxChars(
+                  ctxLimits.contextWindow,
+                  ctxLimits.maxOutputTokens ?? null,
+                )
+              : undefined,
+          );
+          if (recovery) {
+            compactRecovery = recovery;
+            messagesForQuery = [
+              messagesForQuery[0],
+              { role: "user", content: recovery } as QueryMessage,
+              ...messagesForQuery.slice(1),
+            ];
+            console.debug(
+              `[query] post-compact recovery: injected ${recovery.length} chars of working state`,
+            );
+          }
+        } catch (err) {
+          console.warn("[query] post-compact recovery failed:", err);
+        }
+      }
+
       tracking = {
         compacted: true,
         turnId: generateId(),
@@ -1342,6 +1417,7 @@ export async function* query(
         beforeTokens: autoResult.preCompactTokenCount ?? 0,
         afterTokens: autoResult.postCompactTokenCount ?? 0,
         summary: compactSummary,
+        recovery: compactRecovery,
       };
     } else if (autoResult.consecutiveFailures !== undefined) {
       tracking = {
@@ -1364,10 +1440,18 @@ export async function* query(
     {
       const guardWindow = ctxLimits?.contextWindow ?? null;
       if (guardWindow) {
-        const occupancy = Math.max(
-          tokenCountWithEstimation(messagesForQuery),
-          lastTurnRealOccupancy ?? 0,
-        );
+        // MESMA função que o autoCompact usa para decidir — não uma cópia da
+        // lógica. Uma segunda implementação da âncora aqui divergiria da
+        // primeira no dia em que uma das duas fosse ajustada, e este guard
+        // corta histórico à força quando dispara.
+        const occ = resolveOccupancyWithSource(messagesForQuery, 0, {
+          contextWindow: guardWindow,
+          maxOutputTokens: ctxLimits?.maxOutputTokens ?? null,
+          realOccupancyTokens: lastTurnRealOccupancy ?? null,
+          realOccupancyMessageCount: lastTurnRealOccupancyMessageCount ?? null,
+        });
+        lastOccupancySource = occ.source;
+        const occupancy = occ.tokens;
         if (isAtBlockingLimit(occupancy, guardWindow, ctxLimits?.maxOutputTokens ?? null)) {
           const guardSnip = snipCompactIfNeeded(messagesForQuery, {
             force: true,
@@ -2142,11 +2226,18 @@ export async function* query(
           // keepRecentTurns: 0 — modo de emergência. A compactação PROATIVA
           // preserva os turnos recentes, mas aqui o provider JÁ rejeitou o
           // prompt: guardar contexto seria arriscar uma segunda rejeição.
+          //
+          // Arquiva-se, mas NÃO se injeta a recuperação de estado de trabalho
+          // que o caminho proativo injeta: acabámos de levar um prompt_too_long
+          // e o bloco de recuperação vale até ~16K tokens. O caminho para o
+          // material é o arquivo, cujo caminho vai na mensagem de sumário — o
+          // modelo relê o que precisar, à medida que precisar.
           reactivePostCompact = (await compactNow(
             messagesForQuery,
             systemPrompt,
             compactFn,
             0,
+            archivePreCompact,
           )) as QueryMessage[] | null;
         } catch (reactiveErr) {
           console.error("[query] reactive summarization failed:", reactiveErr);
@@ -2343,6 +2434,10 @@ export async function* query(
       // prompt — their sum is the true "how full is the window right now"
       // (matches utils/contextWindow.ts totalContextTokens + the UI pill).
       lastTurnRealOccupancy = turnUsage.prompt_tokens + turnUsage.completion_tokens;
+      // A contagem de mensagens que ESTE real cobre. Sem ela, real e
+      // estimativa medem o mesmo intervalo e a única combinação possível é
+      // escolher um dos dois — que era o `Math.max` que inflacionava tudo.
+      lastTurnRealOccupancyMessageCount = messagesForQuery.length;
     }
 
     // Per-request usage log — real tokens + payloadInspector estimate +
@@ -2370,7 +2465,6 @@ export async function* query(
             : `${state.turnCount}-${Date.now()}`,
           turn: state.turnCount,
           executionPhase,
-          mutableTask,
           model,
           inputTokens: turnUsage?.prompt_tokens ?? 0,
           outputTokens: turnUsage?.completion_tokens ?? 0,
@@ -2384,6 +2478,14 @@ export async function* query(
           toolCountTotal: payloadReport?.toolCountTotal,
           toolNames: activeTools.map((tool: any) => tool?.function?.name).filter((name: unknown): name is string => typeof name === 'string'),
           toolDefsTokens: payloadReport?.toolDefsTokens,
+          // Assinaturas do prefixo — o payloadInspector já as calculava e
+          // mandava-as só para console.debug, portanto morriam com a sessão.
+          // No export, uma queda de cache read entre turnos deixa de ser
+          // adivinhada a partir de contagens: compara-se `messageHashes` do
+          // turno N com o N-1 e o primeiro índice divergente É a causa.
+          occupancySource: lastOccupancySource,
+          promptPrefixHash: payloadReport?.promptPrefixHash,
+          messageHashes: payloadReport?.messageHashes,
           continuationReason: payloadReport?.continuationReason,
           mentionContextTokens: payloadReport?.mentionContextTokens ?? 0,
           breakdown: payloadReport?.byCategory ?? {},
@@ -2450,17 +2552,9 @@ export async function* query(
           // mentionContextRepeatedTokens is the token saving vs re-sending
           // the full body. Both reset each turn.
           ...getAndResetMentionContextStats(),
-          // ── "Stopped without editing" guardrail telemetry ──
-          // Cumulative values as of THIS request. The guardrail fires AFTER
-          // onRequestUsage, so noEditGuardTriggered reflects the PREVIOUS
-          // turn's firing. Final decision fields (completionGuardDecision /
-          // completionGuardReason) are stamped on the last entry by the
-          // caller after the loop returns (see QueryTerminal).
+          // ── Write-action telemetry ──
+          // Cumulative values as of THIS request.
           runHasEdited,
-          noEditRecoveryCount,
-          noEditGuardTriggered: guardTriggeredLastTurn,
-          noEditGuardReason,
-          noEditRecoveryAction,
           firstWriteTurn,
           writeActionCount,
           originalTaskWriteActionCount: executionPhase === 'original_task' ? writeActionCount : 0,
@@ -2484,9 +2578,6 @@ export async function* query(
         })
       } catch { /* usage logging never blocks the agent loop */ }
     }
-    // Reset the guard-triggered flag after the usage entry has captured it,
-    // so it's only true on the request that immediately follows the firing.
-    guardTriggeredLastTurn = false;
 
     // ── Build provider-native state for round-trip ──
     // Reconstruct the assistant message as the provider would have
@@ -2701,8 +2792,6 @@ export async function* query(
           totalInputTokens,
           totalOutputTokens,
           runHasEdited,
-          noEditRecoveryCount,
-          noEditGuardTriggered: noEditRecoveryCount > 0,
           firstWriteTurn,
           writeActionCount,
         };
@@ -2732,47 +2821,12 @@ export async function* query(
         }
       }
 
-      // Guardrail: mutable original-task run that ends without a single file
-      // mutation. The model likely diagnosed the work but deferred the edit.
-      // Give it one chance to continue; if it stops again without editing,
-      // let it end with explicit telemetry instead of looping on reads.
-      if (
-        mutableTask &&
-        !runHasEdited &&
-        noEditRecoveryCount < 1 &&
-        // O toolset vai completo em todos os turnos desde que o ToolsetSelector
-        // foi apagado (2026-07-30), portanto edit_file está SEMPRE disponível
-        // aqui — a recuperação nunca é "pede a ferramenta", é sempre "aplica a
-        // alteração". Read-only explícito continua a desarmar o guard.
-        !readOnlyRun
-      ) {
-        noEditGuardReason = "mutable original_task attempted to stop without file edit";
-        noEditRecoveryAction = "apply_edit";
-        state = {
-          ...state,
-          messages: [
-            ...updatedMessages,
-            {
-              role: "user",
-              // DEBIAS (auditoria 2026-07-17): a versão anterior ORDENAVA um
-              // edit ("apply the change now") — num diagnóstico cuja resposta
-              // certa é uma decisão de arquitetura ("este runtime não suporta
-              // esta dependência"), isso empurrava o modelo para remendos de
-              // config/bundler em vez de fechar a decisão. A porta de saída
-              // explícita mantém o guardrail (não adiar) sem forçar o remendo.
-              // O ramo "call request_tools to activate edit_file" saiu com o
-              // ToolsetSelector (2026-07-30): o toolset vai completo, logo
-              // edit_file está sempre disponível — e mandar o modelo activar
-              // uma tool que já tem custava-lhe um round-trip por nada.
-              content: "You have edit_file available but have not applied any edit yet. If a code change is genuinely the right outcome, apply it now — do not defer to the next turn. But if your investigation concluded that NO edit is appropriate (the correct outcome is an architecture/runtime decision, a recommendation, or the cause lies outside this codebase), do not force one: state that conclusion explicitly and decisively as your final answer.",
-            },
-          ],
-          continuationCount: 0,
-        };
-        noEditRecoveryCount++;
-        guardTriggeredLastTurn = true;
-        continue;
-      }
+      // O guard anti-adiamento ("mutable run parou sem editar") que vivia
+      // aqui foi APAGADO a 2026-07-31: estava órfão desde a remoção do Intent
+      // Router (`mutableTask` nunca armava — nenhum produtor vivo punha
+      // `requiresMutation` a partir do texto do utilizador) e o cli-vaz não
+      // tem equivalente. O que cobre o mesmo risco é ESTRUTURAL e continua
+      // abaixo: o guard de reconciliação do task tracker.
 
       // Guardrail: run is stopping while the task tracker still has
       // non-completed tasks AND the model never called update_tasks this run.
@@ -2833,28 +2887,12 @@ export async function* query(
         turnCount: state.turnCount,
         totalInputTokens,
         totalOutputTokens,
-        // Guardrail telemetry — final values at loop termination.
+        // Write-action telemetry — final values at loop termination.
         runHasEdited,
-        noEditRecoveryCount,
-        noEditGuardTriggered: noEditRecoveryCount > 0,
         firstWriteTurn,
         writeActionCount,
         originalTaskWriteActionCount: executionPhase === 'original_task' ? writeActionCount : 0,
         originalTaskFirstWriteTurn: executionPhase === 'original_task' ? firstWriteTurn : undefined,
-        noEditGuardReason,
-        noEditRecoveryAction,
-        completionGuardDecision:
-          noEditRecoveryCount > 0 && runHasEdited
-            ? "recovered_then_completed"
-            : noEditRecoveryCount > 0 && !runHasEdited
-              ? "recovery_failed_then_completed"
-              : "completed",
-        completionGuardReason:
-          noEditRecoveryCount > 0
-            ? runHasEdited
-              ? "mutable original_task attempted to stop without edit; guardrail steered the model to request/edit and apply the change"
-              : "mutable original_task attempted to stop without edit; guardrail fired but model did not recover"
-            : undefined,
       };
     }
 
@@ -2987,7 +3025,8 @@ export async function* query(
           isError: result.isError,
         });
         // Track whether any file-mutating tool ran successfully this run.
-        // Drives the "stopped without editing" guardrail at the stop path.
+        // Drives the write-action telemetry and the task-reconciliation
+        // guardrail at the stop path.
         // canonicalToolName: `tc.name` é o que o MODELO escreveu (`Edit`,
         // `Write`), e DESTRUCTIVE_TOOLS guarda nomes canónicos. Sem isto,
         // runHasEdited/writeActionCount/firstWriteTurn ficavam permanentemente

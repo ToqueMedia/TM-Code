@@ -80,6 +80,10 @@ export interface QueryEngineOptions {
   collectQueuedSteering?: () => Promise<QueuedSteeringContent | null>
   /** Live active-model limits for auto-compact — see QueryParams.getContextLimits. */
   getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null }
+  /** Arquivo do transcript pré-compactação — ver QueryParams.archivePreCompact. */
+  archivePreCompact?: (older: { role: 'user' | 'assistant'; content: unknown }[]) => Promise<string | null>
+  /** Recuperação do estado de trabalho pós-compactação — ver QueryParams.buildPostCompactRecovery. */
+  buildPostCompactRecovery?: (maxChars?: number) => Promise<string | null>
   /** Dynamic toolset selector — when present, the loop filters tools per turn. */
   /** Read-only por política — ver a nota em QueryParams.readOnlyRun. */
   readOnlyRun?: boolean
@@ -87,8 +91,6 @@ export interface QueryEngineOptions {
   auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection
   /** Execution phase for bootstrap/original-task telemetry and guardrails. */
   executionPhase?: 'project_bootstrap' | 'original_task'
-  /** True when the original user request asks to implement/change/fix files. */
-  mutableTask?: boolean
   /** Delegate telemetry — see QueryParams.getDelegateTelemetry. */
   getDelegateTelemetry?: () => {
     requestedMember: string | null;
@@ -214,10 +216,11 @@ export class QueryEngine {
       collectInterTurnContext: this.options.collectInterTurnContext,
       collectQueuedSteering: this.options.collectQueuedSteering,
       getContextLimits: this.options.getContextLimits,
+      archivePreCompact: this.options.archivePreCompact,
+      buildPostCompactRecovery: this.options.buildPostCompactRecovery,
       readOnlyRun: this.options.readOnlyRun,
       auxiliarySelection: this.options.auxiliarySelection,
       executionPhase: this.options.executionPhase,
-      mutableTask: this.options.mutableTask,
       getDelegateTelemetry: this.options.getDelegateTelemetry,
     }
 

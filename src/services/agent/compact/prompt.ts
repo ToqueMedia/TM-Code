@@ -118,11 +118,20 @@ export function formatCompactSummary(summaryRaw: string): string {
 
 /**
  * Build the user message that replaces the compacted conversation.
+ *
+ * `transcriptPath` aponta para o arquivo JSONL das mensagens que o sumário
+ * substituiu (ver compactTranscriptArchive). É a diferença entre "isto foi
+ * resumido" e "isto foi resumido E aqui está o original": o sumário é lossy por
+ * definição, e sem o caminho o modelo não tem como recuperar a citação literal
+ * do developer, a mensagem de erro exata ou o snippet que o resumo colapsou.
+ * O claude-vaz passa o transcript da sessão pelo mesmo motivo
+ * (compact.ts → getCompactUserSummaryMessage(summary, …, transcriptPath)).
  */
 export function getCompactUserSummaryMessage(
   summary: string,
   suppressFollowUpQuestions?: boolean,
   recentTurnsPreserved?: boolean,
+  transcriptPath?: string | null,
 ): string {
   const formattedSummary = formatCompactSummary(summary)
 
@@ -130,19 +139,30 @@ export function getCompactUserSummaryMessage(
   // evita o pior efeito colateral do sumário: o modelo tratar o resumo como a
   // TOTALIDADE do que sabe e voltar a ler ficheiros cujos resultados estão logo
   // a seguir, intactos, nas mensagens preservadas.
-  let baseSummary = recentTurnsPreserved
-    ? `This session is being continued from a previous conversation that ran out of context. The summary below covers the EARLIER portion only — the most recent turns follow it verbatim, including their tool results. Trust those directly; do not re-read what they already show.
+  const parts: string[] = [
+    recentTurnsPreserved
+      ? `This session is being continued from a previous conversation that ran out of context. The summary below covers the EARLIER portion only — the most recent turns follow it verbatim, including their tool results. Trust those directly; do not re-read what they already show.
 
 ${formattedSummary}`
-    : `This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+      : `This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
 
-${formattedSummary}`
+${formattedSummary}`,
+  ]
 
-  if (suppressFollowUpQuestions) {
-    return `${baseSummary}
+  if (transcriptPath) {
+    parts.push(
+      `If you need specific details from before the compaction (exact code snippets, verbatim error messages, the developer's literal wording), the raw pre-compaction transcript was saved to:
+${transcriptPath}
 
-Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with "I'll continue" or similar. Pick up the last task as if the break never happened.`
+It is a JSONL file — one message per line, with tool_call and tool_result blocks intact. Use search_files on it for the symbol or phrase you need; do not page through the whole file, and do not mention the archive to the developer unless you actually read it.`,
+    )
   }
 
-  return baseSummary
+  if (suppressFollowUpQuestions) {
+    parts.push(
+      `Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with "I'll continue" or similar. Pick up the last task as if the break never happened.`,
+    )
+  }
+
+  return parts.join('\n\n')
 }

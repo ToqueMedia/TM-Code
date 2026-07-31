@@ -457,7 +457,12 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     // Compact boundary — renders via CompactSummary component which shows
     // phased progress, trigger info, token savings, and expandable summary.
     if (message.kind === 'compact_boundary') {
-      const summaryText = message.content || undefined
+      // `compactSummary` é o resumo A SÉRIO (o que o modelo recebe); `content`
+      // é só a linha de estatísticas. O cartão mostrava a linha e chamava-lhe
+      // resumo — expandir não revelava nada e o cálculo de "depois" em
+      // CompactSummary media o comprimento da própria legenda. `compactRecovery`
+      // fica DE FORA de propósito: é despejo de ficheiros, não é para ler.
+      const summaryText = message.compactSummary || message.content || undefined
       return (
         <CompactSummary
           metadata={message.compactMetadata ?? {

@@ -9,6 +9,7 @@
  * single user summary message.
  */
 
+import { CHARS_PER_TOKEN_ESTIMATE } from '../agentConfig'
 import type { ContentBlockAPI } from '../../../types/chat'
 import { getCompactUserSummaryMessage } from './prompt'
 import {
@@ -76,6 +77,13 @@ export interface AutoCompactLimits {
    * Undefined on the first turn (no response seen yet) → estimate-only.
    */
   realOccupancyTokens?: number | null
+  /**
+   * Quantas mensagens estavam no pedido que produziu `realOccupancyTokens`.
+   * É o que permite ancorar: o real cobre esse prefixo, e só as mensagens
+   * DEPOIS dele precisam de estimativa. Sem isto, o real e a estimativa
+   * medem o mesmo intervalo e a única combinação possível é escolher um.
+   */
+  realOccupancyMessageCount?: number | null
 }
 
 /** True when we have a real context window to reason about. */
@@ -94,15 +102,68 @@ function resolveThreshold(limits?: AutoCompactLimits): number {
     : getRealAutoCompactThreshold(FALLBACK_CONTEXT_WINDOW)
 }
 
-/** Best occupancy estimate: never below the provider's real reading nor the char-estimate. */
+/** Como a ocupação foi resolvida neste turno — vai para a telemetria. */
+export type OccupancySource = 'anchored' | 'max-fallback' | 'estimate-only'
+
+/**
+ * Ocupação: ÂNCORA no real + estimativa só do que veio depois.
+ *
+ * PORQUE NÃO É UM `Math.max` (era, até 2026-07-31)
+ * ────────────────────────────────────────────────
+ * O estimador media caracteres e o real vinha do provider — mas os dois
+ * cobriam o MESMO intervalo, portanto a única forma de os combinar era
+ * escolher um. Escolhia-se o maior, e como o estimador era estruturalmente
+ * alto (`chars/3` contra um rácio real medido de ~4,05) a verdade nunca podia
+ * baixar a conta: chegava uma vez por turno e era descartada todas as vezes.
+ * A auto-compactação disparava ~30% cedo — o modelo perdia conversa para um
+ * resumo com um terço da janela ainda livre.
+ *
+ * Agora os intervalos são disjuntos: o real cobre as primeiras
+ * `realOccupancyMessageCount` mensagens (é literalmente o que o provider
+ * contou nesse pedido) e só as acrescentadas depois passam pelo estimador.
+ * Somam-se em vez de competirem.
+ *
+ * O instinto defensivo do `max` (nunca subestimar, senão apanha-se
+ * `prompt_too_long`) continua servido: o histórico só cresce, logo o real do
+ * turno N−1 é um piso honesto para o turno N; e a rede de recuperação de
+ * `prompt_too_long` existe a jusante.
+ *
+ * `snipTokensFreed` é subtraído no ramo ancorado de propósito: quando o snip
+ * forçado liberta tokens, liberta-os da região que o `real` já contabilizou.
+ * Hoje é sempre 0 (o snip de rotina saiu), mas o teste em
+ * autoCompactLimits.test.ts fixa o comportamento para quando não for.
+ */
+export function resolveOccupancyWithSource(
+  messages: MessageLike[],
+  snipTokensFreed: number,
+  limits?: AutoCompactLimits,
+): { tokens: number; source: OccupancySource } {
+  const estimate = Math.max(0, tokenCountWithEstimation(messages) - snipTokensFreed)
+  const real = limits?.realOccupancyTokens
+  if (typeof real !== 'number' || real <= 0) {
+    return { tokens: estimate, source: 'estimate-only' }
+  }
+
+  const anchoredAt = limits?.realOccupancyMessageCount
+  if (typeof anchoredAt === 'number' && anchoredAt > 0 && anchoredAt <= messages.length) {
+    const delta = tokenCountWithEstimation(messages.slice(anchoredAt))
+    return { tokens: Math.max(0, real + delta - snipTokensFreed), source: 'anchored' }
+  }
+
+  // Âncora inutilizável (primeiro turno, ou o histórico encolheu abaixo do
+  // ponto medido). Volta ao comportamento antigo em vez de arriscar um valor
+  // baixo de mais — mas a telemetria diz que foi isso que aconteceu, senão
+  // uma sessão onde a âncora nunca se aplica é indistinguível de uma onde se
+  // aplica sempre.
+  return { tokens: Math.max(estimate, real), source: 'max-fallback' }
+}
+
 function resolveOccupancy(
   messages: MessageLike[],
   snipTokensFreed: number,
   limits?: AutoCompactLimits,
 ): number {
-  const estimate = Math.max(0, tokenCountWithEstimation(messages) - snipTokensFreed)
-  const real = limits?.realOccupancyTokens
-  return typeof real === 'number' && real > 0 ? Math.max(estimate, real) : estimate
+  return resolveOccupancyWithSource(messages, snipTokensFreed, limits).tokens
 }
 
 /** Minimal message shape for auto-compact. */
@@ -113,9 +174,13 @@ interface MessageLike {
 
 // ── Token estimation ──
 
-/** Rough token estimate: ~4 chars per token, padded 4/3. */
+/**
+ * Estimativa de tokens a partir de caracteres. O divisor é MEDIDO e partilhado
+ * — ver CHARS_PER_TOKEN_ESTIMATE em agentConfig.ts para os dados e o porquê
+ * de ser 3,7 e não 4.
+ */
 function roughTokenEstimate(text: string): number {
-  return Math.ceil((text.length / 4) * (4 / 3))
+  return Math.ceil(text.length / CHARS_PER_TOKEN_ESTIMATE)
 }
 
 /** Estimate total tokens across all messages. */
@@ -243,6 +308,13 @@ export function splitForCompaction(
 }
 
 /**
+ * Arquiva o bloco ANTIGO em disco antes de o substituir pelo sumário. Devolve o
+ * caminho, ou null quando não há arquivo (falha de escrita, sem projeto/sessão).
+ * Best-effort por contrato: nunca deve fazer a compactação falhar.
+ */
+export type ArchiveOlderFn = (older: MessageLike[]) => Promise<string | null>
+
+/**
  * Summarize the older messages and return [summary, ...recent turns].
  * Returns null when the summarizer produced nothing — the caller decides
  * whether to count a failure or fall back.
@@ -265,11 +337,34 @@ export async function compactNow(
   systemPrompt: string,
   compactFn: CompactFn,
   keepRecentTurns: number = KEEP_RECENT_TURNS_ON_COMPACT,
+  archiveOlder?: ArchiveOlderFn,
 ): Promise<MessageLike[] | null> {
   const { older, recent } = splitForCompaction(messages, keepRecentTurns)
+
+  // O arquivo corre EM PARALELO com a sumarização, não antes: a escrita em
+  // disco passa pelo IPC do Tauri e é a operação mais lenta do caminho depois
+  // da chamada ao modelo. Serializá-los somava as duas latências a uma pausa
+  // que o utilizador vê como "a app pendurou a meio da resposta".
+  const archivePromise: Promise<string | null> = archiveOlder
+    ? archiveOlder(older).catch(() => null)
+    : Promise.resolve(null)
+
   const summary = await compactFn(older, systemPrompt)
-  if (!summary) return null
-  const summaryContent = getCompactUserSummaryMessage(summary, true, recent.length > 0)
+  if (!summary) {
+    // Sem sumário não há compactação — o histórico fica como estava e o arquivo
+    // ficaria a apontar para mensagens que continuam vivas no contexto. Deixa a
+    // escrita terminar (já foi lançada) mas não a referencia.
+    void archivePromise
+    return null
+  }
+
+  const transcriptPath = await archivePromise
+  const summaryContent = getCompactUserSummaryMessage(
+    summary,
+    true,
+    recent.length > 0,
+    transcriptPath,
+  )
   return [{ role: 'user', content: summaryContent }, ...recent]
 }
 
@@ -292,6 +387,7 @@ export async function autoCompact(
   tracking?: AutoCompactTrackingState,
   snipTokensFreed?: number,
   limits?: AutoCompactLimits,
+  archiveOlder?: ArchiveOlderFn,
 ): Promise<AutoCompactResult> {
   // Disjuntor com arrefecimento — ver a nota em AUTOCOMPACT_BREAKER_COOLDOWN_MS.
   const failures = tracking?.consecutiveFailures ?? 0
@@ -315,7 +411,13 @@ export async function autoCompact(
   const preCompactTokenCount = resolveOccupancy(messages, snipTokensFreed ?? 0, limits)
 
   try {
-    const postCompactMessages = await compactNow(messages, systemPrompt, compactFn)
+    const postCompactMessages = await compactNow(
+      messages,
+      systemPrompt,
+      compactFn,
+      KEEP_RECENT_TURNS_ON_COMPACT,
+      archiveOlder,
+    )
 
     if (!postCompactMessages) {
       return {

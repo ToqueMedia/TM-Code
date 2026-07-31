@@ -67,4 +67,4 @@ export type CompactPhase = 'idle' | 'hooks_pre' | 'compressing' | 'hooks_post' |
 export type CompactProgressEvent =
   | { type: 'hooks_start'; hookType: 'pre_compact' | 'post_compact' | 'session_start' }
   | { type: 'compact_start'; beforeTokens: number; trigger: CompactTrigger }
-  | { type: 'compact_end'; beforeTokens: number; trigger: CompactTrigger; messagesSummarized?: number; summary?: string }
+  | { type: 'compact_end'; beforeTokens: number; trigger: CompactTrigger; messagesSummarized?: number; summary?: string; recovery?: string }

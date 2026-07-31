@@ -72,6 +72,21 @@ export const POST_COMPACTION_REREAD_RANGES = 12
 export const POST_COMPACTION_RANGES_PER_FILE = 4
 export const POST_COMPACTION_RANGE_MAX_LINES = 160
 
+/**
+ * Teto do bloco INTEIRO de recuperação pós-compactação (~16K tokens).
+ *
+ * Os tectos por parte (5 ficheiros × 8000 chars, skills 100K chars) somam pior
+ * caso ~140K caracteres — injetados logo a seguir a uma compactação que existiu
+ * precisamente para libertar espaço, e por cima dos 3 turnos recentes que o
+ * compactNow preserva. Sem um teto global a recuperação podia voltar a cruzar
+ * o limiar e disparar outra compactação no turno seguinte.
+ *
+ * As partes são acrescentadas por ordem de valor (skills → ficheiros → log de
+ * operações); a primeira que não cabe corta o resto, e o bloco diz ao modelo o
+ * que ficou de fora para ele reler em vez de assumir.
+ */
+export const POST_COMPACTION_RECOVERY_MAX_CHARS = 60_000
+
 // ── Reminder re-injection ──
 
 export const REMINDER_REINJECT_INTERVAL_TURNS = 5
@@ -122,3 +137,27 @@ export const MCP_SERVER_DESCRIPTIONS_MAX_CHARS = 20_000
 
 /** Teto agregado de TODAS as descrições MCP juntas. */
 export const MCP_TOTAL_DESCRIPTIONS_MAX_CHARS = 60_000
+
+// ── Estimativa de tokens ──
+//
+// Divisor de caracteres→tokens. Era `3` em dois módulos independentes
+// (`compact/autoCompact.ts` e `payloadInspector.ts`, este último com um
+// comentário a dizer "keeping it identical" ao outro — um contrato de
+// sincronização manual sem teste). Agora é um só valor.
+//
+// MEDIDO (2026-07-31) contra os `usage` reais do provider em duas sessões
+// exportadas, 24 pedidos: chars/token real com mediana 4,05, mínimo 3,73,
+// máximo 4,16. O rácio DESCE ao longo da sessão (4,16 nos primeiros turnos,
+// 3,73 no fim) porque a fatia de tool results e JSON cresce, e esses
+// tokenizam mais denso que prosa.
+//
+// 3,7 e não 4: o estimador é usado onde subestimar custa mais do que
+// sobrestimar (decidir compactar). Um divisor ABAIXO do rácio real garante
+// estimativa >= realidade, e 3,7 fica abaixo de todas as 24 amostras. O erro
+// mediano passa de +35% para +9% — sobra margem, sem a inflação que fazia a
+// compactação disparar ~30% cedo.
+//
+// Isto é uma medição de UM modelo e UM tipo de trabalho. Se os exports
+// passarem a mostrar rácios abaixo de 3,7, é este número que se ajusta — não
+// se volta a pôr um `Math.max` a tapar o erro.
+export const CHARS_PER_TOKEN_ESTIMATE = 3.7

@@ -36,7 +36,10 @@ import { useTmSpeedStore } from "../../stores/tmSpeedStore";
 import { useReasoningEffortStore } from "../../stores/reasoningEffortStore";
 import { invoke } from "@/utils/invokeMetrics";
 import { logger } from "../../utils/logger";
-import { FALLBACK_CONTEXT_WINDOW } from "../../utils/contextWindow";
+import {
+  FALLBACK_CONTEXT_WINDOW,
+  getPostCompactRecoveryMaxChars,
+} from "../../utils/contextWindow";
 import { getQueryGuard } from "./queryGuard";
 import { beginMainRunClaims, endMainRunClaims } from "./fileClaims";
 import type { ContentPart, ByokSessionSnapshot } from "../../types/chat";
@@ -60,7 +63,6 @@ import {
   decorateTmsRequestUsage,
   getTmsTurnTelemetry,
   markExecuteCommandPurpose,
-  markNoEditGuard,
   markOriginalTaskCompleted,
   markOriginalTaskFailed,
   markOriginalTaskStarted,
@@ -370,7 +372,13 @@ class AgentService {
       if (!getQueryGuard().isActive) {
         try {
           useAgentStore.getState().setStatus("cancelled");
-          useChatStore.getState().finalizeAssistantMessage();
+          // `interrupted: true` — este ramo SÓ existe porque houve Stop (a
+          // generation avançou via forceEnd). Quando o stopAgentRun já
+          // carimbou, repetir é inofensivo: o finalize só espalha
+          // `wasInterrupted` quando é true, portanto o carimbo existente
+          // sobrevive. Quando a corrida aterra só aqui, era este o único
+          // sítio que podia carimbar — e não carimbava.
+          useChatStore.getState().finalizeAssistantMessage({ interrupted: true });
         } catch {
           /* non-critical */
         }
@@ -624,20 +632,12 @@ class AgentService {
       : "original_task";
     const enforceReadOnly = auxiliarySelection?.readOnly === true &&
       auxiliarySelection.routerSource === "keyword";
-    // ÓRFÃO desde a remoção do Intent Router (auditoria 2026-07-28):
-    // `requiresMutation` só era produzido por ele, portanto o guard anti-
-    // adiamento no loop nunca arma. NÃO resolver isto com um detetor de texto
-    // sobre a resposta final: o claude-vaz não faz nada disso — o que ele tem
-    // para o mesmo problema é estrutural (system-reminder guiado pelo estado
-    // do TRACKER, que este loop já implementa no guard de reconciliação de
-    // tarefas) mais Stop hooks configuráveis pelo utilizador. E o próprio
-    // turnEfficiency.ts deste repo tem a doutrina escrita: sinais estruturais,
-    // nunca matching de texto. Ou se arranja um sinal estrutural, ou o guard
-    // deve ser APAGADO como código morto — não ressuscitado com heurística.
-    const mutableTask = executionPhase === "original_task" &&
-      !this.lightweightOptions &&
-      !enforceReadOnly &&
-      auxiliarySelection?.requiresMutation === true;
+    // O `mutableTask` que era calculado aqui (e o guard anti-adiamento que o
+    // consumia no loop) foi APAGADO a 2026-07-31: `requiresMutation` só era
+    // produzido pelo Intent Router, removido na auditoria de 2026-07-28,
+    // portanto o guard nunca armava. O cli-vaz não tem equivalente — a
+    // cobertura estrutural do mesmo risco é o guard de reconciliação do task
+    // tracker no stop path do query loop.
 
     // FASE A (recalibração de cache 2026-07-17): toolset CONGELADO por run —
     // schemas completos e estáveis do 1º ao último turno. A seleção dinâmica
@@ -666,7 +666,7 @@ class AgentService {
 
     if (!this.lightweightOptions) {
       if (executionPhase === "original_task") {
-        markOriginalTaskStarted(mutableTask);
+        markOriginalTaskStarted();
       } else {
         setTmsTurnTelemetry({ executionPhase: "project_bootstrap" });
       }
@@ -793,6 +793,53 @@ class AgentService {
           maxOutputTokens: modelMaxOutputTokens ?? profile.maxOutputTokens ?? null,
         };
       },
+      // ── Compactação: arquivo + recuperação (paridade claude-vaz) ──
+      // Ambos vivem aqui porque o loop (query.ts) não conhece stores nem o
+      // SessionState — e não deve. Sub-agentes ficam de fora dos dois: escrevem
+      // na sessão do agente principal (o arquivo colidiria) e o seu contexto é
+      // a tarefa que receberam, não o working set do developer.
+      archivePreCompact: this.lightweightOptions
+        ? undefined
+        : async (older) => {
+            try {
+              const { archivePreCompactTranscript } = await import(
+                "./compactTranscriptArchive"
+              );
+              const chatState = useChatStore.getState();
+              // streamingSessionId primeiro, e o projectPath vem da MESMA
+              // sessão (não de getActiveSession): trocar de sessão a meio de um
+              // run punha o arquivo na pasta do projeto errado — o mesmo bug
+              // que a persistência das skills invocadas já teve.
+              const sessionId =
+                chatState.streamingSessionId ?? chatState.activeSessionId;
+              if (!sessionId) return null;
+              const projectPath = chatState.sessions.get(sessionId)?.projectPath;
+              if (!projectPath) return null;
+              return await archivePreCompactTranscript(
+                projectPath,
+                sessionId,
+                older as import("./compactTranscriptArchive").ArchivedMessage[],
+              );
+            } catch {
+              return null;
+            }
+          },
+      buildPostCompactRecovery: this.lightweightOptions
+        ? undefined
+        : async (maxChars?: number) => {
+            try {
+              const { buildPostCompactRecoveryBlock } = await import(
+                "./contextManager"
+              );
+              return await buildPostCompactRecoveryBlock(
+                this.sessionState,
+                undefined,
+                maxChars ?? this.resolveRecoveryMaxChars(),
+              );
+            } catch {
+              return null;
+            }
+          },
       // Usage is reported via message_stop events — do NOT add onUsage
       // callback here or output tokens will be double-counted (SUM semantics).
       // onRequestUsage is distinct: it carries the payloadInspector breakdown
@@ -806,7 +853,6 @@ class AgentService {
       // payloadInspector; null for sub-agents).
       auxiliarySelection: auxiliarySelection ?? undefined,
       executionPhase,
-      mutableTask,
       // Delegate telemetry — read from the toolExecutor's last delegate call.
       getDelegateTelemetry: () => this.toolExecutor.consumeDelegateTelemetry(),
     });
@@ -928,6 +974,7 @@ class AgentService {
             trigger: "auto",
             messagesSummarized: 0,
             summary: event.summary,
+            recovery: event.recovery,
           });
           break;
 
@@ -955,47 +1002,30 @@ class AgentService {
     // 9. Terminal result
     const terminal = result.value as QueryTerminal;
 
-    // Stamp guardrail telemetry onto the last requestUsageLog entry so the
-    // session export shows the final decision explicitly (not just inferrable
-    // from expandedToolNames / toolCalls). Best-effort — never blocks.
-    if (terminal.completionGuardDecision !== undefined) {
+    // Stamp write-stats + outcome telemetry onto the last requestUsageLog
+    // entry so the session export shows the final decision explicitly.
+    // Best-effort — never blocks.
+    if (terminal.reason === "completed") {
       try {
         if (!this.lightweightOptions && executionPhase === "original_task") {
           markOriginalTaskWriteStats(
             terminal.originalTaskWriteActionCount ?? terminal.writeActionCount ?? 0,
             terminal.originalTaskFirstWriteTurn ?? terminal.firstWriteTurn,
           );
-          if (terminal.noEditGuardReason) {
-            markNoEditGuard(
-              terminal.noEditGuardReason,
-              terminal.noEditRecoveryAction ?? "unknown",
-            );
-          }
-          if (terminal.reason === "completed") {
-            markOriginalTaskCompleted();
-          } else {
-            markOriginalTaskFailed(terminal.reason);
-          }
+          markOriginalTaskCompleted();
         }
         useChatStore.getState().updateLastRequestUsage({
           ...getTmsTurnTelemetry(),
           executionPhase,
-          mutableTask,
           runHasEdited: terminal.runHasEdited,
-          noEditRecoveryCount: terminal.noEditRecoveryCount,
-          noEditGuardTriggered: terminal.noEditGuardTriggered,
-          noEditGuardReason: terminal.noEditGuardReason,
-          noEditRecoveryAction: terminal.noEditRecoveryAction,
           firstWriteTurn: terminal.firstWriteTurn,
           writeActionCount: terminal.writeActionCount,
           originalTaskWriteActionCount: terminal.originalTaskWriteActionCount ?? terminal.writeActionCount,
           originalTaskFirstWriteTurn: terminal.originalTaskFirstWriteTurn ?? terminal.firstWriteTurn,
-          completionGuardDecision: terminal.completionGuardDecision,
-          completionGuardReason: terminal.completionGuardReason,
         });
       } catch { /* telemetry never blocks */ }
     }
-    if (terminal.completionGuardDecision === undefined && !this.lightweightOptions && executionPhase === "original_task") {
+    if (terminal.reason !== "completed" && !this.lightweightOptions && executionPhase === "original_task") {
       try {
         markOriginalTaskWriteStats(
           terminal.originalTaskWriteActionCount ?? terminal.writeActionCount ?? 0,
@@ -1005,7 +1035,6 @@ class AgentService {
         useChatStore.getState().updateLastRequestUsage({
           ...getTmsTurnTelemetry(),
           executionPhase,
-          mutableTask,
           originalTaskFailedReason: terminal.reason,
           originalTaskWriteActionCount: terminal.originalTaskWriteActionCount ?? terminal.writeActionCount ?? 0,
           originalTaskFirstWriteTurn: terminal.originalTaskFirstWriteTurn ?? terminal.firstWriteTurn,
@@ -1677,6 +1706,110 @@ class AgentService {
 
   // ── Manual compact commands ──
 
+  /**
+   * A compactação manual escreve no store DEPOIS de esperar pelo sumarizador
+   * (até 240s, SUMMARIZE_TIMEOUT_MS). `replaceMessages` resolve a sessão ativa
+   * no momento da ESCRITA, não no da leitura — e como o agente não está a
+   * correr, nada impede o developer de trocar de sessão ou de projeto durante
+   * essa espera.
+   *
+   * Isso sempre foi uma janela de escrita cruzada; passou a ser pior quando a
+   * compactação deixou de ser destrutiva, porque o que se escreve agora é o
+   * HISTÓRICO INTEIRO da sessão de origem em vez de duas mensagens. Transplante
+   * silencioso de uma conversa para cima de outra.
+   *
+   * Fixa-se a sessão à entrada e confirma-se à saída. Divergiu → não se escreve
+   * nada; a compactação perde-se, que é o resultado correto (o developer mudou
+   * de assunto).
+   */
+  private assertSameSession(pinnedSessionId: string): void {
+    if (useChatStore.getState().activeSessionId !== pinnedSessionId) {
+      throw new Error(
+        "A sessão mudou durante a compactação — nada foi escrito. Volte à sessão e repita.",
+      );
+    }
+  }
+
+  /**
+   * Teto do bloco de recuperação para a janela ATIVA. A janela é publicada por
+   * modelo (X-Model-Context-Window) e pode ser 128K ou 2M — um teto fixo em
+   * caracteres significava coisas opostas nos dois extremos.
+   */
+  private resolveRecoveryMaxChars(): number {
+    const { modelContextWindow, modelMaxOutputTokens, modelName } =
+      useAgentStore.getState();
+    const known = modelName ? MODEL_PROFILES[modelName] : undefined;
+    const window =
+      modelContextWindow ?? known?.contextWindow ?? FALLBACK_CONTEXT_WINDOW;
+    return getPostCompactRecoveryMaxChars(
+      window,
+      modelMaxOutputTokens ?? known?.maxOutputTokens ?? null,
+    );
+  }
+
+  /**
+   * Arquiva o bloco que a compactação manual vai substituir e devolve o
+   * caminho. Mesmo contrato do `archivePreCompact` do loop: best-effort, nunca
+   * lança. Duplicado em vez de partilhado porque o caminho do loop só existe
+   * quando há um QueryEngine vivo, e a compactação manual corre parada.
+   */
+  private async archiveForManualCompact(
+    older: InternalMessage[],
+  ): Promise<string | null> {
+    try {
+      const { archivePreCompactTranscript } = await import(
+        "./compactTranscriptArchive"
+      );
+      const chatState = useChatStore.getState();
+      const sessionId = chatState.activeSessionId;
+      if (!sessionId) return null;
+      const projectPath = chatState.sessions.get(sessionId)?.projectPath;
+      if (!projectPath) return null;
+      return await archivePreCompactTranscript(
+        projectPath,
+        sessionId,
+        older as import("./compactTranscriptArchive").ArchivedMessage[],
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Os dois payloads que a fronteira de compactação manual leva consigo — é
+   * ISTO que `rebuildConversationHistory` volta a emitir para o modelo, e a
+   * única coisa do lado manual que sobrevive à compactação.
+   *
+   * `summary` é narrativa (embrulhada com o enquadramento de continuação e o
+   * caminho do arquivo) e vai ao cartão expansível da UI; `recovery` é material
+   * (conteúdo de ficheiros, skills) e nunca é mostrado.
+   */
+  private async buildManualCompactBoundaryPayload(
+    summary: string,
+    transcriptPath: string | null,
+    recentMessagesPreserved: boolean,
+  ): Promise<{ summary: string; recovery?: string }> {
+    const { getCompactUserSummaryMessage } = await import("./compact/prompt");
+    const wrapped = getCompactUserSummaryMessage(
+      summary,
+      true,
+      recentMessagesPreserved,
+      transcriptPath,
+    );
+    try {
+      const { buildPostCompactRecoveryBlock } = await import("./contextManager");
+      const recovery = await buildPostCompactRecoveryBlock(
+        this.sessionState,
+        undefined,
+        this.resolveRecoveryMaxChars(),
+      );
+      return { summary: wrapped, recovery: recovery ?? undefined };
+    } catch {
+      // Recuperação é bónus — nunca impede a compactação.
+      return { summary: wrapped };
+    }
+  }
+
   async runManualCompact(
     _customInstructions?: string,
     onProgress?: (event: import("@/types/agent").CompactProgressEvent) => void,
@@ -1687,6 +1820,8 @@ class AgentService {
     const session = chatStore.getActiveSession();
     if (!session || session.messages.length < 4)
       throw new Error("Not enough messages to compact");
+    // Fixa a sessão: a escrita acontece depois de esperar pelo sumarizador.
+    const pinnedSessionId = chatStore.activeSessionId!;
 
     const anthropicMessages = buildInternalMessagesFromSession(session);
     if (anthropicMessages.length < 4)
@@ -1708,21 +1843,40 @@ class AgentService {
 
     try {
       autoSaveSessionMemory(anthropicMessages);
+      // Arquivo em paralelo com a sumarização — a escrita passa pelo IPC e é a
+      // segunda operação mais lenta deste caminho.
+      const archivePromise = this.archiveForManualCompact(anthropicMessages);
       const compressed = await this.runCompactViaSDK(anthropicMessages);
 
       const { runPostCompactCleanup } = await import("./compactCleanup");
       await runPostCompactCleanup();
 
-      const afterTokens = compressed.reduce(
-        (s, m) =>
-          s +
-          Math.ceil(
-            (typeof m.content === "string"
-              ? m.content
-              : JSON.stringify(m.content)
-            ).length / 4,
-          ),
-        0,
+      const rawSummary =
+        compressed.find((m) => m.role === "user")?.content ??
+        "Context was compressed.";
+      const summaryText =
+        typeof rawSummary === "string" ? rawSummary : JSON.stringify(rawSummary);
+
+      // A fronteira é o ÚNICO canal do lado manual: rebuildConversationHistory
+      // re-emite `compactSummary` (+ `compactRecovery`) e ignora tudo o resto
+      // que seja `system`. Antes ficava vazia e o resumo vivia só na bolha de
+      // assistant — o modelo lia-o como palavras SUAS de um turno anterior,
+      // sem o enquadramento ("continua sem perguntar"), sem o caminho do
+      // arquivo e sem o estado de trabalho recuperado.
+      const boundaryPayload = await this.buildManualCompactBoundaryPayload(
+        summaryText,
+        await archivePromise,
+        false,
+      );
+
+      // Conta o que a conversa passa REALMENTE a ocupar — os dois payloads da
+      // fronteira. Contar `compressed` media o intermediário do
+      // runCompactViaSDK, que nem sequer é o que fica no store: dizia "de 120K
+      // para 2K" enquanto a recuperação injetava mais 15K.
+      const afterTokens = Math.ceil(
+        (boundaryPayload.summary.length +
+          (boundaryPayload.recovery?.length ?? 0)) /
+          4,
       );
 
       const boundaryMessage: import("@/types/chat").ChatMessage = {
@@ -1735,20 +1889,25 @@ class AgentService {
           beforeTokens,
           messagesSummarized: anthropicMessages.length - compressed.length,
         },
+        compactSummary: boundaryPayload.summary,
+        ...(boundaryPayload.recovery
+          ? { compactRecovery: boundaryPayload.recovery }
+          : {}),
         level: "info",
-        content: `Conversa comprimida (${Math.round(beforeTokens / 1000)}K tokens).`,
+        content: `Conversa comprimida (${Math.round(beforeTokens / 1000)}K → ~${Math.round(afterTokens / 1000)}K tokens).`,
         timestamp: Date.now(),
       };
-      const summaryContent =
-        compressed.find((m) => m.role === "user")?.content ??
-        "Context was compressed.";
-      const summaryMessage: import("@/types/chat").ChatMessage = {
-        id: generateId("msg"),
-        role: "assistant",
-        content: `Contexto compactado de ${Math.round(beforeTokens / 1000)}K para ~${Math.round(afterTokens / 1000)}K tokens.\n\n${typeof summaryContent === "string" ? summaryContent : JSON.stringify(summaryContent)}`,
-        timestamp: Date.now(),
-      };
-      chatStore.replaceMessages([boundaryMessage, summaryMessage]);
+      // ACRESCENTA, não substitui (2026-07-31). `replaceMessages([boundary])`
+      // apagava o transcript do disco; agora a fronteira é um marcador e o
+      // corte é um filtro de leitura (rebuildConversationHistory + o slice do
+      // ChatView), portanto o histórico anterior continua exportável e o
+      // "mostrar histórico anterior" tem o que mostrar.
+      //
+      // A bolha visível de assistant desapareceu: o sumário vive no cartão
+      // expansível da fronteira (MessageBubble lê `compactSummary`). Tê-lo nos
+      // dois sítios mandava-o DUAS vezes para o modelo.
+      this.assertSameSession(pinnedSessionId);
+      chatStore.replaceMessages([...session.messages, boundaryMessage]);
       chatStore.resetTokenCounters();
       chatStore.setPostCompactSurveyPending(true);
 
@@ -1771,6 +1930,8 @@ class AgentService {
     const session = chatStore.getActiveSession();
     if (!session || session.messages.length < 4)
       throw new Error("Not enough messages to compact");
+    // Fixa a sessão: a escrita acontece depois de esperar pelo sumarizador.
+    const pinnedSessionId = chatStore.activeSessionId!;
 
     const anthropicMessages = buildInternalMessagesFromSession(session);
     if (anthropicMessages.length < 4)
@@ -1787,12 +1948,35 @@ class AgentService {
         ),
       0,
     );
-    const defaultKeep = Math.max(10, Math.ceil(anthropicMessages.length * 0.3));
-    const keep = keepRecentCount ?? defaultKeep;
-    const splitPoint = Math.max(0, anthropicMessages.length - keep);
-    const oldMessages = anthropicMessages.slice(0, splitPoint);
-    const recentMessages = anthropicMessages.slice(splitPoint);
 
+    // O corte é feito nas MENSAGENS DO STORE, não na forma interna.
+    //
+    // Antes cortava-se `anthropicMessages` e depois re-renderizavam-se os
+    // turnos preservados para texto (`contentAsText`) antes de os escrever de
+    // volta no store — ou seja, a "parte preservada" perdia a estrutura:
+    // tool_calls e tool_results deixavam de estar emparelhados e passavam a ser
+    // prosa. Agora que a fronteira é um filtro de leitura, os turnos recentes
+    // ficam onde estão, intactos, e a fronteira entra ANTES deles.
+    //
+    // Cortar em qualquer índice de ChatMessage é seguro: os tool_calls vivem NA
+    // mensagem de assistant e rebuildConversationHistory emite o par
+    // assistant+tool_results a partir dela, portanto um par nunca fica a cavalo
+    // de duas mensagens.
+    const storeMessages = session.messages;
+    const defaultKeep = Math.max(10, Math.ceil(storeMessages.length * 0.3));
+    const keep = keepRecentCount ?? defaultKeep;
+    const splitIdx = Math.max(0, storeMessages.length - keep);
+    const olderChat = storeMessages.slice(0, splitIdx);
+    const recentChat = storeMessages.slice(splitIdx);
+
+    if (olderChat.length === 0) throw new Error("Nothing to compact");
+
+    // Só o bloco ANTIGO vai ao sumarizador — o recente continua literal no
+    // contexto, resumi-lo seria duplicá-lo.
+    const oldMessages = buildInternalMessagesFromSession({
+      ...session,
+      messages: olderChat,
+    });
     if (oldMessages.length === 0) throw new Error("Nothing to compact");
 
     onProgress?.({ type: "hooks_start", hookType: "pre_compact" });
@@ -1800,6 +1984,7 @@ class AgentService {
 
     try {
       autoSaveSessionMemory(oldMessages);
+      const archivePromise = this.archiveForManualCompact(oldMessages);
 
       let summary: string;
       if (this.sessionState.getSummarizationFailures() >= 3) {
@@ -1814,27 +1999,42 @@ class AgentService {
         }
       }
 
-      const systemMsg = anthropicMessages[0];
-      const summaryMsg: InternalMessage = {
-        role: "assistant",
-        content: `[Partial compact — ${oldMessages.length} older messages summarized]\n\n${summary}`,
-      };
-      const compressed = [systemMsg, summaryMsg, ...recentMessages];
-
       const { runPostCompactCleanup } = await import("./compactCleanup");
       await runPostCompactCleanup();
 
-      const afterTokens = compressed.reduce(
-        (s, m) =>
-          s +
-          Math.ceil(
-            (typeof m.content === "string"
-              ? m.content
-              : JSON.stringify(m.content)
-            ).length / 4,
-          ),
-        0,
+      // O sumário SÓ vivia num array local usado para contar tokens — nunca
+      // chegava ao store, portanto a compactação parcial sumarizava e deitava
+      // fora o resultado: o modelo ficava com os turnos recentes e ZERO do que
+      // foi resumido. Agora vai na fronteira, que é o canal que
+      // rebuildConversationHistory lê.
+      const boundaryPayload = await this.buildManualCompactBoundaryPayload(
+        summary,
+        await archivePromise,
+        recentChat.length > 0,
       );
+
+      // O que a conversa passa a ocupar: os payloads da fronteira + os turnos
+      // que ficaram preservados.
+      const afterTokens =
+        Math.ceil(
+          (boundaryPayload.summary.length +
+            (boundaryPayload.recovery?.length ?? 0)) /
+            4,
+        ) +
+        buildInternalMessagesFromSession({
+          ...session,
+          messages: recentChat,
+        }).reduce(
+          (s, m) =>
+            s +
+            Math.ceil(
+              (typeof m.content === "string"
+                ? m.content
+                : JSON.stringify(m.content)
+              ).length / 4,
+            ),
+          0,
+        );
 
       const boundaryMessage: import("@/types/chat").ChatMessage = {
         id: generateId("msg"),
@@ -1844,40 +2044,22 @@ class AgentService {
         compactMetadata: {
           trigger: "manual",
           beforeTokens,
-          messagesSummarized: oldMessages.length,
+          messagesSummarized: olderChat.length,
         },
+        compactSummary: boundaryPayload.summary,
+        ...(boundaryPayload.recovery
+          ? { compactRecovery: boundaryPayload.recovery }
+          : {}),
         level: "info",
         content: `Compactação parcial (${Math.round(beforeTokens / 1000)}K → ~${Math.round(afterTokens / 1000)}K tokens).`,
         timestamp: Date.now(),
       };
-      const summaryMessage: import("@/types/chat").ChatMessage = {
-        id: generateId("msg"),
-        role: "assistant",
-        content: `Compactação parcial: ${oldMessages.length} mensagens resumidas, ${recentMessages.length} preservadas.`,
-        timestamp: Date.now(),
-      };
-      // Narrate structured content (tool_call/tool_result blocks) into
-      // readable text instead of JSON.stringify-ing it. The stringified form
-      // re-entered the next turn as literal `[{"type":"tool_call",...}]`
-      // prose — pseudo-structure the model read as data, with tool_calls and
-      // results no longer paired (context pollution audit, 2026-06-12).
-      // contentAsText renders `[tool: name(args)]` + result text, the same
-      // narration the mechanical compact fallback uses.
-      const recentChatMessages: import("@/types/chat").ChatMessage[] =
-        recentMessages.map((m) => ({
-          id: generateId("msg"),
-          role: m.role as "user" | "assistant",
-          content:
-            typeof m.content === "string"
-              ? m.content
-              : contentAsText(m.content),
-          timestamp: Date.now(),
-        }));
-      chatStore.replaceMessages([
-        boundaryMessage,
-        summaryMessage,
-        ...recentChatMessages,
-      ]);
+      // Antigo + fronteira + recente INTACTO. Os turnos preservados já não são
+      // re-renderizados para texto: ficam as mensagens reais, com os tool_calls
+      // e resultados emparelhados como sempre estiveram. O antigo fica no store
+      // (invisível por causa do filtro de leitura) em vez de ser apagado.
+      this.assertSameSession(pinnedSessionId);
+      chatStore.replaceMessages([...olderChat, boundaryMessage, ...recentChat]);
       chatStore.resetTokenCounters();
       chatStore.setPostCompactSurveyPending(true);
 
