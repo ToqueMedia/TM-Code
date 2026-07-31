@@ -2,6 +2,26 @@ export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = '__TM_SYSTEM_PROMPT_DYNAMIC_BOUNDA
 
 const EXPLICIT_CACHE_MIN_STATIC_BYTES = 4096
 
+/**
+ * Mínimo de conteúdo (em bytes) no histórico antes de valer a pena marcar a
+ * última mensagem.
+ *
+ * A documentação do Model Studio exige 1024 tokens para um bloco de cache
+ * explícito; abaixo disso o marcador é ignorado. Como criar cache custa 125% do
+ * preço de input e ler custa 10%, um marcador ignorado é premium pago a troco de
+ * nada. 4096 bytes é o mesmo limiar conservador que já se aplica ao bloco
+ * estático (~1024+ tokens em qualquer tokenizador razoável).
+ */
+const EXPLICIT_CACHE_MIN_HISTORY_BYTES = 4096
+
+/**
+ * Um pedido aceita no máximo 4 marcadores (os últimos 4 ganham, se houver mais).
+ * Usamos 2: o bloco estático do system e a última mensagem. A folga é
+ * deliberada — deixa espaço para um marcador nas tool definitions no futuro sem
+ * ter de repensar a contagem.
+ */
+const MAX_CACHE_MARKERS = 4
+
 const DASHSCOPE_EXPLICIT_CACHE_MODELS = new Set([
   'qwen3.7-max',
   'qwen3.7-max-2026-05-20',
@@ -64,6 +84,90 @@ function supportsExplicitCache(model: string, baseURL: string | undefined): bool
   return host === 'dashscope.aliyuncs.com' || host.includes('cn-beijing')
 }
 
+/**
+ * Marcador rolante na ÚLTIMA mensagem — cache incremental do histórico.
+ *
+ * PORQUE ISTO FALTAVA (2026-07-31)
+ * ────────────────────────────────
+ * Só se marcava o bloco de system. Consequência: o prefixo cacheado congelava
+ * aí e TODO o histórico era refaturado a preço cheio a cada turno — que é
+ * exatamente o que a sessão katondo-queue mostrou (12,36M tokens de input, valor
+ * cacheado parado nos 31.808 desde o turno 11). O caminho Anthropic
+ * (anthropicAdapter) já fazia isto; o DashScope não, e eu tinha-o dado como
+ * "não verificável sem testar contra a API".
+ *
+ * A documentação oficial responde e desmente essa cautela — Model Studio,
+ * "Context Cache" e "显式缓存最佳实践":
+ *   · o marcador é aceite em mensagens `system`, `user`, `assistant` E `tool`,
+ *     não só no system;
+ *   · máximo 4 marcadores por pedido (se houver mais, valem os últimos 4);
+ *   · mínimo 1024 tokens por bloco;
+ *   · e a recomendação para multi-turno é literalmente marcar o ÚLTIMO objecto
+ *     de conteúdo de cada turno, para o turno seguinte ler o bloco anterior e
+ *     escrever só o delta.
+ *
+ * Custo: criar cache é 125% do input, ler é 10%, e o bloco vive 5 minutos. Num
+ * loop de agente os turnos estão a segundos uns dos outros, portanto o delta
+ * escrito por turno é pequeno e o prefixo inteiro passa a ler-se a 10%. Numa
+ * conversa com pausas longas o bloco expira — mas esse risco já existia para o
+ * marcador do system e o padrão continua a ser o recomendado.
+ *
+ * Devolve true se marcou.
+ */
+function markLastMessageForCache(
+  messages: Array<Record<string, unknown>>,
+): boolean {
+  // Quanto conteúdo existe fora do system: é o que o segundo bloco vai cobrir.
+  let historyBytes = 0
+  for (const msg of messages) {
+    if (msg.role === 'system') continue
+    historyBytes += typeof msg.content === 'string'
+      ? msg.content.length
+      : JSON.stringify(msg.content ?? '').length
+  }
+  if (historyBytes < EXPLICIT_CACHE_MIN_HISTORY_BYTES) return false
+
+  // Da última para trás: uma mensagem de assistant que só traga `tool_calls`
+  // tem content nulo e não pode carregar o marcador.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg.role === 'system') break // chegámos ao prefixo estático: nada a marcar
+
+    if (typeof msg.content === 'string' && msg.content.length > 0) {
+      msg.content = [
+        { type: 'text', text: msg.content, cache_control: { type: 'ephemeral' } },
+      ]
+      return true
+    }
+
+    if (Array.isArray(msg.content)) {
+      const parts = msg.content as Array<Record<string, unknown>>
+      // O marcador vai num bloco de TEXTO. Blocos de imagem não o carregam, e
+      // marcar o último bloco às cegas podia cair num deles.
+      for (let p = parts.length - 1; p >= 0; p--) {
+        const part = parts[p]
+        if (part && part.type === 'text' && typeof part.text === 'string' && part.text.length > 0) {
+          part.cache_control = { type: 'ephemeral' }
+          return true
+        }
+      }
+    }
+  }
+  return false
+}
+
+/** Quantos marcadores existem já no corpo — o limite é por PEDIDO, não por mensagem. */
+function countCacheMarkers(messages: Array<Record<string, unknown>>): number {
+  let n = 0
+  for (const msg of messages) {
+    if (!Array.isArray(msg.content)) continue
+    for (const part of msg.content as Array<Record<string, unknown>>) {
+      if (part && typeof part === 'object' && 'cache_control' in part) n++
+    }
+  }
+  return n
+}
+
 export function applyDashScopePromptCacheForByok(
   body: Record<string, unknown>,
   expectedHost: string,
@@ -108,6 +212,13 @@ export function applyDashScopePromptCacheForByok(
       msg.content = before + (before && after ? '\n\n' : '') + after
     }
     changed = true
+  }
+
+  // Segundo marcador: a última mensagem, para o histórico entrar no cache em vez
+  // de ser refaturado a preço cheio a cada turno. Só quando o modelo suporta
+  // cache explícito — noutros casos o campo seria ruído no corpo.
+  if (canCache && countCacheMarkers(messages) < MAX_CACHE_MARKERS) {
+    if (markLastMessageForCache(messages)) changed = true
   }
 
   return changed
