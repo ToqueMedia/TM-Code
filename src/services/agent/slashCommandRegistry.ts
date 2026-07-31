@@ -5,6 +5,7 @@ import { executePayments } from './commands/paymentsCommand'
 import { executeE2E } from './commands/e2eCommand'
 import { executeReview } from './commands/reviewCommand'
 import { executeCompact } from './commands/compactCommand'
+import { executeContext } from './commands/contextCommand'
 // /speed RETIRADO da UI em 2026-07-16 (decisão do user: guardar como código
 // morto para reativação futura). Para o repor: descomentar estes imports e o
 // bloco de registo em registerDefaults(), voltar a montar o TmSpeedIndicator
@@ -155,6 +156,16 @@ class SlashCommandRegistry {
       enabled: true,
       execute: executeCompact,
       argHint: '[optional: custom instructions for summarization]',
+    })
+
+    // Só leitura: não fala com o modelo, não gasta tokens, e por isso não
+    // precisa de projeto aberto — responde sobre a sessão que existir.
+    this.register({
+      name: '/context',
+      description: t('slashCmd.context.desc'),
+      enabled: true,
+      execute: executeContext,
+      requiresProject: false,
     })
 
     // /speed RETIRADO em 2026-07-16 — código morto deliberado, será reusado.
