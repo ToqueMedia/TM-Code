@@ -169,6 +169,31 @@ describe('chatStore', () => {
       expect(finalMsg.isStreaming).toBe(false)
     })
 
+    it('stamps wasInterrupted when finalized with interrupted and content exists', () => {
+      useChatStore.getState().createSession('/test/project')
+      const assistantId = useChatStore.getState().startAssistantMessage()
+      useChatStore.getState().appendTextDelta('partial answer')
+
+      useChatStore.getState().finalizeAssistantMessage({ interrupted: true })
+
+      const msg = useChatStore.getState().getActiveSession()!.messages.find(m => m.id === assistantId)!
+      expect(msg.wasInterrupted).toBe(true)
+    })
+
+    it('does NOT stamp wasInterrupted on an empty bubble or a normal finalize', () => {
+      useChatStore.getState().createSession('/test/project')
+      const emptyId = useChatStore.getState().startAssistantMessage()
+      useChatStore.getState().finalizeAssistantMessage({ interrupted: true })
+      const empty = useChatStore.getState().getActiveSession()!.messages.find(m => m.id === emptyId)!
+      expect(empty.wasInterrupted).toBeUndefined()
+
+      const normalId = useChatStore.getState().startAssistantMessage()
+      useChatStore.getState().appendTextDelta('done')
+      useChatStore.getState().finalizeAssistantMessage()
+      const normal = useChatStore.getState().getActiveSession()!.messages.find(m => m.id === normalId)!
+      expect(normal.wasInterrupted).toBeUndefined()
+    })
+
     it('marks UI-only streaming text separately from model text', () => {
       useChatStore.getState().createSession('/test/project')
       const assistantId = useChatStore.getState().startAssistantMessage()

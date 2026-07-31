@@ -39,6 +39,9 @@ export interface GitContext {
   files: Array<{ path: string; status: string; staged: boolean }>
   /** How many changed files were dropped past the 50-file cap (0 = none). */
   truncatedFiles: number
+  /** Last few `git log --oneline` lines (newest first). Empty when the repo
+   *  has no commits or history couldn't be read — never fatal. */
+  recentCommits: string[]
 }
 
 /** A recently-modified file (project-relative path + unix-seconds mtime). */

@@ -59,6 +59,6 @@ export function stopAgentRun(): boolean {
   AgentService.getInstance().cancelLoop()
   useAgentStore.getState().setError(null)
   useAgentStore.getState().setStatus('cancelled')
-  useChatStore.getState().finalizeAssistantMessage()
+  useChatStore.getState().finalizeAssistantMessage({ interrupted: true })
   return true
 }

@@ -822,14 +822,21 @@ export function getGitStatusSection(ctx: PromptContext): string | null {
 
   const header = `# Git\n(snapshot at turn start — changes you make THIS turn won't show here)\nbranch: ${git.branch}${syncStr}`
 
+  // History headline (cli-vaz parity): primes the model that git history
+  // exists — `git log -- <path>` answers "when did this disappear?" in one
+  // call instead of exhaustive filesystem greps.
+  const commits = git.recentCommits.length
+    ? `\nrecent commits:\n${git.recentCommits.map(c => `  ${c}`).join('\n')}`
+    : ''
+
   if (!git.files.length) {
-    return `${header}\nworking tree clean`
+    return `${header}\nworking tree clean${commits}`
   }
 
   // Domain TSV (status\tpath\tstaged|unstaged) — bench winner vs JSON/TOON.
   const fileLines = formatGitStatusDomain(git.files)
   const more = git.truncatedFiles ? `\n… and ${git.truncatedFiles} more` : ''
-  return `${header}\nchanged files (${git.files.length}${git.truncatedFiles ? '+' : ''}; columns: status\\tpath\\tstaged|unstaged):\n${fileLines}${more}`
+  return `${header}\nchanged files (${git.files.length}${git.truncatedFiles ? '+' : ''}; columns: status\\tpath\\tstaged|unstaged):\n${fileLines}${more}${commits}`
 }
 
 

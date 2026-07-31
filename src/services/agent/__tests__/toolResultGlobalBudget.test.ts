@@ -116,3 +116,38 @@ describe('applyGlobalToolResultBudget', () => {
     expect(contents[1].startsWith('[tool-result-summary]')).toBe(true)
   })
 })
+
+// ── Invariante de que a âncora de ocupação depende (2026-07-31) ───────────
+//
+// `resolveOccupancyWithSource` ancora no nº de mensagens do pedido anterior:
+// as primeiras N estão cobertas pelo `usage` real do provider e só as
+// seguintes passam pelo estimador. Isso SÓ é seguro porque este módulo
+// reescreve CONTEÚDO sem mexer no número nem na ordem das mensagens — se um
+// dia passar a remover mensagens, o índice âncora passa a apontar para
+// mensagens diferentes e a ocupação fica silenciosamente errada, na direcção
+// que causa `prompt_too_long`.
+//
+// O teste vive aqui, junto de quem pode partir a invariante, e não junto de
+// quem depende dela.
+describe('invariante: reescrever nunca muda o número nem a ordem das mensagens', () => {
+  it('preserva length e papéis mesmo quando compacta agressivamente', () => {
+    const messages: MessageLike[] = []
+    for (let i = 0; i < 12; i++) {
+      messages.push(...readPair(`t${i}`, `/src/file${i}.ts`, 30_000))
+    }
+    const before = messages.map(m => m.role)
+
+    const out = applyGlobalToolResultBudget(messages, { budgetTokens: 5_000, keepRecent: 2 })
+
+    expect(out.compactedCount).toBeGreaterThan(0)      // compactou mesmo
+    expect(out.messages).toHaveLength(messages.length) // …sem perder mensagens
+    expect(out.messages.map(m => m.role)).toEqual(before)
+  })
+
+  it('preserva length quando NÃO compacta nada (abaixo do orçamento)', () => {
+    const messages = readPair('a', '/src/a.ts', 100)
+    const out = applyGlobalToolResultBudget(messages, { budgetTokens: 40_000 })
+    expect(out.compactedCount).toBe(0)
+    expect(out.messages).toHaveLength(messages.length)
+  })
+})

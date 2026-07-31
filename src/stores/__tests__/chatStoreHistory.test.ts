@@ -52,7 +52,7 @@ jest.mock('../../utils/logger', () => ({
   },
 }))
 
-import { rebuildConversationHistory } from '../chatStore'
+import { INTERRUPT_MESSAGE, rebuildConversationHistory } from '../chatStore'
 import type { ChatMessage, ProviderState } from '../../types/chat'
 
 const ts = 1718000000000
@@ -384,5 +384,48 @@ describe('rebuildConversationHistory — UI-only assistant text', () => {
     expect(resultBlocks).toEqual([
       { type: 'tool_result', toolCallId: 'id1', content: 'r1' },
     ])
+  })
+})
+
+describe('rebuildConversationHistory — interrupt marker (wasInterrupted)', () => {
+  it('emits the marker after the per-turn results in the providerStates path', () => {
+    const assistant: ChatMessage = {
+      id: 'a1',
+      role: 'assistant',
+      content: 'partial',
+      timestamp: ts,
+      toolCalls: [toolCall('id1', 'r1')],
+      providerStates: [nativeTurn('partial', [{ id: 'id1', name: 'read_file' }])],
+      wasInterrupted: true,
+    }
+
+    const history = rebuildConversationHistory([userMsg('hi'), assistant])
+
+    // user, assistant, results, interrupt marker
+    expect(history.map(m => m.role)).toEqual(['user', 'assistant', 'user', 'user'])
+    expect(history[3].content).toBe(INTERRUPT_MESSAGE)
+  })
+
+  it('emits the marker in the legacy path (text-only aborted reply)', () => {
+    const assistant: ChatMessage = {
+      id: 'a1',
+      role: 'assistant',
+      content: 'I will now remove the three',
+      timestamp: ts,
+      wasInterrupted: true,
+    }
+
+    const history = rebuildConversationHistory([userMsg('remove them'), assistant])
+
+    expect(history.map(m => m.role)).toEqual(['user', 'assistant', 'user'])
+    expect(history[2].content).toBe(INTERRUPT_MESSAGE)
+  })
+
+  it('emits NO marker without the flag', () => {
+    const history = rebuildConversationHistory([
+      userMsg('hi'),
+      { id: 'a1', role: 'assistant', content: 'done', timestamp: ts },
+    ])
+    expect(history.some(m => m.content === INTERRUPT_MESSAGE)).toBe(false)
   })
 })

@@ -1549,6 +1549,7 @@ pub fn run() {
             git_show_file,
             git_current_branch,
             git_upstream_divergence,
+            git_recent_commits,
             git_clone_repository,
             git_push,
             git_list_branches,

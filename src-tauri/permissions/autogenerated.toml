@@ -133,6 +133,7 @@ commands.allow = [
   "git_checkout_branch",
   "git_create_branch",
   "git_upstream_divergence",
+  "git_recent_commits",
   "git_clone_repository",
   "git_push",
   "git_pull",

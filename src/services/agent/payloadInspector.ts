@@ -32,12 +32,15 @@
  */
 
 import { splitOnBoundary } from './contextBuilder/helpers'
+import { CHARS_PER_TOKEN_ESTIMATE } from './agentConfig'
 
 // ── Token estimate (matches compact/autoCompact.ts roughTokenEstimate) ──
-// ceil(length / 3) — the project's existing heuristic. Keeping it identical
+// Divisor MEDIDO e partilhado — ver CHARS_PER_TOKEN_ESTIMATE em agentConfig.ts.
+// (Era `3` duplicado aqui e no autoCompact, com um comentário a prometer que
+//  as duas cópias ficariam iguais. Ficaram — ambas 35% altas.)
 // means the inspector's numbers line up with what autoCompact sees.
 function roughTokenEstimate(text: string): number {
-  return Math.ceil(text.length / 3)
+  return Math.ceil(text.length / CHARS_PER_TOKEN_ESTIMATE)
 }
 
 // ── FNV-1a 32-bit hash ──
@@ -200,6 +203,20 @@ export interface PayloadReport {
   duplicates: Array<{ hash: string; count: number; tokens: number; preview: string }>
   /** One entry per tool_result block in the payload, in order. */
   toolResults: Array<{ messageIndex: number; toolCallId: string; tokens: number; chars: number; hash: string; preview: string }>
+  /**
+   * FNV-1a do segmento CACHEÁVEL do pedido (tools + system prompt). Se muda
+   * entre turnos, o prefixo inteiro do provider foi invalidado — nada a
+   * jusante pode acertar no cache.
+   */
+  promptPrefixHash: string
+  /**
+   * FNV-1a por mensagem, na ordem em que vão no pedido. Um turno em que o
+   * cache read desce compara-se com o anterior: o primeiro índice em que os
+   * hashes divergem é o ponto onde o prefixo deixou de dar match. Se divergir
+   * num índice ANTIGO, alguém reescreveu histórico já enviado — a única coisa
+   * que parte um prefixo de forma irrecuperável.
+   */
+  messageHashes: string[]
   /**
    * Churn do toolset vs o request anterior — proxy de invalidação de prompt
    * cache. O array `tools` faz parte do prefixo cacheável do provider:
@@ -507,7 +524,7 @@ export function inspectPayload(
   const tally = (kind: string, chars: number) => {
     if (!byCategory[kind]) byCategory[kind] = { blocks: 0, tokens: 0, chars: 0 }
     byCategory[kind].blocks++
-    byCategory[kind].tokens += Math.ceil(chars / 3)
+    byCategory[kind].tokens += Math.ceil(chars / CHARS_PER_TOKEN_ESTIMATE)
     byCategory[kind].chars += chars
   }
 
@@ -627,13 +644,30 @@ export function inspectPayload(
 
   // Tool definitions (schemas sent as the `tools` param)
   let toolDefsTokens = 0
+  let toolsSignature = ''
   if (tools && tools.length > 0) {
     for (const t of tools) {
       const fn = t.function ?? t
       const serialized = JSON.stringify(fn)
       toolDefsTokens += roughTokenEstimate(serialized)
+      toolsSignature += serialized
     }
   }
+
+  // ── Assinaturas do prefixo, para diagnosticar invalidação de cache ──
+  //
+  // O provider faz prefix-matching automático (não há `cache_control` em lado
+  // nenhum, nem no cliente nem no worker), portanto o único controlo que temos
+  // é manter o prefixo byte-estável. Quando o cache read CAI entre turnos —
+  // observado de forma reprodutível no turno 6 de duas sessões, e uma vez com
+  // o input a ENCOLHER, o que só pode ser histórico reescrito — a pergunta é
+  // "que bytes mudaram?". Estes hashes respondem com um diff entre dois
+  // turnos, em vez de se inferir a causa a partir de contagens de tokens.
+  //
+  // São FNV-1a de 32 bits com cache de conteúdo→hash: barato, e o histórico
+  // re-enviado acerta no cache em quase todos os blocos.
+  const promptPrefixHash = fnv1aHex(`${toolsSignature}\u0000${systemPrompt ?? ''}`)
+  const messageHashes = messages.map(m => fnv1aHex(JSON.stringify(m ?? null)))
 
   const systemPromptTokens = systemPrompt ? roughTokenEstimate(systemPrompt) : 0
   const { systemPromptSections, auxiliaryPromptCandidates } = analyzeSystemPrompt(systemPrompt)
@@ -739,6 +773,8 @@ export function inspectPayload(
     model,
     totalMessages: messages.length,
     totalEstimatedTokens,
+    promptPrefixHash,
+    messageHashes,
     systemPromptTokens,
     mentionContextTokens,
     systemPromptSections,

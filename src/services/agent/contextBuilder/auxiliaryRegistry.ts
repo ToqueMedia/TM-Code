@@ -155,7 +155,6 @@ export interface AuxiliarySelection {
   requestContextFallbackTo?: string[]
   requestedButNotLoadedSections?: string[]
   readOnly: boolean
-  requiresMutation: boolean
   reason: string
   routerSource: 'model' | 'fallback' | 'keyword'
   routerConfidence: 'high' | 'medium' | 'low' | 'none'
@@ -606,7 +605,7 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     domain: 'delivery/git',
     capability: 'git_status',
     name: 'Git status',
-    description: 'Branch, upstream state, and changed files snapshot.',
+    description: 'Branch, upstream state, changed files, and recent commits snapshot.',
     scope: 'git',
     costTier: 'low',
     granularity: 'summary',
@@ -619,7 +618,7 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     expectedFiles: ['.git'],
     summaryAvailable: true,
     fullAvailable: true,
-    estTokens: 450,
+    estTokens: 520,
     type: 'dynamic',
     aliases: ['git_status_detail'],
     phase: 1,
@@ -782,7 +781,6 @@ export function selectAuxiliaries(
   routerInfo?: { source: 'model' | 'fallback' | 'keyword'; confidence?: 'high' | 'medium' | 'low' | 'none'; error?: string; diagnostics?: RouterDiagnostics },
   contextPlanOverride?: ContextPlan,
   plannerInfo?: { status: 'parsed' | 'fallback'; source?: 'model' | 'fallback'; modelTier?: 'utility' | 'code'; error?: string; rawOutput?: string; fallbackReason?: string; selectionReason?: string },
-  requiresMutationHint?: boolean,
 ): AuxiliarySelection {
   void userMessage
   const phase1 = AUXILIARY_METAS.filter((m) => m.phase === 1)
@@ -854,7 +852,6 @@ export function selectAuxiliaries(
     requestContextFallbackTo: [],
     requestedButNotLoadedSections: [],
     readOnly: readOnlyHint === true,
-    requiresMutation: readOnlyHint === true ? false : requiresMutationHint === true,
     reason: reason ?? `context planner (taskDomain=${contextPlan.taskDomain})`,
     routerSource: routerInfo?.source ?? 'keyword',
     routerConfidence: routerInfo?.confidence ?? 'none',

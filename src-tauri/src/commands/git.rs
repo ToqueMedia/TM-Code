@@ -804,6 +804,32 @@ pub async fn git_upstream_divergence(
     }
 }
 
+/// Last N one-line commits for the agent's git orientation snapshot.
+/// `--no-optional-locks` avoids touching index locks from a read-only query.
+/// A repo with no commits yet makes `git log` fail — that's an empty history,
+/// not an error, so it returns an empty list.
+#[tauri::command]
+pub async fn git_recent_commits(
+    project_path: String,
+    limit: Option<u32>,
+) -> Result<Vec<String>, String> {
+    let n = limit.unwrap_or(5).min(50).to_string();
+    let output = git_cmd(&project_path)
+        .args(["--no-optional-locks", "log", "--oneline", "-n", &n])
+        .output()
+        .map_err(|e| format!("Failed to run git log: {}", e))?;
+
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|l| l.to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
 /// Push to remote
 #[tauri::command]
 pub async fn git_push(

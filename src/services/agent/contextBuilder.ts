@@ -133,7 +133,6 @@ import {
 type IntentOverride = {
   profile: PromptProfile
   readOnly: boolean
-  requiresMutation?: boolean
   reason?: string
   source?: 'model' | 'fallback' | 'keyword'
   confidence?: 'high' | 'medium' | 'low' | 'none'
@@ -664,7 +663,6 @@ class ContextBuilder {
     const auxProfile: PromptProfile = intentOverride?.profile
       ?? (signals?.hasImage ? 'vision' : 'bugfix_local')
     const readOnly = intentOverride?.readOnly ?? false
-    const requiresMutation = !readOnly && intentOverride?.requiresMutation === true
     // SELEÇÃO DE CONTEXTO: DETERMINISTA, sem chamar modelo nenhum.
     //
     // Houve aqui um planner por MODELO (chamada sidecar pré-voo). Foi desligado
@@ -712,7 +710,6 @@ class ContextBuilder {
         source: contextPlan.source,
         selectionReason: contextPlan.reason,
       },
-      requiresMutation,
     )
     this.lastAuxiliarySelection = auxSelection
     const contextPlanSig = [
@@ -720,7 +717,7 @@ class ContextBuilder {
       auxSelection.contextPlan.selectedContexts.join(','),
       auxSelection.contextPlan.candidateContexts.join(','),
     ].join('|')
-    const cacheKeyBase = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|${mcpSig}|${stickyHashtagSig}|fs${fsVersion}|ac${accessedCount}|p${auxProfile}|ro${auxSelection.readOnly ? 1 : 0}|mut${auxSelection.requiresMutation ? 1 : 0}|cp${contextPlanSig}`
+    const cacheKeyBase = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|${mcpSig}|${stickyHashtagSig}|fs${fsVersion}|ac${accessedCount}|p${auxProfile}|ro${auxSelection.readOnly ? 1 : 0}|cp${contextPlanSig}`
 
     const now = Date.now()
     // Kick off memory work IMMEDIATELY so its network call (selector

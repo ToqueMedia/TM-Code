@@ -79,11 +79,13 @@ export async function buildFileTree(projectPath: string): Promise<string> {
  */
 export async function gatherGitContext(projectPath: string): Promise<GitContext | null> {
   try {
-    const [branch, files, divergence] = await Promise.all([
+    const [branch, files, divergence, recentCommits] = await Promise.all([
       invoke<string>('git_current_branch', { projectPath }),
       invoke<Array<{ path: string; status: string; staged: boolean }>>('git_status_files', { projectPath }),
       // Returns null when there's no upstream — local-only branch, not an error.
       invoke<{ ahead: number; behind: number } | null>('git_upstream_divergence', { projectPath }).catch(() => null),
+      // History headline (git log --oneline -n 5) — empty on fresh repos.
+      invoke<string[]>('git_recent_commits', { projectPath, limit: 5 }).catch(() => [] as string[]),
     ])
     return {
       branch,
@@ -91,6 +93,7 @@ export async function gatherGitContext(projectPath: string): Promise<GitContext 
       behind: divergence?.behind ?? 0,
       files: files.slice(0, 50),
       truncatedFiles: files.length > 50 ? files.length - 50 : 0,
+      recentCommits,
     }
   } catch {
     // Not a git repo (or git unavailable) — no orientation block.
