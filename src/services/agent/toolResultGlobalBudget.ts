@@ -61,14 +61,64 @@ import { GREP_ALIAS, READ_ALIAS, canonicalToolName, normalizeToolInputForCanonic
 
 // ── Constants ──
 
-/** Global cap on combined tool-result tokens per request. ~40K tokens. */
+/**
+ * Orçamento por omissão — usado SÓ quando a janela real é desconhecida (turno 1
+ * pré-handshake, modelo sem perfil). O valor a sério vem de
+ * `getToolResultBudgetTokens(janela)` em utils/contextWindow.ts e segue a janela
+ * publicada pelo admin: era esta constante fixa a última peça da gestão de
+ * contexto que ignorava se o modelo tinha 128K ou 1M.
+ */
 export const GLOBAL_TOOL_RESULT_BUDGET_TOKENS = 40_000
 
 /** Number of most-recent tool results kept COMPLETE (never compacted). */
 export const DEFAULT_KEEP_RECENT = 4
 
+/**
+ * Marca de água BAIXA: uma vez ultrapassado o budget, evicta-se até AQUI, não
+ * até um fio abaixo do teto.
+ *
+ * PORQUÊ (medido 2026-07-31)
+ * ──────────────────────────
+ * Evictar o mínimo indispensável significa voltar a cruzar o teto no turno
+ * seguinte, e no seguinte, e no seguinte: uma reescrita do histórico POR TURNO,
+ * sempre perto da cabeça do array. Todos os providers que temos fazem cache por
+ * PREFIXO — a primeira mudança de bytes invalida tudo o que vem depois. Reescrever
+ * o bloco mais antigo a cada pedido é, na prática, garantir 0% de cache num
+ * histórico longo (sessão katondo-queue, 29-07: 12,36M tokens de input, valor
+ * cacheado parado em 31.808 desde o turno 11).
+ *
+ * É esta a resposta portável ao "microcompact com edição de cache" do claude-vaz:
+ * não temos a API para apagar de dentro do prefixo cacheado, mas podemos deixar
+ * de lhe mexer. Com a banda de histerese a evicção passa de todos os turnos para
+ * um em cada N — e como se evicta do mais ANTIGO para o mais recente, a cabeça
+ * do histórico estabiliza de vez e o prefixo que sobrevive vai crescendo.
+ *
+ * O custo é evictar mais working set de cada vez. `keepRecent` continua a
+ * proteger o que o modelo tem em mãos.
+ */
+export const BUDGET_LOW_WATER_RATIO = 0.7
+
 /** Preview chars included in the compact summary. */
 const SUMMARY_PREVIEW_CHARS = 800
+
+/**
+ * Cabeçalho do bloco de substituição. Serve de MARCA: um resultado que já o tem
+ * não volta a ser compactado.
+ *
+ * Sem esta marca a compactação não era idempotente — cada turno embrulhava o
+ * sumário anterior num sumário novo. Medido com uma sonda: ao turno 7 o
+ * resultado mais antigo tinha SETE camadas de `[tool-result-summary]`, o preview
+ * mostrava o cabeçalho da camada anterior em vez do ficheiro, e o total
+ * ULTRAPASSAVA o budget (3303 → 6247 tokens com teto de 5000) porque cada volta
+ * ACRESCENTAVA bytes em vez de os tirar. A dica de releitura continuava lá, mas
+ * já não havia conteúdo nenhum por baixo para reler.
+ */
+const SUMMARY_MARKER = '[tool-result-summary]'
+
+/** Um resultado já substituído por um sumário estruturado. */
+function isAlreadyCompacted(content: string): boolean {
+  return content.startsWith(SUMMARY_MARKER)
+}
 
 // ── Token estimate (matches compact/autoCompact.ts) ──
 function roughTokenEstimate(text: string): number {
@@ -214,7 +264,7 @@ function buildCompactSummary(
   }
 
   const lines: string[] = [
-    `[tool-result-summary]`,
+    SUMMARY_MARKER,
     `tool: ${toolName ?? 'unknown'}${canonicalName && canonicalName !== toolName ? ` (${canonicalName})` : ''}${context ? ` | ${context}` : ''} | original: ${chars} chars (~${tokens} tokens) | hash: ${hash}`,
   ]
   if (chars > 0) {
@@ -319,9 +369,15 @@ export function applyGlobalToolResultBudget(
   // eviction below this line exists to protect the context window and the
   // per-request bill, not to minimise at all costs. Keeping the working set
   // intact is what lets the agent decide its next step without re-reading.
+  //
+  // O teto é a marca de água ALTA; passada, evicta-se até `target` (a baixa).
+  // Ver BUDGET_LOW_WATER_RATIO: é o que transforma "reescrever o histórico
+  // todos os turnos" em "reescrever um turno em cada N", que é o mais perto do
+  // microcompact-com-edição-de-cache a que se chega sem a API para isso.
   if (tokensBefore <= budget) {
     return { messages, compactedCount: 0, tokensBefore, tokensAfter: tokensBefore }
   }
+  const target = Math.floor(budget * BUDGET_LOW_WATER_RATIO)
 
   // The most recent result (last in array) is ALWAYS kept complete — the model
   // just received it and needs it to continue the current step.
@@ -330,39 +386,46 @@ export function applyGlobalToolResultBudget(
     allResults.slice(-recentCount).map(r => `${r.messageIndex}:${r.blockIndex}`),
   )
 
-  // Build the compact-candidate list: older results that are NOT recent and NOT pinned.
-  // Ordered oldest-first so we compact the oldest first.
+  // Build the compact-candidate list: older results that are NOT recent, NOT
+  // pinned e NÃO compactados. Um resultado já compactado é bytes estáveis que
+  // valem cache — tocar-lhe outra vez custa o prefixo inteiro e não liberta
+  // nada (o sumário já é pequeno). Ordered oldest-first.
   const compactCandidates = allResults.filter(
-    r => !recentSet.has(`${r.messageIndex}:${r.blockIndex}`) && !isPinned(r, pinnedPaths),
+    r =>
+      !recentSet.has(`${r.messageIndex}:${r.blockIndex}`) &&
+      !isPinned(r, pinnedPaths) &&
+      !isAlreadyCompacted(r.content),
   )
 
   // Set of results to compact (messageIndex:blockIndex keys).
   const toCompact = new Set<string>()
 
-  // Phase 1: over budget — evict OLDEST-first, and only as many as it takes
-  // to get back under. Results the model is still working with survive as
-  // long as the budget allows, instead of being unconditionally destroyed.
-  let tokensAfterPhase1 = tokensBefore
+  // Phase 1: over budget — evict OLDEST-first até à marca BAIXA. Results the
+  // model is still working with survive as long as the budget allows, instead
+  // of being unconditionally destroyed.
+  let projected = tokensBefore
   for (const r of compactCandidates) {
-    if (tokensAfterPhase1 <= budget) break
+    if (projected <= target) break
     toCompact.add(`${r.messageIndex}:${r.blockIndex}`)
     // Approximate the compact summary size: ~1000 chars (header + 800 preview + footer).
-    tokensAfterPhase1 = tokensAfterPhase1 - r.tokens
+    projected = projected - r.tokens
       + roughTokenEstimate(buildCompactSummary(r.content, r.toolName, r.toolArgs))
   }
 
-  // Phase 2: if still over budget, compact progressively older "recent" results
-  // (from the oldest recent toward the newest), but NEVER the single most recent.
-  if (tokensAfterPhase1 > budget && recentCount > 1) {
+  // Phase 2: if still over the HIGH mark, compact progressively older "recent"
+  // results (from the oldest recent toward the newest), but NEVER the single
+  // most recent. Aqui o alvo é o teto, não a marca baixa: já se está a comer o
+  // working set imediato do modelo, portanto tira-se o mínimo.
+  if (projected > budget && recentCount > 1) {
     // recentResults ordered oldest-first, excluding the very last (most recent).
     const recentResults = allResults.slice(-recentCount, -1)
     for (const r of recentResults) {
-      if (tokensAfterPhase1 <= budget) break
-      if (isPinned(r, pinnedPaths)) continue
+      if (projected <= budget) break
+      if (isPinned(r, pinnedPaths) || isAlreadyCompacted(r.content)) continue
       toCompact.add(`${r.messageIndex}:${r.blockIndex}`)
       // Recalculate: this result goes from full tokens to summary tokens.
       const summaryTokens = roughTokenEstimate(buildCompactSummary(r.content, r.toolName, r.toolArgs))
-      tokensAfterPhase1 = tokensAfterPhase1 - r.tokens + summaryTokens
+      projected = projected - r.tokens + summaryTokens
     }
   }
 
