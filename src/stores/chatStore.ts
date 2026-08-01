@@ -13,6 +13,7 @@ import { useReasoningEffortStore } from './reasoningEffortStore'
 import { resolveEffortModelId, resolveEffortTurnStamp } from '../services/agent/reasoningEffortModels'
 import { clearCommandQueue as clearMessageQueue } from '../services/agent/messageQueue'
 import { clearMentionContextTracker } from '../services/agent/mentionContextTracker'
+import { endWriteBatch } from '../services/agent/writeBatch'
 export { clearMessageQueue }
 import { setQueueLogContext } from '../services/agent/queueOperationLog'
 import { logger } from '../utils/logger'
@@ -283,6 +284,10 @@ interface ChatActions {
   // Inline diff actions (centralized — handle DiffService + store + agent unblock atomically)
   approveDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => Promise<void>
   rejectDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => void
+  /** Variantes por diffResultId (DiffApprovalPanel só tem o DiffResult):
+   *  localizam messageId+toolCallId e delegam nas ações acima. */
+  approveDiffByResultId: (diffResultId: string) => Promise<void>
+  rejectDiffByResultId: (diffResultId: string) => void
   approveAllPendingDiffs: () => Promise<void>
   rejectAllAndStop: () => Promise<void>
   // Low-level diff status (used internally / by GeneratingView)
@@ -677,6 +682,32 @@ export function resolveDiffApprovalByResultId(diffResultId: string, approved: bo
   // GeneratingView and inline approval), or the diffResultId is stale.
 }
 
+/**
+ * Localiza o par messageId+toolCallId de um diff pendente a partir do seu
+ * diffResultId — mesma pesquisa de resolveDiffApprovalByResultId, mas
+ * devolvendo a localização para as ações approveDiff/rejectDiff (que
+ * precisam do messageId para o update atómico do transcript).
+ */
+function findDiffLocationByResultId(diffResultId: string): { messageId: string; toolCallId: string } | null {
+  const state = useChatStore.getState()
+  const session = state.getActiveSession()
+  if (!session) return null
+  for (const msg of session.messages) {
+    const tc = msg.toolCalls?.find(t => t.diffResultId === diffResultId)
+    if (tc?.id) return { messageId: msg.id, toolCallId: tc.id }
+  }
+  // Fallback: pendingDiffs conhece o toolCallId; encontra a mensagem dona.
+  const diff = state.pendingDiffs.find(d => d.id === diffResultId)
+  if (diff?.toolCallId) {
+    for (const msg of session.messages) {
+      if (msg.toolCalls?.some(t => t.id === diff.toolCallId)) {
+        return { messageId: msg.id, toolCallId: diff.toolCallId }
+      }
+    }
+  }
+  return null
+}
+
 export async function createDiffApprovalPromise(toolCallId: string): Promise<boolean> {
   // Auto-aprovação de diffs por DOIS interruptores:
   //  - autoApproveDiffs ("Accept All" no chrome do chat), como sempre;
@@ -789,6 +820,10 @@ export function resolveAllPendingDiffApprovals(approved: boolean) {
     resolve(approved)
   }
   pendingDiffApprovals.clear()
+  // Um lote de writes órfão (abort/stop a meio do turno) deixaria o gate do
+  // toolExecutor a deixar passar tools de runs futuros — limpar aqui cobre
+  // todos os caminhos de cancelamento de uma vez.
+  endWriteBatch()
 
   // Desbloquear o agente NÃO chega: o `diffStatus` dos tool calls ficava em
   // `pending`, portanto o cartão de diff mantinha os botões Accept/Reject vivos
@@ -815,6 +850,15 @@ export function resolveAllPendingDiffApprovals(approved: boolean) {
  */
 export function hasPendingDiffApprovals(): boolean {
   return pendingDiffApprovals.size > 0
+}
+
+/**
+ * IDs (toolCallId) das aprovações de diff atualmente pendentes. O gate do
+ * toolExecutor usa isto para deixar passar membros do lote de writes ativo
+ * (writeBatch.ts) enquanto bloqueia tudo o resto.
+ */
+export function getPendingDiffApprovalToolIds(): string[] {
+  return Array.from(pendingDiffApprovals.keys())
 }
 
 function appendTextToStreamingMessage(msg: ChatMessage, delta: string, uiOnly = false): void {
@@ -3226,6 +3270,18 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
       // 3. Unblock agent (rejected)
       resolveDiffApproval(toolCallId, false)
+    },
+
+    approveDiffByResultId: async (diffResultId: string) => {
+      const loc = findDiffLocationByResultId(diffResultId)
+      if (!loc) return
+      await get().approveDiff(loc.messageId, loc.toolCallId, diffResultId)
+    },
+
+    rejectDiffByResultId: (diffResultId: string) => {
+      const loc = findDiffLocationByResultId(diffResultId)
+      if (!loc) return
+      get().rejectDiff(loc.messageId, loc.toolCallId, diffResultId)
     },
 
     rejectAllAndStop: async () => {
