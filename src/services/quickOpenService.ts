@@ -1,4 +1,11 @@
 import { logger } from '../utils/logger'
+import { invoke } from '@/utils/invokeMetrics'
+
+interface FileTreeNode {
+  name: string
+  isDirectory?: boolean
+  children?: FileTreeNode[]
+}
 
 export interface QuickOpenItem {
   path: string
@@ -251,62 +258,67 @@ export default class QuickOpenService {
     const targetRoot = this.rootPath
     const entriesOut: IndexEntry[] = []
     const pathSet: Map<string, IndexEntry> = new Map()
-    const visited: Set<string> = new Set()
 
     try {
-      const fs = await import('@tauri-apps/plugin-fs')
-      const stack: string[] = [targetRoot]
+      // O caminhar é do RUST (`build_file_tree` com `respectGitignore`), não
+      // deste lado.
+      //
+      // Antes, esta função percorria o disco com `fs.readDir` e decidia o que
+      // esconder com uma lista estática + um parse "best-effort" do
+      // `.gitignore` da RAIZ que só honrava nomes de directório de segmento
+      // único. Duas consequências, ambas reportadas em uso real: um
+      // `.gitignore` ANINHADO era invisível, e um GLOB também. No momenu-fact
+      // o `functions/.gitignore` tem `lib/**/*.js` — falhava nas duas — e os
+      // ficheiros transpilados apareciam na menção `@`.
+      //
+      // O Rust já tinha a resposta certa: o crate `ignore` (o mesmo que o
+      // ripgrep usa, e portanto a mesma estratégia do claude-vaz), com
+      // gitignores aninhados e "deepest match wins". Reimplementar isso em TS
+      // seria reescrever um motor de gitignore.
+      const tree = await invoke<FileTreeNode>('build_file_tree', {
+        rootPath: targetRoot,
+        filter: { showHidden: true, respectGitignore: true },
+      })
 
-      while (stack.length > 0) {
-        // Cancellation check — exits immediately on token bump.
-        if (myToken !== this.buildToken) return
+      // `.env` continua no índice DE PROPÓSITO (é gitignored em quase todos os
+      // projectos): o developer abre-o por Cmd+P. O Rust filtra-o com o resto,
+      // portanto volta a entrar aqui — a única excepção, explícita.
+      const reAdd = new Set(['.env'])
 
-        const current = stack.pop() as string
-
-        // Cycle detection via canonical path (readlink-backed when possible).
-        // readLink resolves one hop; we canonicalise best-effort, swallowing errors.
-        let canonical = current
-        try {
-          // plugin-fs exposes no realpath in all versions — fall back to the raw
-          // string. For most projects, symlinks in-tree are rare.
-          canonical = current.replace(/\/+$/, '')
-        } catch { /* ignore */ }
-        if (visited.has(canonical)) continue
-        visited.add(canonical)
-
-        let entries: Array<{ name: string; isDirectory: boolean; isFile: boolean; isSymlink: boolean }> = []
-        try {
-          entries = await fs.readDir(current)
-        } catch {
-          continue
+      const walk = (node: FileTreeNode, parentPath: string): void => {
+        const p = parentPath
+          ? (parentPath.includes('\\') ? `${parentPath}\\${node.name}` : `${parentPath}/${node.name}`)
+          : targetRoot
+        if (parentPath) {
+          const n = node.name || ''
+          if (!n) return
+          if (n.startsWith('.') && !reAdd.has(n)) return
+          if (node.isDirectory) {
+            if (this.isIgnoredDirName(n)) return
+          } else if (isIgnoredFileName(n)) {
+            return
+          }
+          const e: IndexEntry = { path: p, isDirectory: !!node.isDirectory }
+          entriesOut.push(e)
+          pathSet.set(p, e)
         }
+        if (myToken !== this.buildToken) return
+        for (const child of node.children ?? []) walk(child, p)
+      }
+      walk(tree, '')
 
-        for (let i = 0; i < entries.length; i++) {
-          const entry = entries[i]
-          const n: string = entry.name || ''
-          if (!n) continue
-          if (n.startsWith('.') && n !== '.env') continue
-
-          const p: string = current.includes('\\')
-            ? `${current}\\${n}`
-            : `${current}/${n}`
-
-          if (entry.isDirectory) {
-            if (this.isIgnoredDirName(n)) continue
-            // Skip known symlinks when we can detect them — avoids the textbook
-            // `a/b -> ../a` infinite loop.
-            if (entry.isSymlink) continue
-            const e: IndexEntry = { path: p, isDirectory: true }
-            entriesOut.push(e)
-            pathSet.set(p, e)
-            stack.push(p)
-          } else {
-            if (isIgnoredFileName(n)) continue
+      // O Rust não devolve ficheiros ignorados, portanto o `.env` da raiz
+      // entra por verificação directa em vez de vir da árvore.
+      for (const name of reAdd) {
+        const p = `${targetRoot}/${name}`
+        if (pathSet.has(p)) continue
+        try {
+          if (await invoke<boolean>('path_exists', { path: p })) {
             const e: IndexEntry = { path: p, isDirectory: false }
             entriesOut.push(e)
             pathSet.set(p, e)
           }
-        }
+        } catch { /* best-effort */ }
       }
 
       // Apply the result only if we're still the active build and root match.
