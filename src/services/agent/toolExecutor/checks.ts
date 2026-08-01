@@ -103,7 +103,12 @@ export const SENSITIVE_FILE_PATTERNS: readonly RegExp[] = [
   /_secret/,
 ]
 
-export function isSensitiveFile(filePath: string): boolean {
+export function isSensitiveFile(filePath: string | undefined): boolean {
+  // Guarda igual à do isEnvFile logo acima. A assimetria entre as duas era o
+  // bug: `read_around({ path })` — a tool aceita `path` OU `file_path` — fazia
+  // chegar `undefined` aqui e rebentava com "undefined is not an object
+  // (evaluating 'filePath.replace')", falhando a leitura inteira.
+  if (!filePath) return false
   const filename = filePath.replace(/\\/g, '/').split('/').pop() || ''
   // Templates de env são documentação — nunca sensíveis (ver ENV_TEMPLATE_FILES).
   if (ENV_TEMPLATE_FILES.has(filename)) return false
