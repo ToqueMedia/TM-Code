@@ -6,6 +6,9 @@ import { useLayoutStore } from '@/stores/layoutStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import MonacoBridge from '@/utils/monacoBridge'
+import { useSyncExternalStore } from 'react'
+import { getQueryGuard } from '@/services/agent/queryGuard'
+import { useParallelTaskStore } from '@/stores/parallelTaskStore'
 import ContextMenuOverlay, { type ContextMenuItem } from '../ContextMenuOverlay'
 import { t } from '@/i18n'
 
@@ -52,6 +55,17 @@ function useMenuDefinitions(): MenuDef[] {
 	const viewMode = useLayoutStore(s => s.viewMode)
 	// Subscribe to language changes so menus re-render
 	useSettingsStore(s => s.appLanguage)
+	// SUBSCRIÇÃO, não leitura imperativa: `items()` só corre quando o menu
+	// abre, portanto um `isAgentBusyNow()` lá dentro congelava o estado do
+	// item "Editor" no instante da abertura — com o menu aberto, um run que
+	// arrancasse deixava a entrada clicável. O QueryGuard expõe uma interface
+	// useSyncExternalStore justamente para isto.
+	const guardBusy = useSyncExternalStore(getQueryGuard().subscribe, getQueryGuard().getSnapshot)
+	const anyLiveTask = useParallelTaskStore(s => {
+		for (const r of s.runs.values()) if (r.status === 'running' || r.status === 'queued') return true
+		return false
+	})
+	const agentBusy = guardBusy || anyLiveTask
 
 	const inEditor = viewMode === 'editor'
 
@@ -126,7 +140,11 @@ function useMenuDefinitions(): MenuDef[] {
 				{ label: t('menu.quickOpen'), hint: 'Ctrl+P', action() { dispatch('quickopen:toggle') } },
 				sep(),
 				{ label: t('menu.chat'), action() { useLayoutStore.getState().setViewMode('chat') } },
-				{ label: t('menu.editorView'), action() { useLayoutStore.getState().setViewMode('editor') } },
+				// Mesmo bloqueio do botão "Código-fonte" no composer e do
+				// Cmd+Shift+E: com o agente a trabalhar, o editor mostra ficheiros
+				// a ser reescritos por baixo. Um botão desativado com uma entrada
+				// de menu que continua a funcionar não bloqueia nada.
+				{ label: t('menu.editorView'), disabled: agentBusy, action() { useLayoutStore.getState().setViewMode('editor') } },
 				{ label: t('menu.preview'), action() { useLayoutStore.getState().setViewMode('preview') } },
 				sep(),
 				{ label: t('menu.toggleSidebar'), hint: 'Ctrl+B', action() { dispatch('sidebar:toggle') } },
