@@ -79,6 +79,14 @@ jest.mock('@/utils/invokeMetrics', () => ({
 }))
 
 // Mock listen from @tauri-apps/api/event (static import in toolExecutor)
+let sidecarImpl: (() => Promise<{ answer: string; model: string | null } | null>) | null = null
+let cachedPage: string | null = null
+jest.mock('../fetchSidecar', () => ({
+  answerFromPageViaSidecar: async () => (sidecarImpl ? sidecarImpl() : null),
+  getCachedPageContent: () => cachedPage,
+  cachePageContent: () => {},
+}))
+
 jest.mock('@tauri-apps/api/event', () => ({
   listen: jest.fn().mockResolvedValue(() => {}),
 }))
@@ -254,6 +262,10 @@ import {
   canonicalToolName,
   normalizePersistedToolName,
   DIVERGENT_TRAINED_TOOLS,
+  WRITE_ALIAS,
+  BASH_ALIAS,
+  ADVERTISED_TOOL_NAMES,
+  CAPTURE_URL_DESIGN,
 } from '../toolNames'
 import { DESTRUCTIVE_TOOLS } from '../toolPolicy'
 // agentStore is NOT mocked — update_tasks drives the real Zustand store, so
@@ -945,7 +957,9 @@ describe('C: Plan mode', () => {
     const result = await exec.execute('execute_command', { command: 'npm install' })
 
     expect(result).toContain('Blocked in /plan architect mode')
-    expect(result).toContain('execute_command')
+    // Ecoado pelo nome anunciado (`Bash`): a mensagem existe para dizer ao
+    // modelo o que ele PODE chamar a seguir, e ele só conhece esse nome.
+    expect(result).toContain(BASH_ALIAS)
   })
 
   it('blocks request_credentials in plan mode', async () => {
@@ -999,7 +1013,7 @@ describe('C: Plan mode', () => {
     const result = await exec.execute('update_tasks', { tasks: [{ id: '1', description: 'task', status: 'pending' }] })
 
     expect(result).toContain('Blocked')
-    expect(result).toContain('must follow write_file')
+    expect(result).toContain(`must follow ${WRITE_ALIAS}`)
   })
 
   it('blocks update_tasks while PLAN.md is still a draft', async () => {
@@ -1097,7 +1111,7 @@ describe('C: Plan mode', () => {
 
     // update_tasks should be blocked again (planFileWritten reset)
     const result = await exec.execute('update_tasks', { tasks: [{ id: '1', description: 'task', status: 'pending' }] })
-    expect(result).toContain('must follow write_file')
+    expect(result).toContain(`must follow ${WRITE_ALIAS}`)
   })
 
   it('isPlanMode returns correct state', () => {
@@ -1818,6 +1832,33 @@ describe('I: Tool definitions and metadata', () => {
     }
     // Sem duplicados: uma etiqueta por tool.
     expect(new Set(names).size).toBe(names.length)
+  })
+
+  it('as DESCRIÇÕES não nomeiam tools pelo nome que o modelo não vê', () => {
+    // Irmão do teste acima. Anunciar `Grep` no `name` e depois escrever
+    // "use this after search_files" na description manda o modelo chamar uma
+    // tool que não está na lista dele. Passou despercebido durante a
+    // renomeação porque o contrato só foi verificado ao nível do NOME.
+    // Mesma classe do bug nas mensagens de erro ("Error: read_file requires
+    // file_path" devolvido a quem chamou `Read`).
+    const exec = freshExecutor()
+    const leaks: string[] = []
+
+    for (const def of exec.getToolDefinitions()) {
+      const text = def.function.description ?? ''
+      for (const [canonical, advertised] of Object.entries(ADVERTISED_TOOL_NAMES)) {
+        // `glob`/`delegate` são palavras inglesas correntes ("a glob
+        // pattern", "delegate a task") — nesses só conta a forma citada.
+        const pattern = canonical.includes('_')
+          ? new RegExp(`(?<![\\w-])${canonical}(?![\\w-])`)
+          : new RegExp(`\`${canonical}\``)
+        if (pattern.test(text)) {
+          leaks.push(`${def.function.name}.description → "${canonical}" devia ser "${advertised}"`)
+        }
+      }
+    }
+
+    expect(leaks).toEqual([])
   })
 
   it('getCoreToolCount returns count of non-MCP tools', () => {
@@ -2932,5 +2973,240 @@ describe('conformidade do contrato das tools', () => {
     expect(readsProperty("const x = input['foo']", 'foo')).toBe(true)
     expect(readsProperty('const { foo, bar } = input', 'foo')).toBe(true)
     expect(readsProperty(stripComments('// usa input.foo aqui\nreturn 1'), 'foo')).toBe(false)
+  })
+
+  describe('web_fetch — corpos binários', () => {
+    // Reportado em uso real (2026-07-31): o developer colou o URL de um PDF de
+    // nota de crédito a pedir a correcção do layout. O fetch devolveu
+    // `%PDF-1.7` + um stream FlateDecode — 4 KB de binário comprimido. O modelo
+    // não viu a imagem NEM o texto (o conteúdo vive dentro do stream), corrigiu
+    // só o que inferiu a ler o código, e o defeito reportado (um nome de
+    // empresa a 18pt a sair da página) ficou intacto. Devolver bytes gasta
+    // contexto e não informa.
+    const fetchAs = (contentType: string, body: string) => {
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'http_client_request') {
+          return { status: 200, headers: [['content-type', contentType]], body }
+        }
+        return null
+      })
+    }
+
+    it('a descrição encaminha para o capture_url_design', () => {
+      const wf = freshExecutor().getToolDefinitions().find(d => d.function.name === 'WebFetch')
+      const desc = wf?.function.description ?? ''
+      expect(desc).toContain(CAPTURE_URL_DESIGN)
+      // A frase mudou quando os PDFs passaram a ser suportados; o que tem de
+      // continuar lá é o encaminhamento do que NÃO é legível como texto.
+      expect(desc).toMatch(/Images, archives and media are NOT readable/i)
+      // A ponte sintoma→tool: sem ela o modelo não sabe quando trocar.
+      expect(desc).toMatch(/layout|overflow|visual/i)
+    })
+
+    it('PDF: extrai a camada de TEXTO, nunca os bytes', async () => {
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'http_client_request') {
+          return { status: 200, headers: [['content-type', 'application/pdf']], body: '%PDF-1.7 FlateDecode' }
+        }
+        if (cmd === 'fetch_pdf_text') return 'Nota de Crédito: NC-MOM2026-001\nTotal a creditar: 1 641 300,80'
+        return null
+      })
+      const out = await freshExecutor().execute('web_fetch', { url: 'https://x.test/a.pdf' })
+      expect(out).toContain('NC-MOM2026-001')
+      expect(out).not.toContain('%PDF-1.7')
+      expect(out).not.toContain('FlateDecode')
+      // Texto não responde a perguntas de LAYOUT — a resposta diz para onde ir.
+      expect(out).toContain(CAPTURE_URL_DESIGN)
+    })
+
+    it('PDF sem camada de texto (digitalizado) encaminha para a visão', async () => {
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'http_client_request') {
+          return { status: 200, headers: [['content-type', 'application/pdf']], body: '%PDF-1.7' }
+        }
+        if (cmd === 'fetch_pdf_text') throw new Error('no extractable text layer')
+        return null
+      })
+      const out = await freshExecutor().execute('web_fetch', { url: 'https://x.test/scan.pdf' })
+      expect(out).toContain(CAPTURE_URL_DESIGN)
+      expect(out).not.toContain('%PDF-1.7')
+    })
+
+    it('imagem segue a mesma regra', async () => {
+      fetchAs('image/png', 'PNG-bytes-aqui')
+      const out = await freshExecutor().execute('web_fetch', { url: 'https://x.test/a.png' })
+      expect(out).toContain(CAPTURE_URL_DESIGN)
+      expect(out).not.toContain('PNG-bytes-aqui')
+    })
+
+
+    it('URL que já parece PDF não paga o download duas vezes', async () => {
+      // Antes: fetch genérico traz bytes inúteis (voltam como String
+      // corrompida), descobre-se o content-type, e o fetch_pdf_text
+      // descarrega OUTRA vez. Em 20 MB são 40 MB por nada.
+      const seen: string[] = []
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        seen.push(cmd)
+        if (cmd === 'fetch_pdf_text') return 'Total a creditar: 1 641 300,80'
+        if (cmd === 'http_client_request') {
+          return { status: 200, headers: [['content-type', 'application/pdf']], body: '%PDF' }
+        }
+        return null
+      })
+      const out = await freshExecutor().execute('web_fetch', { url: 'https://x.test/nota.pdf' })
+      expect(out).toContain('1 641 300,80')
+      expect(seen).toContain('fetch_pdf_text')
+      expect(seen).not.toContain('http_client_request')
+    })
+
+    it('URL .pdf que afinal é HTML cai no caminho normal', async () => {
+      // A extensão mente (404 servido em HTML num caminho `.pdf`): a extracção
+      // falha e o fetch normal assume — correcção preservada.
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'fetch_pdf_text') throw new Error('not a pdf')
+        if (cmd === 'http_client_request') {
+          return { status: 404, headers: [['content-type', 'text/html']], body: '<h1>Not Found</h1>' }
+        }
+        return null
+      })
+      const out = await freshExecutor().execute('web_fetch', { url: 'https://x.test/ghost.pdf' })
+      // Caiu no caminho normal: quem responde é o tratamento de HTTP 404, não
+      // o extractor de PDF. É isso que se quer — a extensão mentiu e o fetch
+      // genérico assumiu.
+      expect(out).toContain('404')
+      expect(out).not.toContain('Text layer only')
+    })
+
+    it('JSON continua a passar — a regra é só para binário', async () => {
+      fetchAs('application/json', '{"total":42}')
+      const out = await freshExecutor().execute('web_fetch', { url: 'https://x.test/a.json' })
+      expect(out).toContain('"total":42')
+      expect(out).not.toContain(CAPTURE_URL_DESIGN)
+    })
+  })
+
+
+  it('nenhuma descrição de tool tem interpolação por resolver', () => {
+    // Apanhado em produção: um fetch falhado devolveu ao modelo a frase
+    // "try ${WEB_SEARCH_ALIAS} for a canonical URL" — literal. A constante
+    // estava em ASPAS SIMPLES, onde `${...}` é texto, não interpolação.
+    // Introduzi-o eu na renomeação para os nomes de treino, e o guarda de
+    // nomes não o via porque só varre o system prompt, não as descrições.
+    //
+    // Um marcador por resolver é pior do que o nome errado: não corresponde a
+    // tool nenhuma, e o modelo não tem como adivinhar o que lá devia estar.
+    const leaks: string[] = []
+    for (const def of freshExecutor().getToolDefinitions()) {
+      const text = `${def.function.name} ${def.function.description ?? ''}`
+      // Só MAIÚSCULAS_COM_UNDERSCORE: é assim que as constantes de nome de
+      // tool se escrevem. `${project}` em minúsculas é prosa deliberada — a
+      // descrição do get_project_state_dir usa-o como marcador de caminho.
+      const m = /\$\{[A-Z][A-Z0-9_]*\}/.exec(text)
+      if (m) leaks.push(`${def.function.name}: ${m[0]}`)
+    }
+    expect(leaks).toEqual([])
+  })
+
+
+  describe('web_fetch — sumarização por sidecar (porte claude-vaz)', () => {
+    // O contrato mudou: com `prompt`, a página é processada por um modelo
+    // rápido e o agente recebe a RESPOSTA. O ganho é de arquitectura — uma
+    // página de 200 KB passa a três linhas no contexto em vez de 50 000
+    // caracteres cortados a meio, e o ruído (navegação, rodapés) nunca entra
+    // no transcript, logo também não sobrevive à compactação.
+    const PAGE = '<html><head><title>API</title></head><body><p>Rate limit is 100 req/min. On 429 retry after 60s.</p></body></html>'
+    const fetchOk = () => {
+      mockInvoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'http_client_request') {
+          return { status: 200, statusText: 'OK', headers: [['content-type', 'text/html']], body: PAGE, sizeBytes: PAGE.length }
+        }
+        return null
+      })
+    }
+
+    it('com prompt devolve a RESPOSTA, não a página', async () => {
+      fetchOk()
+      sidecarImpl = async () => ({ answer: 'Retry after 60 seconds.', model: 'fast-1' })
+      const out = await freshExecutor().execute('web_fetch', {
+        url: 'https://x.test/docs', prompt: 'what to do on 429?',
+      })
+      expect(out).toContain('Retry after 60 seconds.')
+      expect(out).toContain('not the page verbatim')
+      expect(out).not.toContain('Rate limit is 100 req/min')
+      sidecarImpl = null
+    })
+
+    it('sem sidecar disponível cai no texto integral — nunca falha o fetch', async () => {
+      fetchOk()
+      sidecarImpl = async () => null
+      const out = await freshExecutor().execute('web_fetch', {
+        url: 'https://x.test/docs', prompt: 'what to do on 429?',
+      })
+      expect(out).toContain('Rate limit is 100 req/min')
+      sidecarImpl = null
+    })
+
+    it('sem prompt mantém o comportamento antigo', async () => {
+      fetchOk()
+      const out = await freshExecutor().execute('web_fetch', { url: 'https://x.test/docs' })
+      expect(out).toContain('Rate limit is 100 req/min')
+      expect(out).not.toContain('not the page verbatim')
+    })
+
+
+    it('a descrição NÃO desmente a implementação sobre PDFs', () => {
+      // Observado em produção (2026-07-31): a descrição ainda dizia "NOT for
+      // binary URLs: a PDF … has no readable text here" — escrita quando o
+      // web_fetch RECUSAVA PDFs, e não actualizada quando passou a extraí-los.
+      // O modelo leu, acreditou, e contornou com `curl` + `pdftotext` por
+      // Bash: quatro turnos para o que agora é uma chamada. Uma descrição que
+      // desmente o código é pior do que uma descrição em falta — desliga
+      // activamente uma capacidade que existe.
+      const wf = freshExecutor().getToolDefinitions().find(d => d.function.name === 'WebFetch')
+      const desc = wf?.function.description ?? ''
+      expect(desc).toMatch(/PDFs ARE supported/i)
+      expect(desc).not.toMatch(/NOT for binary URLs:\s*a PDF/i)
+      // E continua a encaminhar o VISUAL para a tool certa.
+      expect(desc).toContain(CAPTURE_URL_DESIGN)
+      expect(desc).toMatch(/cannot show you a broken layout/i)
+    })
+
+    it('a descrição anuncia o contrato e o custo de o ignorar', () => {
+      const wf = freshExecutor().getToolDefinitions().find(d => d.function.name === 'WebFetch')
+      const desc = wf?.function.description ?? ''
+      expect(desc).toContain('PASS A `prompt`')
+      expect(desc).toMatch(/ANSWER/)
+      // Sem o custo declarado, omitir o prompt parece gratuito.
+      expect(desc).toMatch(/pay its full size in context/)
+    })
+  })
+
+  describe('PDF — leitura sim, escrita não', () => {
+    // O `Read` passou a extrair a camada de texto de PDFs (pdf-extract, Rust).
+    // Isso abriu uma porta que não existia: até aí, ler um binário FALHAVA,
+    // portanto o portão read-before-write nunca ficava satisfeito para um. Com
+    // a leitura a funcionar, o modelo tem um PDF "lido" e nada o impedia de
+    // lhe escrever texto por cima — ficheiro destruído, diff de aspecto normal.
+    it('write_file recusa um destino binário', async () => {
+      const out = await freshExecutor().execute('write_file', {
+        file_path: '/projects/test-app/doc.pdf', content: 'texto qualquer',
+      })
+      expect(out).toContain('binary file')
+      expect(out).toContain('would corrupt it')
+    })
+
+    it('edit_file recusa um destino binário', async () => {
+      const out = await freshExecutor().execute('edit_file', {
+        file_path: '/projects/test-app/doc.pdf', old_string: 'a', new_string: 'b',
+      })
+      expect(out).toContain('binary file')
+    })
+
+    it('ficheiros de texto continuam a passar', async () => {
+      const out = await freshExecutor().execute('write_file', {
+        file_path: '/projects/test-app/a.ts', content: 'export const x = 1',
+      })
+      expect(out).not.toContain('binary file')
+    })
   })
 })

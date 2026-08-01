@@ -1179,6 +1179,45 @@ pub async fn read_file(path: String) -> Result<String> {
         )));
     }
 
+    // PDF: extrair o TEXTO em vez de falhar com "Cannot read binary file".
+    //
+    // Reportado em uso real (2026-07-31): o developer colou o URL de um PDF a
+    // pedir a correcção do layout; o agente recebeu `%PDF-1.7` + um stream
+    // FlateDecode e corrigiu só o que conseguiu inferir a ler o código. O texto
+    // de um PDF vive dentro de streams comprimidos — sem extractor, um PDF é
+    // opaco para o agente, esteja em disco ou atrás de um URL.
+    //
+    // Fica no `read_file` de propósito, em vez de uma tool nova: o modelo já
+    // chama `Read` por treino (é assim que o claude-vaz o expõe), portanto a
+    // capacidade aparece sem lhe ensinar mais um nome.
+    if canonical
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(false)
+    {
+        let p = canonical.clone();
+        // `pdf_extract` é síncrono e pode demorar em documentos grandes —
+        // fora da thread do runtime para não bloquear a fila de comandos.
+        let text = tokio::task::spawn_blocking(move || pdf_extract::extract_text(&p))
+            .await
+            .map_err(|e| FileTreeError::Io(format!("PDF task failed: {e}")))?
+            .map_err(|e| {
+                FileTreeError::InvalidOperation(format!(
+                    "Could not extract text from PDF: {e}. Scanned/image-only PDFs have no text layer — \
+                     use capture_url_design (URL) or an OCR tool for those."
+                ))
+            })?;
+        if text.trim().is_empty() {
+            return Err(FileTreeError::InvalidOperation(
+                "This PDF has no extractable text layer (likely scanned or image-only). \
+                 Its visual content is not readable as text."
+                    .to_string(),
+            ));
+        }
+        return Ok(text);
+    }
+
     tokio::fs::read_to_string(&canonical).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::InvalidData {
             FileTreeError::InvalidOperation("Cannot read binary file as text".to_string())

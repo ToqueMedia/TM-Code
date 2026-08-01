@@ -152,6 +152,7 @@ commands.allow = [
   "live_preview_serve_static",
   "live_preview_stop_static",
   "http_client_request",
+  "fetch_pdf_text",
   "send_issue_report",
   "capture_screen_region",
   "capture_screen_region_macos_native",

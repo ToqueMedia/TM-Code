@@ -1571,6 +1571,7 @@ pub fn run() {
             live_preview_serve_static,
             live_preview_stop_static,
             http_client_request,
+            fetch_pdf_text,
             send_issue_report,
             capture_screen_region,
             #[cfg(target_os = "macos")]

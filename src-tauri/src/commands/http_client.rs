@@ -63,30 +63,7 @@ pub async fn http_client_request(input: HttpRequestInput) -> Result<HttpResponse
             .map_err(|_| format!("Invalid HTTP method: {}", other))?,
     };
 
-    // Block cloud metadata endpoints to prevent SSRF when called by the agent.
-    // localhost/127.0.0.1 are allowed (local dev servers).
-    if let Ok(url) = reqwest::Url::parse(&input.url) {
-        if let Some(host) = url.host_str() {
-            // Block link-local metadata (AWS/GCP/Azure)
-            if host == "169.254.169.254" || host == "metadata.google.internal" {
-                return Err("Blocked: cloud metadata endpoint".to_string());
-            }
-            // Block non-routable/internal ranges (except localhost for dev servers)
-            if let Ok(ip) = host.parse::<IpAddr>() {
-                let blocked = match ip {
-                    IpAddr::V4(v4) => {
-                        v4.is_link_local()           // 169.254.x.x
-                        || v4.is_broadcast()         // 255.255.255.255
-                        || v4.octets()[0] == 0 // 0.x.x.x
-                    }
-                    IpAddr::V6(v6) => v6.is_loopback() && host != "::1",
-                };
-                if blocked {
-                    return Err(format!("Blocked: request to internal address {}", host));
-                }
-            }
-        }
-    }
+    guard_ssrf(&input.url)?;
 
     let mut req = client.request(method, &input.url);
 
@@ -141,4 +118,91 @@ pub async fn http_client_request(input: HttpRequestInput) -> Result<HttpResponse
         duration_ms,
         size_bytes,
     })
+}
+
+/// Guarda SSRF partilhada por TODOS os caminhos de rede do agente.
+///
+/// Extraída de dentro do `http_client_request` quando o `fetch_pdf_text` foi
+/// acrescentado: duplicá-la teria criado um segundo caminho de rede sem as
+/// mesmas protecções, que é exactamente como um bypass nasce.
+fn guard_ssrf(raw_url: &str) -> Result<(), String> {
+    let url = match reqwest::Url::parse(raw_url) {
+        Ok(u) => u,
+        Err(_) => return Ok(()),
+    };
+    let Some(host) = url.host_str() else { return Ok(()) };
+    // Block link-local metadata (AWS/GCP/Azure)
+    if host == "169.254.169.254" || host == "metadata.google.internal" {
+        return Err("Blocked: cloud metadata endpoint".to_string());
+    }
+    // Block non-routable/internal ranges (except localhost for dev servers)
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let blocked = match ip {
+            IpAddr::V4(v4) => {
+                v4.is_link_local()           // 169.254.x.x
+                || v4.is_broadcast()         // 255.255.255.255
+                || v4.octets()[0] == 0 // 0.x.x.x
+            }
+            IpAddr::V6(v6) => v6.is_loopback() && host != "::1",
+        };
+        if blocked {
+            return Err(format!("Blocked: request to internal address {}", host));
+        }
+    }
+    Ok(())
+}
+
+/// Descarrega um PDF e devolve a sua camada de TEXTO.
+///
+/// Existe porque o agente recebia os bytes crus de um PDF colado pelo
+/// developer (`%PDF-1.7` + streams FlateDecode) e não conseguia ler nada — o
+/// texto de um PDF vive comprimido. Nunca devolve bytes: ou texto, ou um erro
+/// que explica porquê (um PDF digitalizado não tem camada de texto).
+#[tauri::command]
+pub async fn fetch_pdf_text(url: String, timeout_secs: Option<u64>) -> Result<String, String> {
+    guard_ssrf(&url)?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs.unwrap_or(60)))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    const MAX_PDF_BYTES: u64 = 40 * 1024 * 1024;
+    // Recusar ANTES de descarregar quando o servidor declara o tamanho: puxar
+    // 500 MB para depois dizer "grande demais" gasta a rede do developer para
+    // chegar à mesma conclusão.
+    if let Some(len) = resp.content_length() {
+        if len > MAX_PDF_BYTES {
+            return Err(format!(
+                "PDF too large ({:.1} MB, cap {} MB) — not downloaded.",
+                len as f64 / (1024.0 * 1024.0),
+                MAX_PDF_BYTES / (1024 * 1024)
+            ));
+        }
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Could not read response body: {e}"))?;
+    // Segunda verificação: sem `content-length` (chunked) só se sabe no fim.
+    if bytes.len() as u64 > MAX_PDF_BYTES {
+        return Err(format!(
+            "PDF too large ({:.1} MB)",
+            bytes.len() as f64 / (1024.0 * 1024.0)
+        ));
+    }
+    let text = tokio::task::spawn_blocking(move || pdf_extract::extract_text_from_mem(&bytes))
+        .await
+        .map_err(|e| format!("PDF task failed: {e}"))?
+        .map_err(|e| format!("Could not extract text: {e}"))?;
+    if text.trim().is_empty() {
+        return Err("This PDF has no extractable text layer (likely scanned or image-only).".to_string());
+    }
+    Ok(text)
 }

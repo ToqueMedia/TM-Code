@@ -40,8 +40,17 @@ const WEB_FETCH_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
 // Appended to fetch-failure messages so the model doesn't wrongly conclude a
 // page is permanently unreachable after one transient/blocked fetch.
-const WEB_FETCH_FALLBACK_HINT =
-  'Do not conclude the page is inaccessible from this single failure. Retry once, try web_search for a canonical/alternate URL, or (if shell access is available) fetch it with `curl -L -A "Mozilla/5.0" <url>` and extract the text locally before reporting it unavailable.'
+// Template literal, NÃO aspas simples: esta constante interpola nomes de tools.
+// Em aspas simples o `${WEB_SEARCH_ALIAS}` chegava ao modelo como texto
+// literal — apanhado em produção quando um fetch devolveu 404 e a mensagem
+// mandava "try ${WEB_SEARCH_ALIAS}". Um nome de tool por interpolar é pior do
+// que o nome errado: não corresponde a nada.
+// FUNÇÃO, não const: esta constante vive ACIMA do bloco de imports e
+// interpola um nome de tool. Como `const` era avaliada antes de o módulo dos
+// nomes existir ("Cannot access 'toolNames_1' before initialization"). Adiada
+// para a chamada, resolve no momento em que é precisa.
+const webFetchFallbackHint = (): string =>
+  `Do not conclude the page is inaccessible from this single failure. Retry once, try ${WEB_SEARCH_ALIAS} for a canonical/alternate URL, or (if shell access is available) fetch it with \`curl -L -A "Mozilla/5.0" <url>\` and extract the text locally before reporting it unavailable.`
 import { formatError } from '../../utils/errors'
 import { checkPlanModeAccess, isPlanArtefactAtRoot } from './planMode'
 import {
@@ -51,6 +60,11 @@ import {
   LS_ALIAS,
   READ_AROUND,
   READ_ALIAS,
+  WRITE_ALIAS,
+  EDIT_ALIAS,
+  TASK_ALIAS,
+  WEB_FETCH_ALIAS,
+  WEB_SEARCH_ALIAS,
   WRITE_FILE,
   EDIT_FILE,
   CREATE_FILE,
@@ -88,7 +102,8 @@ import { getFsVersion, bumpFsVersion } from '../fsVersion'
 import CheckpointService from './checkpointService'
 import { markReadBeforeWriteBlocked, markTmsCreated, markTmsFullContextSent } from './tmsContext'
 import type { MCPTool } from '../mcp/mcpService'
-import { useChatStore, hasPendingDiffApprovals } from '../../stores/chatStore'
+import { useChatStore, hasPendingDiffApprovals, getPendingDiffApprovalToolIds } from '../../stores/chatStore'
+import { isInActiveWriteBatch } from './writeBatch'
 import { useAskUserQuestionStore } from '../../stores/askUserQuestionStore'
 import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
 
@@ -624,6 +639,13 @@ class ToolExecutor {
     this.cmdModeCwd = cwd
   }
 
+  /** Raiz do projeto para encurtar caminhos em texto entregue ao modelo.
+   *  `getProjectRoot()` é privado e resolve worktree/project-run; expor uma
+   *  leitura só-de-texto evita duplicar essa lógica no caller. */
+  getProjectRootForDiagnostics(): string {
+    try { return this.getProjectRoot() } catch { return '' }
+  }
+
   private buildContext(): ToolRegistrationContext {
     return {
       tools: this.tools,
@@ -1043,7 +1065,7 @@ class ToolExecutor {
    * zustand com cleanup por chamada concorrente. O abort interrompe a
    * espera imediatamente no próximo tick.
    */
-  private async waitForUserGates(signal?: AbortSignal): Promise<void> {
+  private async waitForUserGates(signal?: AbortSignal, toolUseId?: string): Promise<void> {
     // F2 multi-project: only wait for gates that belong to THIS run. A
     // permission dialog for project A must not freeze tool execution of a
     // parallel/background run on project B (global pause was a known
@@ -1080,7 +1102,18 @@ class ToolExecutor {
         // unbound main (or any run without project isolation) waits globally.
         // Background project-runs skip: their file writes use cmdMode alreadyApplied
         // path and don't use the main diff UI. Parallel tasks same.
-        if (!myProjectId && !myTaskId && hasPendingDiffApprovals()) return true
+        //
+        // Excepção de LOTE (writeBatch.ts): writes do MESMO turno despachadas
+        // em conjunto pelo query.ts atravessam o gate — os seus diffs devem
+        // acumular na barra de aprovação e ser decididos juntos. Bloqueia se
+        // (a) houver um diff pendente que NÃO pertence ao lote ativo, ou
+        // (b) esta tool não for membro do lote.
+        if (!myProjectId && !myTaskId && hasPendingDiffApprovals()) {
+          const selfInBatch = toolUseId !== undefined && isInActiveWriteBatch(toolUseId)
+          const strayPending = getPendingDiffApprovalToolIds()
+            .some(id => !isInActiveWriteBatch(id))
+          if (strayPending || !selfInBatch) return true
+        }
       } catch {
         return false
       }
@@ -1189,7 +1222,7 @@ class ToolExecutor {
     // por trás do diálogo, nos dois modos. Não há deadlock: o tool que CRIA
     // o gate já passou esta entrada (o seu prompt abre depois), e todos os
     // gates são resolvidos pelo utilizador ou limpos no cancelLoop.
-    await this.waitForUserGates(signal)
+    await this.waitForUserGates(signal, toolCallId)
     if (signal?.aborted) {
       return `Tool ${toolName} aborted before execution (user cancelled).`
     }
@@ -1312,7 +1345,7 @@ class ToolExecutor {
       // The task list mirrors the plan's Implementation Phases; without a
       // written plan the tasks have no source-of-truth to derive from.
       if (toolName === 'update_tasks' && !this.planFileWritten) {
-        return `Blocked in /plan architect mode: ${toolName} must follow write_file('${this.planModePlanFileName}'). The task list mirrors ${this.planModePlanFileName}'s Implementation Phases — write the plan first, then derive tasks from its phase structure (one task per coherent unit of work, IDs like "1.1", "1.2", "2.1" matching the phase numbering). Calling update_tasks before write_file is a contract violation.`
+        return `Blocked in /plan architect mode: ${toolName} must follow ${WRITE_ALIAS}('${this.planModePlanFileName}'). The task list mirrors ${this.planModePlanFileName}'s Implementation Phases — write the plan first, then derive tasks from its phase structure (one task per coherent unit of work, IDs like "1.1", "1.2", "2.1" matching the phase numbering). Calling update_tasks before ${WRITE_ALIAS} is a contract violation.`
       }
       if (toolName === 'update_tasks' && !(await this.isPlanReadyForTaskSeed())) {
         return `Blocked in /plan architect mode: ${toolName} must follow the final edit that flips ${this.planModePlanFileName} to "Status: PENDING APPROVAL". The task list must derive from the completed plan, not from a draft scaffold. Finish every plan section, flip the status, then call update_tasks.`
@@ -1327,8 +1360,15 @@ class ToolExecutor {
       }
     }
 
-    // Sensitive files require explicit developer authorization
-    const isSensitive = (toolName === 'read_file' || toolName === READ_AROUND) && this.isSensitiveFile(input.file_path as string)
+    // Sensitive files require explicit developer authorization.
+    //
+    // MESMO fallback que o handler do read_around usa (`file_path ?? path`).
+    // Ler só `file_path` não era apenas a causa do crash: uma chamada em
+    // estilo `path` passava a saltar a verificação de sensibilidade por
+    // inteiro — `read_around({ path: '~/.ssh/id_rsa' })` deixaria de pedir
+    // autorização. O gate tem de ver o mesmo caminho que a tool vai abrir.
+    const sensitivePath = (input.file_path ?? input.path) as string | undefined
+    const isSensitive = (toolName === 'read_file' || toolName === READ_AROUND) && this.isSensitiveFile(sensitivePath)
 
     // Apagar o que o git não restaura força SEMPRE o diálogo, mesmo com
     // delete_file já concedido para a sessão (sessão momenu-fact 2026-07-28:
@@ -2735,7 +2775,7 @@ ${preview}
   // ./toolExecutor/checks — wrappers preserve the existing private call
   // sites. Static lists are re-exported for the Settings UI; the wrappers
   // below cover the instance-method usages inside this class.
-  private isSensitiveFile(filePath: string): boolean { return isSensitiveFile(filePath) }
+  private isSensitiveFile(filePath: string | undefined): boolean { return isSensitiveFile(filePath) }
   static readonly DANGEROUS_COMMANDS = DANGEROUS_COMMANDS
   static readonly STATE_MUTATING_COMMANDS = STATE_MUTATING_COMMANDS
   private matchDangerousCommand(command: string): string | null { return matchDangerousCommand(command) }
@@ -2759,9 +2799,9 @@ ${preview}
    * devolvemos erro honesto em vez de resultados alucinados.
    */
   private async runWebSearchSubCall(query: string, maxResults: number, abortSignal?: AbortSignal): Promise<string> {
-    if (abortSignal?.aborted) return 'web_search aborted by user.'
+    if (abortSignal?.aborted) return `${WEB_SEARCH_ALIAS} aborted by user.`
     const token = await FirebaseAuthService.getInstance().getIdToken()
-    if (!token) return 'web_search error: authentication required.'
+    if (!token) return `${WEB_SEARCH_ALIAS} error: authentication required.`
 
     const body = {
       model: 'tm-active-model', // substituído pelo worker (sidecar ou ativo)
@@ -2790,27 +2830,27 @@ ${preview}
         signal: abortSignal,
       })
     } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') return 'web_search aborted by user.'
-      return `web_search error: network failure (${err instanceof Error ? err.message : String(err)}).`
+      if (err instanceof DOMException && err.name === 'AbortError') return `${WEB_SEARCH_ALIAS} aborted by user.`
+      return `${WEB_SEARCH_ALIAS} error: network failure (${err instanceof Error ? err.message : String(err)}).`
     }
 
     if (!response.ok) {
       const detail = await response.text().catch(() => '')
-      return `web_search error: HTTP ${response.status}. ${detail.slice(0, 200)}`
+      return `${WEB_SEARCH_ALIAS} error: HTTP ${response.status}. ${detail.slice(0, 200)}`
     }
 
     // Sem sidecar publicado, o worker serviu com o modelo ATIVO — que não
     // tem pesquisa real. Devolver os tokens dele seria entregar resultados
     // alucinados como se fossem da web; erro honesto é estritamente melhor.
     if (response.headers.get('x-tm-config-key') !== 'sidecar:web_search') {
-      return 'web_search error: web search is currently unavailable for the active model.'
+      return `${WEB_SEARCH_ALIAS} error: web search is currently unavailable for the active model.`
     }
     console.info(`[web-search] query served by auxiliary model=${response.headers.get('x-tm-model') ?? '?'} (config=web_search)`)
 
     const data = await response.json().catch(() => null) as
       { choices?: Array<{ message?: { content?: string } }> } | null
     const answer = data?.choices?.[0]?.message?.content ?? ''
-    return answer.trim() || 'web_search returned no results.'
+    return answer.trim() || `${WEB_SEARCH_ALIAS} returned no results.`
   }
 
 
@@ -2987,7 +3027,7 @@ ${preview}
     )
     if (internalToolAsShell) {
       throw new Error(
-        `"${internalToolAsShell[1]}" is a TOOL, not a shell command. Call the ${internalToolAsShell[1]} tool directly (function call), never through execute_command/shell.`,
+        `"${internalToolAsShell[1]}" is a TOOL, not a shell command. Call the ${advertisedToolName(internalToolAsShell[1])} tool directly (function call), never through ${BASH_ALIAS}/shell.`,
       )
     }
 
@@ -3315,7 +3355,7 @@ ${preview}
       },
       execute: async (input) => {
         let filePath = (input.file_path ?? input.path) as string | undefined
-        if (!filePath) return 'Error: read_file requires file_path or path.'
+        if (!filePath) return `Error: ${READ_ALIAS} requires file_path or path.`
         // Resolve relative paths to absolute (agent often sends relative paths)
         filePath = this.resolveToAbsolute(filePath)
         
@@ -3340,8 +3380,14 @@ ${preview}
         // (constants/files.ts hasBinaryExtension). The TM is text-only
         // (Rust read_to_string), so reject all binary extensions up-front
         // with a short error rather than letting UTF-8 decode fail.
-        if (hasBinaryExtension(filePath)) {
-          return `Error: ${filePath} is a binary file. read_file only supports text files. Use a dedicated tool to inspect binary content.`
+        // EXCEPÇÃO: PDF. O Rust extrai a camada de texto (pdf-extract) em vez
+        // de tentar `read_to_string`. Fica no `${READ_ALIAS}` de propósito, em
+        // vez de uma tool nova: o modelo já chama Read por treino, portanto a
+        // capacidade aparece sem lhe ensinar mais um nome — e sem ela um PDF
+        // era opaco (o texto vive dentro de streams comprimidos).
+        const isPdf = /\.pdf$/i.test(filePath)
+        if (!isPdf && hasBinaryExtension(filePath)) {
+          return `Error: ${filePath} is a binary file. ${READ_ALIAS} only supports text files. Use a dedicated tool to inspect binary content.`
         }
 
         try {
@@ -3373,7 +3419,15 @@ ${preview}
           // reading a >256KB file; we now match that instead of reading the
           // whole body first. Skipped when slicing (the slice IS the
           // refinement path the error would recommend).
-          if (preStat && !sliceRequested && preStat.size > ToolExecutor.READ_FILE_MAX_BYTES) {
+          // PDF fica de FORA deste tecto. Ele mede os BYTES em disco, e num
+          // PDF esses bytes são o contentor (fontes, imagens, streams
+          // comprimidos) — não o texto. Um PDF de 1 MB rende tipicamente
+          // dezenas de KB de texto; recusá-lo por "excede 256 KB" bloqueava
+          // quase todos os PDFs reais, e o conselho da mensagem (usar
+          // offset+limit) não resolve nada porque o stat continua o mesmo.
+          // O que interessa limitar é a SAÍDA, e disso trata o corte por
+          // caracteres mais abaixo, comum a todos os ficheiros.
+          if (preStat && !isPdf && !sliceRequested && preStat.size > ToolExecutor.READ_FILE_MAX_BYTES) {
             void import('../../services/analytics').then(({ trackEvent }) => {
               trackEvent('read_file_oversize_throw', {
                 path: filePath,
@@ -3651,7 +3705,7 @@ ${preview}
     this.tools.set(READ_AROUND, {
       definition: {
         name: READ_AROUND,
-        description: 'Read a bounded line window around a specific 1-indexed line in a file. Use this after search_files returns a matching line and you need the surrounding code. This is a convenience wrapper over read_file offset/limit.',
+        description: `Read a bounded line window around a specific 1-indexed line in a file. Use this after ${GREP_ALIAS} returns a matching line and you need the surrounding code. This is a convenience wrapper over ${READ_ALIAS} offset/limit.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -3844,7 +3898,7 @@ ${preview}
         // é o caminho certo para as outras linguagens. (LSP multi-linguagem a
         // sério = language servers no lado Rust; projeto próprio, assumido.)
         if (!/\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$/i.test(requestedPath)) {
-          return `Error: lsp only covers TypeScript/JavaScript (the project's TS language service). "${requestedPath}" is outside that. For other languages use ${GREP_ALIAS} for usages, ${READ_ALIAS} for definitions, and the language's own compiler/linter via execute_command for diagnostics.`
+          return `Error: lsp only covers TypeScript/JavaScript (the project's TS language service). "${requestedPath}" is outside that. For other languages use ${GREP_ALIAS} for usages, ${READ_ALIAS} for definitions, and the language's own compiler/linter via ${BASH_ALIAS} for diagnostics.`
         }
         await this.requirePathAccess(requestedPath)
         const absolute = this.resolveToAbsolute(requestedPath)
@@ -3866,7 +3920,7 @@ ${preview}
     this.tools.set('list_directory', {
       definition: {
         name: 'list_directory',
-        description: 'List the contents of a directory. Returns a file tree with names and types.',
+        description: `List the contents of a directory. Returns a file tree with names and types. Mapping an unfamiliar area usually takes several rounds — for that, call ${TASK_ALIAS} with subagent_type "Explore" instead of walking the tree yourself.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -3885,7 +3939,7 @@ ${preview}
       execute: async (input) => {
         const requestedPath = (input.file_path ?? input.path ?? input.directory) as string | undefined
         if (!requestedPath) {
-          return 'Error: list_directory requires file_path, path, or directory.'
+          return `Error: ${LS_ALIAS} requires file_path, path, or directory.`
         }
         await this.requirePathAccess(requestedPath)
         const dirPath = this.resolveToAbsolute(requestedPath)
@@ -3959,7 +4013,7 @@ ${preview}
     this.tools.set('search_files', {
       definition: {
         name: 'search_files',
-        description: 'Search for text patterns across files in a directory using ripgrep. Returns up to 50 matching lines with file paths and line numbers. Set contextLines (1-10) when you need a few surrounding lines; for deeper inspection, follow a match with read_around or read_file offset/limit. If you need more results, narrow your search with includePatterns.',
+        description: `Search for text patterns across files in a directory using ripgrep. Returns up to 50 matching lines with file paths and line numbers. Set contextLines (1-10) when you need a few surrounding lines; for deeper inspection, follow a match with read_around or ${READ_ALIAS} offset/limit. If you need more results, narrow your search with includePatterns. For an OPEN-ENDED search that will need several rounds of grep/glob to answer ("where does X live", "what implements Y", mapping an unfamiliar area), call ${TASK_ALIAS} with subagent_type "Explore" instead — one call returns the answer and keeps the intermediate output out of your context.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -3980,7 +4034,7 @@ ${preview}
       execute: async (input) => {
         const query = input.query as string | undefined
         if (!query || !query.trim()) {
-          return 'Error: search_files requires a non-empty "query" parameter. Provide a search pattern.'
+          return `Error: ${GREP_ALIAS} requires a non-empty "query" parameter. Provide a search pattern.`
         }
         await this.requirePathAccess(input.directory as string)
         const directory = this.resolveToAbsolute(input.directory as string)
@@ -4047,7 +4101,7 @@ ${preview}
     this.tools.set('write_file', {
       definition: {
         name: 'write_file',
-        description: 'Replace the entire content of an existing file, or create a new file. Always use Read first on existing files to understand what you are replacing. For creating new files, prefer create_file. For small edits (1-20 lines), prefer edit_file instead.',
+        description: `Replace the entire content of an existing file, or create a new file. Always use Read first on existing files to understand what you are replacing. For creating new files, prefer create_file. For small edits (1-20 lines), prefer ${EDIT_ALIAS} instead.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -4060,6 +4114,15 @@ ${preview}
       execute: async (input) => {
         await this.requirePathAccess(input.file_path as string)
         const path = this.resolveToAbsolute(input.file_path as string)
+        // Binário NÃO é editável como texto. Guarda acrescentada quando o
+        // `${READ_ALIAS}` passou a extrair PDFs: até aí, ler um binário
+        // falhava, portanto o portão read-before-write nunca ficava satisfeito
+        // para um. Com a leitura a funcionar, o modelo passa a ter um PDF
+        // "lido" e nada o impedia de lhe escrever texto por cima — o ficheiro
+        // ficaria destruído e o diff pareceria legítimo.
+        if (hasBinaryExtension(path)) {
+          return `Error: ${path} is a binary file. ${READ_ALIAS} can extract its text, but writing text back would corrupt it. Generate binaries with the project's own tooling via ${BASH_ALIAS}.`
+        }
         const newContent = input.content as string
 
         // Read current content to generate diff data
@@ -4079,7 +4142,7 @@ ${preview}
           const readState = this.readFileTimestamps.get(path)
           if (!readState) {
             this.recordReadBeforeWriteBlocked(WRITE_FILE, 'not_read')
-            return `Error: You must call ${READ_ALIAS} on "${path}" before overwriting it. Read the file first to understand its current content, then call ${WRITE_FILE}.`
+            return `Error: You must call ${READ_ALIAS} on "${path}" before overwriting it. Read the file first to understand its current content, then call ${WRITE_ALIAS}.`
           }
           // isPartialView: if the model only saw an auto-injected partial view
           // (e.g. stripped/truncated project memory), it must do a full Read
@@ -4087,7 +4150,7 @@ ${preview}
           const cachedState = this.readFileState.get(path)
           if (cachedState?.isPartialView) {
             this.recordReadBeforeWriteBlocked(WRITE_FILE, 'partial_view')
-            return `Error: You must call ${READ_ALIAS} on "${path}" before overwriting it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${WRITE_FILE}.`
+            return `Error: You must call ${READ_ALIAS} on "${path}" before overwriting it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${WRITE_ALIAS}.`
           }
           // Concurrent modification detection: full reads use the content
           // hash; ranged reads use the file mtime captured by the range
@@ -4161,7 +4224,7 @@ ${preview}
         // Check if file already exists
         try {
           await invoke<string>('read_file', { path })
-          return `Error: File already exists: ${path}. Use ${WRITE_FILE} to overwrite or ${EDIT_FILE} for small changes.`
+          return `Error: File already exists: ${path}. Use ${WRITE_ALIAS} to overwrite or ${EDIT_ALIAS} for small changes.`
         } catch {
           // File doesn't exist — good, proceed
         }
@@ -4344,7 +4407,7 @@ ${preview}
     this.tools.set('edit_file', {
       definition: {
         name: 'edit_file',
-        description: 'Replace a specific string in a file with new content. The old_string must match exactly and (unless replace_all is true) appear only once in the file. Use this for surgical edits instead of rewriting entire files with write_file. Field names match Claude Code\'s Edit tool: `old_string` / `new_string` / `replace_all`.',
+        description: `Replace a specific string in a file with new content. The old_string must match exactly and (unless replace_all is true) appear only once in the file. Use this for surgical edits instead of rewriting entire files with ${WRITE_ALIAS}. ONE old_string/new_string pair per call: to change several spots in the same file, issue one call per spot in the SAME turn (they are chained in order, each running against the file as the previous one left it); when every spot is the identical snippet, use replace_all. Field names match Claude Code's Edit tool: \`old_string\` / \`new_string\` / \`replace_all\`.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -4358,6 +4421,15 @@ ${preview}
       },
       execute: async (input) => {
         const path = this.resolveToAbsolute(input.file_path as string)
+        // Binário NÃO é editável como texto. Guarda acrescentada quando o
+        // `${READ_ALIAS}` passou a extrair PDFs: até aí, ler um binário
+        // falhava, portanto o portão read-before-write nunca ficava satisfeito
+        // para um. Com a leitura a funcionar, o modelo passa a ter um PDF
+        // "lido" e nada o impedia de lhe escrever texto por cima — o ficheiro
+        // ficaria destruído e o diff pareceria legítimo.
+        if (hasBinaryExtension(path)) {
+          return `Error: ${path} is a binary file. ${READ_ALIAS} can extract its text, but writing text back would corrupt it. Generate binaries with the project's own tooling via ${BASH_ALIAS}.`
+        }
         // Field names align with Claude Code's Edit tool — the model uses
         // these from training. Background: the May 2026 todo-mimo /plan
         // session looped when the schema was old_str-only; the model
@@ -4399,7 +4471,7 @@ ${preview}
         const readState = this.readFileTimestamps.get(path)
         if (!readState) {
           this.recordReadBeforeWriteBlocked(EDIT_FILE, 'not_read')
-          return `Error: You must call ${READ_ALIAS} on "${path}" before editing it. Read the file first to see the current content, then call ${EDIT_FILE}.`
+          return `Error: You must call ${READ_ALIAS} on "${path}" before editing it. Read the file first to see the current content, then call ${EDIT_ALIAS}.`
         }
         // isPartialView: if the model only saw an auto-injected partial view
         // (e.g. stripped/truncated project memory), it must do a full Read
@@ -4407,7 +4479,7 @@ ${preview}
         const readStateEntry = this.readFileState.get(path)
         if (readStateEntry?.isPartialView) {
           this.recordReadBeforeWriteBlocked(EDIT_FILE, 'partial_view')
-          return `Error: You must call ${READ_ALIAS} on "${path}" before editing it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${EDIT_FILE}.`
+          return `Error: You must call ${READ_ALIAS} on "${path}" before editing it. The content you saw was auto-injected and may not match the file on disk. Read the file first, then call ${EDIT_ALIAS}.`
         }
 
         // Re-read from disk before generating the diff. `fsVersion` only tracks
@@ -4489,7 +4561,7 @@ ${preview}
     this.tools.set('glob', {
       definition: {
         name: 'glob',
-        description: 'Find files matching a glob pattern. Returns a list of absolute file paths. Build output and vendored code (anything matched by the project\'s .gitignore — dist/, lib/, out/, node_modules/) is EXCLUDED by default; pass includeIgnored: true when those files are the subject (debugging a build, checking what compiled, reading a dependency\'s real code).',
+        description: `Find files matching a glob pattern. Returns a list of absolute file paths. Build output and vendored code (anything matched by the project\'s .gitignore — dist/, lib/, out/, node_modules/) is EXCLUDED by default; pass includeIgnored: true when those files are the subject (debugging a build, checking what compiled, reading a dependency\'s real code). When the search is open-ended and will take several rounds of globbing and grepping, call ${TASK_ALIAS} with subagent_type "Explore" instead.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -4556,7 +4628,7 @@ ${preview}
       },
       execute: async (input: Record<string, unknown>) => {
         const query = typeof input.query === 'string' ? input.query.trim() : ''
-        if (!query) return 'web_search error: query is required.'
+        if (!query) return `${WEB_SEARCH_ALIAS} error: query is required.`
         const maxResults = typeof input.max_results === 'number' ? input.max_results : 5
         const abortSignal = input._abortSignal as AbortSignal | undefined
         return await this.runWebSearchSubCall(query, maxResults, abortSignal)
@@ -4567,12 +4639,16 @@ ${preview}
     this.tools.set('web_fetch', {
       definition: {
         name: 'web_fetch',
-        description: 'Fetch a web URL (http/https). Default mode returns readable text — HTML is stripped to article text and the page\'s stylesheet URLs are listed; JSON/plaintext/CSS is returned as-is. mode:"raw" returns the raw response body (full HTML markup with classes/inline styles). Use it to read documentation, npm/package pages, API responses, changelogs, or any URL the user pastes. DESIGN-COPY FLOW (user asks to see/copy a site\'s design): 1) fetch the page (text mode) for content/structure + the stylesheet list, 2) fetch the stylesheet URLs for colors/fonts/spacing, 3) fetch mode:"raw" when you need the actual markup, and 4) use capture_url_design for a visual screenshot description. Follows redirects. Can reach the local dev server (localhost); cloud-metadata and internal network addresses are blocked.',
+        description: `Fetch a web URL (http/https). PASS A \`prompt\`: the page is processed by a fast auxiliary model and you get the ANSWER to your question, not the page — a 200 KB page becomes three lines in your context instead of 50 000 truncated characters, and the navigation/footer noise never enters the transcript at all. Without a prompt you get the raw text and pay its full size in context, every turn, until compaction. Default mode returns readable text — HTML is stripped to article text and the page\'s stylesheet URLs are listed; JSON/plaintext/CSS is returned as-is. mode:"raw" returns the raw response body (full HTML markup with classes/inline styles). Use it to read documentation, npm/package pages, API responses, changelogs, or any URL the user pastes. DESIGN-COPY FLOW (user asks to see/copy a site\'s design): 1) fetch the page (text mode) for content/structure + the stylesheet list, 2) fetch the stylesheet URLs for colors/fonts/spacing, 3) fetch mode:"raw" when you need the actual markup, and 4) use capture_url_design for a visual screenshot description. Follows redirects. Can reach the local dev server (localhost); cloud-metadata and internal network addresses are blocked. PDFs ARE supported: point this tool at a .pdf URL and you get its text layer back (summarised, if you passed a prompt) — no need to curl it and shell out to pdftotext. Images, archives and media are NOT readable here. For anything VISUAL — how a page or PDF LOOKS, text overflowing its box, positions, colors — call \`${CAPTURE_URL_DESIGN}\` with the same URL: it renders in a real browser and describes what it looks like. Text extraction cannot show you a broken layout.`,
         input_schema: {
           type: 'object',
           properties: {
             url: { type: 'string', description: 'The URL to fetch (must be http or https)' },
-            maxLength: { type: 'number', description: 'Maximum characters to return. Default: 50000' },
+            prompt: {
+              type: 'string',
+              description: 'What you want to know from this page. The page is processed by a fast model and you get the ANSWER, not the page — so ask a real question ("what does this API return on 429?", "which version added X?"). Omit only when you genuinely need the raw text; then the page comes back verbatim and costs you its full size in context.',
+            },
+            maxLength: { type: 'number', description: 'Maximum characters to return when no prompt is given. Default: 50000' },
             mode: {
               type: 'string',
               enum: ['text', 'raw'],
@@ -4597,9 +4673,68 @@ ${preview}
           return `Error: "${rawUrl}" is not a valid absolute URL. Provide a full http(s) URL (e.g. https://example.com/path).`
         }
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-          return `Error: web_fetch only supports http/https URLs (got "${parsed.protocol}").`
+          return `Error: ${WEB_FETCH_ALIAS} only supports http/https URLs (got "${parsed.protocol}").`
         }
         if (signal?.aborted) return `Web fetch cancelled by user (${rawUrl}).`
+
+        // Cache de 15 min (porte do URL_CACHE do claude-vaz): a mesma página
+        // costuma ser visitada com perguntas DIFERENTES. Cacheia-se o
+        // conteúdo, não a resposta — a 2.ª pergunta poupa a rede e só paga o
+        // modelo. `raw` não usa cache: quem pede markup quer o do momento.
+        const cachedContent = input.mode === 'raw' ? null : (await import('./fetchSidecar')).getCachedPageContent(parsed.toString())
+        if (cachedContent) {
+          const ask = typeof input.prompt === 'string' ? input.prompt.trim() : ''
+          if (ask) {
+            const { answerFromPageViaSidecar } = await import('./fetchSidecar')
+            const sum = await answerFromPageViaSidecar(cachedContent, ask, parsed.toString(), signal)
+            if (sum) {
+              return `URL: ${parsed.toString()}\n`
+                + `Answered from a cached copy of the page by an auxiliary model${sum.model ? ` (${sum.model})` : ''} — not the page verbatim.\n\n`
+                + sum.answer
+            }
+          }
+          return `URL: ${parsed.toString()}\n(from cache)\n\n`
+            + (cachedContent.length > maxLength ? `${cachedContent.slice(0, maxLength)}\n…[truncated]` : cachedContent)
+        }
+
+        // ── Atalho para URLs que JÁ parecem PDF ──
+        //
+        // Sem isto o PDF era descarregado DUAS vezes: o fetch genérico traz o
+        // corpo (bytes binários que voltam como String e ficam corrompidos, ou
+        // seja, inúteis), descobre-se o content-type, e só então o
+        // `fetch_pdf_text` o descarrega outra vez para extrair. Em 4 KB não se
+        // nota; num PDF de 20 MB são 40 MB de tráfego por nada.
+        //
+        // A extensão no URL cobre a esmagadora maioria dos casos. Quando ela
+        // mente (um 404 em HTML servido num caminho `.pdf`), a extracção falha
+        // e cai-se no caminho normal — correcção preservada, custo poupado.
+        if (/\.pdf(?:$|[?#])/i.test(parsed.pathname + parsed.search)) {
+          try {
+            const text = await invoke<string>('fetch_pdf_text', { url: parsed.toString() })
+            if (text.trim()) {
+              // Um PDF é onde o sumarizador rende mais: uma factura de 30
+              // páginas responde a "qual é o total?" numa linha.
+              const ask = typeof input.prompt === 'string' ? input.prompt.trim() : ''
+              if (ask) {
+                const { answerFromPageViaSidecar } = await import('./fetchSidecar')
+                const sum = await answerFromPageViaSidecar(text, ask, parsed.toString(), signal)
+                if (sum) {
+                  return `${parsed.toString()}\nContent-Type: application/pdf\n`
+                    + `Answered from the PDF's text layer by an auxiliary model${sum.model ? ` (${sum.model})` : ''}.\n\n`
+                    + `${sum.answer}\n\n`
+                    + `[Text layer only. For LAYOUT questions — overflowing text, positions, what it LOOKS like — `
+                    + `call \`${CAPTURE_URL_DESIGN}\` on this URL instead.]`
+                }
+              }
+              const trimmed = text.length > 60_000 ? `${text.slice(0, 60_000)}\n…[truncated]` : text
+              return `${parsed.toString()}\nContent-Type: application/pdf\n\n${trimmed}\n\n`
+                + `[Text layer only. For LAYOUT questions — overflowing text, positions, what it LOOKS like — `
+                + `call \`${CAPTURE_URL_DESIGN}\` on this URL instead: text extraction cannot show you a broken layout.]`
+            }
+          } catch {
+            /* não era PDF, ou não tem camada de texto — segue o caminho normal */
+          }
+        }
 
         // Fetch DIRECTLY through the CORS-free Rust reqwest proxy (follows up to 5
         // redirects, SSRF-guards internal/metadata addresses, 30s timeout). This
@@ -4650,7 +4785,7 @@ ${preview}
             return `Web fetch cancelled by user (${rawUrl}).`
           }
           const msg = err instanceof Error ? err.message : String(err)
-          return `Error fetching ${rawUrl}: ${msg}\n\n${WEB_FETCH_FALLBACK_HINT}`
+          return `Error fetching ${rawUrl}: ${msg}\n\n${webFetchFallbackHint()}`
         }
 
         const contentType = (
@@ -4658,13 +4793,63 @@ ${preview}
         ).toLowerCase()
 
         if (result.status >= 400) {
-          return `Error: fetching ${parsed.toString()} returned HTTP ${result.status} ${result.statusText}.\n\n${WEB_FETCH_FALLBACK_HINT}`
+          return `Error: fetching ${parsed.toString()} returned HTTP ${result.status} ${result.statusText}.\n\n${webFetchFallbackHint()}`
         }
 
         // Cap the RAW body before parsing: the Rust proxy has no response-size
         // limit, and handing a multi-MB page to DOMParser (below) would build a
         // giant DOM and can jank/OOM the renderer. 3 MB is far more markup than
         // any readable page; extraction + the output cap shrink it further.
+        // ── Binário não é texto: recusar em vez de despejar bytes ──
+        //
+        // Reportado em uso real (2026-07-31): o developer colou o URL de um PDF
+        // de nota de crédito a pedir a correção do layout. O fetch devolveu
+        // `%PDF-1.7` seguido de um stream FlateDecode — 4 KB de binário
+        // comprimido. O modelo não viu a imagem NEM o texto (o conteúdo está
+        // dentro do stream), corrigiu apenas o que conseguiu inferir lendo o
+        // código, e o defeito reportado ficou por corrigir. Devolver bytes
+        // gasta contexto e não informa: é estritamente pior do que dizer que
+        // não dá e apontar para a ferramenta certa.
+        const BINARY_TYPES: ReadonlyArray<[RegExp, string]> = [
+          [/application\/pdf/i, 'PDF'],
+          [/^image\//i, 'image'],
+          [/application\/(zip|gzip|x-tar|octet-stream)/i, 'binary archive'],
+          [/^(audio|video)\//i, 'media'],
+          [/application\/vnd\.(openxmlformats|ms-)/i, 'Office document'],
+        ]
+        const binaryKind = BINARY_TYPES.find(([re]) => re.test(contentType))?.[1]
+        // PDF: já não é um beco. Grava-se num ficheiro temporário e extrai-se a
+        // camada de texto pelo mesmo caminho do `${READ_ALIAS}` — o developer
+        // cola o URL de uma factura e o agente lê-lhe o conteúdo. Para
+        // perguntas VISUAIS (layout, transbordo) o texto não chega, e a
+        // resposta aponta na mesma para o capture_url_design.
+        if (binaryKind === 'PDF') {
+          try {
+            const text = await invoke<string>('fetch_pdf_text', {
+              url: parsed.toString(),
+            })
+            const trimmed = text.length > 60_000 ? `${text.slice(0, 60_000)}\n…[truncated]` : text
+            return `${parsed.toString()}\nContent-Type: ${contentType}\n\n${trimmed}\n\n`
+              + `[Text layer only. For LAYOUT questions — overflowing text, positions, what it LOOKS like — `
+              + `call \`${CAPTURE_URL_DESIGN}\` on this URL instead: text extraction cannot show you a broken layout.]`
+          } catch (err) {
+            return `${parsed.toString()}\nContent-Type: ${contentType}\n\n`
+              + `Could not extract text from this PDF (${formatError(err)}). `
+              + `If it is scanned or image-only it has no text layer — call \`${CAPTURE_URL_DESIGN}\` on this URL to see it instead.`
+          }
+        }
+        if (binaryKind) {
+          const sizeKb = (result.body.length / 1024).toFixed(0)
+          return `${parsed.toString()}\nContent-Type: ${contentType} (${sizeKb} KB)\n\n`
+            + `This is a ${binaryKind}, not text — its bytes carry no information you can read here, `
+            + `so they are not returned.\n`
+            + (binaryKind === 'PDF' || binaryKind === 'image'
+              ? `To SEE it, call \`${CAPTURE_URL_DESIGN}\` with this same URL: it opens the document in a real browser, `
+                + `screenshots it and returns a visual description (layout, overflowing text, colors, positions). `
+                + `That is the only way to judge a rendering or layout problem from a URL.`
+              : `Download it with \`${BASH_ALIAS}\` and inspect it with a tool that understands the format.`)
+        }
+
         const MAX_FETCH_BODY_CHARS = 3_000_000
         let body = result.body
         let bodyTruncated = false
@@ -4709,6 +4894,41 @@ ${preview}
           // raw mode, or JSON / plain text / CSS / markdown — return as-is
           // (normalized only by size cap).
           content = body
+        }
+
+        // ── Sidecar: responder À PERGUNTA em vez de devolver a página ──
+        //
+        // Porte do contrato do claude-vaz (WebFetchTool): com um `prompt`, a
+        // página é processada por um modelo rápido e o agente recebe a
+        // RESPOSTA. Uma página de 200 KB passa a três linhas no contexto em
+        // vez de 50 000 caracteres cortados a meio — e o que era irrelevante
+        // (navegação, rodapés, banners) nunca entra no transcript, logo também
+        // não sobrevive à compactação.
+        //
+        // `raw` fica de fora de propósito: quem pede markup quer o markup.
+        // Sem sidecar disponível cai-se no texto integral — o sumarizador
+        // nunca faz o fetch falhar.
+        if (!rawMode && content.trim()) {
+          ;(await import('./fetchSidecar')).cachePageContent(parsed.toString(), content)
+        }
+
+        const askPrompt = typeof input.prompt === 'string' ? input.prompt.trim() : ''
+        if (askPrompt && !rawMode && content.trim()) {
+          const { answerFromPageViaSidecar } = await import('./fetchSidecar')
+          const summarised = await answerFromPageViaSidecar(content, askPrompt, parsed.toString(), signal)
+          if (summarised) {
+            return [
+              `URL: ${parsed.toString()}`,
+              `Status: ${result.status} ${result.statusText}`,
+              title ? `Title: ${title}` : '',
+              `Answered from the page by an auxiliary model${summarised.model ? ` (${summarised.model})` : ''} — this is not the page verbatim.`,
+              '',
+              summarised.answer,
+              designFooter,
+              '',
+              `[Ask again with a different prompt to get more from this page, or omit the prompt to receive the raw text.]`,
+            ].filter(Boolean).join('\n')
+          }
         }
 
         // truncated = the raw body was over the parse cap OR the extracted text
@@ -4765,7 +4985,7 @@ ${preview}
       definition: {
         name: CAPTURE_URL_DESIGN,
         description:
-          'Open a public http(s) URL in a real browser, take a screenshot, and return a detailed visual design description (layout, colors, typography, components, all visible text). Use when the user asks to see/copy/recreate a website design or a section of it. Pair with web_fetch (text + stylesheet list + mode:"raw") for markup/CSS tokens. Requires Node.js + Chrome/Edge/Brave on the machine (same stack as /te2e). Optional focus narrows the description (e.g. "hero only", "pricing cards").',
+          `Open a public http(s) URL in a real browser, take a screenshot, and return a detailed visual design description (layout, colors, typography, components, all visible text). Use when the user asks to see/copy/recreate a website design or a section of it. Pair with ${WEB_FETCH_ALIAS} (text + stylesheet list + mode:"raw") for markup/CSS tokens. Requires Node.js + Chrome/Edge/Brave on the machine (same stack as /te2e). Optional focus narrows the description (e.g. "hero only", "pricing cards").`,
         input_schema: {
           type: 'object',
           properties: {
@@ -5165,7 +5385,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('delegate', {
       definition: {
         name: 'delegate',
-        description: `Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (${GLOB_ALIAS}, ${GREP_ALIAS}, ${READ_ALIAS}, ${LS_ALIAS}). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup + read-only diagnostics (web_search, web_fetch, read_skill, curl via execute_command). Use for "find the API docs for X", "what's the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done. Its prompt MUST state what the task was, how you implemented it, and the EXACT files you changed — it sees nothing of your conversation and cannot verify what it cannot locate. Ends with a verdict: PASS, FAIL, or PARTIAL. For a quick type-check alone, prefer ${BASH_ALIAS}("npx tsc --noEmit 2>&1") — it is faster and more direct than delegating.\n\nAll tasks run in parallel. Results are DELIVERED to you automatically when each member finishes — mid-run at your next step if you are still working, or by an auto-wake if you are idle. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn — results will arrive as you work.\n  • If you have nothing else to do, end your turn and tell the user you delegated and will synthesize when the results arrive.\n  • NEVER poll collect_results while members are running — it is a manual fallback for full untruncated text, not a waiting mechanism.\n\nWhen NOT to use:\n  • The task is a single ${READ_ALIAS} call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.`,
+        description: `Delegate a task to a team member. Returns immediately — the task runs in background while you continue working.\n\nAvailable team members:\n  Explore — Read-only codebase search (${GLOB_ALIAS}, ${GREP_ALIAS}, ${READ_ALIAS}, ${LS_ALIAS}). Use for "find all usages of X", "where is Y defined", "list every file that imports Z".\n  Research — Web research + skill lookup + read-only diagnostics (${WEB_SEARCH_ALIAS}, ${WEB_FETCH_ALIAS}, read_skill, curl via ${BASH_ALIAS}). Use for "find the API docs for X", "what's the auth shape of service Y".\n  Verify — Adversarial verification (read + execute, no writes). Use after non-trivial changes (3+ files, backend/API work) to catch issues before reporting done. Its prompt MUST state what the task was, how you implemented it, and the EXACT files you changed — it sees nothing of your conversation and cannot verify what it cannot locate. Ends with a verdict: PASS, FAIL, or PARTIAL. For a quick type-check alone, prefer ${BASH_ALIAS}("npx tsc --noEmit 2>&1") — it is faster and more direct than delegating.\n\nAll tasks run in parallel. Results are DELIVERED to you automatically when each member finishes — mid-run at your next step if you are still working, or by an auto-wake if you are idle. After delegating:\n  • If you have other work to do (reads, edits, analysis), do it in the same turn — results will arrive as you work.\n  • If you have nothing else to do, end your turn and tell the user you delegated and will synthesize when the results arrive.\n  • NEVER poll collect_results while members are running — it is a manual fallback for full untruncated text, not a waiting mechanism.\n\nWhen NOT to use:\n  • The task is a single ${READ_ALIAS} call — just do it directly.\n  • The task requires editing files — team members are read-only.\n  • You already have the answer in your context.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -5397,7 +5617,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
 
         // Nothing to check
         if (ownedSummaries.length === 0) {
-          return 'No team tasks are active. Use the delegate tool to assign work to team members first.'
+          return `No team tasks are active. Use the ${TASK_ALIAS} tool to assign work to team members first.`
         }
 
         // Circuito: nada mudou desde a última chamada → recusa.
