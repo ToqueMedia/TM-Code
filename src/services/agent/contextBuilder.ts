@@ -68,7 +68,6 @@ import {
   sharedOutputEfficiency,
   sharedShellExecutionLoop,
   sharedToneAndStyle,
-  sharedTurnEfficiency,
   sharedTasteDefaults,
   sharedUiBaselineCore,
 } from './contextBuilder/sections/sharedSections'
@@ -273,7 +272,9 @@ class ContextBuilder {
       case 'scaffold.workflow':
         return ctx ? getScaffoldingInstallSection({ pmDetected: ctx.pmDetected }) : null
       case 'vision.image_rules':
-        return getVisionSection()
+        // Capacidade RESOLVIDA (declarada pelo worker × perfil local), a mesma
+        // que decide se o sidecar de visão sequer corre — ver getVisionSection.
+        return getVisionSection(ctx?.promptCtx?.modelProfile?.supportsAttachments === true)
       case 'design_system.semantic_tokens':
         return [
           '# Design system: semantic tokens',
@@ -877,7 +878,7 @@ class ContextBuilder {
       langInstruction,
       modelProfile,
       mcpTools: mcpTools || [],
-      coreToolCount: coreToolCount ?? 20,
+      coreToolCount,
       loadedSkillNames: loadedSkills.map(s => s.name),
       hashtagSkills: stickyHashtagSkills,
       currentTasks,
@@ -1009,7 +1010,6 @@ class ContextBuilder {
       sharedToneAndStyle(),
       sharedOutputEfficiency(),
       sharedContextPreservation(),
-      sharedTurnEfficiency(),
       // Memory taxonomy + save/forget discipline. The rules of the
       // memory system are stable across sessions (the data on disk
       // mutates, but the schema/contract is fixed), so this guidance

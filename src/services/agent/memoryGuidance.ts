@@ -1,7 +1,12 @@
 /**
  * Shared memory guidance content used by all system-prompt builders.
  * Single source of truth — update here and every prompt surface picks it up.
+ *
+ * Tools nomeadas pelo ALIAS de treino: é o único nome que chega ao modelo
+ * (getToolDefinitions renomeia o schema). As de memória (read_memory,
+ * save_memory) são do TM Code e não têm equivalente — ficam canónicas.
  */
+import { READ_ALIAS, LS_ALIAS, GREP_ALIAS } from './toolNames'
 
 /**
  * Build the full memory tools guidance section. Used by:
@@ -14,7 +19,7 @@ You have two memory layers:
 - Persistent memory: \`save_memory\` / \`forget_memory\` / \`read_memory\` for durable cross-session facts.
 - Session memory: \`update_session_memory\` / \`read_session_memory\` for in-progress work state that must survive compaction but should reset with the session.
 
-The current persistent entries are listed in the "Persistent memory" block below (user scope + project scope). Build this system up so future conversations have a complete picture of who the developer is, what to repeat or avoid, and the context behind the work.
+The current persistent entries are listed in the "Persistent memory" block below (user scope + project scope) — that block appears only when entries exist and are relevant; its absence means nothing was selected, not that memory is unavailable. Build this system up so future conversations have a complete picture of who the developer is, what to repeat or avoid, and the context behind the work.
 
 If the developer explicitly asks you to remember something, save it as the type that fits best. If they ask you to forget something, remove the entry.
 
@@ -90,8 +95,8 @@ These exclusions apply **even when the developer explicitly asks you to save.** 
 
 A memory that names a specific function, file, or flag is a claim that it existed *when the memory was written*. It may have been renamed, removed, or never merged. Before recommending it:
 
-- If the memory names a file path → check the file exists (\`read_file\` or \`list_directory\`).
-- If the memory names a function or flag → search_files for it.
+- If the memory names a file path → check the file exists (\`${READ_ALIAS}\` or \`${LS_ALIAS}\`).
+- If the memory names a function or flag → \`${GREP_ALIAS}\` for it.
 - If the developer is about to act on your recommendation, verify first.
 
 "The memory says X exists" is not the same as "X exists now." If a recalled memory conflicts with what you observe, trust what you observe and update or forget the stale memory.`

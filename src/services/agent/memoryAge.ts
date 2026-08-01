@@ -30,6 +30,10 @@
  * does). Pulling the threshold down to 1 day exposes that risk earlier.
  */
 
+// Nomes de treino: o aviso de memória velha vai para o prompt, e mandá-lo
+// verificar com `search_files` nomeava uma tool que o modelo não tem.
+import { GREP_ALIAS, LS_ALIAS, READ_ALIAS } from './toolNames'
+
 const MS_PER_DAY = 1000 * 60 * 60 * 24
 
 export const MEMORY_OLD_DAYS = 1
@@ -66,7 +70,7 @@ export function memoryAgeWarning(mtimeMs: number, nowMs: number = Date.now()): s
     `> ⚠️ This memory is ${days} day${days === 1 ? '' : 's'} old. ` +
     `Memories are point-in-time observations, not live state — file paths, ` +
     `function names, and env-var names it cites may have moved. ` +
-    `Verify identifiers against current code (search_files / list_directory / read_file) ` +
+    `Verify identifiers against current code (${GREP_ALIAS} / ${LS_ALIAS} / ${READ_ALIAS}) ` +
     `before asserting them as fact.\n\n`
   )
 }

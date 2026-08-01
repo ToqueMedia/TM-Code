@@ -21,22 +21,22 @@
 
 import type { MCPToolSummary } from '../types'
 import { budgetMcpDescriptions } from '../../mcpDescriptionBudget'
+// Ver nota em chatSections: tools com nome de treino entram pelo ALIAS (é o
+// único nome que chega ao modelo); as específicas do TM Code pelo canónico.
 import {
   AGENT_SHELL_READ,
   AGENT_SHELL_START,
   AGENT_SHELL_STOP,
   AGENT_SHELL_WRITE,
   CHECK_BACKGROUND_COMMANDS,
-  EDIT_FILE,
-  EXECUTE_COMMAND,
   EXECUTE_COMMAND_BACKGROUND,
   BASH_ALIAS,
+  EDIT_ALIAS,
   GLOB_ALIAS,
   LS_ALIAS,
   GREP_ALIAS,
   READ_AROUND,
   READ_ALIAS,
-  READ_FILE,
 } from '../../toolNames'
 
 /**
@@ -89,9 +89,10 @@ Default to **restraint over decoration**. When the developer hasn't named a visu
 This is the FLOOR. Specialized design/UI skills, when explicitly invoked, layer more on top — motion, micro-interactions, advanced typography, or the requested component stack. These rules apply regardless: with or without a skill, a generated UI must clear this baseline AND the taste defaults above.`
 }
 
-export function sharedUiBaseline(): string {
-  return `${sharedUiBaselineCore()}\n\n${sharedTasteDefaults()}`
-}
+// `sharedUiBaseline()` (o composto Core + TasteDefaults) foi removido em
+// 2026-07-31: zero consumidores. As duas metades são injetadas em separado
+// pelo chatSections; o composto existia para o prompt cwd-scoped
+// (buildCmdModeSystemPrompt), que morreu com a superfície Terminal.
 
 /**
  * Verbatim from claude-vaz (constants/prompts.ts: getSimpleToneAndStyleSection)
@@ -220,7 +221,7 @@ export function sharedShellExecutionLoop(): string {
 
 Operate like an interactive shell operator, not a script generator.
 
- - **Act atomically**: prefer one purposeful command, observe its stdout/stderr/exit code, then decide the next command. Avoid \`&&\`, \`||\`, \`;\`, and pipes as workflow glue because they hide the failing step and remove your feedback loop.
+ - **Act atomically in the shell**: prefer one purposeful command, observe its stdout/stderr/exit code, then decide the next command. Avoid \`&&\`, \`||\`, \`;\`, and pipes as workflow glue because they hide the failing step and remove your feedback loop. This is a rule about SHELL commands and dependent actions — it does not serialize your other tools: independent reads, searches, and edits to different files still belong batched in one turn.
  - **Use persistent shell for interactive state**: when you need to stay inside a shell, SSH session, REPL, or stateful CLI, call \`${AGENT_SHELL_START}\`, then send one input line at a time with \`${AGENT_SHELL_WRITE}\`, observe with \`${AGENT_SHELL_READ}\`, and finish with \`${AGENT_SHELL_STOP}\`. The start result includes \`platform\` and \`command_style\`; obey it. On Windows, \`command_style: posix\` means Git Bash is active and POSIX commands are appropriate; \`powershell\` or \`cmd\` means use native Windows syntax until you enter a remote Unix shell. Example: start shell → write \`ssh root@host\` → read prompt → write \`apt-get update\` → read → write \`DEBIAN_FRONTEND=noninteractive apt-get upgrade -yq\`.
  - **Use shell for shell work only**: use dedicated tools for file/code exploration, and \`${BASH_ALIAS}\` for everything else.
    - \`${READ_ALIAS}\` — read file contents (replaces \`cat\`, \`head\`, \`tail\`, \`sed -n\`)
@@ -229,8 +230,8 @@ Operate like an interactive shell operator, not a script generator.
    - \`${LS_ALIAS}\` — list directory contents (replaces \`ls\`, \`tree\`)
    - \`${GLOB_ALIAS}\` — find files by pattern (replaces \`find\`, \`fd\`)
    - \`${BASH_ALIAS}\` — run CLIs, tests, builds, package managers, git diagnostics, curl, and system operations
- - **Observe before continuing**: after every \`${EXECUTE_COMMAND}\`, read the full result. Exit code ≠ 0, timeout, or meaningful stderr is a blocker to diagnose, not noise to skip.
- - **Choose blocking vs background deliberately**: quick commands that you need immediately go through \`${EXECUTE_COMMAND}\`. ${backgroundGuidance}
+ - **Observe before continuing**: after every \`${BASH_ALIAS}\`, read the full result. Exit code ≠ 0, timeout, or meaningful stderr is a blocker to diagnose, not noise to skip.
+ - **Choose blocking vs background deliberately**: quick commands that you need immediately go through \`${BASH_ALIAS}\`. ${backgroundGuidance}
  - **Keep commands inspectable**: quote paths, pass an explicit \`cwd\` when needed, and split multi-step workflows into named tool calls unless the shell composition is itself the operation being tested.
  - **Escalate risky actions**: destructive, shared-state, or hard-to-reverse shell actions require explicit confirmation from the ${actor} before execution.`
 }
@@ -299,37 +300,15 @@ export function sharedThinkingEfficiencyReminder(): string {
   return `Thinking: after initial analysis, commit and act. If your internal reasoning revisits the same points, stop and produce your answer — looping does not improve the outcome.`
 }
 
-/**
- * Turn efficiency — rules that minimise the number of provider round-trips
- * for localized fixes WITHOUT cutting corners on correctness. Goes in the
- * static block (cacheable) so the guidance is stable across turns.
- *
- * DELIBERADAMENTE sem thresholds numéricos ("3-4 requests", "when you exceed
- * 4 requests") desde 2026-07-22: a auditoria da sessão momenu-fact mostrou o
- * modelo a ignorar a secção numérica 24 vezes num run de 151 requests, e o
- * claude-vaz não usa pacing numérico no prompt (âncoras numéricas lá são um
- * experimento ant-only, ~1,2% de ganho). O número vive agora no RUNTIME:
- * turnEfficiency.ts mede as rondas e injeta um system-reminder inter-turn
- * quando a continuação não tem razão técnica (query.ts). O prompt fica com a
- * doutrina qualitativa + as regras mecânicas de batching, que são acionáveis
- * por si.
- */
-export function sharedTurnEfficiency(): string {
-  return `# Turn efficiency
-
-Go straight to the point: try the simplest approach first, without going in circles. Quality ALWAYS comes first — never rush or skip diagnosis — but continuing when you already have what you need is a defect, not thoroughness: re-reading files you have read, re-verifying what already passed, or exploring beyond the task wastes the developer's time. When your investigation stops producing new information, act on what you have or ask the developer.
-
-## Batch within a turn
- - **Group edits in the same file**: when a fix touches 2+ spots in one file, make ALL changes in a single \`${EDIT_FILE}\` call (sequential \`old_string\`→\`new_string\` pairs) instead of multiple calls. Multiple round-trips to edit one file waste turns and risk intermediate broken states.
- - **One read, not many**: when you need several nearby ranges of the same file, read ONE larger range that covers them all instead of multiple small \`${READ_FILE}\` calls. Re-reading the same file between edits is a wasted turn.
- - **Apply related changes together**: once you've identified the root cause, apply ALL related edits in a single \`${EDIT_FILE}\` when it doesn't increase risk. Don't edit-spot-verify-edit-spot-verify in a serial drip.
- - **Issue independent tool calls TOGETHER, in one turn**: when the next calls don't depend on each other's results — reading three files, a search plus a glob, two \`web_fetch\`es — emit them in the SAME assistant turn instead of one per turn. The IDE runs independent read-only calls concurrently, so a batch costs roughly one call's latency; asking one at a time costs a full round-trip each.
- - **Skip narration-only tool calls**: do not call a tool just to say "I'll now edit the file" — state intent in your text and call the tool. The developer sees tool cards; a text preface is enough.
-
-## Skip expensive verification when it's low-risk
- - For **purely visual / structural / low-risk changes** (formatting, renaming a local variable, adjusting spacing, reordering imports), do NOT run a full build/typecheck/test cycle unless you suspect a type error. A single \`edit_file\` + brief note is sufficient.
- - DO verify when: the change touches types/APIs/logic, you're unsure it compiles, or the fix is in a hot path. "Expensive verification" = running the full test suite or build for a one-line cosmetic fix. Targeted verification (one test file, \`tsc --noEmit\`) is cheap and always acceptable when in doubt.`
-}
+// `sharedTurnEfficiency()` REMOVIDA em 2026-07-31. Era uma secção inteira
+// (# Turn efficiency + ## Batch within a turn + ## Skip expensive
+// verification) que o claude-vaz NÃO tem: lá o assunto é UMA frase neutra
+// sobre multi-tool e uma dica de encaminhamento na descrição do Grep/Glob.
+// Medido na mesma tarefa: a doutrina explícita levou 8 → 31 calls e 8 → 11
+// rondas, porque mandava MAXIMIZAR uma contagem. As duas regras que não
+// eram sobre eficiência mudaram de casa, para o sítio onde são acionáveis:
+//   - contrato do Edit (um par por call, replace_all) → descrição da tool
+//   - remover TODAS as referências de um símbolo → sharedDoingTasksCore
 
 export function sharedDoingTasksCore(actor: 'developer' | 'user', scopeDescription: string): string {
   const subject = actor === 'developer' ? 'The developer' : 'The user'
@@ -344,5 +323,7 @@ export function sharedDoingTasksCore(actor: 'developer' | 'user', scopeDescripti
  - Don't remove existing comments unless you're removing the code they describe or know they're wrong. A pointless-looking comment may encode a constraint from a past bug.
  - If an approach fails, diagnose before switching tactics — read the error, check assumptions, try a focused fix. Don't blindly retry; don't abandon after one failure either. Escalate to the ${actor} only when genuinely stuck after investigation.
  - After initial analysis, commit to a conclusion and act. If your internal reasoning revisits the same evidence or arguments, stop — produce your answer and move forward. Extended deliberation that loops over the same points does not improve the outcome.
- - Watch for security vulnerabilities (injection, XSS, secret exposure) — fix immediately if you wrote them.`
+ - Watch for security vulnerabilities (injection, XSS, secret exposure) — fix immediately if you wrote them.
+ - Removing a symbol means removing EVERY reference to it in the same turn — one \`${EDIT_ALIAS}\` call per site. Deleting a method and leaving one call site behind ships a file that no longer compiles. Count the sites before you start, and emit one edit per site.
+ - Continuing when you already have what you need is a defect, not thoroughness: re-reading a file you have read, re-running a search you already ran, or re-verifying what already passed. When your investigation stops producing new information, act on what you have or ask the developer.`
 }

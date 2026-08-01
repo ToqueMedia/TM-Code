@@ -10,6 +10,7 @@
 
 import { invoke } from '@/utils/invokeMetrics'
 import { cachedBuildFileTree, cachedSafeReadFile } from '../ipcCache'
+import { LS_ALIAS } from '../toolNames'
 import { detectSystemPackageManager } from '../../packageManagerDetector'
 import type { TemplateManifest } from '../../templateService'
 import type { ProjectManifest } from '../../projectManifestService'
@@ -46,10 +47,11 @@ export function formatFileTree(node: Record<string, unknown>, indent: string = '
 
   // The Rust walker sets `truncated` when a directory's contents were cut —
   // either capped at MAX_CHILDREN_PER_DIR or sliced off at maxDepth. Surfacing
-  // it tells the model "there's more here" so it reaches for list_directory
+  // it tells the model "there's more here" so it reaches for the listing tool
   // instead of assuming the folder is empty (or, worse, that the project is).
+  // Nomeada pelo ALIAS: é o único nome que o modelo vê no schema.
   if (isDir && node.truncated === true) {
-    result += `${childIndent}… (truncated — use list_directory to expand)\n`
+    result += `${childIndent}… (truncated — use ${LS_ALIAS} to expand)\n`
   }
 
   return result

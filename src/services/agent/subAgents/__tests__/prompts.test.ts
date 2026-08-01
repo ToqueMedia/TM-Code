@@ -10,6 +10,10 @@ import { RESEARCH_AGENT } from '../researchAgent'
 import { VERIFY_AGENT } from '../verifyAgent'
 import { BUILT_IN_AGENTS, getAgentDefinition } from '../builtInAgents'
 import type { SubAgentParentContext } from '../types'
+import {
+  GREP_ALIAS, GLOB_ALIAS, READ_ALIAS, LS_ALIAS,
+  WEB_SEARCH_ALIAS, WEB_FETCH_ALIAS, BASH_ALIAS,
+} from '../../toolNames'
 
 const LEGACY_MODE_LABEL = ['Terminal', 'Mode'].join(' ')
 
@@ -75,14 +79,17 @@ describe('Explore agent prompt', () => {
   })
 
   it('includes all allowed tools', () => {
+    // DOIS dialectos: o prompt nomeia as tools como o modelo as vê (alias de
+    // treino); `EXPLORE_AGENT.tools` é a allow-list interna, em canónico.
     const prompt = EXPLORE_AGENT.getSystemPrompt(CHAT_CTX)
-    expect(prompt).toContain('search_files')
-    expect(prompt).toContain('glob')
-    expect(prompt).toContain('read_file')
+    expect(prompt).toContain(GREP_ALIAS)
+    expect(prompt).toContain(GLOB_ALIAS)
+    expect(prompt).toContain(READ_ALIAS)
+    expect(prompt).toContain(LS_ALIAS)
     expect(prompt).toContain('read_around')
-    expect(prompt).toContain('list_directory')
     expect(prompt).toContain('read_large_result')
     expect(EXPLORE_AGENT.tools).toContain('read_large_result')
+    expect(EXPLORE_AGENT.tools).toContain('search_files')
   })
 
   it('includes project root', () => {
@@ -109,14 +116,17 @@ describe('Explore agent prompt', () => {
 
 describe('Research agent prompt', () => {
   it('includes web research tools', () => {
+    // DOIS dialectos: o prompt nomeia as tools como o modelo as vê (alias de
+    // treino); `RESEARCH_AGENT.tools` é a allow-list interna, em canónico.
     const prompt = RESEARCH_AGENT.getSystemPrompt(CHAT_CTX)
-    expect(prompt).toContain('web_search')
-    expect(prompt).toContain('web_fetch')
+    expect(prompt).toContain(WEB_SEARCH_ALIAS)
+    expect(prompt).toContain(WEB_FETCH_ALIAS)
+    expect(prompt).toContain(BASH_ALIAS)
     expect(prompt).toContain('read_skill')
     expect(prompt).toContain('read_around')
     expect(prompt).toContain('read_large_result')
-    expect(prompt).toContain('execute_command')
     expect(RESEARCH_AGENT.tools).toContain('read_large_result')
+    expect(RESEARCH_AGENT.tools).toContain('execute_command')
   })
 
   it('includes read-only rule', () => {
@@ -127,7 +137,7 @@ describe('Research agent prompt', () => {
   it('includes typical flow section', () => {
     const prompt = RESEARCH_AGENT.getSystemPrompt(CHAT_CTX)
     expect(prompt).toContain('Typical flow')
-    expect(prompt).toContain('web_search')
+    expect(prompt).toContain(WEB_SEARCH_ALIAS)
   })
 
   it('does not treat a failed web fetch as final proof of inaccessibility', () => {

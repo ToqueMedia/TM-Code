@@ -12,6 +12,7 @@
  */
 
 import { checkPlanModeAccess, isPlanArtefactAtRoot, PLAN_MODE_ALLOWED_TOOLS } from '../planMode'
+import { advertisedToolName } from '../toolNames'
 
 const ROOT = '/Users/dev/projects/myapp'
 
@@ -23,7 +24,9 @@ describe('checkPlanModeAccess', () => {
         const msg = checkPlanModeAccess(tool, '', ROOT)
         expect(msg).not.toBeNull()
         expect(msg).toContain('Blocked in /plan architect mode')
-        expect(msg).toContain(tool)
+        // A mensagem ecoa a tool pelo nome ANUNCIADO — é o que o modelo tem
+        // no schema. Para as que não têm nome de treino, é o mesmo nome.
+        expect(msg).toContain(advertisedToolName(tool))
       }
     })
 

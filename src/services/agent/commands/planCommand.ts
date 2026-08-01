@@ -9,13 +9,18 @@ import ToolExecutor from '../toolExecutor'
 import { preprocessHashtags } from '../hashtagRegistry'
 import { detectAiAgentIntent, buildAiAgentPlatformLine } from '../aiAgentIntent'
 import type { Attachment, PlanResumePending, PromptBlock } from '../../../types/chat'
+// Tools com nome de treino entram pelo ALIAS — é o único nome que o modelo vê
+// (getToolDefinitions renomeia o schema). Vale sobretudo para a lista
+// "You MUST NOT call": proibir `execute_command` não proíbe nada quando a
+// tool que ele tem na mão se chama `Bash`.
 import {
-  READ_FILE, LIST_DIRECTORY, GLOB, SEARCH_FILES,
-  READ_ALIAS,
-  READ_SKILL, WRITE_FILE, EDIT_FILE, CREATE_FILE,
-  EXECUTE_COMMAND, START_DEV_SERVER,
+  READ_ALIAS, LS_ALIAS, GLOB_ALIAS, GREP_ALIAS, BASH_ALIAS,
+  EDIT_ALIAS, WRITE_ALIAS, TASK_ALIAS,
+  WEB_SEARCH_ALIAS, WEB_FETCH_ALIAS, CAPTURE_URL_DESIGN,
+  READ_AROUND, READ_LARGE_RESULT,
+  READ_SKILL, CREATE_FILE, START_DEV_SERVER,
   DELETE_FILE, REQUEST_CREDENTIALS, UPDATE_TASKS,
-  ASK_USER_QUESTION, DELEGATE, COLLECT_RESULTS,
+  ASK_USER_QUESTION, COLLECT_RESULTS,
 } from '../toolNames'
 import { t } from '@/i18n'
 
@@ -429,7 +434,7 @@ Plan file: ${planArtifact.path}
 The current ${planArtifact.fileName} (your previous version) is below. Your job this turn is to:
 
 1. Read the feedback and identify what specific sections of ${planArtifact.fileName} need to change.
-2. Edit ${planArtifact.fileName} at ${planArtifact.path} to incorporate the feedback. Use \`${EDIT_FILE}\` for surgical changes (single section, a few tasks, one decision row). Use \`${WRITE_FILE}\` only if the feedback requires restructuring the document end-to-end.
+2. Edit ${planArtifact.fileName} at ${planArtifact.path} to incorporate the feedback. Use \`${EDIT_ALIAS}\` for surgical changes (single section, a few tasks, one decision row). Use \`${WRITE_ALIAS}\` only if the feedback requires restructuring the document end-to-end.
 3. If the implementation phases shift, update the task tracker via \`${UPDATE_TASKS}\` to mirror the new structure (same task-id convention: "1.1", "1.2", etc.).
 4. Flip frontmatter \`Status:\` back to \`PENDING APPROVAL\` (or leave as-is if it's already there) — the IDE waits for this marker before re-rendering the approval card.
 5. Post a 3-sentence chat summary of what you changed, then STOP. The developer will re-approve / re-request changes / reject from the new card.
@@ -663,12 +668,12 @@ Project root: ${projectPath}${platformBlock}`
 
 function getChannelRuleSection(): string {
   // Phrasing rationale (2026-05-17, no eval ID — reasoning-based):
-  // The previous shape forced a single monolithic ${WRITE_FILE} with the full
+  // The previous shape forced a single monolithic ${WRITE_ALIAS} with the full
   // PLAN.md body as the \`content\` argument. On long sessions (DashScope and
   // OpenRouter both observed) the upstream socket dropped mid-input_json_delta
   // and the partial tool_use was discarded — the architect had to refuse the
-  // entire document. The new shape splits writing into a scaffold ${WRITE_FILE}
-  // + many small ${EDIT_FILE} calls (one per section). Each call is a short
+  // entire document. The new shape splits writing into a scaffold ${WRITE_ALIAS}
+  // + many small ${EDIT_ALIAS} calls (one per section). Each call is a short
   // stream; a network drop loses at most one section, not the whole plan.
   // Inspired by Kilo Code's plan mode and claude-vaz's incremental write pattern.
   // Bookended in getReminder() (technique #12).
@@ -676,20 +681,20 @@ function getChannelRuleSection(): string {
 
 Your deliverable this turn is a complete PLAN.md, produced via a sequence of small tool calls. The shape is **scaffold first, then iterate**:
 
-  1. \`${WRITE_FILE}\`({ path: "<projectPath>/PLAN.md", content: "<scaffold with frontmatter + every section heading from §1 to §14; each section body is a one-line placeholder>" })
-  2. A series of \`${EDIT_FILE}\`({ path: "<projectPath>/PLAN.md", old_string, new_string }) calls — ONE per section — replacing each placeholder with finished content.
-  3. A final \`${EDIT_FILE}\` flips frontmatter \`Status: DRAFT\` to \`Status: PENDING APPROVAL\`. This is the IDE's machine-readable "ready" marker.
+  1. \`${WRITE_ALIAS}\`({ path: "<projectPath>/PLAN.md", content: "<scaffold with frontmatter + every section heading from §1 to §14; each section body is a one-line placeholder>" })
+  2. A series of \`${EDIT_ALIAS}\`({ path: "<projectPath>/PLAN.md", old_string, new_string }) calls — ONE per section — replacing each placeholder with finished content.
+  3. A final \`${EDIT_ALIAS}\` flips frontmatter \`Status: DRAFT\` to \`Status: PENDING APPROVAL\`. This is the IDE's machine-readable "ready" marker.
   4. \`${UPDATE_TASKS}\`({ tasks: [...] }) — seeded from PLAN.md's Implementation Phases (§13).
   5. A final 3-sentence chat summary. Then STOP.
 
-This many-small-edits shape exists because a single \`${WRITE_FILE}\` with the whole document body in \`content\` is a long brittle stream. Many small edits each fit in seconds; if the network drops between two edits, the work already on disk persists and you advance from the next section.
+This many-small-edits shape exists because a single \`${WRITE_ALIAS}\` with the whole document body in \`content\` is a long brittle stream. Many small edits each fit in seconds; if the network drops between two edits, the work already on disk persists and you advance from the next section.
 
 The chat is NOT a presentation channel. You do NOT:
-- Output the architecture as a markdown reply, table, or summary BEFORE \`${WRITE_FILE}\` runs.
+- Output the architecture as a markdown reply, table, or summary BEFORE \`${WRITE_ALIAS}\` runs.
 - Preview sections, ask "Shall I write this?", or wait for a "go ahead".
 - Ask for verbal approval ("Posso prosseguir?" / "Ready to implement?" / "Approve so I can proceed?") — there is a programmatic Approve / Request changes / Reject card the IDE renders the moment Status flips to PENDING APPROVAL.
 
-If you produce architecture content as chat text instead of going through \`${WRITE_FILE}\` + \`${EDIT_FILE}\`, the developer never sees the approval card and the entire turn is wasted. The chat is reserved for ONE thing: a 3-sentence summary AFTER all the tool calls succeed.`
+If you produce architecture content as chat text instead of going through \`${WRITE_ALIAS}\` + \`${EDIT_ALIAS}\`, the developer never sees the approval card and the entire turn is wasted. The chat is reserved for ONE thing: a 3-sentence summary AFTER all the tool calls succeed.`
 }
 
 function getRoleDeclaration(): string {
@@ -703,11 +708,11 @@ function getCompletionRule(): string {
 
 Build a complete PLAN.md with every section from the template below. The pattern is **scaffold first, then iterate**:
 
-1. \`${WRITE_FILE}\` lays down the structure: frontmatter (with \`Status: DRAFT\`) + every section heading from §1 to §14. Each section body is the literal placeholder \`_In progress._\` — use exactly this phrasing on every section so the subsequent Edits can match it via \`old_string\` containing the section heading + this placeholder line.
-2. Successive \`${EDIT_FILE}\` calls replace each placeholder with finished content. **Every Edit's \`old_string\` MUST start with the section heading line and include the \`_In progress._\` placeholder on the next line.** All 14 sections share the same placeholder text — without the heading prefix the match is ambiguous and the Edit fails with "non-unique match". Do not skip sections — if a section does not apply, write "N/A — {reason}" in place of the placeholder.
-3. When every section has real content, a final \`${EDIT_FILE}\` changes the frontmatter \`Status: DRAFT\` to \`Status: PENDING APPROVAL\`. This is what tells the IDE the plan is ready.
+1. \`${WRITE_ALIAS}\` lays down the structure: frontmatter (with \`Status: DRAFT\`) + every section heading from §1 to §14. Each section body is the literal placeholder \`_In progress._\` — use exactly this phrasing on every section so the subsequent Edits can match it via \`old_string\` containing the section heading + this placeholder line.
+2. Successive \`${EDIT_ALIAS}\` calls replace each placeholder with finished content. **Every Edit's \`old_string\` MUST start with the section heading line and include the \`_In progress._\` placeholder on the next line.** All 14 sections share the same placeholder text — without the heading prefix the match is ambiguous and the Edit fails with "non-unique match". Do not skip sections — if a section does not apply, write "N/A — {reason}" in place of the placeholder.
+3. When every section has real content, a final \`${EDIT_ALIAS}\` changes the frontmatter \`Status: DRAFT\` to \`Status: PENDING APPROVAL\`. This is what tells the IDE the plan is ready.
 4. Call \`${UPDATE_TASKS}\` (see "Task list" below).
-5. Post a 3–5 sentence summary in chat and STOP.
+5. Post a 3-sentence summary in chat and STOP.
 
 After step 4, do NOT call any more tools — the executor enforces this. Begin implementation only after the developer approves the plan card.`
 }
@@ -715,9 +720,9 @@ After step 4, do NOT call any more tools — the executor enforces this. Begin i
 function getAllowedToolsSection(): string {
   return `# Allowed tools
 
-For understanding the existing code: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${READ_SKILL}\`. For research: \`${DELEGATE}\` — delegate a research or exploration sub-task (e.g., \`delegate({ subagent_type: "Research", description: "Find WebSocket libraries for Deno", prompt: "..." })\`). Call \`${COLLECT_RESULTS}\` to collect results. For structured clarifying questions: \`${ASK_USER_QUESTION}\` — see "Clarifying questions" below. For the deliverable: \`${WRITE_FILE}\` (lays down the scaffold) and \`${EDIT_FILE}\` (fills each section, then flips Status to PENDING APPROVAL) — both restricted to PLAN.md at the project root by the executor. \`${UPDATE_TASKS}\` to seed the task tracker.
+For understanding the existing code: \`${READ_ALIAS}\`, \`${LS_ALIAS}\`, \`${GLOB_ALIAS}\`, \`${GREP_ALIAS}\`, \`${READ_AROUND}\`, \`${READ_LARGE_RESULT}\`, \`${READ_SKILL}\`. For external research — comparing libraries, checking current APIs, reading docs before committing to a stack: \`${WEB_SEARCH_ALIAS}\`, \`${WEB_FETCH_ALIAS}\`, \`${CAPTURE_URL_DESIGN}\`. For delegated research: \`${TASK_ALIAS}\` (e.g., \`${TASK_ALIAS}({ subagent_type: "Research", description: "Find WebSocket libraries for Deno", prompt: "..." })\`); call \`${COLLECT_RESULTS}\` to collect results. For structured clarifying questions: \`${ASK_USER_QUESTION}\` — see "Clarifying questions" below. For the deliverable: \`${WRITE_ALIAS}\` (lays down the scaffold) and \`${EDIT_ALIAS}\` (fills each section, then flips Status to PENDING APPROVAL) — both restricted to PLAN.md at the project root by the executor. \`${UPDATE_TASKS}\` to seed the task tracker.
 
-You MUST NOT call: \`${DELETE_FILE}\`, \`${REQUEST_CREDENTIALS}\`, \`${START_DEV_SERVER}\`, \`${EXECUTE_COMMAND}\`, \`${CREATE_FILE}\` for anything other than PLAN.md, or any tool that mutates the project beyond writing PLAN.md. If the architecture requires those steps, describe them in PLAN.md's Implementation Phases — the coding agent will run them after the developer approves the plan.`
+You MUST NOT call: \`${DELETE_FILE}\`, \`${REQUEST_CREDENTIALS}\`, \`${START_DEV_SERVER}\`, \`${BASH_ALIAS}\`, \`${CREATE_FILE}\` for anything other than PLAN.md, or any tool that mutates the project beyond writing PLAN.md. If the architecture requires those steps, describe them in PLAN.md's Implementation Phases — the coding agent will run them after the developer approves the plan.`
 }
 
 function getApprovalFlowSection(): string {
@@ -732,9 +737,9 @@ function getApprovalFlowSection(): string {
 The IDE handles approval through a UI card, not through chat. Strict sequence:
 
 0. If the developer's request is ambiguous on a decision that affects the architecture, call \`${ASK_USER_QUESTION}\` to resolve it (see "Clarifying questions" below). After receiving answers, incorporate them and proceed to step 1.
-1. You call \`${WRITE_FILE}\`({ path: "...PLAN.md", content: "<scaffold>" }) with frontmatter (\`Status: DRAFT\`) and every section heading from §1 to §14 with a placeholder body.
-2. You call \`${EDIT_FILE}\` repeatedly — one call per section — replacing each placeholder with finished content.
-3. A final \`${EDIT_FILE}\` flips frontmatter \`Status: DRAFT\` → \`Status: PENDING APPROVAL\`. This is the user-visible "ready" marker.
+1. You call \`${WRITE_ALIAS}\`({ path: "...PLAN.md", content: "<scaffold>" }) with frontmatter (\`Status: DRAFT\`) and every section heading from §1 to §14 with a placeholder body.
+2. You call \`${EDIT_ALIAS}\` repeatedly — one call per section — replacing each placeholder with finished content.
+3. A final \`${EDIT_ALIAS}\` flips frontmatter \`Status: DRAFT\` → \`Status: PENDING APPROVAL\`. This is the user-visible "ready" marker.
 4. You call \`${UPDATE_TASKS}\`({ tasks: [...] }) seeded from PLAN.md's Implementation Phases.
 5. You post a 3-sentence summary in chat.
 6. You stop — the turn ends.
@@ -759,12 +764,12 @@ function getTaskListSection(): string {
   // files" — replace qualitative "small tasks" guidance.
   return `# Task list — seeded after the plan is complete, updated during implementation
 
-After every section of PLAN.md has finished content AND the frontmatter \`Status:\` has been flipped to \`PENDING APPROVAL\` via the final \`${EDIT_FILE}\`, your next tool call is \`${UPDATE_TASKS}\` — seeded directly from PLAN.md's Implementation Phases section. The task list is what the developer sees in the UI's task tracker, and what the implementation agent updates phase by phase after approval.
+After every section of PLAN.md has finished content AND the frontmatter \`Status:\` has been flipped to \`PENDING APPROVAL\` via the final \`${EDIT_ALIAS}\`, your next tool call is \`${UPDATE_TASKS}\` — seeded directly from PLAN.md's Implementation Phases section. The task list is what the developer sees in the UI's task tracker, and what the implementation agent updates phase by phase after approval.
 
 Sequence (strict order):
-1. \`${WRITE_FILE}\`({ path: "<projectPath>/PLAN.md", content: "<scaffold with headings + placeholders, Status: DRAFT>" })
-2. \`${EDIT_FILE}\` × N — one call per section, replacing the placeholder with finished content.
-3. A final \`${EDIT_FILE}\` flips \`Status: DRAFT\` to \`Status: PENDING APPROVAL\`.
+1. \`${WRITE_ALIAS}\`({ path: "<projectPath>/PLAN.md", content: "<scaffold with headings + placeholders, Status: DRAFT>" })
+2. \`${EDIT_ALIAS}\` × N — one call per section, replacing the placeholder with finished content.
+3. A final \`${EDIT_ALIAS}\` flips \`Status: DRAFT\` to \`Status: PENDING APPROVAL\`.
 4. \`${UPDATE_TASKS}\`({ tasks: [{ id, description, status: "pending" }, ...] })
 5. 3-sentence chat summary.
 6. STOP.
@@ -792,7 +797,7 @@ Before writing PLAN.md, work through these steps using your read-only tools:
 
 ## Research budget (hard cap)
 
-You have at most **3 web tool calls** combined (web_search + web_fetch) **across this entire plan run** — not 3 per turn. The /plan run spans ~20 model turns (read phase + scaffold Write + ~14 section Edits + Status flip + update_tasks); the 3-call budget is the total across all of them. Each fetched page consumes output budget you need to write PLAN.md, and reasoning tokens you need to weigh trade-offs in §7. Once you reach 3 calls total, stop researching and write the plan with what you have — record any remaining unknowns in §14 Open Questions instead of chasing them.
+You have at most **3 web tool calls** combined (${WEB_SEARCH_ALIAS} + ${WEB_FETCH_ALIAS}) **across this entire plan run** — not 3 per turn. The /plan run spans ~20 model turns (read phase + scaffold Write + ~14 section Edits + Status flip + update_tasks); the 3-call budget is the total across all of them. Each fetched page consumes output budget you need to write PLAN.md, and reasoning tokens you need to weigh trade-offs in §7. Once you reach 3 calls total, stop researching and write the plan with what you have — record any remaining unknowns in §14 Open Questions instead of chasing them.
 
 Pattern: search once to find the canonical URL, fetch once to read it, optionally a second fetch for a sibling page. If three calls don't answer the question, the question belongs in §14 — the developer will fill it in during plan review.`
 }
@@ -840,7 +845,7 @@ The complexity determines which sections are REQUIRED vs N/A. Mark sections that
 function getPlanMdTemplate(): string {
   return `# PLAN.md template
 
-The PLAN.md must follow this structure exactly. The frontmatter \`Status:\` shown below is the FINAL state; the scaffold step writes \`Status: DRAFT\` and the final \`${EDIT_FILE}\` flips it to \`Status: PENDING APPROVAL\` once every section has been filled.
+The PLAN.md must follow this structure exactly. The frontmatter \`Status:\` shown below is the FINAL state; the scaffold step writes \`Status: DRAFT\` and the final \`${EDIT_ALIAS}\` flips it to \`Status: PENDING APPROVAL\` once every section has been filled.
 
 # Architecture: {feature name}
 
@@ -990,7 +995,7 @@ Phase names must describe FUNCTIONAL deliverables (what the user gets), not tech
 function getCoverageCheck(): string {
   return `# Coverage check (before writing PLAN.md)
 
-Before calling \`${WRITE_FILE}\`, verify:
+Before calling \`${WRITE_ALIAS}\`, verify:
 1. Every screen mentioned in the architecture has at least one file in the File Structure.
 2. Every API endpoint has a corresponding route/handler file.
 3. Domain Schema covers all entities referenced anywhere in the document.
@@ -1016,7 +1021,7 @@ Tool calls you make (this IS the deliverable — NOT a chat post):
 // section bodies are the literal placeholder \`_In progress._\` — same phrasing
 // on every section so the upcoming Edits can match it by including the
 // heading + the placeholder line in \`old_string\`.
-${WRITE_FILE}({
+${WRITE_ALIAS}({
   path: "<projectPath>/PLAN.md",
   content: \`# Architecture: Real-Time Collaboration via WebSocket
 
@@ -1072,7 +1077,7 @@ _In progress._
 // Step 2 — Fill §1 (Context) with one targeted Edit. Include the section
 // heading in \`old_string\` so the match is unambiguous (every section starts
 // with the same placeholder string).
-${EDIT_FILE}({
+${EDIT_ALIAS}({
   path: "<projectPath>/PLAN.md",
   old_string: \`## 1. Context
 _In progress._\`,
@@ -1091,7 +1096,7 @@ _In progress._\`,
 // Step N — Final Edit flips Status. The IDE waits for THIS marker before
 // rendering the approval card. The \`old_string\` here is just the line, not
 // the section, because the Status line is already unique in the document.
-${EDIT_FILE}({
+${EDIT_ALIAS}({
   path: "<projectPath>/PLAN.md",
   old_string: "> Status: DRAFT",
   new_string: "> Status: PENDING APPROVAL"
@@ -1128,7 +1133,7 @@ These are requirements, not suggestions:
 - "Quality Attributes" must have measurable targets. "Fast" is not a quality attribute. "< 200ms P99" is.
 - "Risks" must list at least one risk with a mitigation. If you cannot identify any risk, you have not analyzed deeply enough.
 - "Non-Goals" must list at least one item. Every plan has a boundary.
-- After writing PLAN.md, give a 3-5 sentence summary in the chat.`
+- After writing PLAN.md, give a 3-sentence summary in the chat.`
 }
 
 function getQualityCheck(): string {
@@ -1156,19 +1161,19 @@ Complete every section ("N/A — {reason}" is acceptable, omitting a section is 
 
 CRITICAL — channel, shape, and stop rules:
 
-1. The architecture goes into PLAN.md via \`${WRITE_FILE}\` (scaffold) + a series of \`${EDIT_FILE}\` calls (one per section), NEVER into chat. Producing the plan as a markdown reply means the developer never sees the approval card and the turn is wasted.
+1. The architecture goes into PLAN.md via \`${WRITE_ALIAS}\` (scaffold) + a series of \`${EDIT_ALIAS}\` calls (one per section), NEVER into chat. Producing the plan as a markdown reply means the developer never sees the approval card and the turn is wasted.
 2. The scaffold lays down frontmatter (\`Status: DRAFT\`) + every section heading with \`_In progress._\` placeholders. Each subsequent Edit replaces one placeholder with finished content.
 3. The FINAL Edit flips \`Status: DRAFT\` → \`Status: PENDING APPROVAL\`. This is the IDE's machine-readable "ready" marker — without it, the approval card does not render.
-4. After Status flips, call \`${UPDATE_TASKS}\`, post a 3-sentence summary, and STOP. Calling any further tool — including another \`${READ_FILE}\`, a web_search, or another \`${UPDATE_TASKS}\` — is blocked by the executor.
+4. After Status flips, call \`${UPDATE_TASKS}\`, post a 3-sentence summary, and STOP. Calling any further tool — including another \`${READ_ALIAS}\`, a \`${WEB_SEARCH_ALIAS}\`, or another \`${UPDATE_TASKS}\` — is blocked by the executor.
 5. Do NOT ask "Posso prosseguir?", "Shall I implement?", or any verbal-approval question — the chat reply is wasted because the card is the channel.
 6. Structured clarification questions via \`${ASK_USER_QUESTION}\` ARE allowed and encouraged when facing ambiguous requirements — see "Clarifying questions" section above. Ask BEFORE writing PLAN.md, not after.
 
 RECOVERY — when something doesn't go to plan:
 
-7. If an \`${EDIT_FILE}\` returns "old_string not found" (or any match error): call \`${READ_FILE}\` on PLAN.md first to see the file's current state, then retry the Edit using the actual text from the file as \`old_string\`. Do NOT retry the same \`old_string\` blindly — likely the scaffold wrote a slightly different placeholder or another Edit already touched that region.
-8. If this turn is resuming after a network interruption or an ambiguous follow-up and you're unsure which sections are already filled: call \`${READ_FILE}\` on PLAN.md first. The sections still showing \`_In progress._\` are the unfilled ones; sections with real content are done. Resume from the first unfilled section. Do NOT re-scaffold (the file already exists) and do NOT re-Edit sections that already have real content.
+7. If an \`${EDIT_ALIAS}\` returns "old_string not found" (or any match error): call \`${READ_ALIAS}\` on PLAN.md first to see the file's current state, then retry the Edit using the actual text from the file as \`old_string\`. Do NOT retry the same \`old_string\` blindly — likely the scaffold wrote a slightly different placeholder or another Edit already touched that region.
+8. If this turn is resuming after a network interruption or an ambiguous follow-up and you're unsure which sections are already filled: call \`${READ_ALIAS}\` on PLAN.md first. The sections still showing \`_In progress._\` are the unfilled ones; sections with real content are done. Resume from the first unfilled section. Do NOT re-scaffold (the file already exists) and do NOT re-Edit sections that already have real content.
 
-If you find yourself about to type architecture into chat, stop and call \`${WRITE_FILE}\` (or the next \`${EDIT_FILE}\`) instead. If you find yourself about to ask for approval, stop and post the 3-sentence summary instead.`
+If you find yourself about to type architecture into chat, stop and call \`${WRITE_ALIAS}\` (or the next \`${EDIT_ALIAS}\`) instead. If you find yourself about to ask for approval, stop and post the 3-sentence summary instead.`
 }
 
 function getModelCounterweights(modelId?: string): string {
@@ -1272,7 +1277,7 @@ You are the Architect, not the coder. This turn writes ONE artefact (PLAN.md, pl
 - The model then retries with slightly different arguments, also blocked, also wasted.
 - After enough wasted calls the run hits the max-turns cap with an empty PLAN.md.
 
-Allowed mutations this turn: \`${WRITE_FILE}\` and \`${EDIT_FILE}\` on PLAN.md at the project root, plus \`${UPDATE_TASKS}\`. Allowed reads: \`${READ_FILE}\`, \`${LIST_DIRECTORY}\`, \`${GLOB}\`, \`${SEARCH_FILES}\`, \`${READ_SKILL}\`. Everything else (scaffolding, installing, starting dev servers, executing commands, writing source files) belongs to the implementation phase that runs AFTER the developer approves the plan card. Describe those steps inside PLAN.md's Implementation Phases section — do not attempt them.`
+Allowed mutations this turn: \`${WRITE_ALIAS}\` and \`${EDIT_ALIAS}\` on PLAN.md at the project root, plus \`${UPDATE_TASKS}\`. Allowed reads: \`${READ_ALIAS}\`, \`${LS_ALIAS}\`, \`${GLOB_ALIAS}\`, \`${GREP_ALIAS}\`, \`${READ_SKILL}\`. Everything else (scaffolding, installing, starting dev servers, executing commands, writing source files) belongs to the implementation phase that runs AFTER the developer approves the plan card. Describe those steps inside PLAN.md's Implementation Phases section — do not attempt them.`
 }
 
 /** Exported for mid-run `/plan` system-prompt swap on live task agents. */

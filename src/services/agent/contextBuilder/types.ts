@@ -122,7 +122,11 @@ export interface PromptContext {
   langInstruction: string
   modelProfile: import('../modelProfiles').ModelProfile | null
   mcpTools: MCPToolSummary[]
-  coreToolCount: number
+  /** Contagem real de tools do registo. OPCIONAL de propósito: um fallback
+   *  cozido (era `?? 20`) faz o prompt afirmar um número falso em qualquer
+   *  caminho que não o passe — e o sessionExport, que é justamente o artefacto
+   *  usado para auditar prompts, não o passa. Ausente = a frase sai sem número. */
+  coreToolCount?: number
   /** Names of skills loaded into the prompt — surfaced to the recency
    *  reminder so the model is reminded which skill contracts apply, since
    *  the skill index itself sits mid-prompt (U-curve attention dip). */
