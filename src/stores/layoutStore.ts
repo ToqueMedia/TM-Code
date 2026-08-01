@@ -1,6 +1,25 @@
 import { create } from 'zustand'
 
 export type ViewMode = 'chat' | 'generating' | 'preview' | 'editor' | 'settings'
+
+/**
+ * Vistas onde a DiffApprovalPanel NÃO é montada — nenhuma delas renderiza o
+ * ChatView + composer. Vive aqui, ao lado do próprio `ViewMode`, porque é
+ * consumida pelos DOIS lados de um invariante de posse: o MainLayout monta a
+ * barra no COMPLEMENTO deste conjunto, e o useKeyboardShortcuts ativa o
+ * handler global de atalhos de diff EXATAMENTE neste conjunto.
+ *
+ * Sobreposição = dois handlers a decidir diffs diferentes (o global aprova "o
+ * primeiro pendente", a barra aprova o SELECIONADO). Buraco = vista sem barra
+ * e sem atalho, com o run pendurado no createDiffApprovalPromise e nada na UI
+ * a explicar porquê — foi o que aconteceu a 'editor' e 'settings' quando a
+ * barra foi introduzida e o handler global foi estreitado só a 'generating'.
+ */
+export const VIEWS_WITHOUT_DIFF_BAR: ReadonlySet<ViewMode> = new Set<ViewMode>([
+  'editor',
+  'settings',
+  'generating',
+])
 /** UI surface in the preview area. Derived from `devServer.projectKind` + static preview state. */
 export type PreviewMode = 'server' | 'static' | 'api'
 export type DevLogLevel = 'info' | 'warn' | 'error'

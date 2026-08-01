@@ -17,6 +17,7 @@ import type { ContentBlockAPI, ProviderState, RequestUsageEntry } from "../../ty
 // literal "[object Object]" the model then sees as the tool result. formatError
 // resolves a useful message from every shape.
 import { formatError } from "../../utils/errors";
+import { logger } from "../../utils/logger";
 import { t } from "../../i18n";
 import {
   applyToolResultBudget,
@@ -69,6 +70,7 @@ import {
 import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
 import { DESTRUCTIVE_TOOLS } from "./toolPolicy";
 import { canonicalToolName } from "./toolNames";
+import { beginWriteBatch, endWriteBatch } from "./writeBatch";
 
 // ── Constants ──
 
@@ -338,6 +340,14 @@ export interface QueryParams {
    * = sem execução mid-stream (comportamento clássico: tudo pós-stream).
    */
   isStreamSafeTool?: (toolName: string) => boolean;
+  /**
+   * Predicado de write tools (write_file/edit_file/…): identifica chamadas
+   * cujo resultado é um DIFF pendente de aprovação. Runs consecutivos de
+   * writes num turno são despachados como LOTE — todos os diffs aparecem
+   * de uma vez e o utilizador aprova em conjunto, em vez de um pingado
+   * de cada vez. Ausente = sem batching (comportamento serial clássico).
+   */
+  isWriteTool?: (toolName: string) => boolean;
   /** Re-injeta o reminder crítico a cada N turnos. SÓ para runs cujo system
    *  prompt contém essas regras (main + tarefas paralelas) — sub-agentes
    *  partilham este loop com prompts próprios e ficam de fora. */
@@ -1078,6 +1088,7 @@ export async function* query(
     readOnlyRun,
     auxiliarySelection,
     isStreamSafeTool,
+    isWriteTool,
   } = params;
   const resolveExtraHeaders = (): Record<string, string> | undefined => {
     if (!getExtraHeaders) return initialExtraHeaders
@@ -2964,7 +2975,63 @@ export async function* query(
 
     const toolResultBlocks: Array<ContentBlockAPI & { isError?: boolean }> = [];
 
-    for (const tc of collectedToolCalls) {
+    // ── Lote de writes (aprovação em conjunto) ──
+    // Um turno com vários edits era aprovado pingado: cada write bloqueava
+    // no gate de diffs até o utilizador decidir o ANTERIOR. Aqui, ao chegar
+    // ao primeiro write de uma run consecutiva, despacha a run inteira —
+    // todos os diffs aparecem de uma vez e o gate (waitForUserGates) deixa
+    // os membros do lote passar. Um non-write quebra o grupo: um write
+    // depois de execute_command pode depender do efeito no disco.
+    const extractWritePath = (parsed: Record<string, unknown>): string | null => {
+      const raw = parsed.file_path ?? parsed.path;
+      if (typeof raw !== "string" || !raw.trim()) return null;
+      return raw.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+    };
+    const dispatchWriteGroup = (start: number): void => {
+      if (!isWriteTool) return;
+      const group: Array<{
+        tc: (typeof collectedToolCalls)[number];
+        parsed: Record<string, unknown>;
+        path: string | null;
+      }> = [];
+      for (let j = start; j < collectedToolCalls.length; j++) {
+        const c = collectedToolCalls[j];
+        if (!c.id || !c.name || !isWriteTool(c.name) || preDispatched.has(c.id)) break;
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = c.argsJson ? JSON.parse(c.argsJson) : {};
+        } catch {
+          break;
+        }
+        group.push({ tc: c, parsed, path: extractWritePath(parsed) });
+      }
+      // 1 só write degenera para o caminho serial clássico; caminho não
+      // extraível em QUALQUER membro → grupo inteiro serializa (conservador:
+      // sem chave fiável não dá para provar que dois writes não colidem).
+      if (group.length < 2 || group.some((g) => g.path === null)) return;
+      beginWriteBatch(group.map((g) => g.tc.id));
+      // Encadeamento por caminho: writes ao MESMO ficheiro correm em série
+      // sobre a APROVAÇÃO do anterior (acceptDiff escreve o newContent
+      // inteiro — dois diffs da mesma base seriam lost update; aprovado, o
+      // bridge actualiza o read-state antes de resolver e o edit seguinte
+      // lê o disco novo; rejeitado, o disco está intacto e o old_string
+      // original bate). Caminhos distintos despacham em paralelo.
+      const chains = new Map<string, Promise<unknown>>();
+      for (const g of group) {
+        const prev = chains.get(g.path as string) ?? Promise.resolve();
+        const promise = prev
+          .then(() => executeTool(g.tc.name, g.parsed, g.tc.id, signal))
+          .catch((err) => ({
+            content: `Tool execution error: ${formatError(err)}`,
+            isError: true,
+          }));
+        chains.set(g.path as string, promise);
+        preDispatched.set(g.tc.id, { argsJson: g.tc.argsJson, promise });
+      }
+    };
+
+    try {
+    for (const [idx, tc] of collectedToolCalls.entries()) {
       if (signal.aborted) {
         yield { type: "interrupted" };
         return {
@@ -2999,18 +3066,48 @@ export async function* query(
         continue;
       }
 
+      // Primeiro write de uma run consecutiva ainda não despachada:
+      // despacha o grupo inteiro em lote (regista em preDispatched; o
+      // consumo abaixo é o mesmo do pre-dispatch de stream).
+      if (
+        !readOnlyRun &&
+        isWriteTool &&
+        tc.id &&
+        isWriteTool(tc.name) &&
+        !preDispatched.has(tc.id)
+      ) {
+        dispatchWriteGroup(idx);
+      }
+
       try {
         // Execução em streaming: se este tool call foi pre-despachado durante
         // o stream, consome o resultado (já pronto ou quase). O guard de
         // argsJson invalida o pre-dispatch quando args chegaram DEPOIS do
         // despacho (interleaving raro de provider): re-executa com os args
-        // completos — o pre-dispatch é sempre read-only, o custo é só o
-        // overlap perdido, nunca um side effect duplicado.
+        // completos — o custo é só o overlap perdido.
+        //
+        // A justificação original desta re-execução era "o pre-dispatch é
+        // sempre read-only, nunca um side effect duplicado". DEIXOU de ser
+        // verdade com o lote de writes (dispatchWriteGroup acima): re-executar
+        // um write aplicaria o ficheiro DUAS vezes e publicaria um segundo
+        // diff para o mesmo tool_use_id. Hoje o mismatch é inalcançável para
+        // writes (são despachados com o stream já fechado, args finais), mas
+        // isso é uma propriedade do sítio da chamada, não uma garantia deste
+        // guard — e a diferença entre as duas coisas é um bug de duplicação.
+        // Para writes, o pre-dispatch é a ÚNICA execução, sempre.
         const pre = preDispatched.get(tc.id);
-        const result =
-          pre && pre.argsJson === tc.argsJson
-            ? await pre.promise
-            : await executeTool(tc.name, toolInput, tc.id, signal);
+        const staleArgs = pre != null && pre.argsJson !== tc.argsJson;
+        const isWrite = isWriteTool != null && isWriteTool(tc.name);
+        if (staleArgs && isWrite) {
+          logger.warn(
+            "agent",
+            `pre-dispatch de write com args desatualizados (${tc.name}) — a consumir o resultado despachado em vez de re-executar (re-executar duplicaria a escrita).`,
+          );
+        }
+        const usePre = pre != null && (!staleArgs || isWrite);
+        const result = usePre
+          ? await pre.promise
+          : await executeTool(tc.name, toolInput, tc.id, signal);
         const modelContent = sanitizeToolResultForModel(result.content)
         yield {
           type: "tool_result",
@@ -3069,6 +3166,13 @@ export async function* query(
           isError: true,
         });
       }
+    }
+    } finally {
+      // Fecha o lote em QUALQUER saída do loop (fim normal, abort return,
+      // throw). Um lote órfão deixaria o gate de diffs permissivo para o
+      // turno seguinte. Cobertura extra no resolveAllPendingDiffApprovals
+      // (Stop/cancel resolve os promises E fecha o lote).
+      endWriteBatch();
     }
 
     // ── Turn-efficiency measurement ──

@@ -646,7 +646,6 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                   <ExplorationBatch
                     key={`explore-${directive.calls[0].id}`}
                     calls={directive.calls}
-                    messageId={message.id}
                   />
                 )
               }
@@ -757,7 +756,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                       />
                     )
                   }
-                  return <ToolCallDisplayComponent key={tc.id} toolCall={tc} messageId={message.id} />
+                  return <ToolCallDisplayComponent key={tc.id} toolCall={tc} />
                 }
               }
               return null
@@ -845,11 +844,11 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                     return <ShellSessionBlock key={group.calls[0].id} toolCalls={group.calls} mode="chat" />
                   }
                   if (group.kind === 'exploration') {
-                    return <ExplorationBatch key={group.calls[0].id} calls={group.calls} messageId={message.id} />
+                    return <ExplorationBatch key={group.calls[0].id} calls={group.calls} />
                   }
                   return group.kind === 'large_read_batch'
                     ? <ReadOutputBatch key={group.calls[0].id} calls={group.calls} />
-                    : <ToolCallDisplayComponent key={group.call.id} toolCall={group.call} messageId={message.id} />
+                    : <ToolCallDisplayComponent key={group.call.id} toolCall={group.call} />
                 })}
               </Box>
             )}

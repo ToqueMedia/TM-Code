@@ -23,6 +23,9 @@ import {
   resolveAllPendingDiffApprovals,
   useChatStore,
 } from "../../stores/chatStore";
+import { markWriteBatchDecision, writeBatchSiblings } from "./writeBatch";
+import { markProjectEdited, startDiagnosticsBaseline } from "./editDiagnostics";
+import { getProjectStateDir } from "../projectStatePaths";
 import { useBillingStore } from "../../stores/billingStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useActiveModelStore } from "../../stores/activeModelStore";
@@ -103,6 +106,11 @@ export type { ContentBlockAPI } from "../../types/chat";
 import type { ContentBlockAPI } from "../../types/chat";
 import type { AgentCallbacks, LightweightAgentOptions } from "./types";
 import type { InternalMessage } from "./messageUtils";
+
+/** Tools cujo resultado é um DIFF pendente de aprovação (nomes canónicos).
+ *  Partilhado entre o bridge (abre o portão de aprovação) e o predicado
+ *  isWriteTool do query loop (batching de writes do mesmo turno). */
+const WRITE_TOOLS = new Set(["write_file", "edit_file", "create_file"]);
 
 // ── AgentService ──
 
@@ -697,6 +705,28 @@ class AgentService {
     // 5. Create tool executor bridge
     const executeTool = this.createToolExecutorBridge(callbacks);
     this.toolExecutor.clearDelegateTelemetry();
+    // Baseline de diagnósticos é POR RUN e arranca AQUI, em background: um
+    // `tsc` frio leva ~10s e a fase de exploração do agente leva mais do que
+    // isso antes do primeiro edit. Sem o arranque antecipado, o primeiro turn
+    // boundary com edições pagaria a passagem fria inteira.
+    // try/catch: um guarda de diagnósticos NUNCA pode impedir um run de
+    // arrancar. Sem isto, um toolExecutor sem esta capacidade (ou uma raiz
+    // irresolúvel) atirava um TypeError daqui e abortava o loop inteiro antes
+    // sequer de o QueryEngine ser construído.
+    try {
+      const diagRoot = this.toolExecutor.getProjectRootForDiagnostics?.() ?? "";
+      if (diagRoot) {
+        // O `.tsbuildinfo` do --incremental vai para o estado gerido da app,
+        // NUNCA para a raiz do developer: sem isto ficava lá um ficheiro de
+        // ~0,5 MB (medido) só por termos verificado tipos, visível no git
+        // status de quem não o tenha ignorado.
+        void getProjectStateDir(diagRoot)
+          .then((dir: string) => startDiagnosticsBaseline(diagRoot, dir))
+          .catch(() => startDiagnosticsBaseline(diagRoot));
+      }
+    } catch {
+      /* sem baseline: a recolha desiste sozinha */
+    }
 
     // 6. Build extra headers — X-Request-Type is sticky across turns
     const extraHeaders = this.buildExtraHeaders();
@@ -732,6 +762,11 @@ class AgentService {
       isStreamSafeTool: (name) =>
         this.toolExecutor.isConcurrencySafe(name) ||
         this.toolExecutor.isConcurrencySafe(canonicalToolName(name)),
+      // Batching de writes (query.ts): identifica os tools cujo resultado é
+      // um diff pendente de aprovação, para runs consecutivas de writes num
+      // turno serem despachadas em lote (aprovação única). Sub-agentes
+      // read-only nunca chegam cá (readOnlyRun bloqueia antes).
+      isWriteTool: (name) => WRITE_TOOLS.has(canonicalToolName(name)),
       // O prompt do main contém o reminder; os sub-agentes (lightweight) não.
       reinjectCriticalReminder: !this.lightweightOptions,
       // Só o agente principal é dono do tracker visível no chat. Sub-agentes
@@ -752,7 +787,22 @@ class AgentService {
         ? undefined
         : async () => {
             const { collectChangedFileContext } = await import("./atMentions");
-            return collectChangedFileContext();
+            const changed = await collectChangedFileContext();
+            // Diagnósticos NOVOS introduzidos pelas edições deste turno
+            // (porte do diagnosticTracking do claude-vaz — ver
+            // editDiagnostics.ts). Vai pelo MESMO canal da varredura de
+            // modificações externas: o modelo não tem de chamar nada.
+            let diagnostics = "";
+            try {
+              const { collectNewDiagnostics, formatDiagnosticsReminder } =
+                await import("./editDiagnostics");
+              const root = this.toolExecutor.getProjectRootForDiagnostics();
+              const found = await collectNewDiagnostics(root);
+              diagnostics = formatDiagnosticsReminder(found, root);
+            } catch {
+              /* nunca bloqueia o turno */
+            }
+            return [changed, diagnostics].filter(Boolean).join("\n\n");
           },
       // Queued-message steering (claude-vaz parity). Main agent only: a
       // sub-agent must never drain the developer's queued messages — those
@@ -1414,8 +1464,6 @@ class AgentService {
    * execution to TM Code's ToolExecutor with diff approval support.
    */
   private createToolExecutorBridge(callbacks: AgentCallbacks): ToolExecutorFn {
-    const WRITE_TOOLS = new Set(["write_file", "edit_file", "create_file"]);
-
     return async (
       toolName: string,
       toolInput: Record<string, unknown>,
@@ -1519,12 +1567,12 @@ class AgentService {
         markTmsWriteAttempt(toolUseId, targetPath ?? undefined);
       }
 
-      // Announce + start the tool at execution time. The query loop runs tools
-      // serially, so doing the announcement here keeps later write calls out of
-      // the UI while an earlier permission / diff / credential decision is
-      // pending. onToolCallPending creates the card; onToolCallStart immediately
-      // flips it to "running". Execution was already gated by the serial loop +
-      // waitForUserGates; this only fixes the visual pile-up.
+      // Announce + start the tool at execution time. onToolCallPending creates
+      // the card; onToolCallStart immediately flips it to "running". Reads e
+      // afins continuam gated pelo loop serial + waitForUserGates; writes do
+      // MESMO lote aparecem todos de uma vez — é intencional: os diffs do
+      // turno são publicados em conjunto e aprovados como lote na
+      // DiffApprovalPanel, não pingados um a um.
       callbacks.onToolCallPending(toolUseId, effectiveToolName);
       callbacks.onToolCallStart(toolUseId, effectiveToolName, effectiveToolInput);
 
@@ -1607,7 +1655,11 @@ class AgentService {
             if (signal?.aborted) {
               return { content: "Aborted", isError: true };
             }
+            markWriteBatchDecision(toolUseId, approved);
             if (approved) {
+              // Escrita APLICADA: só agora vale a pena pagar a passagem do
+              // `tsc` no turn boundary. Um diff rejeitado não muda o disco.
+              markProjectEdited();
               this.sessionState.trackFileEdit(parsedDiff.path);
               if (/[\\/]TMS\.md$/i.test(parsedDiff.path)) {
                 markTmsCreated(parsedDiff.path);
@@ -1627,8 +1679,20 @@ class AgentService {
                 isError: false,
               };
             }
+            // Aviso de estado MISTO. Tem de cobrir os dois lados do lote, não
+            // só o que já foi aprovado: se ainda houver membros por decidir,
+            // podem ser aplicados DEPOIS desta rejeição (o developer navega a
+            // lista pela ordem que quiser). Sem o segundo ramo, rejeitar
+            // primeiro e aprovar depois deixava o modelo a assumir um disco
+            // intacto que já não era.
+            const siblings = writeBatchSiblings(toolUseId);
+            const mixedStateWarning = siblings.approvedOthers
+              ? " Other edits from this batch were applied — re-read affected files before assuming a consistent state."
+              : siblings.undecidedOthers
+                ? " Other edits from this batch are still awaiting a decision and may be applied — re-read affected files before assuming a consistent state."
+                : "";
             return {
-              content: `User rejected: ${parsedDiff.path}`,
+              content: `User rejected: ${parsedDiff.path}` + mixedStateWarning,
               isError: false,
             };
           }

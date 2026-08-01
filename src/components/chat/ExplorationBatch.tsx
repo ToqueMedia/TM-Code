@@ -36,7 +36,6 @@ interface ExplorationBatchProps {
   /** All calls in the run, chronological. Guaranteed by the grouper to be
    *  exploration-eligible (never failed, never sub-agent children). */
   calls: ToolCallDisplayType[]
-  messageId: string
 }
 
 /** Literal-key lookup (t() takes a typed TranslationKey — no template
@@ -95,7 +94,7 @@ function CountPhrase({ template, count, capitalize }: {
   )
 }
 
-function ExplorationBatchComponent({ calls, messageId }: ExplorationBatchProps) {
+function ExplorationBatchComponent({ calls }: ExplorationBatchProps) {
   const t = useTranslation()
   const [expanded, setExpanded] = useState(false)
   const projectPath = useProjectStore(s => s.currentProject?.path || '')
@@ -214,7 +213,7 @@ function ExplorationBatchComponent({ calls, messageId }: ExplorationBatchProps) 
             item.kind === 'large_read_streak' ? (
               <ReadOutputBatch key={item.calls[0].id} calls={item.calls} />
             ) : (
-              <ToolCallDisplayComponent key={item.call.id} toolCall={item.call} messageId={messageId} />
+              <ToolCallDisplayComponent key={item.call.id} toolCall={item.call} />
             ),
           )}
         </Box>

@@ -52,6 +52,8 @@ export interface QueryEngineOptions {
   executeTool: ToolExecutorFn
   /** Streaming-execution predicate — see QueryParams.isStreamSafeTool. */
   isStreamSafeTool?: (toolName: string) => boolean
+  /** Write-tool predicate (batching de diffs) — ver QueryParams.isWriteTool. */
+  isWriteTool?: (toolName: string) => boolean
   /** Re-injeção do reminder crítico — ver QueryParams.reinjectCriticalReminder. */
   reinjectCriticalReminder?: boolean
   /** Lembrete de reconciliação do tracker — exclusivo do agente principal. */
@@ -196,6 +198,7 @@ export class QueryEngine {
       tools: this.options.tools,
       executeTool: this.options.executeTool,
       isStreamSafeTool: this.options.isStreamSafeTool,
+      isWriteTool: this.options.isWriteTool,
       reinjectCriticalReminder: this.options.reinjectCriticalReminder,
       enableTaskTrackerReminder: this.options.enableTaskTrackerReminder,
       signal: this.abortController.signal,

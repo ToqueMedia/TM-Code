@@ -1,10 +1,7 @@
 import { memo, useMemo, useState } from 'react'
-import { Box, Flex, Text, Image, Kbd } from '@chakra-ui/react'
-import { FiCheck, FiCheckCircle, FiX } from 'react-icons/fi'
+import { Box, Flex, Text, Image } from '@chakra-ui/react'
 import { diffLines } from 'diff'
 import { getFileIconUrl } from '@/utils/fileIcons'
-import { useSettingsStore, formatBinding } from '@/stores/settingsStore'
-import { usePermissionStore } from '@/stores/permissionStore'
 import { tokens } from '@/theme/tokens'
 import { detectLanguage, highlightLines, type HighlightedLine } from '@/utils/syntaxHighlight'
 
@@ -17,10 +14,6 @@ interface InlineDiffProps {
   newContent: string
   isNewFile: boolean
   status: 'pending' | 'approved' | 'denied'
-  onApprove: () => void
-  onApproveAll: () => void
-  onDeny: () => void
-  onRejectAll: () => void
 }
 
 interface DiffLine {
@@ -37,14 +30,8 @@ function InlineDiff({
   newContent,
   isNewFile,
   status,
-  onApprove,
-  onApproveAll,
-  onDeny,
-  onRejectAll,
 }: InlineDiffProps) {
   const [showFull, setShowFull] = useState(false)
-  const sc = useSettingsStore(s => s.shortcuts)
-  const autoApproveDiffs = usePermissionStore(s => s.autoApproveDiffs)
   const fileName = filePath.split('/').pop() || filePath
   const language = useMemo(() => detectLanguage(filePath), [filePath])
 
@@ -84,10 +71,6 @@ function InlineDiff({
   }, [changes])
 
   const isResolved = status === 'approved' || status === 'denied'
-  // Hide approval buttons whenever autoApproveDiffs is on (user already opted
-  // into "Accept all", or we're inside a /plan run). Prevents the flicker where
-  // buttons briefly appear before the auto-approval phase resolves.
-  const showActionButtons = !isResolved && !autoApproveDiffs
 
   const addedCount = allLines.filter(l => l.type === 'added').length
   const removedCount = allLines.filter(l => l.type === 'removed').length
@@ -479,115 +462,6 @@ function InlineDiff({
             Show {totalDisplayLines - MAX_LINES} more lines
           </Text>
         </Box>
-      )}
-
-      {/* Action buttons */}
-      {showActionButtons && (
-        <Flex
-          gap={2}
-          px={{ base: 3, md: 4 }}
-          py="10px"
-          borderTop="1px solid rgba(255, 255, 255, 0.075)"
-          bg="rgba(255, 255, 255, 0.026)"
-          flexWrap="wrap"
-        >
-          <Box
-            as="button"
-            display="flex"
-            alignItems="center"
-            gap="5px"
-            px="11px"
-            py="6px"
-            bg="rgba(46, 160, 67, 0.13)"
-            border="1px solid rgba(46, 160, 67, 0.24)"
-            borderRadius="8px"
-            color={tokens.colors.accent.green}
-            fontSize="11px"
-            fontWeight="650"
-            cursor="pointer"
-            transition="all 0.15s"
-            _hover={{ bg: 'rgba(46, 160, 67, 0.2)', borderColor: 'rgba(46, 160, 67, 0.38)', transform: 'translateY(-1px)' }}
-            _active={{ transform: 'translateY(0) scale(0.98)' }}
-            onClick={onApprove}
-            aria-label={`Accept changes in ${fileName}`}
-          >
-            <FiCheck size={12} />
-            Accept
-            <Kbd fontSize="9px" color="inherit" opacity={0.5} ml="2px" bg="transparent" borderColor="transparent" p={0}>{formatBinding(sc.diffAccept)}</Kbd>
-          </Box>
-          <Box
-            as="button"
-            display="flex"
-            alignItems="center"
-            gap="5px"
-            px="11px"
-            py="6px"
-            bg="transparent"
-            border="1px solid rgba(46, 160, 67, 0.18)"
-            borderRadius="8px"
-            color={tokens.colors.accent.green}
-            fontSize="11px"
-            fontWeight="650"
-            cursor="pointer"
-            transition="all 0.15s"
-            _hover={{ bg: 'rgba(46, 160, 67, 0.1)', borderColor: 'rgba(46, 160, 67, 0.32)', transform: 'translateY(-1px)' }}
-            _active={{ transform: 'translateY(0) scale(0.98)' }}
-            onClick={onApproveAll}
-            aria-label="Accept all pending changes"
-          >
-            <FiCheckCircle size={12} />
-            Accept all
-            <Kbd fontSize="9px" color="inherit" opacity={0.5} ml="2px" bg="transparent" borderColor="transparent" p={0}>{formatBinding(sc.diffAcceptAll)}</Kbd>
-          </Box>
-          <Box
-            as="button"
-            display="flex"
-            alignItems="center"
-            gap="5px"
-            px="11px"
-            py="6px"
-            bg="transparent"
-            border="1px solid rgba(248, 81, 73, 0.18)"
-            borderRadius="8px"
-            color={tokens.colors.accent.red}
-            fontSize="11px"
-            fontWeight="650"
-            cursor="pointer"
-            transition="all 0.15s"
-            _hover={{ bg: 'rgba(248, 81, 73, 0.1)', borderColor: 'rgba(248, 81, 73, 0.32)', transform: 'translateY(-1px)' }}
-            _active={{ transform: 'translateY(0) scale(0.98)' }}
-            onClick={onDeny}
-            aria-label={`Reject changes in ${fileName}`}
-          >
-            <FiX size={12} />
-            Reject
-            <Kbd fontSize="9px" color="inherit" opacity={0.5} ml="2px" bg="transparent" borderColor="transparent" p={0}>{formatBinding(sc.diffReject)}</Kbd>
-          </Box>
-          <Box
-            as="button"
-            display="flex"
-            alignItems="center"
-            gap="5px"
-            px="11px"
-            py="6px"
-            bg="rgba(248, 81, 73, 0.13)"
-            border="1px solid rgba(248, 81, 73, 0.24)"
-            borderRadius="8px"
-            color={tokens.colors.accent.red}
-            fontSize="11px"
-            fontWeight="650"
-            cursor="pointer"
-            transition="all 0.15s"
-            _hover={{ bg: 'rgba(248, 81, 73, 0.2)', borderColor: 'rgba(248, 81, 73, 0.38)', transform: 'translateY(-1px)' }}
-            _active={{ transform: 'translateY(0) scale(0.98)' }}
-            onClick={onRejectAll}
-            aria-label="Reject all pending changes"
-          >
-            <FiX size={12} />
-            Reject all
-            <Kbd fontSize="9px" color="inherit" opacity={0.5} ml="2px" bg="transparent" borderColor="transparent" p={0}>{formatBinding(sc.diffRejectAll)}</Kbd>
-          </Box>
-        </Flex>
       )}
 
       {/* File path footer */}
