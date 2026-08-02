@@ -172,14 +172,37 @@ export function applyReasoningEffort(
   // DashScope GLM: enable_thinking tem PRIORIDADE sobre reasoning_effort.
   // Sem alinhar o flag, effort=high com enable_thinking:false (extraBody) =
   // zero reasoning e UX "mensagem vazia de thinking".
+  //
+  // NÃO enviamos `preserve_thinking` aqui. Existe no DashScope e faz o que
+  // queríamos ("pass prior reasoning to subsequent turns"), mas a doc limita-o
+  // a qwen3.7-*/qwen3.6-*/kimi-k2.6/kimi-k2.7-* — **GLM não está na lista**.
+  // Mandá-lo ao GLM era o parâmetro não suportado que este ficheiro existe para
+  // evitar. Se um dia um qwen3.7 for o modelo principal, é aqui que entra, com
+  // guarda de modelo — não por provider.
   if (isDashScope(ctx) && isGlmModel(ctx.model)) {
     body.enable_thinking = !isOffEffort(effort)
     return
   }
 
   // z.AI GLM: thinking.type + reasoning_effort (docs Deep Thinking).
+  //
+  // `clear_thinking: false` = Preserved Thinking. O default da API é `true`, e
+  // a descrição é literal: "Controls whether to clear reasoning_content from
+  // previous conversation turns". Ou seja, por omissão o servidor DEITA FORA o
+  // raciocínio dos turnos anteriores que nós enviamos.
+  //
+  // Isto fecha meio contrato que estava aberto: a doc pede as duas metades —
+  // `clear_thinking: false` E devolver o `reasoning_content` intacto. A segunda
+  // já a cumpríamos com rigor (round-trip `_native` em query.ts, e uma
+  // auditoria que recusou podá-lo); a primeira nunca foi enviada. Resultado:
+  // pagávamos esses tokens em input, todos os turnos, e o servidor descartava-os.
+  //
+  // Só no ramo `enabled`: com `type: 'disabled'` não há raciocínio a preservar,
+  // e o comportamento do campo nesse estado não está documentado.
   if (isZai(ctx) && isGlmModel(ctx.model)) {
-    body.thinking = { type: isOffEffort(effort) ? 'disabled' : 'enabled' }
+    body.thinking = isOffEffort(effort)
+      ? { type: 'disabled' }
+      : { type: 'enabled', clear_thinking: false }
     return
   }
 

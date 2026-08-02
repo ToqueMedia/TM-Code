@@ -52,7 +52,9 @@ test('z.AI GLM: effort=max enables thinking object', () => {
     model: 'glm-5.2',
   })
   assert.equal(body.reasoning_effort, 'max')
-  assert.deepEqual(body.thinking, { type: 'enabled' })
+  // `clear_thinking: false` juntou-se em 2026-08 (Preserved Thinking) — ver
+  // preservedThinking.test.ts para o porquê e para o caso do DashScope.
+  assert.deepEqual(body.thinking, { type: 'enabled', clear_thinking: false })
 })
 
 test('z.AI GLM: effort=none disables thinking object', () => {

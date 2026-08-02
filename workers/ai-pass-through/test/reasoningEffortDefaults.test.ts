@@ -80,7 +80,7 @@ test('z.AI GLM sem header: max e thinking ligado', () => {
   const body: Record<string, unknown> = {}
   applyReasoningEffort(body, '', CTX['glm-5.2'])
   assert.equal(body.reasoning_effort, 'max')
-  assert.deepEqual(body.thinking, { type: 'enabled' })
+  assert.deepEqual(body.thinking, { type: 'enabled', clear_thinking: false })
 })
 
 test('DashScope GLM sem header: max e enable_thinking true', () => {
