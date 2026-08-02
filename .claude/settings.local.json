@@ -523,7 +523,9 @@
       "Bash(rg -rn \"SplitEditorLayout\" /Users/ithustle/dev/deskotp/exodus-ide/src -l)",
       "Bash(set -o pipefail)",
       "Read(//Users/ithustle/.codex/**)",
-      "Bash(xargs -0 ls -lt)"
+      "Bash(xargs -0 ls -lt)",
+      "Bash(perl -0pi -e 's/import \\\\{ markWriteBatchDecision, writeBatchSiblings \\\\} from \".\\\\/writeBatch\";/import { markWriteBatchDecision, writeBatchSiblings } from \".\\\\/writeBatch\";\\\\nimport { markFileBeforeEdit } from \".\\\\/editDiagnostics\";/' src/services/agent/agentService.ts)",
+      "Bash(perl -0pi -e 's/import \\\\{ markFileBeforeEdit \\\\} from \".\\\\/editDiagnostics\";/import { markFileBeforeEdit, resetEditDiagnostics } from \".\\\\/editDiagnostics\";/' src/services/agent/agentService.ts)"
     ]
   }
 }
