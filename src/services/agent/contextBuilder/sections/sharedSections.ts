@@ -215,7 +215,15 @@ export function sharedContextPreservation(): string {
 // — o ramo 'cmd' era texto morto compilado em cada build.
 export function sharedShellExecutionLoop(): string {
   const actor = 'developer'
-  const backgroundGuidance = `Use \`${EXECUTE_COMMAND_BACKGROUND}\` for long-running one-shot work such as installs, builds, type checks, and large compiles; observe it later with \`${CHECK_BACKGROUND_COMMANDS}\` before relying on the result.`
+  // A regra de NÃO SONDAR tem de vir com a tool, em TODAS as secções que a
+  // mencionam. Esta versão dizia só "observe it later ... before relying on the
+  // result" — verdadeira, mas incompleta, e um agente que só visse esta secção
+  // nunca sabia que sondar em ciclo é proibido.
+  //
+  // Não era uma linha errada — era uma regra em falta, e por isso a varredura
+  // de contradições anterior (que procurava nomes errados e instruções
+  // inexistentes) passou-lhe ao lado. Ver contradictionByOmission.test.ts.
+  const backgroundGuidance = `Use \`${EXECUTE_COMMAND_BACKGROUND}\` for long-running one-shot work such as installs, builds, type checks, and large compiles; observe it later with \`${CHECK_BACKGROUND_COMMANDS}\` before relying on the result. Never poll: if it is still running and you have no other work, END YOUR TURN — the system auto-wakes you the moment it exits.`
 
   return `# Shell execution loop
 

@@ -82,6 +82,7 @@ import {
   routeTrainedToolCall,
   normalizeToolInputForCanonical,
   DIVERGENT_TRAINED_TOOLS,
+  CHECK_BACKGROUND_COMMANDS,
 } from './toolNames'
 import { ENTER_WORKTREE_DESCRIPTION, EXIT_WORKTREE_DESCRIPTION } from './toolExecutor/worktrees'
 import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileState, type FileStateCache } from './toolExecutor/fileStateCache'
@@ -307,8 +308,23 @@ function formatBackgroundCommandResult(cmd: {
     // antigo dizia só "(truncated)" e a cabeça era irrecuperável (auditoria
     // 2026-07-28, o mesmo padrão do bug do execute_command).
     const MAX_OUTPUT = 4000
+    // O convite a pedir por id SÓ vale para comandos que já terminaram.
+    //
+    // Era emitido sempre, e contradizia o guardrail: a tool dizia "call
+    // check_background_commands with id ... for the full output" e a chamada
+    // seguinte recebia "do not ask again". Medido no export de 2026-08-02
+    // (deploy do momenu-fact): o modelo obedeceu ao convite três vezes
+    // seguidas — chamadas 54, 55, 56 — e levou com a recusa as três. Seguiu a
+    // instrução que prometia os dados, que é a escolha racional entre duas
+    // instruções contraditórias.
+    //
+    // Enquanto corre não há "output completo" para ir buscar — só um output
+    // parcial que vai crescer. Dizê-lo é honesto E remove a contradição.
+    const truncatedHint = cmd.status === 'running'
+      ? `...(output parcial, ${cmd.output.length} chars até agora — o comando ainda corre; o output fica completo quando terminar)`
+      : `...(truncated — call ${CHECK_BACKGROUND_COMMANDS} with id: ${cmd.id} for the full output)`
     const output = !opts?.full && cmd.output.length > MAX_OUTPUT
-      ? `...(truncated — call check_background_commands with id: ${cmd.id} for the full output)\n${cmd.output.slice(-MAX_OUTPUT)}`
+      ? `${truncatedHint}\n${cmd.output.slice(-MAX_OUTPUT)}`
       : cmd.output
     lines.push(output)
   }
