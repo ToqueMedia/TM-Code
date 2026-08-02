@@ -134,12 +134,29 @@ test('Grok 4.5: strips thinking companions', () => {
   assert.equal('enable_thinking' in body, false)
 })
 
-test('empty effort is a no-op', () => {
+// MUDANÇA DELIBERADA (2026-08): "effort vazio = no-op" deixou de valer para
+// modelos com default conhecido. Motivo: até este worker ser deployado o header
+// era ignorado, portanto há builds da IDE lá fora que não o enviam — e sem
+// default ficavam sem `reasoning_effort` E sem os companions, à mercê do que o
+// extraBody da KV tivesse. Ver defaultEffortFor + reasoningEffortDefaults.test.
+test('empty effort on a model WITH a known default applies that default', () => {
   const body: Record<string, unknown> = { foo: 1 }
   applyReasoningEffort(body, '  ', {
     provider: 'dashscope',
     baseUrl: 'https://dashscope.aliyuncs.com/v1',
     model: 'glm-5.2',
+  })
+  assert.deepEqual(body, { foo: 1, reasoning_effort: 'max', enable_thinking: true })
+})
+
+test('empty effort on an UNKNOWN provider is still a no-op', () => {
+  // A intenção original do teste acima, preservada onde continua a valer: não
+  // inventamos um valor para uma API cujo conjunto válido não conhecemos.
+  const body: Record<string, unknown> = { foo: 1 }
+  applyReasoningEffort(body, '  ', {
+    provider: 'mimo',
+    baseUrl: 'https://api.xiaomimimo.com/v1',
+    model: 'mimo-v2.5',
   })
   assert.deepEqual(body, { foo: 1 })
 })

@@ -99,7 +99,33 @@ function isOffEffort(effort: string): boolean {
 }
 
 /**
- * Mutates `body` in place. No-op when effort is empty.
+ * Default quando o cliente NÃO manda `X-TM-Reasoning-Effort`.
+ *
+ * Existe para as builds da IDE já distribuídas: até este worker ser deployado
+ * (2026-08) o header era ignorado, portanto há clientes lá fora que não o
+ * enviam. Sem default, esses ficavam sem `reasoning_effort` E sem os campos
+ * companion (`thinking.type`, `enable_thinking`) — ou seja, à mercê do que o
+ * extraBody da KV tivesse.
+ *
+ * NÃO é `max` para todos: o Grok aceita só `low|medium|high` e `max` cairia
+ * fora do conjunto — o 400 que este ficheiro existe para evitar. Os valores
+ * espelham EFFORT_BY_MODEL em src/services/agent/reasoningEffortModels.ts (a
+ * fonte de verdade, probada ao vivo em 2026-07-23); o teste
+ * `reasoningEffortDefaults.test.ts` lê esse ficheiro e acusa se divergirem.
+ *
+ * Provider desconhecido devolve '' de propósito: não inventamos um valor para
+ * uma API cujo conjunto válido não conhecemos.
+ */
+export function defaultEffortFor(ctx: ApplyReasoningEffortCtx): string {
+  if (isMoonshot(ctx)) return isKimiK3(ctx.model) ? 'max' : ''
+  if (isXai(ctx)) return 'high'
+  if (isGlmModel(ctx.model) && (isZai(ctx) || isDashScope(ctx))) return 'max'
+  return ''
+}
+
+/**
+ * Mutates `body` in place. No-op when effort is empty AND the model has no
+ * known default.
  * Always runs AFTER extraBody merge so the user choice wins.
  */
 export function applyReasoningEffort(
@@ -107,7 +133,7 @@ export function applyReasoningEffort(
   effortRaw: string,
   ctx: ApplyReasoningEffortCtx,
 ): void {
-  const effort = effortRaw.trim()
+  const effort = effortRaw.trim() || defaultEffortFor(ctx)
   if (!effort) return
 
   // Valor nativo — o frontend já validou contra as options do modelo.
