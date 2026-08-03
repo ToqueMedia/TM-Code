@@ -124,6 +124,75 @@ export function getAutoCompactThreshold(
 }
 
 /**
+ * Fatia da janela EFETIVA que os tool results podem ocupar no pedido.
+ *
+ * PORQUÊ ISTO É UMA PERCENTAGEM E NÃO UM NÚMERO (2026-07-31)
+ * ─────────────────────────────────────────────────────────
+ * A janela real é publicada pelo admin por modelo (X-Model-Context-Window:
+ * 128k … 2M) e todo o resto desta ficheiro já a respeita — limiar de
+ * auto-compactação, aviso, limite de bloqueio. O orçamento de tool results era
+ * a exceção: 40.000 tokens fixos, chamados sem opções em query.ts.
+ *
+ * Isso está errado nos dois sentidos. Num modelo de 1M, 40K são 4% da janela:
+ * destruía-se o working set e pagava-se a reescrita do prefixo com 950K vazios
+ * ao lado — e o modelo voltava a ler ficheiros que já tinha, que é exatamente a
+ * dança que o módulo do orçamento diz existir para evitar. Num modelo de 128K,
+ * 40K são 31% da janela, e somados ao system prompt + tools a auto-compactação
+ * disparava muito antes do necessário.
+ *
+ * 30% da janela efetiva: em 200K dá ~54K (perto do valor antigo, ligeiramente
+ * mais generoso), em 1M dá ~285K, em 128K dá ~32K. Sem piso — numa janela
+ * pequena, 30% JÁ é a resposta certa, e um piso em tokens absolutos
+ * sobre-alocaria precisamente onde o espaço é mais escasso.
+ */
+export const TOOL_RESULT_BUDGET_PCT = 0.30
+
+/**
+ * Teto absoluto do orçamento. Acima disto, manter mais resultados completos no
+ * prompt custa mais por turno (latência incluída) do que reler de vez em
+ * quando. Segura os 2M sem estragar os 1M.
+ */
+export const TOOL_RESULT_BUDGET_MAX = 250_000
+
+/** Orçamento de tool results para a janela ativa. */
+export function getToolResultBudgetTokens(
+  contextWindow: number,
+  maxOutputTokens?: number | null,
+): number {
+  const effective = getEffectiveContextWindowSize(contextWindow, maxOutputTokens)
+  if (effective <= 0) return 0
+  return Math.min(
+    Math.floor(effective * TOOL_RESULT_BUDGET_PCT),
+    TOOL_RESULT_BUDGET_MAX,
+  )
+}
+
+/**
+ * Teto do bloco de recuperação pós-compactação, em CARACTERES.
+ *
+ * Também tem de seguir a janela: 60.000 caracteres (~16K tokens) são ruído num
+ * modelo de 1M e são 12% da janela num de 128K — injetados no instante a seguir
+ * a uma compactação que existiu para libertar espaço, ou seja, no pior momento
+ * possível para voltar a cruzar o limiar.
+ *
+ * 8% da janela efetiva, convertidos a caracteres pelo mesmo rácio medido que o
+ * estimador usa (ver CHARS_PER_TOKEN_ESTIMATE), com teto para o bloco não se
+ * tornar um despejo em janelas enormes.
+ */
+export const POST_COMPACT_RECOVERY_PCT = 0.08
+export const POST_COMPACT_RECOVERY_MAX_CHARS_CAP = 240_000
+
+export function getPostCompactRecoveryMaxChars(
+  contextWindow: number,
+  maxOutputTokens?: number | null,
+): number {
+  const effective = getEffectiveContextWindowSize(contextWindow, maxOutputTokens)
+  if (effective <= 0) return 0
+  const tokens = Math.floor(effective * POST_COMPACT_RECOVERY_PCT)
+  return Math.min(tokens * 4, POST_COMPACT_RECOVERY_MAX_CHARS_CAP)
+}
+
+/**
  * Warning threshold for the UI's "orange" zone — pre-compaction signal.
  * Lower than the auto-compact threshold so the user sees pressure
  * building before the IDE acts. Buffer is adaptive: floor of 20K on

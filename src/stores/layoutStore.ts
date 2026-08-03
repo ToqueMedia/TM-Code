@@ -1,12 +1,34 @@
 import { create } from 'zustand'
 
 export type ViewMode = 'chat' | 'generating' | 'preview' | 'editor' | 'settings'
+
+/**
+ * Vistas onde a DiffApprovalPanel NÃO é montada — nenhuma delas renderiza o
+ * ChatView + composer. Vive aqui, ao lado do próprio `ViewMode`, porque é
+ * consumida pelos DOIS lados de um invariante de posse: o MainLayout monta a
+ * barra no COMPLEMENTO deste conjunto, e o useKeyboardShortcuts ativa o
+ * handler global de atalhos de diff EXATAMENTE neste conjunto.
+ *
+ * Sobreposição = dois handlers a decidir diffs diferentes (o global aprova "o
+ * primeiro pendente", a barra aprova o SELECIONADO). Buraco = vista sem barra
+ * e sem atalho, com o run pendurado no createDiffApprovalPromise e nada na UI
+ * a explicar porquê — foi o que aconteceu a 'editor' e 'settings' quando a
+ * barra foi introduzida e o handler global foi estreitado só a 'generating'.
+ */
+export const VIEWS_WITHOUT_DIFF_BAR: ReadonlySet<ViewMode> = new Set<ViewMode>([
+  'editor',
+  'settings',
+  'generating',
+])
 /** UI surface in the preview area. Derived from `devServer.projectKind` + static preview state. */
 export type PreviewMode = 'server' | 'static' | 'api'
 export type DevLogLevel = 'info' | 'warn' | 'error'
 
 /** Event name for dev server log additions — shared between layoutStore (emit) and toolExecutor (listen). */
-export const DEV_LOG_EVENT = 'devserver-log-added'
+// DEV_LOG_EVENT (CustomEvent no window) foi substituído pelo canal do
+// hostBus a 2026-08-03 (P3.3 headless): emitDevServerLogAdded /
+// onDevServerLogAdded — o único consumidor era o read_dev_logs do executor.
+import { emitDevServerLogAdded } from '@/services/agent/host/hostBus'
 
 export interface DevServerLogEntry {
   id: number
@@ -313,7 +335,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
       const trimmed = logs.length >= MAX_LOG_ENTRIES ? logs.slice(-MAX_LOG_ENTRIES + 1) : logs
       return { devServerLogs: [...trimmed, entry] }
     })
-    window.dispatchEvent(new CustomEvent(DEV_LOG_EVENT, { detail: { level } }))
+    emitDevServerLogAdded(level)
   },
 
   addDevServerLogs: (entries) => {
@@ -340,7 +362,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
       return { devServerLogs: trimmed }
     })
     const level: DevLogLevel = hasError ? 'error' : hasWarn ? 'warn' : 'info'
-    window.dispatchEvent(new CustomEvent(DEV_LOG_EVENT, { detail: { level } }))
+    emitDevServerLogAdded(level)
   },
 
   clearDevServerLogs: () => {

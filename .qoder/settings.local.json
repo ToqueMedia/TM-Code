@@ -43,7 +43,8 @@
       "Bash(ls ~/dev/deskotp/toquemedia-studio-api/wrangler* 2>/dev/null && cat ~/dev/deskotp/toquemedia-studio-api/package.json | head -20)",
       "Bash(ls ~/dev/deskotp/toquemedia-studio-api/wrangler.* 2>/dev/null; cat ~/dev/deskotp/toquemedia-studio-api/package.json 2>/dev/null | head -30)",
       "Bash(find:*)",
-      "Bash(ls -la ~/.claude/projects/ 2>/dev/null | head -50; echo \"---\"; find ~/.claude -name \"*d832bf59*\" 2>/dev/null; echo \"---qoder---\"; find ~/.qoder -name \"*d832bf59*\" 2>/dev/null)"
+      "Bash(ls -la ~/.claude/projects/ 2>/dev/null | head -50; echo \"---\"; find ~/.claude -name \"*d832bf59*\" 2>/dev/null; echo \"---qoder---\"; find ~/.qoder -name \"*d832bf59*\" 2>/dev/null)",
+      "Bash(ls -d ~/dev/cli-vaz ~/dev/claude-vaz 2>/dev/null; ls ~/dev/cli-vaz 2>/dev/null | head -20)"
     ]
   }
 }

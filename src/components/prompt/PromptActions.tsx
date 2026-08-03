@@ -39,7 +39,7 @@ interface PromptActionsProps {
 function PromptActions({
   viewMode,
   isStreaming,
-  isAgentBusy: _isAgentBusy,
+  isAgentBusy,
   viewedTaskBusy = false,
   hasInput,
   onToggleEditor,
@@ -200,14 +200,22 @@ function PromptActions({
             gerido (o header X-TM-Reasoning-Effort só tem efeito aí; o BYOK usa
             o seu próprio thinking config). O componente esconde-se sozinho
             quando o modelo ativo não expõe effort. */}
-        {!byokInUse && <EffortSelector />}
+        {/* Bloqueado durante o run: o effort é carimbado por turno, portanto
+            uma troca a meio não se aplica ao turno em voo (ver EffortSelector). */}
+        {!byokInUse && <EffortSelector disabled={isAgentBusy} />}
 
-        {/* Editor toggle */}
+        {/* Editor toggle — bloqueado durante o run pela mesma razão que o
+            effort: o editor mostra ficheiros que o agente está a reescrever,
+            e sair do chat esconde a UI de aprovação de diffs (a
+            DiffApprovalPanel e o PromptBar só existem nas vistas chat/preview),
+            deixando o run à espera de uma decisão que não se consegue tomar. */}
         <PromptToolButton
           icon={<FiCode size={14} />}
           label={t('prompt.sourceCode')}
           active={viewMode === 'editor'}
+          disabled={isAgentBusy}
           ariaLabel={t("prompt.toggleEditor")}
+          title={isAgentBusy ? t('prompt.toggleEditorBusy') : t('prompt.toggleEditor')}
           onClick={onToggleEditor}
         />
 

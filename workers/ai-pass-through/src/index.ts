@@ -71,6 +71,32 @@ export function resolveUpstreamHeaderTimeout(env: Env, streamRequested: boolean)
 // ~minutos até o runtime cancelar. 0/negativo desliga (ver streamWatchdog.ts).
 const DEFAULT_UPSTREAM_STREAM_IDLE_TIMEOUT_MS = 90_000
 
+// Timeout de leitura do corpo do CLIENTE. O terceiro buraco da mesma família:
+// o header-timeout cobre o upstream até ao 1º byte, o stream-idle cobre o corpo
+// do upstream depois disso, e NADA cobria o corpo que o cliente nos envia.
+//
+// `await request.json()` (bodyWithActiveModel) espera indefinidamente se o
+// cliente abre o POST, manda os headers e estola a meio do upload — TCP vivo,
+// bytes parados. Nesse caso `request.signal` NÃO dispara (o cliente não
+// abortou), portanto nem o listener de abort salva. O pedido fica pendurado até
+// o runtime o matar com "code had hung and would never generate a response".
+//
+// Não é hipotético: a IDE manda prompts de centenas de KB (83 929 tokens
+// observados em produção), e um portátil a adormecer ou uma troca de rede a
+// meio do upload produz exatamente isto.
+//
+// 60s é folgado — 350 KB a 100 kbit/s são ~28s — e continua finito. 0/negativo
+// desliga (mesma convenção dos outros knobs).
+const DEFAULT_CLIENT_BODY_TIMEOUT_MS = 60_000
+
+export function resolveClientBodyTimeout(env: Env): number {
+  const raw = typeof env.CLIENT_BODY_TIMEOUT_MS === 'string'
+    ? Number(env.CLIENT_BODY_TIMEOUT_MS)
+    : NaN
+  if (Number.isFinite(raw)) return raw
+  return DEFAULT_CLIENT_BODY_TIMEOUT_MS
+}
+
 export function resolveUpstreamStreamIdleTimeout(env: Env): number {
   const raw = typeof env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS === 'string'
     ? Number(env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS)
@@ -128,12 +154,38 @@ async function bodyWithActiveModel(
   baseUrl: string,
   extraBody?: Record<string, unknown>,
   isGoogleOAuth = false,
+  bodyTimeoutMs = 0,
 ): Promise<PreparedBody> {
   let parsed: unknown
+  // O timer TEM de ser limpo no caminho feliz. Sem o clearTimeout ficava armado
+  // até ao fim do intervalo em TODOS os pedidos — um timer pendurado por
+  // pedido, a segurar o isolate. Mesmo padrão do headerTimer abaixo e do
+  // watchdog de stream; foi o salto da suite de testes de 3s para 60s que
+  // denunciou a fuga.
+  let bodyTimer: ReturnType<typeof setTimeout> | null = null
   try {
-    parsed = await request.json()
-  } catch {
+    // A corrida existe para converter um upload estolado num 408 limpo em vez
+    // de um pedido pendurado (ver resolveClientBodyTimeout). O `json()` fica
+    // pendente — não há como o cancelar — mas devolvemos resposta e o runtime
+    // liberta o isolate; o que interessa é NUNCA ficarmos sem responder.
+    parsed = bodyTimeoutMs > 0
+      ? await Promise.race([
+        request.json(),
+        new Promise<never>((_, reject) => {
+          bodyTimer = setTimeout(
+            () => reject(new HttpError(408, 'tm_request_body_timeout', 'Request body was not fully received in time.')),
+            bodyTimeoutMs,
+          )
+        }),
+      ])
+      : await request.json()
+  } catch (err) {
+    // O timeout NÃO pode sair como "must be valid JSON": mentiria sobre a causa
+    // e mandaria quem depura procurar um bug de serialização no cliente.
+    if (err instanceof HttpError) throw err
     throw new HttpError(400, 'tm_bad_request', 'Request body must be valid JSON.')
+  } finally {
+    if (bodyTimer !== null) clearTimeout(bodyTimer)
   }
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -387,6 +439,7 @@ async function handleChatCompletions(
     config.baseUrl,
     config.extraBody,
     config.authScheme === 'google_oauth',
+    resolveClientBodyTimeout(env),
   )
   const { headers: upstreamHeaders, providerKey } = await buildUpstreamHeaders(request, config, env, fetcher)
 
@@ -469,7 +522,22 @@ async function handleChatCompletions(
 
   let responseBody: ReadableStream | string | null = upstream.body
   if (upstream.status === 400) {
-    const errorText = await upstream.text()
+    // Este `text()` corre ANTES do watchdog de stream (o corpo deixa de ser um
+    // ReadableStream aqui), portanto é o único sítio do caminho do upstream sem
+    // supervisão nenhuma. Um gateway que devolve 400 + headers e depois segura a
+    // ligação penduraria o pedido — o mesmo modo de falha que o watchdog cobre
+    // no caminho 2xx. Curto de propósito: o corpo de um erro é pequeno; se não
+    // chegar em 10s, o texto não vale o pedido pendurado.
+    let errTimer: ReturnType<typeof setTimeout> | null = null
+    const errorText = await Promise.race([
+      upstream.text().catch(() => ''),
+      new Promise<string>(resolve => {
+        errTimer = setTimeout(() => {
+          void upstream.body?.cancel().catch(() => { /* já fechado */ })
+          resolve('[corpo do erro não chegou a tempo]')
+        }, 10_000)
+      }),
+    ]).finally(() => { if (errTimer !== null) clearTimeout(errTimer) })
     console.error(`[ai-pass-through] Upstream 400 Error Body:`, errorText)
     responseBody = errorText
   }

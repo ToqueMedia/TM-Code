@@ -25,6 +25,13 @@ import { t } from '@/i18n'
  * overflow:hidden, que cortava um popover posicionado por dentro (parecia que o
  * botão "só ativava/desativava"). Aberto para CIMA (o rodapé está no fundo).
  * Sempre visível no caminho gerido; só escondido em BYOK (gate em PromptActions).
+ *
+ * `disabled` = agente a trabalhar. O effort é carimbado POR TURNO
+ * (resolveEffortTurnStamp, chatStore) e o header vai no pedido — trocá-lo a
+ * meio de um run não afeta o turno em voo, só os seguintes. O controlo fica
+ * bloqueado em vez de aceitar uma escolha que não se aplica ao que o
+ * utilizador está a ver acontecer (mesma doutrina de honestidade do gate
+ * shouldSendEffort abaixo).
  */
 
 function labelFor(value: string): string {
@@ -34,7 +41,7 @@ function labelFor(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1)
 }
 
-export function EffortSelector() {
+export function EffortSelector({ disabled = false }: { disabled?: boolean }) {
   // Modelo ativo: MESMA resolução que buildExtraHeaders / carimbo da mensagem
   // (Firestore → fallback X-TM-Model). Sem isto o seletor e o header divergem.
   const fsModel = useActiveModelStore((s) => s.activeModelId)
@@ -58,6 +65,13 @@ export function EffortSelector() {
   useLayoutEffect(() => {
     if (open && buttonRef.current) setRect(buttonRef.current.getBoundingClientRect())
   }, [open])
+
+  // Se o run arrancar com o dropdown aberto, fecha-o: o menu está PORTALADO
+  // para document.body, portanto não herda o estado disabled do botão e
+  // ficaria a flutuar clicável por cima de um controlo já bloqueado.
+  useEffect(() => {
+    if (disabled) setOpen(false)
+  }, [disabled])
 
   // Fecha ao clicar fora (botão OU menu — o menu está no portal, fora do botão)
   // ou com Escape.
@@ -97,17 +111,19 @@ export function EffortSelector() {
         h="28px"
         px="8px"
         borderRadius="8px"
-        cursor="pointer"
+        cursor={disabled ? 'not-allowed' : 'pointer'}
+        opacity={disabled ? 0.45 : 1}
         color={open ? tokens.colors.accent.primary : tokens.colors.text.secondary}
         bg={open ? tokens.colors.accent.primarySubtle : 'transparent'}
         border={`1px solid ${open ? tokens.colors.accent.primaryMuted : 'transparent'}`}
         transition={`all ${tokens.transition.fast}`}
-        _hover={{ bg: open ? tokens.colors.accent.primarySubtle : tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
+        _hover={disabled ? {} : { bg: open ? tokens.colors.accent.primarySubtle : tokens.colors.bg.whiteSubtle, color: tokens.colors.text.primary }}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-disabled={disabled}
         aria-label={t('prompt.effort.tooltip')}
-        title={t('prompt.effort.tooltip')}
-        onClick={(e) => { e.stopPropagation(); setOpen((o) => !o) }}
+        title={disabled ? t('prompt.effort.busyTooltip') : t('prompt.effort.tooltip')}
+        onClick={disabled ? undefined : (e) => { e.stopPropagation(); setOpen((o) => !o) }}
       >
         <Box display="flex" alignItems="center" flexShrink={0}><FiBarChart2 size={14} /></Box>
         <Text data-prompt-action-label fontSize="11px" fontWeight="600" whiteSpace="nowrap">

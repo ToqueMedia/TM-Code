@@ -8,6 +8,10 @@
  * root.
  */
 
+// DOIS dialectos: o Set de permissões casa com as chaves do registo
+// (CANÓNICO); as mensagens de bloqueio são LIDAS PELO MODELO e por isso
+// nomeiam as tools como ele as vê no schema (ALIAS). Uma mensagem que diz
+// "podes usar read_file" a quem só tem `Read` na lista não desbloqueia nada.
 import {
   READ_FILE, READ_AROUND, LIST_DIRECTORY, GLOB, SEARCH_FILES,
   READ_SKILL, READ_LARGE_RESULT,
@@ -15,7 +19,9 @@ import {
   WEB_SEARCH, WEB_FETCH, CAPTURE_URL_DESIGN, DELEGATE,
   WRITE_FILE, CREATE_FILE, EDIT_FILE,
   ASK_USER_QUESTION,
-  canonicalToolName,
+  READ_ALIAS, LS_ALIAS, GLOB_ALIAS, GREP_ALIAS,
+  WEB_SEARCH_ALIAS, WEB_FETCH_ALIAS, WRITE_ALIAS, EDIT_ALIAS,
+  canonicalToolName, advertisedToolName,
 } from './toolNames'
 
 // Tools the architect agent is allowed to call while planMode is on.
@@ -88,16 +94,20 @@ export function checkPlanModeAccess(
   planFileName: string = 'PLAN.md',
 ): string | null {
   toolName = canonicalToolName(toolName)
+  // O que se ECOA ao modelo é o nome que ele escreveu / que tem no schema.
+  // Devolver-lhe "read_file is an implementation tool" depois de ele chamar
+  // `Read` faz o bloqueio parecer ser sobre outra tool qualquer.
+  const shownName = advertisedToolName(toolName)
   const planLabel = normalisePlanFileName(planFileName)
   if (!PLAN_MODE_ALLOWED_TOOLS.has(toolName)) {
     const allowedList = [
-      READ_FILE, READ_AROUND, LIST_DIRECTORY, GLOB, SEARCH_FILES, READ_SKILL,
-      UPDATE_TASKS, WEB_SEARCH, WEB_FETCH, CAPTURE_URL_DESIGN, ASK_USER_QUESTION,
+      READ_ALIAS, READ_AROUND, LS_ALIAS, GLOB_ALIAS, GREP_ALIAS, READ_SKILL,
+      UPDATE_TASKS, WEB_SEARCH_ALIAS, WEB_FETCH_ALIAS, CAPTURE_URL_DESIGN, ASK_USER_QUESTION,
     ].join(', ')
-    return `Blocked in /plan architect mode: ${toolName} is an implementation tool. Document what this step would do in ${planLabel}'s Implementation Phases section — the coding agent will run it after the user approves the plan. Allowed in this mode: ${allowedList}, ${WRITE_FILE}/${CREATE_FILE}/${EDIT_FILE} (${planLabel} or TODO.md only).`
+    return `Blocked in /plan architect mode: ${shownName} is an implementation tool. Document what this step would do in ${planLabel}'s Implementation Phases section — the coding agent will run it after the user approves the plan. Allowed in this mode: ${allowedList}, ${WRITE_ALIAS}/${CREATE_FILE}/${EDIT_ALIAS} (${planLabel} or TODO.md only).`
   }
   if (WRITE_TOOLS.has(toolName) && !isPlanArtefactAtRoot(filePath, projectRoot, planLabel)) {
-    return `Blocked in /plan architect mode: ${toolName} can only write ${planLabel} or TODO.md at the project root. Tried to write "${filePath}". Source files belong to the implementation phase that follows user approval — describe them in ${planLabel}'s File Structure table instead.`
+    return `Blocked in /plan architect mode: ${shownName} can only write ${planLabel} or TODO.md at the project root. Tried to write "${filePath}". Source files belong to the implementation phase that follows user approval — describe them in ${planLabel}'s File Structure table instead.`
   }
   return null
 }

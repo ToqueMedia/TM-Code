@@ -99,7 +99,33 @@ function isOffEffort(effort: string): boolean {
 }
 
 /**
- * Mutates `body` in place. No-op when effort is empty.
+ * Default quando o cliente NÃO manda `X-TM-Reasoning-Effort`.
+ *
+ * Existe para as builds da IDE já distribuídas: até este worker ser deployado
+ * (2026-08) o header era ignorado, portanto há clientes lá fora que não o
+ * enviam. Sem default, esses ficavam sem `reasoning_effort` E sem os campos
+ * companion (`thinking.type`, `enable_thinking`) — ou seja, à mercê do que o
+ * extraBody da KV tivesse.
+ *
+ * NÃO é `max` para todos: o Grok aceita só `low|medium|high` e `max` cairia
+ * fora do conjunto — o 400 que este ficheiro existe para evitar. Os valores
+ * espelham EFFORT_BY_MODEL em src/services/agent/reasoningEffortModels.ts (a
+ * fonte de verdade, probada ao vivo em 2026-07-23); o teste
+ * `reasoningEffortDefaults.test.ts` lê esse ficheiro e acusa se divergirem.
+ *
+ * Provider desconhecido devolve '' de propósito: não inventamos um valor para
+ * uma API cujo conjunto válido não conhecemos.
+ */
+export function defaultEffortFor(ctx: ApplyReasoningEffortCtx): string {
+  if (isMoonshot(ctx)) return isKimiK3(ctx.model) ? 'max' : ''
+  if (isXai(ctx)) return 'high'
+  if (isGlmModel(ctx.model) && (isZai(ctx) || isDashScope(ctx))) return 'max'
+  return ''
+}
+
+/**
+ * Mutates `body` in place. No-op when effort is empty AND the model has no
+ * known default.
  * Always runs AFTER extraBody merge so the user choice wins.
  */
 export function applyReasoningEffort(
@@ -107,7 +133,7 @@ export function applyReasoningEffort(
   effortRaw: string,
   ctx: ApplyReasoningEffortCtx,
 ): void {
-  const effort = effortRaw.trim()
+  const effort = effortRaw.trim() || defaultEffortFor(ctx)
   if (!effort) return
 
   // Valor nativo — o frontend já validou contra as options do modelo.
@@ -146,14 +172,37 @@ export function applyReasoningEffort(
   // DashScope GLM: enable_thinking tem PRIORIDADE sobre reasoning_effort.
   // Sem alinhar o flag, effort=high com enable_thinking:false (extraBody) =
   // zero reasoning e UX "mensagem vazia de thinking".
+  //
+  // NÃO enviamos `preserve_thinking` aqui. Existe no DashScope e faz o que
+  // queríamos ("pass prior reasoning to subsequent turns"), mas a doc limita-o
+  // a qwen3.7-*/qwen3.6-*/kimi-k2.6/kimi-k2.7-* — **GLM não está na lista**.
+  // Mandá-lo ao GLM era o parâmetro não suportado que este ficheiro existe para
+  // evitar. Se um dia um qwen3.7 for o modelo principal, é aqui que entra, com
+  // guarda de modelo — não por provider.
   if (isDashScope(ctx) && isGlmModel(ctx.model)) {
     body.enable_thinking = !isOffEffort(effort)
     return
   }
 
   // z.AI GLM: thinking.type + reasoning_effort (docs Deep Thinking).
+  //
+  // `clear_thinking: false` = Preserved Thinking. O default da API é `true`, e
+  // a descrição é literal: "Controls whether to clear reasoning_content from
+  // previous conversation turns". Ou seja, por omissão o servidor DEITA FORA o
+  // raciocínio dos turnos anteriores que nós enviamos.
+  //
+  // Isto fecha meio contrato que estava aberto: a doc pede as duas metades —
+  // `clear_thinking: false` E devolver o `reasoning_content` intacto. A segunda
+  // já a cumpríamos com rigor (round-trip `_native` em query.ts, e uma
+  // auditoria que recusou podá-lo); a primeira nunca foi enviada. Resultado:
+  // pagávamos esses tokens em input, todos os turnos, e o servidor descartava-os.
+  //
+  // Só no ramo `enabled`: com `type: 'disabled'` não há raciocínio a preservar,
+  // e o comportamento do campo nesse estado não está documentado.
   if (isZai(ctx) && isGlmModel(ctx.model)) {
-    body.thinking = { type: isOffEffort(effort) ? 'disabled' : 'enabled' }
+    body.thinking = isOffEffort(effort)
+      ? { type: 'disabled' }
+      : { type: 'enabled', clear_thinking: false }
     return
   }
 

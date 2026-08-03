@@ -12,15 +12,14 @@
  */
 
 import { invoke } from '@tauri-apps/api/core'
-import { useBackgroundCommandStore } from '../../../stores/backgroundCommandStore'
+import { processRegistry } from '../processRegistry'
 import { logger } from '../../../utils/logger'
 
 export async function cancelBackgroundCommand(id: string): Promise<void> {
-  const store = useBackgroundCommandStore.getState()
-  const cmd = store.getById(id)
+  const cmd = processRegistry.getById(id)
   if (!cmd || cmd.status !== 'running') return
 
-  store.cancelCommand(id)
+  processRegistry.cancelCommand(id)
   try {
     await invoke('kill_process', { pid: cmd.pid })
   } catch (err) {

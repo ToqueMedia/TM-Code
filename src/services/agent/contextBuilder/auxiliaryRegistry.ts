@@ -119,13 +119,15 @@ export interface ContextPlan {
  * foi apagado a 2026-07-30; só este tipo estava vivo, e só porque o
  * contextBuilder o usava para carimbar o plano determinista.
  *
- * `source` é sempre 'fallback' hoje. Fica no tipo porque o export de sessão
- * lê o campo — se algum dia voltar um planner por modelo, é aqui que o
- * 'model' passa a ser possível.
+ * `source` é 'deterministic' hoje (2026-08-03 — antes dizia 'fallback', que
+ * implicava um planner falhado; não há planner, a selecção determinística É
+ * o desenho). 'fallback' fica no tipo para compat com exports antigos; se
+ * algum dia voltar um planner por modelo, é aqui que 'model' volta a ser
+ * possível.
  */
 export interface ContextPlanClassification {
   plan: ContextPlan
-  source: 'model' | 'fallback'
+  source: 'model' | 'deterministic' | 'fallback'
   modelTier?: 'utility' | 'code'
   attempts?: number
   confidence: 'high' | 'medium' | 'low' | 'none'
@@ -155,7 +157,6 @@ export interface AuxiliarySelection {
   requestContextFallbackTo?: string[]
   requestedButNotLoadedSections?: string[]
   readOnly: boolean
-  requiresMutation: boolean
   reason: string
   routerSource: 'model' | 'fallback' | 'keyword'
   routerConfidence: 'high' | 'medium' | 'low' | 'none'
@@ -167,8 +168,8 @@ export interface AuxiliarySelection {
   // ('fallback'), and surface the raw output / error for diagnosis. The
   // taskDomain / requiredCapabilities / selectedContexts ride on
   // `contextPlan`; rejectedContexts and selectionReason are surfaced here.
-  contextPlannerStatus?: 'parsed' | 'fallback'
-  contextPlannerSource?: 'model' | 'fallback'
+  contextPlannerStatus?: 'parsed' | 'deterministic' | 'fallback'
+  contextPlannerSource?: 'model' | 'deterministic' | 'fallback'
   contextPlannerModel?: 'utility' | 'code'
   contextPlannerError?: string
   contextPlannerRawOutput?: string
@@ -482,7 +483,7 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fallbackTo: ['project.structure_overview'],
     sourceResolver: 'mcp_routing_detail',
     freshnessPolicy: 'snapshot of connected tools at turn start',
-    expectedFiles: ['src/services/mcp/**', 'src/services/agent/toolsetSelector.ts'],
+    expectedFiles: ['src/services/mcp/**', 'src/services/agent/toolPolicy.ts'],
     summaryAvailable: true,
     fullAvailable: true,
     estTokens: 600,
@@ -490,47 +491,30 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     aliases: ['mcp_routing_detail'],
     phase: 1,
   }),
+  // `agent_runtime.request_context_policy` foi REMOVIDA (2026-08-03): era
+  // circular — a política de uso do request_context só chegava a quem já
+  // soubesse usá-lo. O conteúdo vive agora inline no cabeçalho do índice
+  // on-demand (buildOnDemandIndex). Medido na sessão momenu-fact de 02-08:
+  // 0 chamadas a request_context em 34 pedidos com a política trancada aqui.
   cx({
     id: 'agent_runtime.tool_profiles',
     domain: 'agent_runtime',
     capability: 'tool_profiles',
-    name: 'Tool profiles',
-    description: 'Compact dynamic-toolset profile guidance.',
+    name: 'Tool loading',
+    description: 'How the toolset is assembled: frozen local tools + deferred MCP definitions loaded on demand.',
     scope: 'runtime',
     costTier: 'low',
     granularity: 'summary',
-    whenToUse: 'Use when auditing or changing tool profiles, request_tools policy, or on-demand starter behavior.',
-    whenNotToUse: 'Do not use for external MCP routing unless tool profile behavior is the subject.',
+    whenToUse: 'Use when auditing or changing how tool definitions are assembled, deferred, or loaded on demand.',
+    whenNotToUse: 'Do not use for external MCP routing unless tool loading behavior is the subject.',
     dependencies: [],
-    fallbackTo: ['agent_runtime.request_context_policy'],
+    fallbackTo: [],
     sourceResolver: 'tool_profiles_summary',
     freshnessPolicy: 'stable code policy',
-    expectedFiles: ['src/services/agent/toolsetSelector.ts'],
+    expectedFiles: ['src/services/agent/toolPolicy.ts', 'src/services/agent/toolExecutor.ts'],
     summaryAvailable: true,
     fullAvailable: false,
     estTokens: 180,
-    type: 'static',
-    phase: 1,
-  }),
-  cx({
-    id: 'agent_runtime.request_context_policy',
-    domain: 'agent_runtime',
-    capability: 'request_context_policy',
-    name: 'Request context policy',
-    description: 'Policy for choosing on-demand context and avoiding broad fallbacks.',
-    scope: 'runtime',
-    costTier: 'low',
-    granularity: 'summary',
-    whenToUse: 'Use when modifying or auditing the on-demand context system itself.',
-    whenNotToUse: 'Do not use for ordinary product bugfixes.',
-    dependencies: [],
-    fallbackTo: ['project.structure_overview'],
-    sourceResolver: 'request_context_policy',
-    freshnessPolicy: 'stable code policy',
-    expectedFiles: ['src/services/agent/contextBuilder/auxiliaryRegistry.ts', 'src/services/agent/contextBuilder.ts'],
-    summaryAvailable: true,
-    fullAvailable: false,
-    estTokens: 220,
     type: 'static',
     phase: 1,
   }),
@@ -606,7 +590,7 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     domain: 'delivery/git',
     capability: 'git_status',
     name: 'Git status',
-    description: 'Branch, upstream state, and changed files snapshot.',
+    description: 'Branch, upstream state, changed files, and recent commits snapshot.',
     scope: 'git',
     costTier: 'low',
     granularity: 'summary',
@@ -619,7 +603,7 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     expectedFiles: ['.git'],
     summaryAvailable: true,
     fullAvailable: true,
-    estTokens: 450,
+    estTokens: 520,
     type: 'dynamic',
     aliases: ['git_status_detail'],
     phase: 1,
@@ -738,6 +722,38 @@ function unique(ids: string[]): string[] {
   return Array.from(new Set(ids))
 }
 
+/**
+ * Secções BOUNDED entregues inline por defeito (doutrina full-delivery,
+ * 2026-08-03). A meia-entrega falhava em silêncio: na sessão momenu-fact de
+ * 02-08, 0 chamadas a request_context em 34 pedidos — as secções omitidas
+ * nunca serviram para nada, e com ~96% de cache-hit medido o custo marginal
+ * de as entregar é ~10% do preço nominal. Ficam ON-DEMAND apenas as
+ * unbounded (project.structure_full, project.docs_full, project.symbol_index)
+ * e agent_runtime.memory_context (duplicaria as secções estáticas de memória
+ * do prompt — ver renderAuxiliaryContent).
+ */
+// Fora da lista, de propósito (não são meia-entrega — já chegam por outra via
+// ou duplicariam): `delivery.changed_files` (a secção recent_files entrega o
+// mesmo bloco em todos os runs), `project.structure_overview` (é o fallback
+// permanente da secção project_structure), `scaffold.workflow` (o protocolo
+// de install já vive no bloco estático; o workflow completo é só para
+// bootstrap), `agent_runtime.memory_context` (duplicaria as secções estáticas
+// de memória).
+export const BOUNDED_INLINE_CONTEXTS: string[] = [
+  'design_system.semantic_tokens',
+  'design_system.theme_config',
+  'design_system.brand_palette',
+  'design_system.chakra_recipes',
+  'design_system.component_patterns',
+  'ui_patterns',
+  'project.package_map',
+  'project.entrypoints',
+  'delivery.build_scripts',
+  'agent_runtime.mcp_routing',
+  'agent_runtime.tool_profiles',
+  'vision.image_rules',
+]
+
 export function fallbackContextPlanForProfile(profile: PromptProfile): ContextPlan {
   if (profile === 'project_bootstrap') {
     return {
@@ -756,21 +772,21 @@ export function fallbackContextPlanForProfile(profile: PromptProfile): ContextPl
       taskDomain: 'vision',
       requiredCapabilities: ['image_rules'],
       minimumContextNeeded: 'summary',
-      candidateContexts: ['vision.image_rules', 'design_system.component_patterns'],
-      selectedContexts: ['vision.image_rules'],
+      candidateContexts: [],
+      selectedContexts: BOUNDED_INLINE_CONTEXTS,
       fallbackRisk: 'low',
-      reason: 'Vision profile: image rules are enough unless visual implementation is also needed.',
+      reason: 'Full delivery: bounded sections inline; only unbounded contexts stay on-demand.',
     }
   }
 
   return {
     taskDomain: 'bugfix_local',
     requiredCapabilities: [],
-    minimumContextNeeded: 'index',
+    minimumContextNeeded: 'summary',
     candidateContexts: [],
-    selectedContexts: [],
+    selectedContexts: BOUNDED_INLINE_CONTEXTS,
     fallbackRisk: 'low',
-    reason: 'Context planner unavailable; conservative fallback loads no auxiliary context.',
+    reason: 'Full delivery: bounded sections inline; only unbounded contexts stay on-demand.',
   }
 }
 
@@ -781,8 +797,7 @@ export function selectAuxiliaries(
   reason?: string,
   routerInfo?: { source: 'model' | 'fallback' | 'keyword'; confidence?: 'high' | 'medium' | 'low' | 'none'; error?: string; diagnostics?: RouterDiagnostics },
   contextPlanOverride?: ContextPlan,
-  plannerInfo?: { status: 'parsed' | 'fallback'; source?: 'model' | 'fallback'; modelTier?: 'utility' | 'code'; error?: string; rawOutput?: string; fallbackReason?: string; selectionReason?: string },
-  requiresMutationHint?: boolean,
+  plannerInfo?: { status: 'parsed' | 'deterministic' | 'fallback'; source?: 'model' | 'deterministic' | 'fallback'; modelTier?: 'utility' | 'code'; error?: string; rawOutput?: string; fallbackReason?: string; selectionReason?: string },
 ): AuxiliarySelection {
   void userMessage
   const phase1 = AUXILIARY_METAS.filter((m) => m.phase === 1)
@@ -854,7 +869,6 @@ export function selectAuxiliaries(
     requestContextFallbackTo: [],
     requestedButNotLoadedSections: [],
     readOnly: readOnlyHint === true,
-    requiresMutation: readOnlyHint === true ? false : requiresMutationHint === true,
     reason: reason ?? `context planner (taskDomain=${contextPlan.taskDomain})`,
     routerSource: routerInfo?.source ?? 'keyword',
     routerConfidence: routerInfo?.confidence ?? 'none',
@@ -890,14 +904,19 @@ export function buildOnDemandIndex(selection: AuxiliarySelection): string | null
     `- \`${o.id}\` [candidate; ${o.granularity}; ${o.costTier}] — ${o.description}`,
   )
 
+  // Uma linha POR SECÇÃO, com a descrição da meta. A versão anterior listava
+  // só ids agrupados por domínio ("- design_system: `a`, `b`, `c`") — medido
+  // na sessão momenu-fact de 02-08: 0 chamadas a request_context em 34
+  // pedidos. Ids nus não dão ao modelo matéria para DECIDIR; a descrição de
+  // uma linha custa ~200 tokens no total e é o que torna o índice utilizável.
   const byDomain = new Map<string, string[]>()
   for (const o of available) {
-    const ids = byDomain.get(o.domain) ?? []
-    ids.push(`\`${o.id}\``)
-    byDomain.set(o.domain, ids)
+    const lines = byDomain.get(o.domain) ?? []
+    lines.push(`  - \`${o.id}\` — ${o.description}`)
+    byDomain.set(o.domain, lines)
   }
-  const domainLines = Array.from(byDomain.entries()).map(
-    ([domain, ids]) => `- ${domain}: ${ids.join(', ')}`,
+  const domainLines = Array.from(byDomain.entries()).flatMap(
+    ([domain, lines]) => [`- ${domain}:`, ...lines],
   )
 
   const fallbackLine = fallbackOnly.length
@@ -913,11 +932,20 @@ export function buildOnDemandIndex(selection: AuxiliarySelection): string | null
     '',
     `Context plan: ${selection.contextPlan.taskDomain}; required: ${selection.contextPlan.requiredCapabilities.join(', ') || 'none'}; minimum: ${selection.contextPlan.minimumContextNeeded}; fallback risk: ${selection.contextPlan.fallbackRisk}.`,
     `Selected inline: ${selection.contextPlan.selectedContexts.length ? selection.contextPlan.selectedContexts.map(id => `\`${resolveAuxiliaryId(id)}\``).join(', ') : 'none'}.`,
-    'Rule: request the most specific capability context first. Use broad project/full contexts only after specific/domain contexts are insufficient.',
+    '',
+    // A política de uso vive AQUI, no cabeçalho do índice — não numa secção
+    // on-demand. A `agent_runtime.request_context_policy` (removida) era
+    // circular: as instruções de quando usar o request_context só chegavam a
+    // quem já soubesse usá-lo. Uma política que o modelo não vê não existe.
+    // Desde a doutrina full-delivery (2026-08-03) só as secções UNBOUNDED
+    // chegam aqui — o resto é entregue inline.
+    'Only unbounded contexts are omitted from the prompt (everything bounded is already inline). To load one, call the `request_context` tool with its id — the content comes back as a tool result in the same turn. This is expected use, not a failure mode: when a section below matches the task, request it BEFORE falling back to broad exploration.',
+    'Typical moments: you need to locate a function/class/component/hook by name → `project.symbol_index`; broad architecture or unknown file layout → `project.structure_full`; README/PLAN/TODO content → `project.docs_full`; the task is about agent memory → `agent_runtime.memory_context`.',
+    'Call once per id — content already returned does not need re-requesting.',
     ...(symbolIndexLine ? [symbolIndexLine] : []),
     '',
     ...(candidateLines.length ? ['Candidate contexts:', ...candidateLines, ''] : []),
-    ...(domainLines.length ? ['Other available context ids by domain:', ...domainLines, ''] : []),
+    ...(domainLines.length ? ['Other available contexts:', ...domainLines, ''] : []),
     ...(fallbackLine ? [fallbackLine] : []),
   ].join('\n')
 }

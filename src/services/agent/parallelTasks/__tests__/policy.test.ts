@@ -10,7 +10,7 @@ describe('parallelTasks/policy (F3)', () => {
     expect(() => assertOneAgentPolicyActive()).not.toThrow()
   })
 
-  it('exposes a stable tool error string for send_agent_message', () => {
+  it('exposes a stable one-agent-per-project tool error string', () => {
     expect(ONE_AGENT_PER_PROJECT_TOOL_ERROR.toLowerCase()).toContain('one agent')
   })
 })

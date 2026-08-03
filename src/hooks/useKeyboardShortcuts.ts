@@ -1,7 +1,7 @@
 // src/hooks/useKeyboardShortcuts.ts
 import { useEffect } from 'react';
 import { useProjectStore } from '../stores/projectStore';
-import { useLayoutStore } from '../stores/layoutStore';
+import { useLayoutStore, VIEWS_WITHOUT_DIFF_BAR } from '../stores/layoutStore';
 import { useChatStore } from '../stores/chatStore';
 import { useSettingsStore, matchesBinding } from '../stores/settingsStore';
 import { useEditorRepository } from '../stores/editorStore';
@@ -158,14 +158,29 @@ export function useKeyboardShortcuts() {
         }
       }
 
-      // === Diff approval shortcuts (only when diffs are pending, prompt not focused, no dialogs open) ===
+      // === Diff approval shortcuts ===
+      //
+      // REGRA: este handler global está ativo EXATAMENTE nas vistas onde a
+      // DiffApprovalPanel NÃO está montada. Onde ela está, é ela que manda — o
+      // global aprova "o primeiro pendente", que deixaria de coincidir com a
+      // seleção da barra (dois handlers a decidir diffs diferentes).
+      //
+      // O MainLayout monta a barra em 'chat' e 'preview'. Sobram 'editor',
+      // 'settings' e 'generating' — e essas TÊM de continuar cobertas aqui:
+      // nenhuma delas renderiza o ChatView, portanto o teclado é o único
+      // caminho de aprovação que resta. Restringir isto só a 'generating'
+      // (como se fez ao introduzir a barra) deixava o run pendurado no
+      // createDiffApprovalPromise, sem barra e sem atalho, assim que o
+      // developer estivesse no editor ou nas definições — sem nada na UI a
+      // explicar porque é que o agente tinha parado.
       const activeEl = document.activeElement
       const isPromptFocused = activeEl?.tagName === 'TEXTAREA'
       const isInputFocused = activeEl?.tagName === 'INPUT' || activeEl?.tagName === 'SELECT'
       const hasDialogOpen = !!document.querySelector('[role="dialog"], [data-command-palette]')
       const hasPendingDiffs = useChatStore.getState().pendingDiffs.length > 0
+      const ownsDiffShortcuts = VIEWS_WITHOUT_DIFF_BAR.has(useLayoutStore.getState().viewMode)
 
-      if (hasPendingDiffs && !isPromptFocused && !isInputFocused && !hasDialogOpen) {
+      if (ownsDiffShortcuts && hasPendingDiffs && !isPromptFocused && !isInputFocused && !hasDialogOpen) {
         if (matchesBinding(e, sc.diffAccept)) {
           e.preventDefault()
           const state = useChatStore.getState()

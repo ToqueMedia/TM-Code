@@ -33,6 +33,7 @@ import {
   POST_COMPACTION_REREAD_RANGES,
   POST_COMPACTION_RANGES_PER_FILE,
   POST_COMPACTION_RANGE_MAX_LINES,
+  POST_COMPACTION_RECOVERY_MAX_CHARS,
   SUMMARIZE_TIMEOUT_MS,
 } from './agentConfig'
 import { getReadRanges } from './toolExecutor/readRangeTracker'
@@ -504,17 +505,45 @@ function renderRecoveryRanges(
 // ── Post-compaction recovery ──
 
 /**
- * After compaction, re-read recently accessed files and inject their content.
- * Also injects tool ops log, skills, session memory, and dev server status.
+ * Reconstrói o ESTADO DE TRABALHO que a compactação levou.
+ *
+ * PORQUÊ ISTO EXISTE (paridade claude-vaz, reposta 2026-07-31)
+ * ────────────────────────────────────────────────────────────
+ * O sumário conta a HISTÓRIA da sessão; não devolve o conteúdo dos ficheiros
+ * que o modelo estava a editar, nem o texto das skills que leu. O claude-vaz
+ * trata isso como parte da compactação: a seguir ao sumário injeta anexos com
+ * os ficheiros lidos mais recentemente, o plano, as skills invocadas e o
+ * estado dos agentes assíncronos (compact.ts → createPostCompactFileAttachments
+ * e companhia). Sem isso o modelo continua com uma narrativa e nenhum material,
+ * e a primeira coisa que faz a seguir a compactar é reler tudo — os turnos que
+ * a compactação acabou de pagar.
+ *
+ * Este bloco era código MORTO no TM Code: existia, estava correto, e nenhum
+ * caminho o chamava desde que `compressContext` ficou sem callers. Agora é
+ * chamado pelos dois caminhos de compactação (auto em query.ts, manual em
+ * agentService).
+ *
+ * O QUE NÃO ENTRA AQUI, e porquê: memória de sessão, plano ativo, tracker de
+ * tarefas e estado do dev server são secções DINÂMICAS do system prompt
+ * (contextBuilder), reconstruídas a cada turno — sobrevivem à compactação por
+ * construção. Repeti-las aqui era pagá-las duas vezes no mesmo pedido.
+ *
+ * Devolve `null` quando não há nada a recuperar.
  */
-export async function injectPostCompactRecovery(
-  messages: InternalMessage[],
+export async function buildPostCompactRecoveryBlock(
   state: SessionState,
   toolOpsLog?: string,
-): Promise<void> {
+  /**
+   * Teto em caracteres. Vem da janela ATIVA (ver
+   * getPostCompactRecoveryMaxChars); a constante só serve quando a janela ainda
+   * não é conhecida — um bloco de 60K caracteres é ruído num modelo de 1M e é
+   * 12% da janela num de 128K.
+   */
+  maxChars: number = POST_COMPACTION_RECOVERY_MAX_CHARS,
+): Promise<string | null> {
   const recentFiles = state.getRecentFiles(POST_COMPACTION_REREAD_FILES)
   const readRanges = [...getReadRanges()].reverse().slice(0, POST_COMPACTION_REREAD_RANGES).reverse()
-  if (recentFiles.length === 0 && readRanges.length === 0 && !toolOpsLog) return
+  if (recentFiles.length === 0 && readRanges.length === 0 && !toolOpsLog) return null
 
   const DiffService = (await import('./diffService')).default
   const diffService = DiffService.getInstance()
@@ -558,43 +587,54 @@ export async function injectPostCompactRecovery(
     } catch { /* file may have been deleted */ }
   }
 
-  const { devServerManager } = await import('../../services/devServerManager')
-  let devServerNote = ''
-  if (devServerManager.isRunning()) {
-    devServerNote = `\n\nNote: A dev server is currently running at ${devServerManager.getUrl() || 'unknown URL'}. Do not start another one.`
-  }
-
   const { buildPostCompactionSkillsBlock } = await import('./skillService')
   const skillsBlock = buildPostCompactionSkillsBlock()
 
-  const parts: string[] = []
-  if (skillsBlock) parts.push(skillsBlock)
-  if (toolOpsLog) parts.push(`[Context recovery — tool operations already performed this session]\n\n${toolOpsLog}`)
-  if (fileContents.length > 0) parts.push(`[Context recovery — current content of recently accessed files]\n\n${fileContents.join('\n\n')}`)
-  if (devServerNote) parts.push(devServerNote)
-
-  // Session memory recovery
-  try {
-    const { useChatStore } = await import('../../stores/chatStore')
-    const sessionMemory = useChatStore.getState().getActiveSession()?.sessionMemory
-    if (sessionMemory) parts.push(`[Session memory — recorded earlier this session]\n\n${sessionMemory}`)
-  } catch { /* non-critical */ }
-
-  if (parts.length === 0) return
-
-  // Ensure alternation
-  const lastMsg = messages[messages.length - 1]
-  if (lastMsg?.role === 'user') {
-    messages.push({
-      role: 'assistant',
-      content: '[context recovered — continuing from recovered state]',
-    })
+  // Ordem = valor decrescente. As skills primeiro porque são REGRAS: perder o
+  // texto de uma skill não faz o modelo reler, faz-lhe escrever código contra o
+  // prior de treino sem saber que está a violar algo. Os ficheiros a seguir
+  // (material de trabalho), o log de operações por último (evita repetir
+  // comandos, mas o modelo sobrevive sem ele).
+  const candidates: string[] = []
+  if (skillsBlock) candidates.push(skillsBlock)
+  if (fileContents.length > 0) {
+    candidates.push(
+      `[Context recovery — current content of recently accessed files]\n\n${fileContents.join('\n\n')}`,
+    )
+  }
+  if (toolOpsLog) {
+    candidates.push(
+      `[Context recovery — tool operations already performed this session]\n\n${toolOpsLog}`,
+    )
   }
 
-  messages.push({
-    role: 'user',
-    content: parts.join('\n'),
-  })
+  // Teto global: a primeira parte que não cabe corta o resto. Nunca fica vazio
+  // por causa do teto — a primeira parte entra sempre (é a mais valiosa),
+  // mesmo que sozinha o exceda.
+  const parts: string[] = []
+  let used = 0
+  let dropped = 0
+  for (const part of candidates) {
+    if (parts.length > 0 && used + part.length > maxChars) {
+      dropped = candidates.length - parts.length
+      break
+    }
+    parts.push(part)
+    used += part.length
+  }
+
+  if (parts.length === 0) return null
+
+  if (dropped > 0) {
+    // Dizê-lo. Um bloco truncado em silêncio lê-se como "isto é tudo o que
+    // havia" — a mesma amnésia-com-cara-de-completa que o marcador do snip
+    // existe para evitar.
+    parts.push(
+      `[Context recovery — ${dropped} further recovery section(s) omitted to stay within the post-compaction budget. Re-read files or re-run searches if you need them; do not assume they were empty.]`,
+    )
+  }
+
+  return parts.join('\n\n')
 }
 
 // ── Auto-save session memory ──

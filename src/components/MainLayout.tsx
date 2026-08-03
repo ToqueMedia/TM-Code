@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Flex, Box } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { useLayoutStore } from '../stores/layoutStore'
+import { useLayoutStore, VIEWS_WITHOUT_DIFF_BAR } from '../stores/layoutStore'
 import { useCurrentProject } from '../hooks/useProjectState'
 import { useProjectStore, autoSaveProjectState } from '../stores/projectStore'
 import { useEditorRepository } from '../stores/editorStore'
@@ -17,6 +17,7 @@ import GeneratingView from './views/GeneratingView'
 import PreviewView from './views/PreviewView'
 import EditorView from './views/EditorView'
 import PermissionDialog from './chat/PermissionDialog'
+import DiffApprovalPanel from './chat/DiffApprovalPanel'
 import PlanViewerPanel from './chat/PlanViewerPanel'
 import CheckpointDrawerPanel from './chat/CheckpointDrawerPanel'
 import TerminalDrawerPanel from './cmd-mode/TerminalDrawerPanel'
@@ -26,6 +27,7 @@ import { ErrorBoundary } from './ErrorBoundary'
 import SettingsView from './views/SettingsView'
 import { useCodeEditorState } from '../hooks/useEditorState'
 import { usePermissionStore } from '../stores/permissionStore'
+import { useChatStore } from '../stores/chatStore'
 import { useBillingStore, isTeamCollabActive } from '../stores/billingStore'
 import { devServerManager } from '../services/devServerManager'
 import { closePreviewWebview } from './ui/TauriWebview'
@@ -34,6 +36,7 @@ import { TeamChatPanel } from './collab/TeamChatPanel'
 import { ScreenShareViewer } from './collab/ScreenShareViewer'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
+import { isAgentBusyNow } from '../utils/agentBusy'
 import { GoalCelebration } from './celebration/GoalCelebration'
 import MonacoBridge from '../utils/monacoBridge'
 
@@ -61,6 +64,13 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
   const approveAlwaysGlobal = usePermissionStore(s => s.approveAlwaysGlobal)
   const deny = usePermissionStore(s => s.deny)
   const denyWith = usePermissionStore(s => s.denyWith)
+  // Batch diff approval: a barra ACOMPANHA o PromptBar enquanto houver diffs
+  // pendentes (prioridade abaixo do PermissionDialog — responder à permissão
+  // desbloqueia a produção do resto do lote). Não o substitui: rever um lote
+  // é uma sessão de revisão, e quem revê quer poder escrever ao agente no
+  // mesmo momento — a mensagem fica na fila e é drenada no turn boundary,
+  // logo a seguir à decisão do lote. Ver DiffApprovalPanel.
+  const hasPendingDiffs = useChatStore(s => s.pendingDiffs.length > 0)
   const currentProject = useCurrentProject()
   const { handleFileSelect } = useCodeEditorState()
 
@@ -285,7 +295,12 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
         const layout = useLayoutStore.getState()
         if (layout.viewMode === 'editor') {
           layout.goBack()
-        } else {
+        } else if (!isAgentBusyNow()) {
+          // Mesmo bloqueio do botão "Código-fonte" no PromptActions: com o
+          // agente a trabalhar, ENTRAR no editor é que está vedado — SAIR
+          // (o ramo acima) nunca. Sem esta guarda o atalho contornava o
+          // botão desativado e a UI de aprovação de diffs (que só existe
+          // nas vistas chat/preview) ficava inalcançável a meio do run.
           layout.setViewMode('editor')
         }
       }
@@ -480,7 +495,10 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
                             denyWith={denyWith}
                           />
                         ) : (
-                          <PromptBar />
+                          <>
+                            {hasPendingDiffs && <DiffApprovalPanel />}
+                            <PromptBar />
+                          </>
                         )
                       )}
                     </Box>
@@ -538,7 +556,14 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
                   denyWith={denyWith}
                 />
               ) : (
-                <PromptBar />
+                <>
+                  {/* Guarda `generating`: o GeneratingView tem o seu próprio
+                      DiffPreview com aprovação — a barra duplicaria a decisão.
+                      Ver VIEWS_WITHOUT_DIFF_BAR (fonte única, partilhada com o
+                      handler global de atalhos). */}
+                  {hasPendingDiffs && !VIEWS_WITHOUT_DIFF_BAR.has(viewMode) && <DiffApprovalPanel />}
+                  <PromptBar />
+                </>
               )
             )}
           </Flex>

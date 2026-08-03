@@ -4,6 +4,7 @@ import { logger } from '../../utils/logger'
 import { hashProjectPath, encryptSession, decryptSession } from '../../utils/crypto'
 import { useByokStore } from '../../stores/byokStore'
 import { getProjectSessionsDir } from '../projectStatePaths'
+import { READ_ALIAS } from './toolNames'
 
 /** Snapshot the current BYOK selection so the session uses the same provider
  *  and model for its entire lifetime, even if the user later switches the
@@ -627,7 +628,7 @@ class SessionService {
     if (msg.mentionContext) {
       sanitized.mentionContext = msg.mentionContext.length > MAX_MENTION_CONTEXT_PERSIST
         ? msg.mentionContext.slice(0, MAX_MENTION_CONTEXT_PERSIST)
-          + '\n<system-reminder>[mention context truncated on session reload — re-read the file with read_file if its tail matters]</system-reminder>'
+          + `\n<system-reminder>[mention context truncated on session reload — re-read the file with ${READ_ALIAS} if its tail matters]</system-reminder>`
         : msg.mentionContext
       // Paths the snapshot covers — lets the reload-time rebuild still void a
       // snapshot a later tool superseded (mentionContext staleness fix).

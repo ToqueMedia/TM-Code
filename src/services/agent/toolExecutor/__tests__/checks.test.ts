@@ -84,4 +84,17 @@ describe('commandReferencesSealedEnv — selo nas superfícies de shell', () => 
     expect(commandReferencesSealedEnv('cat .env')).toBe(true)
     expect(commandReferencesSealedEnv('cat .env')).toBe(true)
   })
+
+  describe('isSensitiveFile — caminho ausente', () => {
+    // Reportado em runtime (2026-07-31, sessão momenu-fact): o modelo chamou
+    // `read_around({ path: '…/ApiClient.ts' })` — a tool aceita `path` OU
+    // `file_path` — e o gate de sensibilidade lia só `file_path`, passando
+    // `undefined` para cá. Rebentava com "undefined is not an object
+    // (evaluating 'filePath.replace')" e a leitura falhava por inteiro.
+    // O `isEnvFile` ao lado já tinha esta guarda; a assimetria era o bug.
+    it('não rebenta com undefined/vazio', () => {
+      expect(isSensitiveFile(undefined)).toBe(false)
+      expect(isSensitiveFile('')).toBe(false)
+    })
+  })
 })

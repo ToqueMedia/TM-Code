@@ -21,6 +21,9 @@ export interface TmsTurnTelemetry {
   tmsBootstrapInputTokens: number
   tmsBootstrapOutputTokens: number
   tmsBootstrapPhase?: string
+  /** Secções em falta quando a phase termina em `_invalid` — o PORQUÊ do
+   *  inválido, espelho da lista que o prompt já mostra ao modelo. */
+  tmsMissingSections?: string[]
   tmsBootstrapToolset?: string
   tmsWriteAttempted: boolean
   tmsWriteToolCallId?: string
@@ -35,12 +38,8 @@ export interface TmsTurnTelemetry {
   originalUserMessageDisplayed: boolean
   originalTaskResumedAfterBootstrap: boolean
   originalTaskResumeRequestId?: string
-  mutableTask: boolean
   originalTaskWriteActionCount: number
   originalTaskFirstWriteTurn?: number
-  noEditGuardTriggered: boolean
-  noEditGuardReason?: string
-  noEditRecoveryAction?: string
   readBeforeWriteBlocked: boolean
   readBeforeWriteBlockCount: number
   readBeforeWriteBlockedTools: string[]
@@ -81,9 +80,7 @@ let currentTelemetry: TmsTurnTelemetry = {
   tmsSectionsRequested: [],
   originalUserMessageDisplayed: false,
   originalTaskResumedAfterBootstrap: false,
-  mutableTask: false,
   originalTaskWriteActionCount: 0,
-  noEditGuardTriggered: false,
   readBeforeWriteBlocked: false,
   readBeforeWriteBlockCount: 0,
   readBeforeWriteBlockedTools: [],
@@ -181,12 +178,11 @@ export function markTmsBootstrapFailed(reason: string): void {
   }
 }
 
-export function markOriginalTaskStarted(mutableTask: boolean): void {
+export function markOriginalTaskStarted(): void {
   currentTelemetry = {
     ...currentTelemetry,
     executionPhase: 'original_task',
     originalTaskStarted: true,
-    mutableTask,
   }
 }
 
@@ -215,15 +211,6 @@ export function markOriginalTaskWriteStats(writeActionCount: number, firstWriteT
     ...currentTelemetry,
     originalTaskWriteActionCount: writeActionCount,
     originalTaskFirstWriteTurn: firstWriteTurn,
-  }
-}
-
-export function markNoEditGuard(reason: string, recoveryAction: string): void {
-  currentTelemetry = {
-    ...currentTelemetry,
-    noEditGuardTriggered: true,
-    noEditGuardReason: reason,
-    noEditRecoveryAction: recoveryAction,
   }
 }
 

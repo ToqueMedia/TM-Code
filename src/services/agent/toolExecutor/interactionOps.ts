@@ -6,7 +6,7 @@
  * the user responds (or the abort signal fires).
  */
 
-import { useChatStore } from '../../../stores/chatStore'
+import { getAgentHost } from '../host/agentHost'
 import type { ToolRegistrationContext } from './context'
 import { t } from '@/i18n'
 
@@ -110,60 +110,27 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
         return 'No active project — cannot collect credentials. Open a project first.'
       }
 
-      const { useCredentialRequestStore } = await import('../../../stores/credentialRequestStore')
-      const chatStore = useChatStore.getState()
-
-      // Tarefa paralela: o pedido é etiquetado (badge "Credenciais" na row)
-      // e o card escrito NA SESSÃO da tarefa — o user decide no chat dela.
+      // P2 headless (2026-08-03): a ronda humana inteira — pedido na store,
+      // card no chat, corrida com o abort, lifecycle do card — vive no
+      // hospedeiro (windowHost.requestCredentials). Aqui fica só a validação
+      // e a formatação do resultado para o modelo.
       const taskOrigin = ctx.getTaskOrigin()
-
-      const { id: requestId, promise: requestPromise } = useCredentialRequestStore
-        .getState()
-        .request({
-          serviceName,
-          fields,
-          ...(taskOrigin ? { origin: { taskId: taskOrigin.taskId, label: taskOrigin.label } } : {}),
-        })
-
-      const cardMessageId = chatStore.addCredentialRequestCard(
-        projectRoot,
-        requestId,
+      const abortSignal = input._abortSignal as AbortSignal | undefined
+      const result = await getAgentHost().requestCredentials({
         serviceName,
         fields,
-        taskOrigin?.sessionId,
-      )
-
-      const abortSignal = input._abortSignal as AbortSignal | undefined
-
-      const result = await new Promise<{ submitted: boolean; keys?: string[] }>((resolve) => {
-        let settled = false
-        const onAbort = () => {
-          if (settled) return
-          settled = true
-          useCredentialRequestStore.getState().cancel(requestId)
-          resolve({ submitted: false })
-        }
-        if (abortSignal) {
-          if (abortSignal.aborted) {
-            onAbort()
-            return
-          }
-          abortSignal.addEventListener('abort', onAbort, { once: true })
-        }
-        requestPromise.then((r) => {
-          if (settled) return
-          settled = true
-          resolve(r)
-        })
+        projectRoot,
+        taskOrigin: taskOrigin
+          ? { taskId: taskOrigin.taskId, label: taskOrigin.label, sessionId: taskOrigin.sessionId }
+          : null,
+        signal: abortSignal,
       })
 
       if (result.submitted) {
-        chatStore.markCredentialRequestSubmitted(cardMessageId, result.keys ?? [])
         const keysList = (result.keys ?? []).join(', ') || '(none)'
         return `Credentials saved to .env for ${serviceName}: ${keysList}. These keys are now written to .env (values masked from the chat history). This message IS your confirmation — do NOT read .env to verify (it is sealed by design) and do NOT request these keys again. Continue with the implementation.`
       }
 
-      chatStore.updateCardStatus(cardMessageId, 'cancelled')
       return `User cancelled the credential request for ${serviceName}. Ask the user how they want to proceed without these credentials.`
     },
   })
@@ -244,55 +211,27 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
         multiSelect: !!q.multiSelect,
       }))
 
-      const { useAskUserQuestionStore } = await import('../../../stores/askUserQuestionStore')
-
       const projectRoot = ctx.getProjectRoot()
       if (!projectRoot) return 'No active project — cannot ask questions. Open a project first.'
 
-      // Tarefa paralela: pedido etiquetado (badge "Pergunta" na row) e card
-      // escrito na sessão da tarefa.
+      // P2 headless (2026-08-03): ronda humana no hospedeiro — ver
+      // windowHost.askUserQuestion (pedido na store + card + corrida com o
+      // abort + lifecycle do card). Objecto vazio = cancelado (semântica
+      // pré-existente).
       const taskOrigin = ctx.getTaskOrigin()
-
-      const { id: requestId, promise: answerPromise } = useAskUserQuestionStore
-        .getState()
-        .request(
-          questions,
-          taskOrigin ? { taskId: taskOrigin.taskId, label: taskOrigin.label } : undefined,
-        )
-
-      const chatStore = useChatStore.getState()
-      const cardMessageId = chatStore.addAskUserQuestionCard(projectRoot, requestId, questions, taskOrigin?.sessionId)
-
       const abortSignal = input._abortSignal as AbortSignal | undefined
-
-      const result = await new Promise<Record<string, string | string[]>>((resolve) => {
-        let settled = false
-        const onAbort = () => {
-          if (settled) return
-          settled = true
-          useAskUserQuestionStore.getState().cancel(requestId)
-          resolve({})
-        }
-        if (abortSignal) {
-          if (abortSignal.aborted) {
-            onAbort()
-            return
-          }
-          abortSignal.addEventListener('abort', onAbort, { once: true })
-        }
-        answerPromise.then((r) => {
-          if (settled) return
-          settled = true
-          resolve(r)
-        })
+      const result = await getAgentHost().askUserQuestion({
+        questions,
+        projectRoot,
+        taskOrigin: taskOrigin
+          ? { taskId: taskOrigin.taskId, label: taskOrigin.label, sessionId: taskOrigin.sessionId }
+          : null,
+        signal: abortSignal,
       })
 
       if (!result || Object.keys(result).length === 0) {
-        chatStore.updateCardStatus(cardMessageId, 'cancelled')
         return 'User cancelled the questions. Continue with your best judgment.'
       }
-
-      chatStore.updateCardStatus(cardMessageId, 'submitted')
 
       const answerLines = questionsRaw.map((q, i) => {
         const key = `question_${i}`

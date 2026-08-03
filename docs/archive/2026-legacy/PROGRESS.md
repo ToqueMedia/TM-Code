@@ -1,3 +1,5 @@
+> **HISTÓRICO (arquivado 2026-08-03) — NÃO reflecte o presente.** Snapshot do branch fix-windows em Abril de 2026.
+
 # Progresso — Auditoria Windows / Bottlenecks
 
 Branch: `fix-windows` · Última atualização: 2026-04-18

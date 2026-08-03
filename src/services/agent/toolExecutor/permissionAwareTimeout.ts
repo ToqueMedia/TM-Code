@@ -15,20 +15,22 @@
  * approves, the HTTP call fires, but the race already rejected. Per project
  * policy: user waits are unbounded.
  *
- * How: track wall-clock elapsed minus accumulated user-wait time.
- * When the timer fires, recompute "active" elapsed; if still under
- * `timeoutMs`, reschedule for the remainder. Three stores are the
- * sources of truth for "am I currently waiting on the user?":
- *   - permissionStore.pendingPermission — tool permission dialog
- *   - chatStore.pendingDiffs.length > 0 — file diff awaiting approval
- *   - credentialRequestStore.pending.size > 0 — credentials form open
- * We subscribe to all three so transitions in/out of wait states are
- * recorded as they happen, not only when the timer ticks.
+ * How: track wall-clock elapsed minus accumulated user-wait time. When the
+ * timer fires, recompute "active" elapsed; if still under `timeoutMs`,
+ * reschedule for the remainder.
+ *
+ * P4 headless (2026-08-03, portão nº7 do inventário): a fonte de "estou à
+ * espera do utilizador?" deixou de ser a subscrição a TRÊS stores do
+ * renderer (permissionStore/chatStore/credentialRequestStore) e passou a
+ * ser o contador de gates humanos do hostBus — o host-janela abre um span
+ * à volta de CADA via de decisão humana do AgentHost (P2), e um host
+ * headless nunca abre gates, portanto nada pausa (não há diálogo nenhum).
+ * O span cobre também a fila de permissões e as perguntas estruturadas,
+ * que a subscrição antiga ignorava — divergência deliberadamente
+ * conservadora (deadline maior, menos timeouts falsos).
  */
 
-import { usePermissionStore } from '../../../stores/permissionStore'
-import { useChatStore } from '../../../stores/chatStore'
-import { useCredentialRequestStore } from '../../../stores/credentialRequestStore'
+import { hasOpenHumanGates, onHumanGatesChange } from '../host/hostBus'
 
 export function createPermissionAwareTimeout(toolName: string, timeoutMs: number): {
   promise: Promise<never>
@@ -38,18 +40,10 @@ export function createPermissionAwareTimeout(toolName: string, timeoutMs: number
   let totalPausedMs = 0
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined
 
-  // Helper: check if any user-wait state is currently active
-  const isAnyWaitStateActive = (): boolean => {
-    const hasPermission = !!usePermissionStore.getState().pendingPermission
-    const hasDiffs = useChatStore.getState().pendingDiffs.length > 0
-    const hasCredentials = useCredentialRequestStore.getState().pending.size > 0
-    return hasPermission || hasDiffs || hasCredentials
-  }
+  let waitStartedAt: number | null = hasOpenHumanGates() ? startedAt : null
 
-  let waitStartedAt: number | null = isAnyWaitStateActive() ? startedAt : null
-
-  const onStoreChange = () => {
-    const isWaiting = isAnyWaitStateActive()
+  const onGateChange = () => {
+    const isWaiting = hasOpenHumanGates()
     const wasWaiting = waitStartedAt !== null
     if (isWaiting && !wasWaiting) {
       waitStartedAt = Date.now()
@@ -59,10 +53,7 @@ export function createPermissionAwareTimeout(toolName: string, timeoutMs: number
     }
   }
 
-  // Subscribe to all three stores to detect wait state transitions
-  const unsubscribePermission = usePermissionStore.subscribe(onStoreChange)
-  const unsubscribeChat = useChatStore.subscribe(onStoreChange)
-  const unsubscribeCredentials = useCredentialRequestStore.subscribe(onStoreChange)
+  const unsubscribeGates = onHumanGatesChange(onGateChange)
 
   const promise = new Promise<never>((_, reject) => {
     const tick = () => {
@@ -80,9 +71,7 @@ export function createPermissionAwareTimeout(toolName: string, timeoutMs: number
 
   const cleanup = () => {
     if (timeoutHandle) clearTimeout(timeoutHandle)
-    unsubscribePermission()
-    unsubscribeChat()
-    unsubscribeCredentials()
+    unsubscribeGates()
   }
 
   return { promise, cleanup }

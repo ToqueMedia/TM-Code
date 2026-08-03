@@ -76,7 +76,9 @@ jest.mock('../../../stores/settingsStore', () => ({
   },
 }))
 
-import { executePlan, executePlanResume } from '../commands/planCommand'
+import { executePlan, executePlanResume, buildArchitectSystemPrompt } from '../commands/planCommand'
+import { BASH_ALIAS, ADVERTISED_TOOL_NAMES, advertisedToolName } from '../toolNames'
+import { PLAN_MODE_ALLOWED_TOOLS } from '../planMode'
 
 describe('executePlan call sequence', () => {
   beforeEach(() => {
@@ -158,8 +160,14 @@ describe('executePlan call sequence', () => {
     // from toolNames.ts so a rename in the registry does not silently
     // break the architect's tool-blocklist. (MANAGED-PLATFORM cut 2026-07:
     // provision_auth was replaced by delete_file as the destructive example.)
+    //
+    // `execute_command` aparece pelo ALIAS de treino (`Bash`): é o único nome
+    // que chega ao modelo, e proibir um nome que ele não tem na mão não
+    // proíbe nada. As tools sem equivalente de treino (delete_file,
+    // start_dev_server) continuam em canónico.
     expect(sysPrompt).toContain('delete_file')
-    expect(sysPrompt).toContain('execute_command')
+    expect(sysPrompt).toContain(BASH_ALIAS)
+    expect(sysPrompt).not.toContain('execute_command')
     expect(sysPrompt).toContain('start_dev_server')
     expect(sysPrompt).not.toContain('provision_auth')
   })
@@ -431,5 +439,43 @@ describe('executePlan call sequence', () => {
     const sysPrompt = capturedOptions?.systemPromptOverride as string
     expect(sysPrompt).toContain('LANGUAGE: Respond in English')
     mockAgentLanguage = original
+  })
+
+  describe('prompt do arquiteto — lista de tools', () => {
+    // O prompt abre com "Every tool except those listed in 'Allowed tools'
+    // below is blocked at the executor layer". Isso torna a lista NORMATIVA:
+    // o que ela omite, o modelo trata como proibido. Sub-declarar é perda de
+    // capacidade silenciosa — foi o que aconteceu com as tools de pesquisa
+    // web, permitidas pelo executor mas ausentes da lista, num modo cuja
+    // função é justamente investigar alternativas de arquitetura.
+    const prompt = () => buildArchitectSystemPrompt('PLAN.md')
+
+    it('declara as tools de investigação que o executor permite', () => {
+      const p = prompt()
+      for (const canonical of ['web_search', 'web_fetch', 'capture_url_design', 'read_around', 'read_large_result']) {
+        expect(PLAN_MODE_ALLOWED_TOOLS.has(canonical)).toBe(true)
+        expect(p).toContain(advertisedToolName(canonical))
+      }
+    })
+
+    it('não nomeia tools pelo nome que o modelo não vê', () => {
+      const p = prompt()
+      const leaks: string[] = []
+      for (const [canonical, advertised] of Object.entries(ADVERTISED_TOOL_NAMES)) {
+        const pattern = canonical.includes('_')
+          ? new RegExp(`(?<![\\w-])${canonical}(?![\\w-])`)
+          : new RegExp(`\`${canonical}\``)
+        if (pattern.test(p)) leaks.push(`${canonical} → "${advertised}"`)
+      }
+      expect(leaks).toEqual([])
+    })
+
+    it('o comprimento do resumo final é dito uma só vez', () => {
+      // A sequência scaffold→edit→flip→tasks→resumo→STOP é repetida 4× de
+      // propósito (contramedida à falha observada de despejar o plano no
+      // chat). A repetição só é útil se as cópias CONCORDAREM: havia "3-5
+      // sentence" em duas delas contra "3-sentence" nas outras.
+      expect(prompt()).not.toMatch(/3[–-]5 sentence/)
+    })
   })
 })

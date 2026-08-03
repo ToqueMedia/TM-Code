@@ -51,6 +51,7 @@ import {
   useChatStore,
   createDiffApprovalPromise,
   hasPendingDiffApprovals,
+  getPendingDiffApprovalToolIds,
   resolveAllPendingDiffApprovals,
   resolveDiffApproval,
 } from '../chatStore'
@@ -167,6 +168,31 @@ describe('chatStore', () => {
 
       const finalMsg = useChatStore.getState().getActiveSession()!.messages.find(m => m.id === assistantId)!
       expect(finalMsg.isStreaming).toBe(false)
+    })
+
+    it('stamps wasInterrupted when finalized with interrupted and content exists', () => {
+      useChatStore.getState().createSession('/test/project')
+      const assistantId = useChatStore.getState().startAssistantMessage()
+      useChatStore.getState().appendTextDelta('partial answer')
+
+      useChatStore.getState().finalizeAssistantMessage({ interrupted: true })
+
+      const msg = useChatStore.getState().getActiveSession()!.messages.find(m => m.id === assistantId)!
+      expect(msg.wasInterrupted).toBe(true)
+    })
+
+    it('does NOT stamp wasInterrupted on an empty bubble or a normal finalize', () => {
+      useChatStore.getState().createSession('/test/project')
+      const emptyId = useChatStore.getState().startAssistantMessage()
+      useChatStore.getState().finalizeAssistantMessage({ interrupted: true })
+      const empty = useChatStore.getState().getActiveSession()!.messages.find(m => m.id === emptyId)!
+      expect(empty.wasInterrupted).toBeUndefined()
+
+      const normalId = useChatStore.getState().startAssistantMessage()
+      useChatStore.getState().appendTextDelta('done')
+      useChatStore.getState().finalizeAssistantMessage()
+      const normal = useChatStore.getState().getActiveSession()!.messages.find(m => m.id === normalId)!
+      expect(normal.wasInterrupted).toBeUndefined()
     })
 
     it('marks UI-only streaming text separately from model text', () => {
@@ -542,6 +568,104 @@ describe('chatStore', () => {
       // approveAllPendingDiffs carimba os estados por sua conta depois de
       // escrever; marcá-lo como recusado aqui apagava uma aprovação real.
       expect(toolCallById('tc-approve')?.diffStatus).toBe('pending')
+    })
+  })
+
+  describe('aprovação/rejeição por diffResultId (DiffApprovalBar)', () => {
+    // A barra só conhece o DiffResult (pendingDiffs) — as variantes ByResultId
+    // localizam messageId+toolCallId e delegam nas ações centrais.
+    function seedPendingDiff(toolCallId: string, path: string) {
+      useChatStore.getState().addPendingToolCall(toolCallId, 'write_file')
+      useChatStore.getState().updateToolCallWithResult(
+        toolCallId,
+        JSON.stringify({
+          type: 'diff',
+          path,
+          oldContent: 'a\nb\n',
+          newContent: 'a\n',
+          isNewFile: false,
+        }),
+        false,
+      )
+    }
+
+    function toolCallById(toolCallId: string) {
+      const { activeSessionId, sessions } = useChatStore.getState()
+      const session = sessions.get(activeSessionId!)
+      return session?.messages
+        .flatMap(m => m.toolCalls ?? [])
+        .find(tc => tc.id === toolCallId)
+    }
+
+    beforeEach(() => {
+      useChatStore.getState().createSession('/work/proj-diff')
+      useChatStore.getState().startAssistantMessage()
+    })
+
+    it('getPendingDiffApprovalToolIds expõe as chaves pendentes', async () => {
+      const p1 = createDiffApprovalPromise('tc-ids-1')
+      const p2 = createDiffApprovalPromise('tc-ids-2')
+
+      expect(getPendingDiffApprovalToolIds().sort()).toEqual(['tc-ids-1', 'tc-ids-2'])
+
+      resolveDiffApproval('tc-ids-1', true)
+      await p1
+      expect(getPendingDiffApprovalToolIds()).toEqual(['tc-ids-2'])
+
+      resolveDiffApproval('tc-ids-2', false)
+      await p2
+      expect(getPendingDiffApprovalToolIds()).toEqual([])
+    })
+
+    it('approveDiffByResultId resolve o promise certo, marca approved e limpa pendingDiffs', async () => {
+      seedPendingDiff('tc-res-a', '/work/proj-diff/A.ts')
+      seedPendingDiff('tc-res-b', '/work/proj-diff/B.ts')
+      const approvalA = createDiffApprovalPromise('tc-res-a')
+      createDiffApprovalPromise('tc-res-b')
+
+      const diffAId = toolCallById('tc-res-a')!.diffResultId!
+      await useChatStore.getState().approveDiffByResultId(diffAId)
+
+      await expect(approvalA).resolves.toBe(true)
+      expect(toolCallById('tc-res-a')?.diffStatus).toBe('approved')
+      // O diff B fica intocado: pendente na barra E no gate do executor.
+      expect(toolCallById('tc-res-b')?.diffStatus).toBe('pending')
+      expect(useChatStore.getState().pendingDiffs.map(d => d.id)).toEqual([
+        toolCallById('tc-res-b')!.diffResultId,
+      ])
+      expect(getPendingDiffApprovalToolIds()).toEqual(['tc-res-b'])
+
+      // Cleanup para não deixar promises penduradas
+      resolveDiffApproval('tc-res-b', false)
+    })
+
+    it('rejectDiffByResultId resolve a false, marca denied e limpa pendingDiffs', async () => {
+      seedPendingDiff('tc-rej', '/work/proj-diff/C.ts')
+      const approval = createDiffApprovalPromise('tc-rej')
+
+      const diffId = toolCallById('tc-rej')!.diffResultId!
+      useChatStore.getState().rejectDiffByResultId(diffId)
+
+      await expect(approval).resolves.toBe(false)
+      expect(toolCallById('tc-rej')?.diffStatus).toBe('denied')
+      expect(useChatStore.getState().pendingDiffs).toHaveLength(0)
+      expect(getPendingDiffApprovalToolIds()).toEqual([])
+    })
+
+    it('diffResultId desconhecido é no-op — nada resolve nem muda de estado', async () => {
+      seedPendingDiff('tc-noop', '/work/proj-diff/D.ts')
+      const approval = createDiffApprovalPromise('tc-noop')
+
+      await useChatStore.getState().approveDiffByResultId('diff-inexistente')
+      useChatStore.getState().rejectDiffByResultId('diff-inexistente')
+
+      expect(toolCallById('tc-noop')?.diffStatus).toBe('pending')
+      expect(useChatStore.getState().pendingDiffs).toHaveLength(1)
+      expect(getPendingDiffApprovalToolIds()).toEqual(['tc-noop'])
+
+      // Cleanup
+      resolveDiffApproval('tc-noop', false)
+      await expect(approval).resolves.toBe(false)
     })
   })
 

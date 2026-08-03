@@ -1,4 +1,4 @@
-import { memo, useState, useCallback, useMemo } from 'react'
+import { memo, useState, useMemo } from 'react'
 import { Box, Flex, Text, Image } from '@chakra-ui/react'
 import {
   FiFolder, FiSearch, FiTerminal,
@@ -7,7 +7,6 @@ import {
 } from 'react-icons/fi'
 import { ToolCallDisplay as ToolCallDisplayType } from '../../types/chat'
 import InlineDiff from './InlineDiff'
-import { useChatStore } from '../../stores/chatStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { getFileIconUrl } from '@/utils/fileIcons'
 import { relativeToProjectPath } from '@/utils/platform'
@@ -19,7 +18,6 @@ import { canonicalToolName, normalizeToolInputForCanonical } from '@/services/ag
 
 interface ToolCallDisplayProps {
   toolCall: ToolCallDisplayType
-  messageId: string
 }
 
 const TOOL_ICONS: Record<string, React.ComponentType<{ size?: number | string }>> = {
@@ -218,7 +216,7 @@ function isWriteTool(toolName: string): boolean {
 // resultado do sub-agente é entregue à parte (SubAgentCard), portanto o seu
 // painel de resultado não duplica nada e deve continuar visível.
 
-function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps) {
+function ToolCallDisplayComponent({ toolCall }: ToolCallDisplayProps) {
   const [expanded, setExpanded] = useState(false)
   const projectPath = useProjectStore(s => s.currentProject?.path || '')
   const displayToolName = canonicalToolName(toolCall.toolName)
@@ -260,22 +258,6 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
     return highlightLines(resultText, readFileLang)
   }, [readFileLang, resultText])
 
-  const handleApprove = useCallback(() => {
-    useChatStore.getState().approveDiff(messageId, toolCall.id, toolCall.diffResultId)
-  }, [messageId, toolCall.id, toolCall.diffResultId])
-
-  const handleApproveAll = useCallback(() => {
-    useChatStore.getState().approveAllPendingDiffs()
-  }, [])
-
-  const handleDeny = useCallback(() => {
-    useChatStore.getState().rejectDiff(messageId, toolCall.id, toolCall.diffResultId)
-  }, [messageId, toolCall.id, toolCall.diffResultId])
-
-  const handleRejectAll = useCallback(() => {
-    useChatStore.getState().rejectAllAndStop()
-  }, [])
-
   // Sub-agent tool calls carry a spawnedBy id — nest them visually under the
   // research/verify/bg launcher so the user sees the full activity hierarchy.
   const nestedProps = isNested
@@ -285,7 +267,7 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
   // Render inline diff for write tools
   if (isCompleted && hasDiff) {
     return (
-      <Box my={2} {...nestedProps}>
+      <Box my={2} data-tool-call-id={toolCall.id} {...nestedProps}>
         <Flex align="center" gap={2} mb={1.5} px={1}>
           <Box color={tokens.colors.accent.green} flexShrink={0}>
             <FiCheck size={12} />
@@ -316,17 +298,29 @@ function ToolCallDisplayComponent({ toolCall, messageId }: ToolCallDisplayProps)
             {inputSummary}
           </Text>
         </Flex>
-        <InlineDiff
-          filePath={filePath}
-          oldContent={toolCall.diffOldContent || ''}
-          newContent={toolCall.diffNewContent || ''}
-          isNewFile={toolCall.isNewFile || false}
-          status={toolCall.diffStatus || 'pending'}
-          onApprove={handleApprove}
-          onApproveAll={handleApproveAll}
-          onDeny={handleDeny}
-          onRejectAll={handleRejectAll}
-        />
+        {/* Enquanto a decisão está PENDENTE, o diff vive no painel de
+            aprovação (DiffApprovalPanel), com a lista de ficheiros e os
+            botões. Repeti-lo aqui mostrava o MESMO diff duas vezes no ecrã e
+            empurrava o painel para fora da vista. Decidido, o cartão volta a
+            ser o registo permanente no transcript. */}
+        {toolCall.diffStatus === 'pending' ? (
+          <Text
+            px={1}
+            fontSize="11px"
+            color={tokens.colors.text.disabled}
+            fontFamily={tokens.fontFamily.mono}
+          >
+            {t('diffBar.underReview')}
+          </Text>
+        ) : (
+          <InlineDiff
+            filePath={filePath}
+            oldContent={toolCall.diffOldContent || ''}
+            newContent={toolCall.diffNewContent || ''}
+            isNewFile={toolCall.isNewFile || false}
+            status={toolCall.diffStatus || 'pending'}
+          />
+        )}
       </Box>
     )
   }

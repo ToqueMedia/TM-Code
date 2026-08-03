@@ -29,7 +29,7 @@ yarn test src/services/__tests__/projectAgentStatusService.test.ts 2>/dev/null |
 | 5 | Cross-window stop request (if UI exposes X on foreign task row) | Owner aborts within turn boundary or ≤30s heartbeat (≤~3s if owner focused) |
 | 6 | Budget exhaust mid-run | Stop-all, system message, queue parked; other window sees error/badge after focus `/v1/me` |
 | 7 | Switch project in-window while running | Confirm → run cancelled |
-| 8 | `send_agent_message` if model calls it | Tool error: one agent per project |
+| 8 | `send_agent_message` (tool removida do registry, 2026-08-03) | Nenhum def viaja nos pedidos; uma chamada vinda de transcript antigo recebe o erro padrão de tool desconhecida |
 | 8b | Steer live session agent with image attachment | Image reaches model (or sidecar description); no "attachments ignored" system warn |
 | 8d | Session-agent **first** message with image | Multimodal on turn 1 (not text-only after history pop) |
 | 8e | Badge lag other window while owner focused | Status refresh within ~2–4s (writer 3s + reader 1.5s) |

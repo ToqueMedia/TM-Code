@@ -18,11 +18,13 @@ import FirebaseAuthService from "../auth/firebaseAuth";
 import { ServiceError, formatError } from "../../utils/errors";
 import { MODEL_PROFILES, getProfileForPlan } from "./modelProfiles";
 import {
-  createDiffApprovalPromise,
   generateId,
   resolveAllPendingDiffApprovals,
   useChatStore,
 } from "../../stores/chatStore";
+import { markWriteBatchDecision, writeBatchSiblings } from "./writeBatch";
+import { markProjectEdited, startDiagnosticsBaseline } from "./editDiagnostics";
+import { getProjectStateDir } from "../projectStatePaths";
 import { useBillingStore } from "../../stores/billingStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useActiveModelStore } from "../../stores/activeModelStore";
@@ -36,7 +38,10 @@ import { useTmSpeedStore } from "../../stores/tmSpeedStore";
 import { useReasoningEffortStore } from "../../stores/reasoningEffortStore";
 import { invoke } from "@/utils/invokeMetrics";
 import { logger } from "../../utils/logger";
-import { FALLBACK_CONTEXT_WINDOW } from "../../utils/contextWindow";
+import {
+  FALLBACK_CONTEXT_WINDOW,
+  getPostCompactRecoveryMaxChars,
+} from "../../utils/contextWindow";
 import { getQueryGuard } from "./queryGuard";
 import { beginMainRunClaims, endMainRunClaims } from "./fileClaims";
 import type { ContentPart, ByokSessionSnapshot } from "../../types/chat";
@@ -50,7 +55,11 @@ import { useByokStore } from "../../stores/byokStore";
 import { buildByokClientFromSnapshot, buildByokThinkingConfig } from "./byokRouting";
 import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
-import { REQUEST_CONTEXT_NAME, requestContextDefinition } from "./toolPolicy";
+import { REQUEST_CONTEXT_NAME, requestContextDefinition, TOOL_SEARCH_NAME, toolSearchDefinition, searchDeferredTools } from "./toolPolicy";
+import { emitAgentStopRequested } from "./host/hostBus";
+import { windowBudgetHooks } from "./host/windowHost";
+import { getAgentHost } from "./host/agentHost";
+import { processRegistry } from "./processRegistry";
 import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 import { classifyExecuteCommandPurpose, convertShellReadCommand } from "./commandPurpose";
@@ -60,7 +69,6 @@ import {
   decorateTmsRequestUsage,
   getTmsTurnTelemetry,
   markExecuteCommandPurpose,
-  markNoEditGuard,
   markOriginalTaskCompleted,
   markOriginalTaskFailed,
   markOriginalTaskStarted,
@@ -102,6 +110,11 @@ import type { ContentBlockAPI } from "../../types/chat";
 import type { AgentCallbacks, LightweightAgentOptions } from "./types";
 import type { InternalMessage } from "./messageUtils";
 
+/** Tools cujo resultado é um DIFF pendente de aprovação (nomes canónicos).
+ *  Partilhado entre o bridge (abre o portão de aprovação) e o predicado
+ *  isWriteTool do query loop (batching de writes do mesmo turno). */
+const WRITE_TOOLS = new Set(["write_file", "edit_file", "create_file"]);
+
 // ── AgentService ──
 
 class AgentService {
@@ -136,6 +149,13 @@ class AgentService {
   // Só é atualizado em runs não-lightweight (lightweight não envia o header
   // X-TM-Speed nem liga onResponseHeaders) e é reposto no início de cada run.
   private lastResponseSpeedApplied = false;
+
+  // Array de tool defs do RUN CORRENTE — a mesma referência que o QueryEngine
+  // envia em cada pedido (query.ts usa `activeTools = tools` sem cópia). O
+  // bridge do `load_tools` empurra defs MCP diferidos para aqui a meio do
+  // run; do turno seguinte em diante seguem nos pedidos. Reatribuído no
+  // início de cada run (runQueryEngineLoop), nunca mutado fora do bridge.
+  private activeRunTools: OpenAI.ChatCompletionTool[] | null = null;
 
   // ── BYOK direct-routing state (set per run in runQueryEngineLoop) ──
   // When byokActive, the run routes IDE → SDK → provider DIRECT (bypassing the
@@ -304,32 +324,31 @@ class AgentService {
     import("../../stores/askUserQuestionStore")
       .then((m) => m.useAskUserQuestionStore.getState().clearAll())
       .catch(() => {});
-    import("../../stores/backgroundCommandStore")
-      .then(async (m) => {
-        const store = m.useBackgroundCommandStore.getState();
-        // F2 MDI: kill ONLY this (main) run's own background processes. A
-        // parallel task's background process (owner = its runId) belongs to a
-        // different project's live run — the main run's cancel/restart/budget
-        // stop must not tear it down. The task kills its own on its abort.
-        const running = store
-          .getAll()
-          .filter((c) => c.status === "running" && c.owner === "main");
-        for (const cmd of running) {
-          try {
-            await invoke("kill_process", { pid: cmd.pid });
-          } catch {
-            /* best effort */
-          }
-          store.cancelCommand(cmd.id);
+    void (async () => {
+      // F2 MDI: kill ONLY this (main) run's own background processes. A
+      // parallel task's background process (owner = its runId) belongs to a
+      // different project's live run — the main run's cancel/restart/budget
+      // stop must not tear it down. The task kills its own on its abort.
+      // (P3.1: registry do motor, não a store.)
+      const running = processRegistry
+        .getAll()
+        .filter((c) => c.status === "running" && c.owner === "main");
+      for (const cmd of running) {
+        try {
+          await invoke("kill_process", { pid: cmd.pid });
+        } catch {
+          /* best effort */
         }
-      })
-      .catch(() => {});
+        processRegistry.cancelCommand(cmd.id);
+      }
+    })().catch(() => {});
     this.isRunning = false;
     if (!this.lightweightOptions) {
       getQueryGuard().forceEnd();
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("agent-stop-requested"));
-      }
+      // P1 headless: o CustomEvent 'agent-stop-requested' no window virou
+      // hostBus — o único listener (reviewCommand) subscreve o bus, e um
+      // hospedeiro sem DOM continua a conseguir cancelar sub-agentes.
+      emitAgentStopRequested();
     }
   }
 
@@ -370,7 +389,13 @@ class AgentService {
       if (!getQueryGuard().isActive) {
         try {
           useAgentStore.getState().setStatus("cancelled");
-          useChatStore.getState().finalizeAssistantMessage();
+          // `interrupted: true` — este ramo SÓ existe porque houve Stop (a
+          // generation avançou via forceEnd). Quando o stopAgentRun já
+          // carimbou, repetir é inofensivo: o finalize só espalha
+          // `wasInterrupted` quando é true, portanto o carimbo existente
+          // sobrevive. Quando a corrida aterra só aqui, era este o único
+          // sítio que podia carimbar — e não carimbava.
+          useChatStore.getState().finalizeAssistantMessage({ interrupted: true });
         } catch {
           /* non-critical */
         }
@@ -624,20 +649,12 @@ class AgentService {
       : "original_task";
     const enforceReadOnly = auxiliarySelection?.readOnly === true &&
       auxiliarySelection.routerSource === "keyword";
-    // ÓRFÃO desde a remoção do Intent Router (auditoria 2026-07-28):
-    // `requiresMutation` só era produzido por ele, portanto o guard anti-
-    // adiamento no loop nunca arma. NÃO resolver isto com um detetor de texto
-    // sobre a resposta final: o claude-vaz não faz nada disso — o que ele tem
-    // para o mesmo problema é estrutural (system-reminder guiado pelo estado
-    // do TRACKER, que este loop já implementa no guard de reconciliação de
-    // tarefas) mais Stop hooks configuráveis pelo utilizador. E o próprio
-    // turnEfficiency.ts deste repo tem a doutrina escrita: sinais estruturais,
-    // nunca matching de texto. Ou se arranja um sinal estrutural, ou o guard
-    // deve ser APAGADO como código morto — não ressuscitado com heurística.
-    const mutableTask = executionPhase === "original_task" &&
-      !this.lightweightOptions &&
-      !enforceReadOnly &&
-      auxiliarySelection?.requiresMutation === true;
+    // O `mutableTask` que era calculado aqui (e o guard anti-adiamento que o
+    // consumia no loop) foi APAGADO a 2026-07-31: `requiresMutation` só era
+    // produzido pelo Intent Router, removido na auditoria de 2026-07-28,
+    // portanto o guard nunca armava. O cli-vaz não tem equivalente — a
+    // cobertura estrutural do mesmo risco é o guard de reconciliação do task
+    // tracker no stop path do query loop.
 
     // FASE A (recalibração de cache 2026-07-17): toolset CONGELADO por run —
     // schemas completos e estáveis do 1º ao último turno. A seleção dinâmica
@@ -666,7 +683,7 @@ class AgentService {
 
     if (!this.lightweightOptions) {
       if (executionPhase === "original_task") {
-        markOriginalTaskStarted(mutableTask);
+        markOriginalTaskStarted();
       } else {
         setTmsTurnTelemetry({ executionPhase: "project_bootstrap" });
       }
@@ -692,11 +709,52 @@ class AgentService {
       if (omittedIds.length > 0) {
         openaiTools.push(requestContextDefinition(omittedIds));
       }
+
+      // Defs MCP DIFERIDOS (2026-08-03): getToolDefinitions() já não os
+      // inclui — o modelo procura/carrega os schemas de que precisa via
+      // `ToolSearch` (uma quebra de cache no momento da necessidade, em vez
+      // de todos os schemas MCP em todos os pedidos). Os nomes diferidos
+      // vivem na secção MCP do prompt; o def do ToolSearch é byte-estável
+      // (sem interpolações), portanto o prefixo de cache fica intacto até o
+      // modelo DECIDIR carregar.
+      // Optional-chaining defensivo (estilo getProjectRootForDiagnostics): um
+      // executor sem esta capacidade nunca pode abortar o arranque do run.
+      const deferredIndex = this.toolExecutor.getDeferredToolIndex?.() ?? [];
+      if (deferredIndex.length > 0) {
+        openaiTools.push(toolSearchDefinition());
+      }
     }
+
+    // Array VIVO do run: o query loop envia `activeTools` por referência em
+    // cada pedido, portanto o bridge do load_tools pode empurrar defs para
+    // aqui a meio do run e eles seguem do turno seguinte em diante.
+    this.activeRunTools = openaiTools;
 
     // 5. Create tool executor bridge
     const executeTool = this.createToolExecutorBridge(callbacks);
     this.toolExecutor.clearDelegateTelemetry();
+    // Baseline de diagnósticos é POR RUN e arranca AQUI, em background: um
+    // `tsc` frio leva ~10s e a fase de exploração do agente leva mais do que
+    // isso antes do primeiro edit. Sem o arranque antecipado, o primeiro turn
+    // boundary com edições pagaria a passagem fria inteira.
+    // try/catch: um guarda de diagnósticos NUNCA pode impedir um run de
+    // arrancar. Sem isto, um toolExecutor sem esta capacidade (ou uma raiz
+    // irresolúvel) atirava um TypeError daqui e abortava o loop inteiro antes
+    // sequer de o QueryEngine ser construído.
+    try {
+      const diagRoot = this.toolExecutor.getProjectRootForDiagnostics?.() ?? "";
+      if (diagRoot) {
+        // O `.tsbuildinfo` do --incremental vai para o estado gerido da app,
+        // NUNCA para a raiz do developer: sem isto ficava lá um ficheiro de
+        // ~0,5 MB (medido) só por termos verificado tipos, visível no git
+        // status de quem não o tenha ignorado.
+        void getProjectStateDir(diagRoot)
+          .then((dir: string) => startDiagnosticsBaseline(diagRoot, dir))
+          .catch(() => startDiagnosticsBaseline(diagRoot));
+      }
+    } catch {
+      /* sem baseline: a recolha desiste sozinha */
+    }
 
     // 6. Build extra headers — X-Request-Type is sticky across turns
     const extraHeaders = this.buildExtraHeaders();
@@ -718,6 +776,9 @@ class AgentService {
 
     // 7. Create QueryEngine
     const engine = new QueryEngine({
+      // P1 headless: hooks de orçamento da janela (billingStore) — o loop
+      // deixou de conhecer a store; ver windowHost.windowBudgetHooks.
+      ...windowBudgetHooks(),
       client,
       refreshClient,
       model: this.resolveModel(),
@@ -732,6 +793,11 @@ class AgentService {
       isStreamSafeTool: (name) =>
         this.toolExecutor.isConcurrencySafe(name) ||
         this.toolExecutor.isConcurrencySafe(canonicalToolName(name)),
+      // Batching de writes (query.ts): identifica os tools cujo resultado é
+      // um diff pendente de aprovação, para runs consecutivas de writes num
+      // turno serem despachadas em lote (aprovação única). Sub-agentes
+      // read-only nunca chegam cá (readOnlyRun bloqueia antes).
+      isWriteTool: (name) => WRITE_TOOLS.has(canonicalToolName(name)),
       // O prompt do main contém o reminder; os sub-agentes (lightweight) não.
       reinjectCriticalReminder: !this.lightweightOptions,
       // Só o agente principal é dono do tracker visível no chat. Sub-agentes
@@ -752,7 +818,22 @@ class AgentService {
         ? undefined
         : async () => {
             const { collectChangedFileContext } = await import("./atMentions");
-            return collectChangedFileContext();
+            const changed = await collectChangedFileContext();
+            // Diagnósticos NOVOS introduzidos pelas edições deste turno
+            // (porte do diagnosticTracking do claude-vaz — ver
+            // editDiagnostics.ts). Vai pelo MESMO canal da varredura de
+            // modificações externas: o modelo não tem de chamar nada.
+            let diagnostics = "";
+            try {
+              const { collectNewDiagnostics, formatDiagnosticsReminder } =
+                await import("./editDiagnostics");
+              const root = this.toolExecutor.getProjectRootForDiagnostics();
+              const found = await collectNewDiagnostics(root);
+              diagnostics = formatDiagnosticsReminder(found, root);
+            } catch {
+              /* nunca bloqueia o turno */
+            }
+            return [changed, diagnostics].filter(Boolean).join("\n\n");
           },
       // Queued-message steering (claude-vaz parity). Main agent only: a
       // sub-agent must never drain the developer's queued messages — those
@@ -793,6 +874,53 @@ class AgentService {
           maxOutputTokens: modelMaxOutputTokens ?? profile.maxOutputTokens ?? null,
         };
       },
+      // ── Compactação: arquivo + recuperação (paridade claude-vaz) ──
+      // Ambos vivem aqui porque o loop (query.ts) não conhece stores nem o
+      // SessionState — e não deve. Sub-agentes ficam de fora dos dois: escrevem
+      // na sessão do agente principal (o arquivo colidiria) e o seu contexto é
+      // a tarefa que receberam, não o working set do developer.
+      archivePreCompact: this.lightweightOptions
+        ? undefined
+        : async (older) => {
+            try {
+              const { archivePreCompactTranscript } = await import(
+                "./compactTranscriptArchive"
+              );
+              const chatState = useChatStore.getState();
+              // streamingSessionId primeiro, e o projectPath vem da MESMA
+              // sessão (não de getActiveSession): trocar de sessão a meio de um
+              // run punha o arquivo na pasta do projeto errado — o mesmo bug
+              // que a persistência das skills invocadas já teve.
+              const sessionId =
+                chatState.streamingSessionId ?? chatState.activeSessionId;
+              if (!sessionId) return null;
+              const projectPath = chatState.sessions.get(sessionId)?.projectPath;
+              if (!projectPath) return null;
+              return await archivePreCompactTranscript(
+                projectPath,
+                sessionId,
+                older as import("./compactTranscriptArchive").ArchivedMessage[],
+              );
+            } catch {
+              return null;
+            }
+          },
+      buildPostCompactRecovery: this.lightweightOptions
+        ? undefined
+        : async (maxChars?: number) => {
+            try {
+              const { buildPostCompactRecoveryBlock } = await import(
+                "./contextManager"
+              );
+              return await buildPostCompactRecoveryBlock(
+                this.sessionState,
+                undefined,
+                maxChars ?? this.resolveRecoveryMaxChars(),
+              );
+            } catch {
+              return null;
+            }
+          },
       // Usage is reported via message_stop events — do NOT add onUsage
       // callback here or output tokens will be double-counted (SUM semantics).
       // onRequestUsage is distinct: it carries the payloadInspector breakdown
@@ -806,7 +934,6 @@ class AgentService {
       // payloadInspector; null for sub-agents).
       auxiliarySelection: auxiliarySelection ?? undefined,
       executionPhase,
-      mutableTask,
       // Delegate telemetry — read from the toolExecutor's last delegate call.
       getDelegateTelemetry: () => this.toolExecutor.consumeDelegateTelemetry(),
     });
@@ -928,6 +1055,7 @@ class AgentService {
             trigger: "auto",
             messagesSummarized: 0,
             summary: event.summary,
+            recovery: event.recovery,
           });
           break;
 
@@ -955,47 +1083,30 @@ class AgentService {
     // 9. Terminal result
     const terminal = result.value as QueryTerminal;
 
-    // Stamp guardrail telemetry onto the last requestUsageLog entry so the
-    // session export shows the final decision explicitly (not just inferrable
-    // from expandedToolNames / toolCalls). Best-effort — never blocks.
-    if (terminal.completionGuardDecision !== undefined) {
+    // Stamp write-stats + outcome telemetry onto the last requestUsageLog
+    // entry so the session export shows the final decision explicitly.
+    // Best-effort — never blocks.
+    if (terminal.reason === "completed") {
       try {
         if (!this.lightweightOptions && executionPhase === "original_task") {
           markOriginalTaskWriteStats(
             terminal.originalTaskWriteActionCount ?? terminal.writeActionCount ?? 0,
             terminal.originalTaskFirstWriteTurn ?? terminal.firstWriteTurn,
           );
-          if (terminal.noEditGuardReason) {
-            markNoEditGuard(
-              terminal.noEditGuardReason,
-              terminal.noEditRecoveryAction ?? "unknown",
-            );
-          }
-          if (terminal.reason === "completed") {
-            markOriginalTaskCompleted();
-          } else {
-            markOriginalTaskFailed(terminal.reason);
-          }
+          markOriginalTaskCompleted();
         }
         useChatStore.getState().updateLastRequestUsage({
           ...getTmsTurnTelemetry(),
           executionPhase,
-          mutableTask,
           runHasEdited: terminal.runHasEdited,
-          noEditRecoveryCount: terminal.noEditRecoveryCount,
-          noEditGuardTriggered: terminal.noEditGuardTriggered,
-          noEditGuardReason: terminal.noEditGuardReason,
-          noEditRecoveryAction: terminal.noEditRecoveryAction,
           firstWriteTurn: terminal.firstWriteTurn,
           writeActionCount: terminal.writeActionCount,
           originalTaskWriteActionCount: terminal.originalTaskWriteActionCount ?? terminal.writeActionCount,
           originalTaskFirstWriteTurn: terminal.originalTaskFirstWriteTurn ?? terminal.firstWriteTurn,
-          completionGuardDecision: terminal.completionGuardDecision,
-          completionGuardReason: terminal.completionGuardReason,
         });
       } catch { /* telemetry never blocks */ }
     }
-    if (terminal.completionGuardDecision === undefined && !this.lightweightOptions && executionPhase === "original_task") {
+    if (terminal.reason !== "completed" && !this.lightweightOptions && executionPhase === "original_task") {
       try {
         markOriginalTaskWriteStats(
           terminal.originalTaskWriteActionCount ?? terminal.writeActionCount ?? 0,
@@ -1005,7 +1116,6 @@ class AgentService {
         useChatStore.getState().updateLastRequestUsage({
           ...getTmsTurnTelemetry(),
           executionPhase,
-          mutableTask,
           originalTaskFailedReason: terminal.reason,
           originalTaskWriteActionCount: terminal.originalTaskWriteActionCount ?? terminal.writeActionCount ?? 0,
           originalTaskFirstWriteTurn: terminal.originalTaskFirstWriteTurn ?? terminal.firstWriteTurn,
@@ -1385,8 +1495,6 @@ class AgentService {
    * execution to TM Code's ToolExecutor with diff approval support.
    */
   private createToolExecutorBridge(callbacks: AgentCallbacks): ToolExecutorFn {
-    const WRITE_TOOLS = new Set(["write_file", "edit_file", "create_file"]);
-
     return async (
       toolName: string,
       toolInput: Record<string, unknown>,
@@ -1421,6 +1529,53 @@ class AgentService {
           content: `# Auxiliary context: ${name}\n\n${content}`,
           isError: false,
         };
+      }
+
+      // Intercepta o meta-tool ToolSearch (contrato de treino do cli-vaz) —
+      // o modelo procura/seleciona tools MCP diferidas; o bridge devolve os
+      // schemas no bloco <functions> E empurra os defs para o array vivo do
+      // run (this.activeRunTools). Nunca chega ao toolExecutor. Ver a nota
+      // no toolPolicy.ts sobre a diferença face ao request_tools morto.
+      if (toolName === TOOL_SEARCH_NAME) {
+        const queryStr = typeof toolInput.query === 'string' ? toolInput.query : '';
+        const maxResults = typeof toolInput.max_results === 'number' && toolInput.max_results > 0
+          ? toolInput.max_results
+          : 5;
+        if (!queryStr.trim()) {
+          return {
+            content: 'No query provided. Use "select:<tool_name>" (comma-separated for several) or keywords to search the deferred tool list.',
+            isError: false,
+          };
+        }
+        const index = this.toolExecutor.getDeferredToolIndex();
+        const matches = searchDeferredTools(queryStr, index, maxResults);
+        if (matches.length === 0) {
+          return { content: 'No matching deferred tools found', isError: false };
+        }
+        const { defs } = this.toolExecutor.getDeferredToolDefinitions(matches);
+        const target = this.activeRunTools;
+        for (const def of defs) {
+          if (target && !target.some((t) => t.function.name === def.function.name)) {
+            target.push({
+              type: 'function' as const,
+              function: {
+                name: def.function.name,
+                description: def.function.description,
+                parameters: def.function.parameters as Record<string, unknown>,
+              },
+            });
+          }
+        }
+        // Formato do contrato: uma linha <function>{...}</function> por match
+        // — o mesmo encoding da lista de tools do topo do prompt.
+        const lines = defs.map((d) =>
+          `<function>${JSON.stringify({
+            description: d.function.description,
+            name: d.function.name,
+            parameters: d.function.parameters,
+          })}</function>`,
+        );
+        return { content: `<functions>\n${lines.join('\n')}\n</functions>`, isError: false };
       }
 
       // DUAS variáveis, de propósito — e a distinção é cara.
@@ -1490,12 +1645,12 @@ class AgentService {
         markTmsWriteAttempt(toolUseId, targetPath ?? undefined);
       }
 
-      // Announce + start the tool at execution time. The query loop runs tools
-      // serially, so doing the announcement here keeps later write calls out of
-      // the UI while an earlier permission / diff / credential decision is
-      // pending. onToolCallPending creates the card; onToolCallStart immediately
-      // flips it to "running". Execution was already gated by the serial loop +
-      // waitForUserGates; this only fixes the visual pile-up.
+      // Announce + start the tool at execution time. onToolCallPending creates
+      // the card; onToolCallStart immediately flips it to "running". Reads e
+      // afins continuam gated pelo loop serial + waitForUserGates; writes do
+      // MESMO lote aparecem todos de uma vez — é intencional: os diffs do
+      // turno são publicados em conjunto e aprovados como lote na
+      // DiffApprovalPanel, não pingados um a um.
       callbacks.onToolCallPending(toolUseId, effectiveToolName);
       callbacks.onToolCallStart(toolUseId, effectiveToolName, effectiveToolInput);
 
@@ -1574,11 +1729,17 @@ class AgentService {
             // code path that registers pendingDiffs, so waiting first deadlocks:
             // no approval UI exists yet to resolve createDiffApprovalPromise.
             callbacks.onToolResult(toolUseId, effectiveToolName, content, false);
-            const approved = await createDiffApprovalPromise(toolUseId);
+            // P2 headless: a espera pela decisão humana do diff vive no
+            // hospedeiro (janela: createDiffApprovalPromise do chatStore).
+            const approved = await getAgentHost().approveDiff(toolUseId);
             if (signal?.aborted) {
               return { content: "Aborted", isError: true };
             }
+            markWriteBatchDecision(toolUseId, approved);
             if (approved) {
+              // Escrita APLICADA: só agora vale a pena pagar a passagem do
+              // `tsc` no turn boundary. Um diff rejeitado não muda o disco.
+              markProjectEdited();
               this.sessionState.trackFileEdit(parsedDiff.path);
               if (/[\\/]TMS\.md$/i.test(parsedDiff.path)) {
                 markTmsCreated(parsedDiff.path);
@@ -1598,8 +1759,20 @@ class AgentService {
                 isError: false,
               };
             }
+            // Aviso de estado MISTO. Tem de cobrir os dois lados do lote, não
+            // só o que já foi aprovado: se ainda houver membros por decidir,
+            // podem ser aplicados DEPOIS desta rejeição (o developer navega a
+            // lista pela ordem que quiser). Sem o segundo ramo, rejeitar
+            // primeiro e aprovar depois deixava o modelo a assumir um disco
+            // intacto que já não era.
+            const siblings = writeBatchSiblings(toolUseId);
+            const mixedStateWarning = siblings.approvedOthers
+              ? " Other edits from this batch were applied — re-read affected files before assuming a consistent state."
+              : siblings.undecidedOthers
+                ? " Other edits from this batch are still awaiting a decision and may be applied — re-read affected files before assuming a consistent state."
+                : "";
             return {
-              content: `User rejected: ${parsedDiff.path}`,
+              content: `User rejected: ${parsedDiff.path}` + mixedStateWarning,
               isError: false,
             };
           }
@@ -1644,7 +1817,14 @@ class AgentService {
         import("../../stores/projectStore"),
         import("./memoryWriteTracker"),
       ]);
-      const sessionId = useChatStore.getState().activeSessionId;
+      // Sessão do RUN, não a activa (P1 headless, portão nº9): o extractor
+      // corre no FIM do run — se o utilizador trocou de sessão a meio,
+      // activeSessionId aponta à sessão errada e o guard/propostas iam para
+      // o balde errado. streaming-primeiro é o idioma já usado pelo arquivo
+      // pré-compactação e pelo taskOps (getTaskOrigin ?? streaming ?? activa).
+      const chatState = useChatStore.getState();
+      const sessionId =
+        chatState.streamingSessionId ?? chatState.activeSessionId;
       if (sessionId && hasMemoryWriteSinceTurnStart(sessionId)) return;
       const projectPath =
         useProjectStore.getState().currentProject?.path ?? null;
@@ -1677,6 +1857,110 @@ class AgentService {
 
   // ── Manual compact commands ──
 
+  /**
+   * A compactação manual escreve no store DEPOIS de esperar pelo sumarizador
+   * (até 240s, SUMMARIZE_TIMEOUT_MS). `replaceMessages` resolve a sessão ativa
+   * no momento da ESCRITA, não no da leitura — e como o agente não está a
+   * correr, nada impede o developer de trocar de sessão ou de projeto durante
+   * essa espera.
+   *
+   * Isso sempre foi uma janela de escrita cruzada; passou a ser pior quando a
+   * compactação deixou de ser destrutiva, porque o que se escreve agora é o
+   * HISTÓRICO INTEIRO da sessão de origem em vez de duas mensagens. Transplante
+   * silencioso de uma conversa para cima de outra.
+   *
+   * Fixa-se a sessão à entrada e confirma-se à saída. Divergiu → não se escreve
+   * nada; a compactação perde-se, que é o resultado correto (o developer mudou
+   * de assunto).
+   */
+  private assertSameSession(pinnedSessionId: string): void {
+    if (useChatStore.getState().activeSessionId !== pinnedSessionId) {
+      throw new Error(
+        "A sessão mudou durante a compactação — nada foi escrito. Volte à sessão e repita.",
+      );
+    }
+  }
+
+  /**
+   * Teto do bloco de recuperação para a janela ATIVA. A janela é publicada por
+   * modelo (X-Model-Context-Window) e pode ser 128K ou 2M — um teto fixo em
+   * caracteres significava coisas opostas nos dois extremos.
+   */
+  private resolveRecoveryMaxChars(): number {
+    const { modelContextWindow, modelMaxOutputTokens, modelName } =
+      useAgentStore.getState();
+    const known = modelName ? MODEL_PROFILES[modelName] : undefined;
+    const window =
+      modelContextWindow ?? known?.contextWindow ?? FALLBACK_CONTEXT_WINDOW;
+    return getPostCompactRecoveryMaxChars(
+      window,
+      modelMaxOutputTokens ?? known?.maxOutputTokens ?? null,
+    );
+  }
+
+  /**
+   * Arquiva o bloco que a compactação manual vai substituir e devolve o
+   * caminho. Mesmo contrato do `archivePreCompact` do loop: best-effort, nunca
+   * lança. Duplicado em vez de partilhado porque o caminho do loop só existe
+   * quando há um QueryEngine vivo, e a compactação manual corre parada.
+   */
+  private async archiveForManualCompact(
+    older: InternalMessage[],
+  ): Promise<string | null> {
+    try {
+      const { archivePreCompactTranscript } = await import(
+        "./compactTranscriptArchive"
+      );
+      const chatState = useChatStore.getState();
+      const sessionId = chatState.activeSessionId;
+      if (!sessionId) return null;
+      const projectPath = chatState.sessions.get(sessionId)?.projectPath;
+      if (!projectPath) return null;
+      return await archivePreCompactTranscript(
+        projectPath,
+        sessionId,
+        older as import("./compactTranscriptArchive").ArchivedMessage[],
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Os dois payloads que a fronteira de compactação manual leva consigo — é
+   * ISTO que `rebuildConversationHistory` volta a emitir para o modelo, e a
+   * única coisa do lado manual que sobrevive à compactação.
+   *
+   * `summary` é narrativa (embrulhada com o enquadramento de continuação e o
+   * caminho do arquivo) e vai ao cartão expansível da UI; `recovery` é material
+   * (conteúdo de ficheiros, skills) e nunca é mostrado.
+   */
+  private async buildManualCompactBoundaryPayload(
+    summary: string,
+    transcriptPath: string | null,
+    recentMessagesPreserved: boolean,
+  ): Promise<{ summary: string; recovery?: string }> {
+    const { getCompactUserSummaryMessage } = await import("./compact/prompt");
+    const wrapped = getCompactUserSummaryMessage(
+      summary,
+      true,
+      recentMessagesPreserved,
+      transcriptPath,
+    );
+    try {
+      const { buildPostCompactRecoveryBlock } = await import("./contextManager");
+      const recovery = await buildPostCompactRecoveryBlock(
+        this.sessionState,
+        undefined,
+        this.resolveRecoveryMaxChars(),
+      );
+      return { summary: wrapped, recovery: recovery ?? undefined };
+    } catch {
+      // Recuperação é bónus — nunca impede a compactação.
+      return { summary: wrapped };
+    }
+  }
+
   async runManualCompact(
     _customInstructions?: string,
     onProgress?: (event: import("@/types/agent").CompactProgressEvent) => void,
@@ -1687,6 +1971,8 @@ class AgentService {
     const session = chatStore.getActiveSession();
     if (!session || session.messages.length < 4)
       throw new Error("Not enough messages to compact");
+    // Fixa a sessão: a escrita acontece depois de esperar pelo sumarizador.
+    const pinnedSessionId = chatStore.activeSessionId!;
 
     const anthropicMessages = buildInternalMessagesFromSession(session);
     if (anthropicMessages.length < 4)
@@ -1708,21 +1994,40 @@ class AgentService {
 
     try {
       autoSaveSessionMemory(anthropicMessages);
+      // Arquivo em paralelo com a sumarização — a escrita passa pelo IPC e é a
+      // segunda operação mais lenta deste caminho.
+      const archivePromise = this.archiveForManualCompact(anthropicMessages);
       const compressed = await this.runCompactViaSDK(anthropicMessages);
 
       const { runPostCompactCleanup } = await import("./compactCleanup");
       await runPostCompactCleanup();
 
-      const afterTokens = compressed.reduce(
-        (s, m) =>
-          s +
-          Math.ceil(
-            (typeof m.content === "string"
-              ? m.content
-              : JSON.stringify(m.content)
-            ).length / 4,
-          ),
-        0,
+      const rawSummary =
+        compressed.find((m) => m.role === "user")?.content ??
+        "Context was compressed.";
+      const summaryText =
+        typeof rawSummary === "string" ? rawSummary : JSON.stringify(rawSummary);
+
+      // A fronteira é o ÚNICO canal do lado manual: rebuildConversationHistory
+      // re-emite `compactSummary` (+ `compactRecovery`) e ignora tudo o resto
+      // que seja `system`. Antes ficava vazia e o resumo vivia só na bolha de
+      // assistant — o modelo lia-o como palavras SUAS de um turno anterior,
+      // sem o enquadramento ("continua sem perguntar"), sem o caminho do
+      // arquivo e sem o estado de trabalho recuperado.
+      const boundaryPayload = await this.buildManualCompactBoundaryPayload(
+        summaryText,
+        await archivePromise,
+        false,
+      );
+
+      // Conta o que a conversa passa REALMENTE a ocupar — os dois payloads da
+      // fronteira. Contar `compressed` media o intermediário do
+      // runCompactViaSDK, que nem sequer é o que fica no store: dizia "de 120K
+      // para 2K" enquanto a recuperação injetava mais 15K.
+      const afterTokens = Math.ceil(
+        (boundaryPayload.summary.length +
+          (boundaryPayload.recovery?.length ?? 0)) /
+          4,
       );
 
       const boundaryMessage: import("@/types/chat").ChatMessage = {
@@ -1735,20 +2040,25 @@ class AgentService {
           beforeTokens,
           messagesSummarized: anthropicMessages.length - compressed.length,
         },
+        compactSummary: boundaryPayload.summary,
+        ...(boundaryPayload.recovery
+          ? { compactRecovery: boundaryPayload.recovery }
+          : {}),
         level: "info",
-        content: `Conversa comprimida (${Math.round(beforeTokens / 1000)}K tokens).`,
+        content: `Conversa comprimida (${Math.round(beforeTokens / 1000)}K → ~${Math.round(afterTokens / 1000)}K tokens).`,
         timestamp: Date.now(),
       };
-      const summaryContent =
-        compressed.find((m) => m.role === "user")?.content ??
-        "Context was compressed.";
-      const summaryMessage: import("@/types/chat").ChatMessage = {
-        id: generateId("msg"),
-        role: "assistant",
-        content: `Contexto compactado de ${Math.round(beforeTokens / 1000)}K para ~${Math.round(afterTokens / 1000)}K tokens.\n\n${typeof summaryContent === "string" ? summaryContent : JSON.stringify(summaryContent)}`,
-        timestamp: Date.now(),
-      };
-      chatStore.replaceMessages([boundaryMessage, summaryMessage]);
+      // ACRESCENTA, não substitui (2026-07-31). `replaceMessages([boundary])`
+      // apagava o transcript do disco; agora a fronteira é um marcador e o
+      // corte é um filtro de leitura (rebuildConversationHistory + o slice do
+      // ChatView), portanto o histórico anterior continua exportável e o
+      // "mostrar histórico anterior" tem o que mostrar.
+      //
+      // A bolha visível de assistant desapareceu: o sumário vive no cartão
+      // expansível da fronteira (MessageBubble lê `compactSummary`). Tê-lo nos
+      // dois sítios mandava-o DUAS vezes para o modelo.
+      this.assertSameSession(pinnedSessionId);
+      chatStore.replaceMessages([...session.messages, boundaryMessage]);
       chatStore.resetTokenCounters();
       chatStore.setPostCompactSurveyPending(true);
 
@@ -1771,6 +2081,8 @@ class AgentService {
     const session = chatStore.getActiveSession();
     if (!session || session.messages.length < 4)
       throw new Error("Not enough messages to compact");
+    // Fixa a sessão: a escrita acontece depois de esperar pelo sumarizador.
+    const pinnedSessionId = chatStore.activeSessionId!;
 
     const anthropicMessages = buildInternalMessagesFromSession(session);
     if (anthropicMessages.length < 4)
@@ -1787,12 +2099,35 @@ class AgentService {
         ),
       0,
     );
-    const defaultKeep = Math.max(10, Math.ceil(anthropicMessages.length * 0.3));
-    const keep = keepRecentCount ?? defaultKeep;
-    const splitPoint = Math.max(0, anthropicMessages.length - keep);
-    const oldMessages = anthropicMessages.slice(0, splitPoint);
-    const recentMessages = anthropicMessages.slice(splitPoint);
 
+    // O corte é feito nas MENSAGENS DO STORE, não na forma interna.
+    //
+    // Antes cortava-se `anthropicMessages` e depois re-renderizavam-se os
+    // turnos preservados para texto (`contentAsText`) antes de os escrever de
+    // volta no store — ou seja, a "parte preservada" perdia a estrutura:
+    // tool_calls e tool_results deixavam de estar emparelhados e passavam a ser
+    // prosa. Agora que a fronteira é um filtro de leitura, os turnos recentes
+    // ficam onde estão, intactos, e a fronteira entra ANTES deles.
+    //
+    // Cortar em qualquer índice de ChatMessage é seguro: os tool_calls vivem NA
+    // mensagem de assistant e rebuildConversationHistory emite o par
+    // assistant+tool_results a partir dela, portanto um par nunca fica a cavalo
+    // de duas mensagens.
+    const storeMessages = session.messages;
+    const defaultKeep = Math.max(10, Math.ceil(storeMessages.length * 0.3));
+    const keep = keepRecentCount ?? defaultKeep;
+    const splitIdx = Math.max(0, storeMessages.length - keep);
+    const olderChat = storeMessages.slice(0, splitIdx);
+    const recentChat = storeMessages.slice(splitIdx);
+
+    if (olderChat.length === 0) throw new Error("Nothing to compact");
+
+    // Só o bloco ANTIGO vai ao sumarizador — o recente continua literal no
+    // contexto, resumi-lo seria duplicá-lo.
+    const oldMessages = buildInternalMessagesFromSession({
+      ...session,
+      messages: olderChat,
+    });
     if (oldMessages.length === 0) throw new Error("Nothing to compact");
 
     onProgress?.({ type: "hooks_start", hookType: "pre_compact" });
@@ -1800,6 +2135,7 @@ class AgentService {
 
     try {
       autoSaveSessionMemory(oldMessages);
+      const archivePromise = this.archiveForManualCompact(oldMessages);
 
       let summary: string;
       if (this.sessionState.getSummarizationFailures() >= 3) {
@@ -1814,27 +2150,42 @@ class AgentService {
         }
       }
 
-      const systemMsg = anthropicMessages[0];
-      const summaryMsg: InternalMessage = {
-        role: "assistant",
-        content: `[Partial compact — ${oldMessages.length} older messages summarized]\n\n${summary}`,
-      };
-      const compressed = [systemMsg, summaryMsg, ...recentMessages];
-
       const { runPostCompactCleanup } = await import("./compactCleanup");
       await runPostCompactCleanup();
 
-      const afterTokens = compressed.reduce(
-        (s, m) =>
-          s +
-          Math.ceil(
-            (typeof m.content === "string"
-              ? m.content
-              : JSON.stringify(m.content)
-            ).length / 4,
-          ),
-        0,
+      // O sumário SÓ vivia num array local usado para contar tokens — nunca
+      // chegava ao store, portanto a compactação parcial sumarizava e deitava
+      // fora o resultado: o modelo ficava com os turnos recentes e ZERO do que
+      // foi resumido. Agora vai na fronteira, que é o canal que
+      // rebuildConversationHistory lê.
+      const boundaryPayload = await this.buildManualCompactBoundaryPayload(
+        summary,
+        await archivePromise,
+        recentChat.length > 0,
       );
+
+      // O que a conversa passa a ocupar: os payloads da fronteira + os turnos
+      // que ficaram preservados.
+      const afterTokens =
+        Math.ceil(
+          (boundaryPayload.summary.length +
+            (boundaryPayload.recovery?.length ?? 0)) /
+            4,
+        ) +
+        buildInternalMessagesFromSession({
+          ...session,
+          messages: recentChat,
+        }).reduce(
+          (s, m) =>
+            s +
+            Math.ceil(
+              (typeof m.content === "string"
+                ? m.content
+                : JSON.stringify(m.content)
+              ).length / 4,
+            ),
+          0,
+        );
 
       const boundaryMessage: import("@/types/chat").ChatMessage = {
         id: generateId("msg"),
@@ -1844,40 +2195,22 @@ class AgentService {
         compactMetadata: {
           trigger: "manual",
           beforeTokens,
-          messagesSummarized: oldMessages.length,
+          messagesSummarized: olderChat.length,
         },
+        compactSummary: boundaryPayload.summary,
+        ...(boundaryPayload.recovery
+          ? { compactRecovery: boundaryPayload.recovery }
+          : {}),
         level: "info",
         content: `Compactação parcial (${Math.round(beforeTokens / 1000)}K → ~${Math.round(afterTokens / 1000)}K tokens).`,
         timestamp: Date.now(),
       };
-      const summaryMessage: import("@/types/chat").ChatMessage = {
-        id: generateId("msg"),
-        role: "assistant",
-        content: `Compactação parcial: ${oldMessages.length} mensagens resumidas, ${recentMessages.length} preservadas.`,
-        timestamp: Date.now(),
-      };
-      // Narrate structured content (tool_call/tool_result blocks) into
-      // readable text instead of JSON.stringify-ing it. The stringified form
-      // re-entered the next turn as literal `[{"type":"tool_call",...}]`
-      // prose — pseudo-structure the model read as data, with tool_calls and
-      // results no longer paired (context pollution audit, 2026-06-12).
-      // contentAsText renders `[tool: name(args)]` + result text, the same
-      // narration the mechanical compact fallback uses.
-      const recentChatMessages: import("@/types/chat").ChatMessage[] =
-        recentMessages.map((m) => ({
-          id: generateId("msg"),
-          role: m.role as "user" | "assistant",
-          content:
-            typeof m.content === "string"
-              ? m.content
-              : contentAsText(m.content),
-          timestamp: Date.now(),
-        }));
-      chatStore.replaceMessages([
-        boundaryMessage,
-        summaryMessage,
-        ...recentChatMessages,
-      ]);
+      // Antigo + fronteira + recente INTACTO. Os turnos preservados já não são
+      // re-renderizados para texto: ficam as mensagens reais, com os tool_calls
+      // e resultados emparelhados como sempre estiveram. O antigo fica no store
+      // (invisível por causa do filtro de leitura) em vez de ser apagado.
+      this.assertSameSession(pinnedSessionId);
+      chatStore.replaceMessages([...olderChat, boundaryMessage, ...recentChat]);
       chatStore.resetTokenCounters();
       chatStore.setPostCompactSurveyPending(true);
 

@@ -532,6 +532,11 @@ fn app_ready(app: tauri::AppHandle) -> std::result::Result<(), String> {
     if let Some(splash) = app.get_webview_window("splash") {
         let _ = splash.close();
     }
+    // Runner headless (--run): a janela principal NUNCA é mostrada — o motor
+    // corre no webview invisível e o output sai por runner_emit.
+    if commands::runner::runner_mode_active() {
+        return Ok(());
+    }
     if let Some(win) = app.get_webview_window("main") {
         win.show().map_err(|e| format!("show failed: {}", e))?;
         win.set_focus()
@@ -544,6 +549,11 @@ fn app_ready(app: tauri::AppHandle) -> std::result::Result<(), String> {
 /// residual — another window wrote focus-request.json for our pid).
 #[tauri::command]
 fn focus_main_window(app: tauri::AppHandle) -> std::result::Result<(), String> {
+    // Runner headless: um focus-request de outra janela não pode revelar a
+    // janela invisível do runner.
+    if commands::runner::runner_mode_active() {
+        return Ok(());
+    }
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.unminimize();
         win.show().map_err(|e| format!("show failed: {}", e))?;
@@ -813,6 +823,69 @@ pub fn run() {
                 }
             }
 
+            // ── Headless runner launch args (P5, docs/DESIGN-HEADLESS-RUNNER.md) ──
+            // `--run "<tarefa>" --project <dir> [--yolo]` arranca a app com a
+            // janela INVISÍVEL: o mesmo motor, hospedado sem UI. O --project
+            // reutiliza o slot pending_open_project (o caminho normal de
+            // abertura de projecto); o job fica disponível ao frontend via o
+            // comando runner_get_job.
+            //
+            // DUAS entradas para o mesmo job:
+            //  - argv (--run/--project/--yolo) — para o binário instalado,
+            //    onde os args chegam directos;
+            //  - env (TM_RUN_TASK/TM_RUN_PROJECT/TM_RUN_YOLO=1) — para o
+            //    `yarn tauri dev`: a corrente yarn→tauri→cargo desfaz o
+            //    forwarding de `--` (o smoke de 03-08 viu o cargo receber
+            //    `--run` como arg PRÓPRIO, sem aspas); as env vars atravessam
+            //    as três camadas intactas.
+            {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                let arg_task = args
+                    .iter()
+                    .position(|a| a == "--run")
+                    .and_then(|i| args.get(i + 1))
+                    .cloned();
+                let task = arg_task.or_else(|| {
+                    std::env::var("TM_RUN_TASK").ok().filter(|s| !s.is_empty())
+                });
+                if let Some(task) = task {
+                    let project = args
+                        .iter()
+                        .position(|a| a == "--project")
+                        .and_then(|j| args.get(j + 1))
+                        .cloned()
+                        .or_else(|| {
+                            std::env::var("TM_RUN_PROJECT").ok().filter(|s| !s.is_empty())
+                        });
+                    let yolo = args.iter().any(|a| a == "--yolo")
+                        || std::env::var("TM_RUN_YOLO").map(|v| v == "1").unwrap_or(false);
+                    if let Some(p) = project.clone() {
+                        if std::path::Path::new(&p).is_dir() {
+                            if let Ok(mut slot) = pending_open_project().lock() {
+                                *slot = Some(p);
+                            }
+                        }
+                    }
+                    commands::runner::set_runner_job(commands::runner::RunnerJob {
+                        task,
+                        project: project.unwrap_or_default(),
+                        yolo,
+                    });
+                }
+            }
+
+            // Runner headless: processo de FUNDO verdadeiro no macOS — sem
+            // ícone no Dock nem activação por clique. Sem isto o Dock
+            // mostrava a app do runner e o clique tentava activar uma janela
+            // que os gates mantêm escondida de propósito ("abre minimizada e
+            // não permite abrir", nota do smoke de 03-08).
+            #[cfg(target_os = "macos")]
+            if commands::runner::runner_mode_active() {
+                let _ = app
+                    .handle()
+                    .set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+
             // ── File-association launch args ───────────────────────────
             // On Windows/Linux, "Open with TM Code" launches the binary
             // with file paths in argv[1..]. macOS routes these through
@@ -888,7 +961,8 @@ pub fn run() {
                 .center()
                 .skip_taskbar(true)
                 .always_on_top(false)
-                .visible(true);
+                // Runner headless (--run): splash invisível — nada aparece.
+                .visible(!commands::runner::runner_mode_active());
 
             #[cfg(target_os = "macos")]
             {
@@ -1137,6 +1211,21 @@ pub fn run() {
                 .inner_size(1250.0, 850.0)
                 .min_inner_size(900.0, 600.0)
                 .decorations(false)
+                // Runner headless (--run): a janela fica invisível para
+                // SEMPRE, e o WKWebView acelera/suspende timers de janelas
+                // ocultas (o mesmo fenómeno documentado abaixo para o rAF do
+                // arranque — no smoke P6 os setInterval do condutor nunca
+                // dispararam). Sem timers não há heartbeats, watchdogs nem
+                // retries no motor. Em modo runner o throttling é DESLIGADO;
+                // no modo janela fica Suspend — que a doc do enum declara ser
+                // o comportamento default quando nenhuma política é definida
+                // ("fully suspends tasks" numa webview sem janela: a prova
+                // documental do bug do smoke).
+                .background_throttling(if commands::runner::runner_mode_active() {
+                    tauri::utils::config::BackgroundThrottlingPolicy::Disabled
+                } else {
+                    tauri::utils::config::BackgroundThrottlingPolicy::Suspend
+                })
                 // Start hidden — the React entry, on first mount, calls the
                 // `app_ready` command which shows the window. This eliminates
                 // the visible flash of an empty (vibrancy-only on macOS, dark
@@ -1336,6 +1425,11 @@ pub fn run() {
             let app_handle_for_failsafe = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                // Runner headless: janela invisível é o estado DESEJADO — o
+                // failsafe de show não se aplica.
+                if commands::runner::runner_mode_active() {
+                    return;
+                }
                 if let Some(win) = app_handle_for_failsafe.get_webview_window("main") {
                     if let Ok(false) = win.is_visible() {
                         eprintln!("[splash] failsafe: 5s elapsed without app_ready — forcing show");
@@ -1428,6 +1522,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::runner::runner_get_job,
+            commands::runner::runner_emit,
+            commands::runner::runner_exit,
             open_project,
             create_project,
             get_recent_projects,
@@ -1549,6 +1646,7 @@ pub fn run() {
             git_show_file,
             git_current_branch,
             git_upstream_divergence,
+            git_recent_commits,
             git_clone_repository,
             git_push,
             git_list_branches,
@@ -1570,6 +1668,7 @@ pub fn run() {
             live_preview_serve_static,
             live_preview_stop_static,
             http_client_request,
+            fetch_pdf_text,
             send_issue_report,
             capture_screen_region,
             #[cfg(target_os = "macos")]

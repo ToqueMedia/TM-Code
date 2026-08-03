@@ -1,56 +1,46 @@
 /**
  * createPermissionAwareTimeout — verifies that the timer pauses while a
- * permission dialog is pending, then resumes from where it left off.
+ * human gate is open, then resumes from where it left off.
+ *
+ * P4 (2026-08-03): o driver deixou de ser o permissionStore — a fonte de
+ * "há humano a decidir?" é o contador de gates do hostBus, aberto pelo
+ * host-janela à volta de cada via de decisão humana do AgentHost. Os
+ * testes conduzem os gates directamente (beginHumanGate/end), que é
+ * exactamente o que o windowHost faz.
  *
  * The contract:
- *   - With no pending permission, fires after `timeoutMs` of wall-clock.
- *   - When pendingPermission is set, the active-time clock pauses.
- *   - When pendingPermission goes back to null, the active clock resumes
- *     from the value it had when paused.
+ *   - With no open gate, fires after `timeoutMs` of wall-clock.
+ *   - While a gate is open, the active-time clock pauses.
+ *   - When the gate closes, the active clock resumes from the value it had
+ *     when paused.
  *   - Multiple pause/resume cycles accumulate correctly.
- *   - cleanup() removes the timer + permission subscription so leaks don't
+ *   - cleanup() removes the timer + gate subscription so leaks don't
  *     accumulate across tool calls.
  */
 
-jest.mock('../../../stores/chatStore', () => ({
-  useChatStore: {
-    getState: () => ({ pendingDiffs: [] }),
-    subscribe: jest.fn(() => jest.fn()),
-  },
-}))
-
-jest.mock('../../../stores/credentialRequestStore', () => ({
-  useCredentialRequestStore: {
-    getState: () => ({ pending: new Map() }),
-    subscribe: jest.fn(() => jest.fn()),
-  },
-}))
-
 import { createPermissionAwareTimeout } from '../toolExecutor/permissionAwareTimeout'
-import { usePermissionStore } from '../../../stores/permissionStore'
+import { beginHumanGate } from '../host/hostBus'
 
-// We toggle pendingPermission directly via the store. resolve() is supplied
-// to satisfy the type — none of these tests actually advance through the
-// approve/deny path, they just observe the timer's reaction.
-function setPending(name: string | null) {
-  usePermissionStore.setState({
-    pendingPermission: name === null ? null : {
-      id: 'test-' + Math.random(),
-      toolName: name,
-      args: {},
-      promptReason: null,
-      resolve: () => { /* not used in these tests */ },
-    },
-  })
+let endGate: (() => void) | null = null
+
+/** Abre/fecha um gate humano — o equivalente ao diálogo pendente de antes. */
+function setPending(open: boolean) {
+  if (open) {
+    endGate = beginHumanGate()
+  } else {
+    endGate?.()
+    endGate = null
+  }
 }
 
-beforeEach(() => {
-  // Reset store between tests so cycles don't bleed.
-  usePermissionStore.setState({ pendingPermission: null, permissionQueue: [] })
+afterEach(() => {
+  // Fecha qualquer gate deixado aberto para os ciclos não sangrarem.
+  endGate?.()
+  endGate = null
 })
 
 describe('createPermissionAwareTimeout', () => {
-  test('fires after timeoutMs when no permission is pending', async () => {
+  test('fires after timeoutMs when no gate is open', async () => {
     const { promise, cleanup } = createPermissionAwareTimeout('test_tool', 100)
     try {
       await expect(promise).rejects.toThrow(/timed out after 0\.1 seconds/)
@@ -68,8 +58,8 @@ describe('createPermissionAwareTimeout', () => {
     }
   })
 
-  test('does NOT fire while permission is continuously pending', async () => {
-    setPending('request_credentials')
+  test('does NOT fire while a gate stays open', async () => {
+    setPending(true)
     const { promise, cleanup } = createPermissionAwareTimeout('request_credentials', 80)
 
     // Race the timeout against a wall-clock window twice as long. If the
@@ -89,17 +79,17 @@ describe('createPermissionAwareTimeout', () => {
     }
   })
 
-  test('resumes the timer when permission is approved (cleared)', async () => {
-    // Start with permission pending. The timer should accumulate ZERO active
-    // ms during this period, then start counting once we clear the dialog.
-    setPending('request_credentials')
+  test('resumes the timer when the gate closes (approval)', async () => {
+    // Start with a gate open. The timer should accumulate ZERO active ms
+    // during this period, then start counting once the gate closes.
+    setPending(true)
     const { promise, cleanup } = createPermissionAwareTimeout('request_credentials', 100)
 
     // Sit on the dialog for longer than the timeout — proves the pause works
     await new Promise((r) => setTimeout(r, 150))
 
     // Approve. From here, the timer has the FULL 100ms of active time before firing.
-    setPending(null)
+    setPending(false)
 
     const fired = Date.now()
     try {
@@ -117,17 +107,17 @@ describe('createPermissionAwareTimeout', () => {
     const { promise, cleanup } = createPermissionAwareTimeout('chain_tool', 100)
 
     // Cycle 1: pause for 80ms. Active time so far: ~0ms.
-    setPending('chain_tool')
+    setPending(true)
     await new Promise((r) => setTimeout(r, 80))
-    setPending(null)
+    setPending(false)
 
     // Run for 40ms in the active window. Active time so far: ~40ms.
     await new Promise((r) => setTimeout(r, 40))
 
     // Cycle 2: pause for 80ms again.
-    setPending('chain_tool')
+    setPending(true)
     await new Promise((r) => setTimeout(r, 80))
-    setPending(null)
+    setPending(false)
 
     // Now the timer should fire ~60ms after this point (100 - 40 = 60 active ms left)
     const beforeFire = Date.now()
@@ -136,6 +126,29 @@ describe('createPermissionAwareTimeout', () => {
       const elapsed = Date.now() - beforeFire
       expect(elapsed).toBeGreaterThanOrEqual(40)
       expect(elapsed).toBeLessThan(200)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test('sobreposição de gates: só fecha a pausa quando TODOS fecham', async () => {
+    const { promise, cleanup } = createPermissionAwareTimeout('overlap_tool', 100)
+
+    // Dois gates em simultâneo (ex.: permissão + diff em lote) — fechar o
+    // primeiro não pode retomar o relógio enquanto o segundo está aberto.
+    const endA = beginHumanGate()
+    const endB = beginHumanGate()
+    await new Promise((r) => setTimeout(r, 80))
+    endA()
+    await new Promise((r) => setTimeout(r, 80))
+    endB()
+
+    const beforeFire = Date.now()
+    try {
+      await expect(promise).rejects.toThrow(/timed out/)
+      const elapsed = Date.now() - beforeFire
+      expect(elapsed).toBeGreaterThanOrEqual(80)
+      expect(elapsed).toBeLessThan(300)
     } finally {
       cleanup()
     }
@@ -153,13 +166,15 @@ describe('createPermissionAwareTimeout', () => {
     expect(rejected).toBe(false)
   })
 
-  test('cleanup() unsubscribes from the permission store', () => {
-    const before = (usePermissionStore as unknown as { getState: () => Record<string, unknown> }).getState
-    const { cleanup } = createPermissionAwareTimeout('t', 1000)
+  test('cleanup() unsubscribes from the gate channel', async () => {
+    const { promise, cleanup } = createPermissionAwareTimeout('t', 60)
     cleanup()
-    // No assertion on subscriber count (Zustand doesn't expose it cheaply),
-    // but cleanup must not throw — that itself proves the unsubscribe path
-    // is reached and the timer handle is cleared.
-    expect(typeof before).toBe('function')
+    let rejected = false
+    promise.catch(() => { rejected = true })
+    // Transições de gate depois do cleanup não podem ressuscitar o timer.
+    setPending(true)
+    setPending(false)
+    await new Promise((r) => setTimeout(r, 120))
+    expect(rejected).toBe(false)
   })
 })

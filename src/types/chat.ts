@@ -288,6 +288,18 @@ export interface ChatMessage {
    * skipped; only a boundary WITH this field re-emits.
    */
   compactSummary?: string
+  /**
+   * Estado de TRABALHO recuperado na compactação — conteúdo dos ficheiros
+   * recentes, texto das skills invocadas, log de operações (ver
+   * contextManager.buildPostCompactRecoveryBlock).
+   *
+   * Campo separado de `compactSummary` porque são duas coisas diferentes com
+   * dois destinos: o sumário é NARRATIVA (legível, mostrado ao developer no
+   * cartão expansível da fronteira), a recuperação é MATERIAL (despejo de
+   * ficheiros que ninguém quer ver na UI). Ambos são re-emitidos para o modelo
+   * por rebuildConversationHistory, o sumário primeiro.
+   */
+  compactRecovery?: string
   /** Terminal-mode local command result, rendered like a shell command block. */
   terminalCommand?: {
     command: string
@@ -395,6 +407,15 @@ export interface ChatMessage {
   turnDurationMs?: number
   turnInputTokens?: number
   turnOutputTokens?: number
+  /**
+   * `true` when the user aborted the run that was producing this assistant
+   * message (Stop / ESC). rebuildConversationHistory emits a
+   * "[Request interrupted by user]" user message right after it so the model
+   * KNOWS the previous turn ended by interruption, not by its own choice —
+   * without this it reads its truncated reply as a completed answer
+   * (cli-vaz parity: utils/messages INTERRUPT_MESSAGE).
+   */
+  wasInterrupted?: boolean
   /**
    * Ephemeral system messages: appear momentarily in the transcript, scroll
    * up as new messages arrive, and auto-remove after a short timeout. Used
@@ -581,6 +602,14 @@ export interface RequestUsageEntry {
   provider?: string
   /** Model id the request was sent to. */
   model: string
+  /** Model id that ACTUALLY served the response (X-TM-Model do data-plane).
+   *  `model` é o placeholder pedido ("tm-active-model"); sem este campo o
+   *  export de sessão não permite análise por modelo real (custo/qualidade
+   *  por modelo — pré-requisito da auto-análise). Ausente em BYOK directo
+   *  (o provider não emite o header) e em respostas sem headers. */
+  servedModel?: string
+  /** Provider real que serviu a resposta (X-TM-Provider). */
+  servedProvider?: string
   /** Real input tokens from the provider's usage chunk. */
   inputTokens: number
   /** Real output tokens from the provider's usage chunk. */
@@ -606,6 +635,11 @@ export interface RequestUsageEntry {
   tmsBootstrapInputTokens?: number
   tmsBootstrapOutputTokens?: number
   tmsBootstrapPhase?: string
+  /** Secções obrigatórias em falta quando tmsBootstrapPhase termina em
+   *  `_invalid` (2026-08-03). O prompt já avisa o modelo ("INCOMPLETE
+   *  (missing: …)"); sem este campo o export dizia "invalid" sem dizer
+   *  PORQUÊ e a auto-análise lia-o como estado contraditório. */
+  tmsMissingSections?: string[]
   tmsBootstrapToolset?: string
   tmsWriteAttempted?: boolean
   tmsWriteToolCallId?: string
@@ -620,11 +654,8 @@ export interface RequestUsageEntry {
   originalUserMessageDisplayed?: boolean
   originalTaskResumedAfterBootstrap?: boolean
   originalTaskResumeRequestId?: string
-  mutableTask?: boolean
   originalTaskWriteActionCount?: number
   originalTaskFirstWriteTurn?: number
-  noEditGuardReason?: string
-  noEditRecoveryAction?: string
   readBeforeWriteBlocked?: boolean
   readBeforeWriteBlockCount?: number
   readBeforeWriteBlockedTools?: string[]
@@ -669,6 +700,26 @@ export interface RequestUsageEntry {
   toolNames?: string[]
   /** Estimated tokens spent on tool definitions. */
   toolDefsTokens?: number
+  /**
+   * FNV-1a do segmento cacheável (tools + system). Muda entre turnos = prefixo
+   * do provider invalidado por inteiro.
+   */
+  /**
+   * Como a ocupação de contexto foi calculada: 'anchored' (real do turno
+   * anterior + estimativa só do que veio depois), 'max-fallback' (âncora
+   * inutilizável → o maior dos dois, comportamento pré-2026-07-31) ou
+   * 'estimate-only' (primeiro turno). Um run cheio de 'max-fallback' está a
+   * decidir compactação com o estimador sozinho.
+   */
+  occupancySource?: 'anchored' | 'max-fallback' | 'estimate-only'
+  promptPrefixHash?: string
+  /**
+   * FNV-1a por mensagem, na ordem do pedido. Diagnostica quedas de cache read:
+   * o primeiro índice que diverge face ao turno anterior é onde o prefixo
+   * deixou de dar match. Divergir num índice ANTIGO significa histórico
+   * reescrito — a única coisa que parte um prefixo de forma irrecuperável.
+   */
+  messageHashes?: string[]
   /** Why this request continued past the simple-bugfix turn target, if known. */
   continuationReason?: string
   /** Estimated tokens from @mention synthetic context specifically. */
@@ -810,9 +861,9 @@ export interface RequestUsageEntry {
    *  fell back ('fallback'), with the raw output / error for diagnosis. */
   /** 'parsed' = planner returned valid JSON; 'fallback' = invalid/missing and
    *  a deterministic per-profile plan was used instead. */
-  contextPlannerStatus?: 'parsed' | 'fallback'
+  contextPlannerStatus?: 'parsed' | 'deterministic' | 'fallback'
   /** 'model' when the context plan came from a model. 'fallback' exists for legacy exports only. */
-  contextPlannerSource?: 'model' | 'fallback'
+  contextPlannerSource?: 'model' | 'deterministic' | 'fallback'
   /** Which model layer produced the plan. 'code' means utility planner retries failed and the code model returned valid JSON. */
   contextPlannerModel?: 'utility' | 'code'
   /** When status === 'fallback', the failure reason (schema/parse/HTTP/…). */
@@ -836,25 +887,15 @@ export interface RequestUsageEntry {
   expandedToolNames?: string[]
   /** Tools the model requested but an explicit policy denied. */
   deniedToolNames?: string[]
-  /** ── "Stopped without editing" guardrail telemetry ──
-   *  Populated from the query loop's run-level tracking. Lets an exported
-   *  session prove the guardrail fired and whether the model recovered. */
+  /** ── Write-action telemetry ──
+   *  Populated from the query loop's run-level tracking. */
   /** Whether any file-mutating tool (edit_file, write_file, …) ran
    *  successfully during this run, as of this request. */
   runHasEdited?: boolean
-  /** How many times the no-edit recovery steering was injected (0 or 1). */
-  noEditRecoveryCount?: number
-  /** True on the request AFTER the guardrail fired (the recovery turn). */
-  noEditGuardTriggered?: boolean
   /** Turn number of the first successful file mutation (1-indexed). */
   firstWriteTurn?: number
   /** Total count of successful file-mutating tool calls this run. */
   writeActionCount?: number
-  /** Final decision at the stop path: "completed" | "recovered_then_completed"
-   *  | "aborted" | "error" | "max_turns". Only set on the LAST entry. */
-  completionGuardDecision?: string
-  /** Human-readable reason for the guardrail's decision. Only set on the LAST entry. */
-  completionGuardReason?: string
   /** ── Delegate/sub-agent telemetry ──
    *  Populated when the delegate tool was called this run. Lets the session
    *  export prove the member field was resolved (or why it was blocked). */

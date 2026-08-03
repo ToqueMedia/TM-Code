@@ -6,7 +6,14 @@
  */
 
 import type { SubAgentDefinition, SubAgentParentContext } from './types'
-import { READ_FILE, READ_AROUND, LIST_DIRECTORY, SEARCH_FILES, GLOB, READ_LARGE_RESULT } from '../toolNames'
+// DOIS dialectos, de propósito: o array `tools` é a allow-list interna e casa
+// com as chaves do registo (CANÓNICO); o texto do prompt nomeia as tools como
+// o modelo as vê no schema (ALIAS — ver nota em planCommand).
+import {
+  READ_FILE, LIST_DIRECTORY, SEARCH_FILES, GLOB,
+  READ_ALIAS, LS_ALIAS, GREP_ALIAS, GLOB_ALIAS,
+  READ_AROUND, READ_LARGE_RESULT,
+} from '../toolNames'
 
 export const EXPLORE_AGENT: SubAgentDefinition = {
   agentType: 'Explore',
@@ -33,11 +40,11 @@ export const EXPLORE_AGENT: SubAgentDefinition = {
 ${depthGuide}
 
 ## Capabilities
-- **${SEARCH_FILES}** — ripgrep search across the codebase. Use for finding usages, references, patterns.
-- **${GLOB}** — file pattern matching. Use for finding files by name/extension.
-- **${READ_FILE}** — read a file's contents. Use after search_files/glob to read the relevant code.
+- **${GREP_ALIAS}** — ripgrep search across the codebase. Use for finding usages, references, patterns.
+- **${GLOB_ALIAS}** — file pattern matching. Use for finding files by name/extension.
+- **${READ_ALIAS}** — read a file's contents. Use after ${GREP_ALIAS}/${GLOB_ALIAS} to read the relevant code.
 - **${READ_AROUND}** — read a bounded window around a search match line.
-- **${LIST_DIRECTORY}** — list files in a directory. Use for understanding project structure.
+- **${LS_ALIAS}** — list files in a directory. Use for understanding project structure.
 - **${READ_LARGE_RESULT}** — page through large search/read outputs when a result was truncated.
 ## Rules
 - You are READ-ONLY. You cannot write, edit, create, or delete files.

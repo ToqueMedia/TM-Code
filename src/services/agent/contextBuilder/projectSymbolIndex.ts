@@ -1,6 +1,7 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { cachedSafeReadFile } from '../ipcCache'
 import { markProjectSymbolIndexRequested } from '../tmsContext'
+import { EDIT_ALIAS, WRITE_ALIAS, READ_ALIAS } from '../toolNames'
 
 export interface ProjectSymbolEntry {
   path: string
@@ -249,7 +250,7 @@ export function formatProjectSymbolIndex(index: ProjectSymbolIndex): string {
     '# Project symbol index',
     'Purpose: locate likely files and line ranges before using Read. This is an index, not source code and not edit permission.',
     `Scope: ${index.filesScanned}/${index.filesConsidered} candidate files scanned; ${index.entries.length} symbols listed${index.truncated ? ' (truncated)' : ''}.`,
-    'Rule: before edit_file/write_file, call Read on the exact file/range and treat the current file body as authoritative.',
+    `Rule: before ${EDIT_ALIAS}/${WRITE_ALIAS}, call ${READ_ALIAS} on the exact file/range and treat the current file body as authoritative.`,
     '',
   ]
 

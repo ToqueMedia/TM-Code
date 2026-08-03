@@ -85,18 +85,47 @@ describe('portões de segurança fora do ToolsetSelector', () => {
     )
   })
 
-  it('o guard anti-adiamento respeita a política read-only', () => {
-    // Sem isto, um run read-only levava a mensagem "aplica o edit agora"
-    // depois de lhe termos negado as tools de escrita.
-    const guard = query.slice(
-      query.indexOf('mutable original_task attempted to stop without file edit') - 900,
-      query.indexOf('mutable original_task attempted to stop without file edit'),
-    )
-    expect(guard).toContain('!readOnlyRun')
+  // O teste "o guard anti-adiamento respeita a política read-only" viveu aqui
+  // até 2026-07-31. O guard que ele vigiava foi APAGADO: dependia de
+  // `mutableTask`, órfão desde a remoção do Intent Router, portanto nunca
+  // armava. Um teste cujo assunto deixou de existir não deve ser "arranjado"
+  // para voltar a verde — a âncora (`query.indexOf(...)`) devolvia -1 e o
+  // slice passava a apanhar uma região arbitrária do ficheiro, o que é pior
+  // que não testar nada. Se o guard voltar, volta com o seu teste.
+  it('o guard anti-adiamento não foi ressuscitado sem produtor para mutableTask', () => {
+    expect(query).not.toContain('mutable original_task attempted to stop without file edit')
+    // A varredura só falha se alguém reintroduzir uma LEITURA do sinal órfão;
+    // as notas históricas que o nomeiam continuam permitidas.
+    const codeLines = query
+      .split('\n')
+      .filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l))
+      .join('\n')
+    expect(codeLines).not.toMatch(/\bmutableTask\b/)
   })
 
   it('o perfil pós-bootstrap sem chamadores foi apagado, não deixado a parecer vivo', () => {
     expect(agentService).not.toContain('postTmsBootstrapToolProfile')
     expect(read('mainDispatch.ts')).not.toContain('clearPostTmsBootstrapToolProfile')
+  })
+
+  // ── ToolSearch (2026-08-03): o sucessor do request_tools TEM produtor ──
+  // A doutrina do toolPolicy.ts exige que qualquer selecção de tools volte
+  // com um produtor real e um teste que prove que corre. O comportamento do
+  // executor está no toolExecutor.test.ts ("deferred MCP tool definitions");
+  // aqui fica a prova estrutural de que o meta-tool é INJECTADO e RESPONDIDO
+  // nos dois runners — a combinação que faltou ao request_tools (definição
+  // sem injecção = tool invisível; intercepção sem injecção = código morto).
+  it('ToolSearch é injectado e interceptado no agentService (produtor real)', () => {
+    expect(agentService).toContain('openaiTools.push(toolSearchDefinition());')
+    expect(agentService).toContain('if (toolName === TOOL_SEARCH_NAME) {')
+    // O bridge empurra para o array VIVO do run — sem isto a activação não
+    // chega aos pedidos seguintes (query.ts envia `activeTools` por referência).
+    expect(agentService).toContain('this.activeRunTools = openaiTools;')
+  })
+
+  it('ToolSearch é injectado e interceptado no parallelTaskRunner (espelho)', () => {
+    const runner = read('parallelTasks/parallelTaskRunner.ts')
+    expect(runner).toContain('openaiTools.push(toolSearchDefinition())')
+    expect(runner).toContain('if (toolName === TOOL_SEARCH_NAME) {')
   })
 })

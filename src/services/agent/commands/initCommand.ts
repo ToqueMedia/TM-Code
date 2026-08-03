@@ -37,7 +37,6 @@ export async function executeInit(
     intentOverride: {
       profile: 'project_bootstrap',
       readOnly: false,
-      requiresMutation: true,
       source: 'keyword',
       confidence: 'high',
       reason: '/init selected project_bootstrap to create or refresh TMS.md',

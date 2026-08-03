@@ -15,6 +15,8 @@
 import type OpenAI from 'openai'
 import FirebaseAuthService from '../../auth/firebaseAuth'
 import { createSubAgentClient } from '../sdkClient'
+import { notifyHost } from '../host/hostBus'
+import { windowBudgetHooks } from '../host/windowHost'
 import {
   resolveByokSnapshotForSession,
   buildByokClientFromSnapshot,
@@ -183,6 +185,8 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
 
   // ── Create QueryEngine ──
   const engine = new QueryEngine({
+    // P1 headless: hooks de orçamento da janela — ver windowHost.
+    ...windowBudgetHooks(),
     client,
     refreshClient,
     model,
@@ -216,13 +220,11 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
       )
       engine.cancel()
       abortController.abort()
-      import('@/services/notificationService').then(({ notify }) => {
-        notify({
-          title: `⏰ ${definition.agentType} task timed out`,
-          body: `"${description}" exceeded the time limit`,
-          evenWhenFocused: true,
-          dedupKey: `subagent-timeout-${runId}`,
-        })
+      notifyHost({
+        title: `⏰ ${definition.agentType} task timed out`,
+        body: `"${description}" exceeded the time limit`,
+        evenWhenFocused: true,
+        dedupKey: `subagent-timeout-${runId}`,
       })
       maybeWakeMainAgent(options.ownerTaskId)
     }
@@ -253,13 +255,11 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
         )
         engine.cancel()
         abortController.abort()
-        import('@/services/notificationService').then(({ notify }) => {
-          notify({
-            title: `⏰ ${definition.agentType} task stalled`,
-            body: `"${description}" made no tool call for ${Math.round(elapsed / 1000)}s`,
-            evenWhenFocused: true,
-            dedupKey: `subagent-stale-${runId}`,
-          })
+        notifyHost({
+          title: `⏰ ${definition.agentType} task stalled`,
+          body: `"${description}" made no tool call for ${Math.round(elapsed / 1000)}s`,
+          evenWhenFocused: true,
+          dedupKey: `subagent-stale-${runId}`,
         })
         maybeWakeMainAgent(options.ownerTaskId)
       }
@@ -379,13 +379,11 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
         const msg = streamErrorMessage || resultText || 'Model stream failed'
         console.error(`[subAgent:${definition.agentType}] terminal error:`, msg)
         useSubAgentStore.getState().errorRun(runId, msg)
-        import('@/services/notificationService').then(({ notify }) => {
-          notify({
-            title: `❌ ${definition.agentType} task failed`,
-            body: `"${description}": ${msg.slice(0, 100)}`,
-            evenWhenFocused: true,
-            dedupKey: `subagent-error-${runId}`,
-          })
+        notifyHost({
+          title: `❌ ${definition.agentType} task failed`,
+          body: `"${description}": ${msg.slice(0, 100)}`,
+          evenWhenFocused: true,
+          dedupKey: `subagent-error-${runId}`,
         })
         maybeWakeMainAgent(options.ownerTaskId)
         return
@@ -412,12 +410,10 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
         output: outputTokens,
       })
 
-      import('@/services/notificationService').then(({ notify }) => {
-        notify({
-          title: `✅ ${definition.agentType} task completed`,
-          body: `"${description}" finished successfully`,
-          dedupKey: `subagent-done-${runId}`,
-        })
+      notifyHost({
+        title: `✅ ${definition.agentType} task completed`,
+        body: `"${description}" finished successfully`,
+        dedupKey: `subagent-done-${runId}`,
       })
       maybeWakeMainAgent(options.ownerTaskId)
     } catch (err) {
@@ -427,13 +423,11 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
       console.error(`[subAgent:${definition.agentType}] unhandled error:`, err)
       useSubAgentStore.getState().errorRun(runId, msg)
 
-      import('@/services/notificationService').then(({ notify }) => {
-        notify({
-          title: `❌ ${definition.agentType} task failed`,
-          body: `"${description}": ${msg.slice(0, 100)}`,
-          evenWhenFocused: true,
-          dedupKey: `subagent-error-${runId}`,
-        })
+      notifyHost({
+        title: `❌ ${definition.agentType} task failed`,
+        body: `"${description}": ${msg.slice(0, 100)}`,
+        evenWhenFocused: true,
+        dedupKey: `subagent-error-${runId}`,
       })
       maybeWakeMainAgent(options.ownerTaskId)
     } finally {

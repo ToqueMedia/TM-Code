@@ -10,6 +10,7 @@
 
 import { invoke } from '@/utils/invokeMetrics'
 import { cachedBuildFileTree, cachedSafeReadFile } from '../ipcCache'
+import { LS_ALIAS } from '../toolNames'
 import { detectSystemPackageManager } from '../../packageManagerDetector'
 import type { TemplateManifest } from '../../templateService'
 import type { ProjectManifest } from '../../projectManifestService'
@@ -46,10 +47,11 @@ export function formatFileTree(node: Record<string, unknown>, indent: string = '
 
   // The Rust walker sets `truncated` when a directory's contents were cut —
   // either capped at MAX_CHILDREN_PER_DIR or sliced off at maxDepth. Surfacing
-  // it tells the model "there's more here" so it reaches for list_directory
+  // it tells the model "there's more here" so it reaches for the listing tool
   // instead of assuming the folder is empty (or, worse, that the project is).
+  // Nomeada pelo ALIAS: é o único nome que o modelo vê no schema.
   if (isDir && node.truncated === true) {
-    result += `${childIndent}… (truncated — use list_directory to expand)\n`
+    result += `${childIndent}… (truncated — use ${LS_ALIAS} to expand)\n`
   }
 
   return result
@@ -79,11 +81,13 @@ export async function buildFileTree(projectPath: string): Promise<string> {
  */
 export async function gatherGitContext(projectPath: string): Promise<GitContext | null> {
   try {
-    const [branch, files, divergence] = await Promise.all([
+    const [branch, files, divergence, recentCommits] = await Promise.all([
       invoke<string>('git_current_branch', { projectPath }),
       invoke<Array<{ path: string; status: string; staged: boolean }>>('git_status_files', { projectPath }),
       // Returns null when there's no upstream — local-only branch, not an error.
       invoke<{ ahead: number; behind: number } | null>('git_upstream_divergence', { projectPath }).catch(() => null),
+      // History headline (git log --oneline -n 5) — empty on fresh repos.
+      invoke<string[]>('git_recent_commits', { projectPath, limit: 5 }).catch(() => [] as string[]),
     ])
     return {
       branch,
@@ -91,6 +95,7 @@ export async function gatherGitContext(projectPath: string): Promise<GitContext 
       behind: divergence?.behind ?? 0,
       files: files.slice(0, 50),
       truncatedFiles: files.length > 50 ? files.length - 50 : 0,
+      recentCommits,
     }
   } catch {
     // Not a git repo (or git unavailable) — no orientation block.

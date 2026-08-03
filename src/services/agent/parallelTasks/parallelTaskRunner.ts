@@ -40,7 +40,9 @@ import {
   canonicalToolName,
   WRITE_FILE, EDIT_FILE, CREATE_FILE, DELETE_FILE, RENAME_FILE, CREATE_DIRECTORY,
 } from '../toolNames'
-import { REQUEST_CONTEXT_NAME, requestContextDefinition } from '../toolPolicy'
+import { REQUEST_CONTEXT_NAME, requestContextDefinition, TOOL_SEARCH_NAME, toolSearchDefinition, searchDeferredTools } from '../toolPolicy'
+import { notifyHost } from '../host/hostBus'
+import { windowBudgetHooks } from '../host/windowHost'
 import type ContextBuilderT from '../contextBuilder'
 import { formatError } from '../../../utils/errors'
 import { useBillingStore } from '../../../stores/billingStore'
@@ -163,6 +165,7 @@ function buildTaskSystemPrompt(
     // nenhuma. A própria policy.ts manda actualizar os prompts junto com a
     // flag ("update ARCHITECTURE + prompts + tests together") e isto ficou
     // atrás. Apanhado pelo portão de conformidade de contratos das tools.
+    // (2026-08-03: a tool foi removida do registry de vez — o def já nem viaja.)
     '- You are the ONLY agent on this project. There is no peer-agent messaging: if you need a decision or information only the developer has, use ask_user_question.',
     '- File writes are applied directly and are serialized with the other agents, so keep your edits scoped to YOUR task to avoid stepping on theirs.',
     '- If you genuinely need the developer (a decision between options, or credentials for a service), use ask_user_question / request_credentials — the developer is notified on your task row and answers in your task chat. Prefer sensible defaults over asking.',
@@ -388,6 +391,43 @@ export async function runParallelTask(runId: string): Promise<void> {
         return { content: `Error loading auxiliary context: ${formatError(err)}`, isError: true }
       }
     }
+    // ToolSearch: procura/carrega defs MCP diferidos, empurrados para o
+    // openaiTools DESTA tarefa (mesma referência que o engine dela envia por
+    // pedido). Espelho do bridge do agentService — ver toolPolicy.ts.
+    if (toolName === TOOL_SEARCH_NAME) {
+      const queryStr = typeof toolInput.query === 'string' ? toolInput.query : ''
+      const maxResults = typeof toolInput.max_results === 'number' && toolInput.max_results > 0
+        ? toolInput.max_results
+        : 5
+      if (!queryStr.trim()) {
+        return { content: 'No query provided. Use "select:<tool_name>" (comma-separated for several) or keywords to search the deferred tool list.', isError: false }
+      }
+      const matches = searchDeferredTools(queryStr, toolExecutor.getDeferredToolIndex(), maxResults)
+      if (matches.length === 0) {
+        return { content: 'No matching deferred tools found', isError: false }
+      }
+      const { defs } = toolExecutor.getDeferredToolDefinitions(matches)
+      for (const def of defs) {
+        if (!openaiTools.some(t => t.function.name === def.function.name)) {
+          openaiTools.push({
+            type: 'function' as const,
+            function: {
+              name: def.function.name,
+              description: def.function.description,
+              parameters: def.function.parameters as Record<string, unknown>,
+            },
+          })
+        }
+      }
+      const lines = defs.map(d =>
+        `<function>${JSON.stringify({
+          description: d.function.description,
+          name: d.function.name,
+          parameters: d.function.parameters,
+        })}</function>`,
+      )
+      return { content: `<functions>\n${lines.join('\n')}\n</functions>`, isError: false }
+    }
     const canonical = canonicalToolName(toolName)
     // Caminhos do modelo → referencial do worktree (execução, claims e
     // display coerentes; sem isto os ficheiros aninhavam no próprio worktree).
@@ -461,6 +501,10 @@ export async function runParallelTask(runId: string): Promise<void> {
     // efémero). Sem omissões, nada a injetar.
     const omittedIds = builder.getLastAuxiliarySelection()?.omitted.map(o => o.id) ?? []
     if (omittedIds.length > 0) openaiTools.push(requestContextDefinition(omittedIds))
+    // Espelho do main: defs MCP diferidos + meta-tool ToolSearch. O bridge
+    // desta tarefa empurra os defs carregados para ESTE openaiTools (array
+    // vivo do engine da tarefa), não para o do singleton.
+    if (toolExecutor.getDeferredToolIndex().length > 0) openaiTools.push(toolSearchDefinition())
     // FASE B: volátil na mensagem (system prompt da tarefa byte-estável —
     // vale ouro nas CONTINUAÇÕES, que repetem o mesmo prefixo).
     taskVolatileCtx = builder.getLastVolatileContext()
@@ -521,6 +565,8 @@ export async function runParallelTask(runId: string): Promise<void> {
   }
 
   const engine = new QueryEngine({
+    // P1 headless: hooks de orçamento da janela — ver windowHost.
+    ...windowBudgetHooks(),
     client,
     refreshClient,
     model,
@@ -941,13 +987,11 @@ export async function runParallelTask(runId: string): Promise<void> {
           })
         }
         stampTaskSessionStatus(run.sessionId, 'completed')
-        void import('@/services/notificationService').then(({ notify }) =>
-          notify({
-            title: `✅ Task completed`,
-            body: `"${run.description}" finished`,
-            dedupKey: `parallel-task-done-${runId}`,
-          }),
-        )
+        notifyHost({
+          title: `✅ Task completed`,
+          body: `"${run.description}" finished`,
+          dedupKey: `parallel-task-done-${runId}`,
+        })
       }
     }
   } catch (err) {
@@ -1036,13 +1080,12 @@ export async function runParallelTask(runId: string): Promise<void> {
     }).catch(() => {})
     // F2 MDI: kill THIS task's own background processes (owner = runId). The
     // main run's cancel kills only owner 'main', so the task reaps its own here.
-    void import('../../../stores/backgroundCommandStore').then(async ({ useBackgroundCommandStore }) => {
+    void import('../processRegistry').then(async ({ processRegistry }) => {
       const { invoke } = await import('@/utils/invokeMetrics')
-      const store = useBackgroundCommandStore.getState()
-      for (const c of store.getAll()) {
+      for (const c of processRegistry.getAll()) {
         if (c.owner === runId && c.status === 'running') {
           try { await invoke('kill_process', { pid: c.pid }) } catch { /* best effort */ }
-          store.cancelCommand(c.id)
+          processRegistry.cancelCommand(c.id)
         }
       }
     }).catch(() => {})

@@ -13,6 +13,7 @@ import { useReasoningEffortStore } from './reasoningEffortStore'
 import { resolveEffortModelId, resolveEffortTurnStamp } from '../services/agent/reasoningEffortModels'
 import { clearCommandQueue as clearMessageQueue } from '../services/agent/messageQueue'
 import { clearMentionContextTracker } from '../services/agent/mentionContextTracker'
+import { endWriteBatch } from '../services/agent/writeBatch'
 export { clearMessageQueue }
 import { setQueueLogContext } from '../services/agent/queueOperationLog'
 import { logger } from '../utils/logger'
@@ -198,7 +199,7 @@ interface ChatActions {
    * ContextWindowIndicator no longer pins to the pre-compression peak that
    * `addTokenUsage` had cached via `Math.max`.
    */
-  addCompactBoundaryMessage: (beforeTokens: number, trigger?: import('@/types/chat').CompactMetadata['trigger'], messagesSummarized?: number, summary?: string) => void
+  addCompactBoundaryMessage: (beforeTokens: number, trigger?: import('@/types/chat').CompactMetadata['trigger'], messagesSummarized?: number, summary?: string, recovery?: string) => void
   /**
    * Re-capture the current BYOK selection (provider/model/baseURL/caps)
    * from byokStore and store it as the active session's byokSnapshot.
@@ -232,7 +233,9 @@ interface ChatActions {
    * the assistant bubble exists — so project-switch park can preserve it.
    */
   pinStreamingSession: (sessionId: string) => void
-  finalizeAssistantMessage: () => void
+  /** `opts.interrupted` stamps `wasInterrupted` on the finalized bubble so
+   *  rebuildConversationHistory can tell the model the turn was aborted. */
+  finalizeAssistantMessage: (opts?: { interrupted?: boolean }) => void
   addCodeBlockToMessage: (messageId: string, block: CodeBlock) => void
   updateCodeBlockStatus: (messageId: string, blockId: string, status: 'applied' | 'rejected') => void
   setStreaming: (streaming: boolean) => void
@@ -281,6 +284,10 @@ interface ChatActions {
   // Inline diff actions (centralized — handle DiffService + store + agent unblock atomically)
   approveDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => Promise<void>
   rejectDiff: (messageId: string, toolCallId: string, diffResultId: string | undefined) => void
+  /** Variantes por diffResultId (DiffApprovalPanel só tem o DiffResult):
+   *  localizam messageId+toolCallId e delegam nas ações acima. */
+  approveDiffByResultId: (diffResultId: string) => Promise<void>
+  rejectDiffByResultId: (diffResultId: string) => void
   approveAllPendingDiffs: () => Promise<void>
   rejectAllAndStop: () => Promise<void>
   // Low-level diff status (used internally / by GeneratingView)
@@ -675,6 +682,32 @@ export function resolveDiffApprovalByResultId(diffResultId: string, approved: bo
   // GeneratingView and inline approval), or the diffResultId is stale.
 }
 
+/**
+ * Localiza o par messageId+toolCallId de um diff pendente a partir do seu
+ * diffResultId — mesma pesquisa de resolveDiffApprovalByResultId, mas
+ * devolvendo a localização para as ações approveDiff/rejectDiff (que
+ * precisam do messageId para o update atómico do transcript).
+ */
+function findDiffLocationByResultId(diffResultId: string): { messageId: string; toolCallId: string } | null {
+  const state = useChatStore.getState()
+  const session = state.getActiveSession()
+  if (!session) return null
+  for (const msg of session.messages) {
+    const tc = msg.toolCalls?.find(t => t.diffResultId === diffResultId)
+    if (tc?.id) return { messageId: msg.id, toolCallId: tc.id }
+  }
+  // Fallback: pendingDiffs conhece o toolCallId; encontra a mensagem dona.
+  const diff = state.pendingDiffs.find(d => d.id === diffResultId)
+  if (diff?.toolCallId) {
+    for (const msg of session.messages) {
+      if (msg.toolCalls?.some(t => t.id === diff.toolCallId)) {
+        return { messageId: msg.id, toolCallId: diff.toolCallId }
+      }
+    }
+  }
+  return null
+}
+
 export async function createDiffApprovalPromise(toolCallId: string): Promise<boolean> {
   // Auto-aprovação de diffs por DOIS interruptores:
   //  - autoApproveDiffs ("Accept All" no chrome do chat), como sempre;
@@ -787,6 +820,10 @@ export function resolveAllPendingDiffApprovals(approved: boolean) {
     resolve(approved)
   }
   pendingDiffApprovals.clear()
+  // Um lote de writes órfão (abort/stop a meio do turno) deixaria o gate do
+  // toolExecutor a deixar passar tools de runs futuros — limpar aqui cobre
+  // todos os caminhos de cancelamento de uma vez.
+  endWriteBatch()
 
   // Desbloquear o agente NÃO chega: o `diffStatus` dos tool calls ficava em
   // `pending`, portanto o cartão de diff mantinha os botões Accept/Reject vivos
@@ -813,6 +850,15 @@ export function resolveAllPendingDiffApprovals(approved: boolean) {
  */
 export function hasPendingDiffApprovals(): boolean {
   return pendingDiffApprovals.size > 0
+}
+
+/**
+ * IDs (toolCallId) das aprovações de diff atualmente pendentes. O gate do
+ * toolExecutor usa isto para deixar passar membros do lote de writes ativo
+ * (writeBatch.ts) enquanto bloqueia tudo o resto.
+ */
+export function getPendingDiffApprovalToolIds(): string[] {
+  return Array.from(pendingDiffApprovals.keys())
 }
 
 function appendTextToStreamingMessage(msg: ChatMessage, delta: string, uiOnly = false): void {
@@ -1334,8 +1380,51 @@ function assistantTextForModel(msg: ChatMessage): string {
   return sawTextBlock ? text : (msg.content || '')
 }
 
+/** Marker the model sees after an aborted assistant turn (cli-vaz literal). */
+export const INTERRUPT_MESSAGE = '[Request interrupted by user]'
+
+/**
+ * Índice da ÚLTIMA fronteira de compactação, ou -1.
+ *
+ * Porquê a última e não a primeira: uma sessão longa compacta várias vezes, e
+ * cada compactação resume tudo o que veio antes — incluindo o sumário anterior.
+ * Só a mais recente descreve o estado atual.
+ */
+export function findLastCompactBoundaryIndex(messages: ChatMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role === 'system' && m.kind === 'compact_boundary') return i
+  }
+  return -1
+}
+
+/**
+ * Reconstrói o que vai para o modelo a partir do transcript.
+ *
+ * COMPACTAÇÃO É UM FILTRO DE LEITURA, NÃO UMA ELIMINAÇÃO (2026-07-31)
+ * ───────────────────────────────────────────────────────────────────
+ * O corte na última fronteira acontece AQUI. Até agora era o
+ * `addCompactBoundaryMessage` que apagava as mensagens pré-fronteira do store —
+ * e o store é o que vai para disco, portanto a compactação destruía o
+ * transcript. Três consequências que ninguém tinha ligado entre si:
+ *
+ *   · o comentário do ChatView dizia "the pre-compression history stays in
+ *     storage (so session export and re-open still see it)" e era falso;
+ *   · o botão "mostrar histórico anterior" (`revealPreBoundary`) nunca podia
+ *     aparecer numa auto-compactação, porque `preBoundaryCount` era sempre 0 —
+ *     havia UI para revelar dados que já tinham sido apagados;
+ *   · e o utilizador perdia para sempre o que escreveu, sem aviso.
+ *
+ * O claude-vaz faz o contrário: guarda tudo e filtra na leitura
+ * (`getMessagesAfterCompactBoundary`). Passa a ser assim aqui — o filtro vive
+ * neste único sítio, o que torna TODOS os callers corretos sem cada um ter de
+ * se lembrar de cortar.
+ */
 // Exported for tests — pure function, no store access.
-export function rebuildConversationHistory(messages: ChatMessage[]): ConversationMessage[] {
+export function rebuildConversationHistory(allMessages: ChatMessage[]): ConversationMessage[] {
+  const boundaryIndex = findLastCompactBoundaryIndex(allMessages)
+  const messages = boundaryIndex === -1 ? allMessages : allMessages.slice(boundaryIndex)
+
   const history: ConversationMessage[] = []
   const toolTouches = collectToolTouches(messages)
 
@@ -1349,6 +1438,13 @@ export function rebuildConversationHistory(messages: ChatMessage[]): Conversatio
     if (msg.role === 'system') {
       if (msg.kind === 'compact_boundary' && msg.compactSummary) {
         history.push({ role: 'user', content: msg.compactSummary })
+      }
+      // Estado de trabalho recuperado — mensagem própria, a seguir ao sumário.
+      // Separada para o modelo ler "o que aconteceu" e "com que material
+      // continuo" como duas coisas, e para o cartão da fronteira poder mostrar
+      // o sumário sem despejar ficheiros na UI.
+      if (msg.kind === 'compact_boundary' && msg.compactRecovery) {
+        history.push({ role: 'user', content: msg.compactRecovery })
       }
       return
     }
@@ -1414,6 +1510,9 @@ export function rebuildConversationHistory(messages: ChatMessage[]): Conversatio
         // message_stop): intentionally emit NOTHING for them — their
         // tool_call is in no assistant message, so a synthetic result would
         // be an orphan the normalizer strips at the API boundary anyway.
+        if (msg.wasInterrupted) {
+          history.push({ role: 'user', content: INTERRUPT_MESSAGE })
+        }
         return
       }
 
@@ -1478,6 +1577,13 @@ export function rebuildConversationHistory(messages: ChatMessage[]): Conversatio
           role: 'user',
           content: msg.toolCalls.map(tc => buildToolResultBlock(tc, tc.id)),
         })
+      }
+
+      // User aborted this turn (Stop/ESC). Without the marker the model reads
+      // its truncated reply as a completed answer and, on the next turn,
+      // reasons from a conclusion it never reached (cli-vaz parity).
+      if (msg.wasInterrupted) {
+        history.push({ role: 'user', content: INTERRUPT_MESSAGE })
       }
     } else {
       history.push({ role: msg.role, content: msg.content })
@@ -2329,7 +2435,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
     },
 
-    addCompactBoundaryMessage: (beforeTokens: number, trigger: CompactMetadata['trigger'] = 'auto', messagesSummarized?: number, summary?: string) => {
+    addCompactBoundaryMessage: (beforeTokens: number, trigger: CompactMetadata['trigger'] = 'auto', messagesSummarized?: number, summary?: string, recovery?: string) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
         id: messageId,
@@ -2341,6 +2447,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         // it into the outgoing prompt so the model keeps the pre-boundary context
         // after auto-compaction (the in-loop summary is otherwise discarded).
         ...(summary ? { compactSummary: summary } : {}),
+        // Idem para o estado de trabalho recuperado: dentro do run ele vive no
+        // array do loop, mas o run acaba e o próximo reconstrói a conversa a
+        // partir do store. Sem o persistir aqui, a recuperação durava um run e
+        // o run seguinte arrancava outra vez só com a narrativa.
+        ...(recovery ? { compactRecovery: recovery } : {}),
         level: 'info',
         content: `Conversa comprimida (${Math.round(beforeTokens / 1000)}K tokens).`,
         timestamp: Date.now(),
@@ -2383,15 +2494,15 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           newMessages = [...session.messages, message]
         }
 
-        // Trim pre-boundary messages from the store so the UI updates
-        // immediately without relying on ChatView's slice logic (which
-        // can lag behind during active streaming). Keep the boundary
-        // message itself and everything after it (including the in-flight
-        // streaming assistant message).
-        const boundaryIdx = newMessages.findIndex(m => m.id === messageId)
-        if (boundaryIdx > 0) {
-          newMessages = newMessages.slice(boundaryIdx)
-        }
+        // NÃO se corta nada aqui (2026-07-31). Cortar era rápido de ver na UI
+        // mas o store é o que vai para disco: a compactação apagava o
+        // transcript do utilizador para sempre, e o botão "mostrar histórico
+        // anterior" do ChatView ficava sem dados para mostrar. O corte passou a
+        // ser um FILTRO DE LEITURA, em dois sítios que já existiam e agora
+        // mandam sozinhos: `rebuildConversationHistory` (o que o modelo vê) e o
+        // slice do ChatView em `lastBoundaryIndex` (o que o utilizador vê). O
+        // `conversationVersion` abaixo é o que força o ChatView a recalcular na
+        // hora — era essa a preocupação legítima do corte, e continua servida.
 
         const updatedSession: ChatSession = {
           ...session,
@@ -3161,6 +3272,18 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       resolveDiffApproval(toolCallId, false)
     },
 
+    approveDiffByResultId: async (diffResultId: string) => {
+      const loc = findDiffLocationByResultId(diffResultId)
+      if (!loc) return
+      await get().approveDiff(loc.messageId, loc.toolCallId, diffResultId)
+    },
+
+    rejectDiffByResultId: (diffResultId: string) => {
+      const loc = findDiffLocationByResultId(diffResultId)
+      if (!loc) return
+      get().rejectDiff(loc.messageId, loc.toolCallId, diffResultId)
+    },
+
     rejectAllAndStop: async () => {
       const { activeSessionId, sessions } = get()
       if (!activeSessionId) return
@@ -3235,7 +3358,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
     },
 
-    finalizeAssistantMessage: () => {
+    finalizeAssistantMessage: (opts?: { interrupted?: boolean }) => {
       let finalMessages: ChatMessage[] | null = null
       let finalizedSessionIsActive = true
 
@@ -3268,6 +3391,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           const reasoningDurationMs = (msg.reasoningStartedAt && !msg.reasoningDurationMs)
             ? Date.now() - msg.reasoningStartedAt
             : msg.reasoningDurationMs
+          // Aborted mid-work with something already streamed → persist the
+          // interruption so history rebuilds tell the model the turn was cut,
+          // not concluded. An empty bubble gets no stamp (nothing to explain).
+          const wasInterrupted = opts?.interrupted === true
+            && Boolean(msg.content || msg.toolCalls?.length || msg.reasoningContent)
           return {
             ...msg,
             isStreaming: false,
@@ -3277,6 +3405,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             ...(turnDurationMs !== undefined && { turnDurationMs }),
             ...(turnInputTokens > 0 && { turnInputTokens }),
             ...(turnOutputTokens > 0 && { turnOutputTokens }),
+            ...(wasInterrupted && { wasInterrupted }),
           }
         })
 

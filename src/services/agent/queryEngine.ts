@@ -52,6 +52,8 @@ export interface QueryEngineOptions {
   executeTool: ToolExecutorFn
   /** Streaming-execution predicate — see QueryParams.isStreamSafeTool. */
   isStreamSafeTool?: (toolName: string) => boolean
+  /** Write-tool predicate (batching de diffs) — ver QueryParams.isWriteTool. */
+  isWriteTool?: (toolName: string) => boolean
   /** Re-injeção do reminder crítico — ver QueryParams.reinjectCriticalReminder. */
   reinjectCriticalReminder?: boolean
   /** Lembrete de reconciliação do tracker — exclusivo do agente principal. */
@@ -74,12 +76,20 @@ export interface QueryEngineOptions {
   extraHeaders?: Record<string, string>
   /** Called as soon as streaming response headers are available. */
   onResponseHeaders?: (headers: Headers) => void
+  /** Costura de host (P1 headless) — ver QueryParams.isTeamMemberBudgetBlocked. */
+  isTeamMemberBudgetBlocked?: () => Promise<boolean>
+  /** Costura de host (P1 headless) — ver QueryParams.onBudgetExhausted. */
+  onBudgetExhausted?: () => void | Promise<void>
   /** Inter-turn attachment collector — see QueryParams.collectInterTurnContext. */
   collectInterTurnContext?: () => Promise<string>
   /** Queued-message steering collector — see QueryParams.collectQueuedSteering. */
   collectQueuedSteering?: () => Promise<QueuedSteeringContent | null>
   /** Live active-model limits for auto-compact — see QueryParams.getContextLimits. */
   getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null }
+  /** Arquivo do transcript pré-compactação — ver QueryParams.archivePreCompact. */
+  archivePreCompact?: (older: { role: 'user' | 'assistant'; content: unknown }[]) => Promise<string | null>
+  /** Recuperação do estado de trabalho pós-compactação — ver QueryParams.buildPostCompactRecovery. */
+  buildPostCompactRecovery?: (maxChars?: number) => Promise<string | null>
   /** Dynamic toolset selector — when present, the loop filters tools per turn. */
   /** Read-only por política — ver a nota em QueryParams.readOnlyRun. */
   readOnlyRun?: boolean
@@ -87,8 +97,6 @@ export interface QueryEngineOptions {
   auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection
   /** Execution phase for bootstrap/original-task telemetry and guardrails. */
   executionPhase?: 'project_bootstrap' | 'original_task'
-  /** True when the original user request asks to implement/change/fix files. */
-  mutableTask?: boolean
   /** Delegate telemetry — see QueryParams.getDelegateTelemetry. */
   getDelegateTelemetry?: () => {
     requestedMember: string | null;
@@ -194,6 +202,7 @@ export class QueryEngine {
       tools: this.options.tools,
       executeTool: this.options.executeTool,
       isStreamSafeTool: this.options.isStreamSafeTool,
+      isWriteTool: this.options.isWriteTool,
       reinjectCriticalReminder: this.options.reinjectCriticalReminder,
       enableTaskTrackerReminder: this.options.enableTaskTrackerReminder,
       signal: this.abortController.signal,
@@ -211,13 +220,16 @@ export class QueryEngine {
       },
       compactInstructions: this.options.compactInstructions,
       onResponseHeaders: this.options.onResponseHeaders,
+      isTeamMemberBudgetBlocked: this.options.isTeamMemberBudgetBlocked,
+      onBudgetExhausted: this.options.onBudgetExhausted,
       collectInterTurnContext: this.options.collectInterTurnContext,
       collectQueuedSteering: this.options.collectQueuedSteering,
       getContextLimits: this.options.getContextLimits,
+      archivePreCompact: this.options.archivePreCompact,
+      buildPostCompactRecovery: this.options.buildPostCompactRecovery,
       readOnlyRun: this.options.readOnlyRun,
       auxiliarySelection: this.options.auxiliarySelection,
       executionPhase: this.options.executionPhase,
-      mutableTask: this.options.mutableTask,
       getDelegateTelemetry: this.options.getDelegateTelemetry,
     }
 

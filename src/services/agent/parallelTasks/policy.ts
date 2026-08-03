@@ -8,7 +8,8 @@
  *  - at most one live agent run per project path (main loop or session runner);
  *  - addParallelTask always refuses;
  *  - a second spawn on a busy project steers the existing run when possible;
- *  - send_agent_message is disabled (no peer agent bus);
+ *  - there is no peer agent bus (the send_agent_message tool was removed from
+ *    the registry on 2026-08-03 — it had been error-only since F3);
  *  - multi-window parallel work = different projects in different processes.
  *
  * Set false only with an explicit product decision to re-enable worktree fan-out

@@ -48,7 +48,15 @@ function makeCommand(overrides: Partial<BackgroundCommand> = {}): BackgroundComm
 }
 
 function seedStore(...cmds: BackgroundCommand[]) {
-  useBackgroundCommandStore.setState({ commands: new Map(cmds.map(c => [c.id, c])) })
+  // P3.1 (2026-08-03): a store é fachada-espelho do processRegistry do motor
+  // — semear por setState deixava o registry às cegas e as acções delegadas
+  // (completeCommand etc.) viravam no-ops sobre ids desconhecidos. Semeia
+  // pelo caminho real: addCommand → registry → espelho. O cancelAll inicial
+  // neutraliza sobras running de testes anteriores (o registry é
+  // module-level); entradas terminadas não são renderizadas pela strip.
+  const store = useBackgroundCommandStore.getState()
+  store.cancelAll()
+  for (const c of cmds) store.addCommand(c)
 }
 
 describe('BackgroundCommandsBar — cablagem', () => {

@@ -124,17 +124,17 @@ in the IDE's billing memories.)
 |---------|-------------|
 | One live agent run per **project path** (main loop **or** session/project runner) | Concurrent fan-out tasks in the **same** project (`addParallelTask` always refuses) |
 | **Steer** the live run (Enter / mid-run message) | Spawning a second agent on a busy project (redirects to steer when possible) |
-| **Multi-window, multi-project**: window A on `/proj-a`, window B on `/proj-b` | Peer agent messaging (`send_agent_message` is **disabled**) |
+| **Multi-window, multi-project**: window A on `/proj-a`, window B on `/proj-b` | Peer agent messaging (the `send_agent_message` tool was **removed from the registry**, 2026-08-03) |
 | Sub-agents **read-only** under the owner (Explore / Research / Verify, cap shared) | Inter-agent “teams” board / peer chat |
 | Sequential **queue** (park on Stop; resume) same session | Parallel worktrees **for concurrent agents on one project** (worktree machinery remains for future / isolated checkouts; **not** multi-agent fan-out while F3 is on) |
 
-**Mental model today:** not “N agents on one tree”, but **N windows × N projects**, each with **at most one** agent, plus positional sessions (steer the run you are viewing). Coordinate humans via the developer, not `send_agent_message`.
+**Mental model today:** not “N agents on one tree”, but **N windows × N projects**, each with **at most one** agent, plus positional sessions (steer the run you are viewing). Coordinate humans via the developer — there is no peer-agent messaging tool.
 
 **Code gates:**
 
 - `parallelTaskManager.addParallelTask` → always `null` + i18n warn  
 - `addSessionAgentRun` / project run → steer if project busy, else spawn  
-- `send_agent_message` tool → hard error (deprecated under F3)  
+- `send_agent_message` tool → **removed from the registry** (2026-08-03; was error-only under F3 — a call from an old transcript now gets the standard unknown-tool error)  
 - Status writer assumes a single live owner per project file  
 
 ### Session / UI invariants (still hold)
@@ -200,7 +200,8 @@ multi-agent fan-out on one project (F3: one agent per project).
 the session the developer is viewing. Sub-agents remain owner-scoped tools.
 
 **Runtime as of 2026-07-24:** see **Current parallel model** — **one agent per project**;
-intra-project concurrent tasks and `send_agent_message` are off. Worktree multi-task design
+intra-project concurrent tasks are off and the `send_agent_message` tool was removed from the
+registry (2026-08-03). Worktree multi-task design
 below is retained as archive of implementation investment.
 
 **Invariantes (violá-las = regressão):**

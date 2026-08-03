@@ -1,6 +1,9 @@
 import { invoke } from '@tauri-apps/api/core'
 import ContextBuilder from '../contextBuilder'
+import { BOUNDED_INLINE_CONTEXTS } from '../contextBuilder/auxiliaryRegistry'
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../contextBuilder/helpers'
+import { getCriticalReinjectionReminder } from '../contextBuilder/sections/chatSections'
+import { WRITE_ALIAS, EDIT_ALIAS, CREATE_FILE } from '../toolNames'
 
 // contextBuilder → contextPlanner → firebaseAuth, which reads
 // import.meta.env at module load (Jest cannot parse import.meta). Stub it
@@ -129,13 +132,16 @@ describe('ContextBuilder', () => {
       expect(sel?.loaded.map(l => l.id)).toContain('vision.image_rules')
     })
 
-    it('sem imagem fica em bugfix_local e NÃO carrega as regras de visão', async () => {
+    it('sem imagem fica em bugfix_local (full delivery inclui as regras de visão)', async () => {
       await builder.buildSystemPrompt(
         '/test/project', 'web', undefined, undefined, 'corrige este bug',
       )
       const sel = builder.getLastAuxiliarySelection()
       expect(sel?.profile).toBe('bugfix_local')
-      expect(sel?.loaded.map(l => l.id)).not.toContain('vision.image_rules')
+      // Doutrina full-delivery (2026-08-03): vision.image_rules é bounded e
+      // vai inline em todos os perfis — o CONTEÚDO adapta-se à capacidade do
+      // modelo (getVisionSection lê supportsAttachments), não a presença.
+      expect(sel?.loaded.map(l => l.id)).toContain('vision.image_rules')
     })
 
     it('returns a string', async () => {
@@ -211,16 +217,17 @@ describe('ContextBuilder', () => {
       // Planner desligado: ZERO chamadas sidecar; seleção determinística.
       expect(fetchMock).toHaveBeenCalledTimes(0)
       expect(selection?.profile).toBe('bugfix_local')
-      expect(selection?.contextPlannerStatus).toBe('fallback')
-      // Determinística NÃO quer dizer VAZIA (auditoria 2026-07-28): a seleção
-      // vazia deixava auxLoadedContent={} e matava no prompt as secções que só
-      // lêem de lá — git status e estado do dev-server incluídos, apesar de o
-      // gatherGitContext() continuar a correr. A baseline de delivery é sempre
-      // carregada; o resto fica on-demand via request_context.
-      expect(selection?.contextPlan.selectedContexts).toEqual([
-        'delivery.git_status',
-        'delivery.dev_server',
-      ])
+      // 'deterministic', não 'fallback' (2026-08-03): não há planner para
+      // falhar — a selecção determinística é o desenho, e a telemetria não
+      // pode auto-descrever o desenho como degradação.
+      expect(selection?.contextPlannerStatus).toBe('deterministic')
+      // Determinística NÃO quer dizer VAZIA (auditoria 2026-07-28) e, desde a
+      // doutrina full-delivery (2026-08-03), também não quer dizer mínima: as
+      // secções BOUNDED vão todas inline (BOUNDED_INLINE_CONTEXTS) + a
+      // baseline de delivery; on-demand ficam só as unbounded.
+      expect([...(selection?.contextPlan.selectedContexts ?? [])].sort()).toEqual(
+        [...BOUNDED_INLINE_CONTEXTS, 'delivery.git_status', 'delivery.dev_server'].sort(),
+      )
       expect(prompt).not.toContain('__TM_SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
     })
 
@@ -258,11 +265,70 @@ describe('ContextBuilder', () => {
       expect(prompt).toContain('resume directly')
     })
 
-    it('allows multiple serial diff-producing tools in one response', async () => {
+    it('descreve o batching de writes como ele é — sem "run serially"', async () => {
+      // O nome antigo deste teste ("allows multiple serial diff-producing
+      // tools") e a frase que ele travava vinham de quando os writes CORRIAM
+      // mesmo em série. Depois do lote de diffs (2026-07-31) o runtime despacha
+      // writes a ficheiros distintos em paralelo — e a frase "write tools run
+      // serially" ficou a contradizer, duas secções acima, a promessa de lote
+      // que o próprio prompt passou a fazer. Contradição no prompt custa mais
+      // do que instrução em falta: o modelo escolhe uma das duas ao acaso.
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
-      expect(prompt).toContain('each `write_file`/`edit_file`/`create_file` call produces a reviewable diff')
+      expect(prompt).toContain(
+        `each \`${WRITE_ALIAS}\`/\`${EDIT_ALIAS}\`/\`${CREATE_FILE}\` call produces its own diff`,
+      )
       expect(prompt).toContain('You MAY make multiple file-change tool calls in the same assistant response')
+      // A regra do mesmo ficheiro tem de estar dita: é o hazard de lost update.
+      expect(prompt).toContain('two writes to the SAME file are chained')
+      expect(prompt).not.toContain('write tools run serially')
       expect(prompt).not.toMatch(new RegExp(['Claude', 'Code parity'].join('\\s+')))
+    })
+
+    it('declares parallel tool-call capability in the tools section', async () => {
+      // Auditoria momenu-fact (2026-07-31): sem a declaração explícita de
+      // capacidade, o modelo emitia 1 call/turno em 8/8 turnos apesar da
+      // instrução de batching enterrada em subsecção.
+      const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+      expect(prompt).toContain('You can call MULTIPLE tools in a single response')
+      expect(prompt).toContain('ONE batch of diffs')
+    })
+
+    it('o Reminder acaba no bullet 12 e o MCP volta a ser o 13', async () => {
+      // O bullet sobre calls (13) saiu em 2026-07-31 junto com a secção
+      // `# Turn efficiency`: o claude-vaz não tem nenhum dos dois, e a
+      // doutrina explícita mediu-se a levar 8 → 31 calls na MESMA tarefa
+      // (mandava maximizar uma contagem). O encaminhamento para o sub-agente
+      // vive agora na descrição do Grep/Glob/LS — o sítio onde o modelo está
+      // quando ia disparar o 3.º grep.
+      const plain = await fullPrompt('/test/project', 'web')
+      expect(plain).toContain("12. **OTHER AGENTS' SESSIONS**")
+      const tail = plain.slice(plain.indexOf("12. **OTHER AGENTS'")).split('\n#')[0]
+      expect(tail).not.toContain('\n13.')
+
+      const withMcp = await fullPrompt('/test/project', 'web', [
+        { name: 'query_db', description: 'run a query', serverName: 'postgres' },
+      ])
+      expect(withMcp).toContain('13. **MCP available**')
+      expect(withMcp).not.toContain('14. **MCP available**')
+    })
+
+    it('a secção # Turn efficiency já não é injetada', async () => {
+      const prompt = await fullPrompt('/test/project', 'web')
+      expect(prompt).not.toContain('# Turn efficiency')
+      expect(prompt).not.toContain('## Batch within a turn')
+      expect(prompt).not.toContain('## Skip expensive verification')
+      // As DUAS regras que não eram sobre eficiência mudaram de casa e têm de
+      // continuar vivas: a de correctness em `# Doing tasks`…
+      expect(prompt).toContain('Removing a symbol means removing EVERY reference')
+      // …e a declaração de multi-tool, que fica na secção de tools.
+      expect(prompt).toContain('You can call MULTIPLE tools in a single response')
+    })
+
+    it('critical reinjection reminder restates the batching rule', () => {
+      // O comentário de getCriticalReinjectionReminder exige acordo entre o
+      // Reminder estático e a re-injeção — o bullet 13 tem de ter eco aqui.
+      const reminder = getCriticalReinjectionReminder()
+      expect(reminder).toContain('Batch independent tool calls in one assistant message.')
     })
 
     it('interpolates tool names from toolNames.ts (not hardcoded literals)', async () => {

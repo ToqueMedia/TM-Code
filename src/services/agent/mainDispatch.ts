@@ -39,8 +39,6 @@ import type { AgentCallbacks } from './types'
 export interface IntentClassification {
   profile: PromptProfile
   readOnly: boolean
-  /** True when this turn should ultimately mutate project files/state. */
-  requiresMutation: boolean
   source: 'model' | 'fallback' | 'keyword'
   confidence: 'high' | 'medium' | 'low' | 'none'
   /** Short reason for logging / export telemetry. */
@@ -84,7 +82,6 @@ export interface MCPToolSummaryLite {
 export const TMS_BOOTSTRAP_INTENT: IntentClassification = {
   profile: 'project_bootstrap',
   readOnly: false,
-  requiresMutation: true,
   source: 'keyword',
   confidence: 'high',
   reason: 'TMS.md bootstrap preflight selected project_bootstrap before the original task',
@@ -276,7 +273,11 @@ export function buildMainLoopCallbacks(
   const finalizeOnce = () => {
     if (!finalized) {
       finalized = true
-      useChatStore.getState().finalizeAssistantMessage()
+      // Aborted runs stamp the interruption on the bubble — the next turn's
+      // rebuilt history then tells the model the reply was cut, not concluded.
+      useChatStore.getState().finalizeAssistantMessage(
+        agentService.isAborted() ? { interrupted: true } : undefined,
+      )
     }
   }
 
@@ -383,10 +384,10 @@ export function buildMainLoopCallbacks(
       if (!isBackgroundRun && !agentService.isAborted()) {
         let mainBgRunning = 0
         try {
-          // Lazy import: backgroundCommandStore is store-only, safe from cycles.
+          // Lazy require (P3.1: registry do motor — módulo puro, sem ciclos).
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { useBackgroundCommandStore } = require('../../stores/backgroundCommandStore') as typeof import('../../stores/backgroundCommandStore')
-          for (const c of useBackgroundCommandStore.getState().getAll()) {
+          const { processRegistry } = require('./processRegistry') as typeof import('./processRegistry')
+          for (const c of processRegistry.getAll()) {
             // 'main' or project-bound main stamp (taskId `project:{id}`).
             if (c.status === 'running' && (c.owner === 'main' || c.owner.startsWith('project:'))) {
               mainBgRunning++
@@ -492,7 +493,7 @@ export function buildMainLoopCallbacks(
         logger.info('agent', '✓ Context compression complete')
         useAgentStore.getState().setCompactPhase('idle')
         useAgentStore.getState().setStatus('awaiting_response')
-        useChatStore.getState().addCompactBoundaryMessage(event.beforeTokens, event.trigger, event.messagesSummarized, event.summary)
+        useChatStore.getState().addCompactBoundaryMessage(event.beforeTokens, event.trigger, event.messagesSummarized, event.summary, event.recovery)
       }
     },
     // ── Steering de mensagens em fila (paridade claude-vaz) ──

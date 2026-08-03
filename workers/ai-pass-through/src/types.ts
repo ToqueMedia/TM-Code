@@ -131,6 +131,12 @@ export interface Env {
    *  que estola a meio da geração). Sem ele, a Response ficava aberta até o
    *  runtime a matar com "code had hung". 0/negativo desliga o watchdog. */
   UPSTREAM_STREAM_IDLE_TIMEOUT_MS?: string
+  /** Tecto para LER o corpo que o CLIENTE envia (`await request.json()`).
+   *  Um upload estolado (TCP vivo, bytes parados) não dispara `request.signal`
+   *  — o cliente não abortou — e pendurava o pedido até o runtime o matar com
+   *  "code had hung". Default 60s (folgado para prompts de centenas de KB);
+   *  0/negativo desliga. */
+  CLIENT_BODY_TIMEOUT_MS?: string
   /** Re-tentativas do pedido ao provedor em falhas transitórias de gateway
    *  (HTML 400 do Tengine/DashScope, 502/503/504, timeout/transporte). Default
    *  2 (3 tentativas no total); "0" desliga. */
