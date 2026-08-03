@@ -25,7 +25,10 @@ export type PreviewMode = 'server' | 'static' | 'api'
 export type DevLogLevel = 'info' | 'warn' | 'error'
 
 /** Event name for dev server log additions — shared between layoutStore (emit) and toolExecutor (listen). */
-export const DEV_LOG_EVENT = 'devserver-log-added'
+// DEV_LOG_EVENT (CustomEvent no window) foi substituído pelo canal do
+// hostBus a 2026-08-03 (P3.3 headless): emitDevServerLogAdded /
+// onDevServerLogAdded — o único consumidor era o read_dev_logs do executor.
+import { emitDevServerLogAdded } from '@/services/agent/host/hostBus'
 
 export interface DevServerLogEntry {
   id: number
@@ -332,7 +335,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
       const trimmed = logs.length >= MAX_LOG_ENTRIES ? logs.slice(-MAX_LOG_ENTRIES + 1) : logs
       return { devServerLogs: [...trimmed, entry] }
     })
-    window.dispatchEvent(new CustomEvent(DEV_LOG_EVENT, { detail: { level } }))
+    emitDevServerLogAdded(level)
   },
 
   addDevServerLogs: (entries) => {
@@ -359,7 +362,7 @@ export const useLayoutStore = create<LayoutState & LayoutActions>()((set, get) =
       return { devServerLogs: trimmed }
     })
     const level: DevLogLevel = hasError ? 'error' : hasWarn ? 'warn' : 'info'
-    window.dispatchEvent(new CustomEvent(DEV_LOG_EVENT, { detail: { level } }))
+    emitDevServerLogAdded(level)
   },
 
   clearDevServerLogs: () => {

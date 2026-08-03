@@ -83,7 +83,7 @@ import {
   DIVERGENT_TRAINED_TOOLS,
   CHECK_BACKGROUND_COMMANDS,
 } from './toolNames'
-import { notifyHost, emitToolProgress } from './host/hostBus'
+import { notifyHost, emitToolProgress, onDevServerLogAdded } from './host/hostBus'
 import { processRegistry } from './processRegistry'
 import { getAgentHost } from './host/agentHost'
 import { ENTER_WORKTREE_DESCRIPTION, EXIT_WORKTREE_DESCRIPTION } from './toolExecutor/worktrees'
@@ -5256,7 +5256,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         concurrencySafe: true,
       },
       execute: async (input) => {
-        const { useLayoutStore, DEV_LOG_EVENT } = await import('../../stores/layoutStore')
+        const { useLayoutStore } = await import('../../stores/layoutStore')
 
         if (!devServerManager.isActive()) {
           return 'No dev server is running. Start one with start_dev_server.'
@@ -5273,8 +5273,9 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         //      previous deploys that are already fixed.
         //   2. Only wait if the dev server reloaded recently (last 5s) —
         //      if the server has been stable for a while, no point waiting.
-        //   3. Subscribe to DEV_LOG_EVENT and return immediately when an
-        //      error arrives. Timeout after 3s.
+        //   3. Subscribe to the hostBus dev-log channel (P3.3: era um
+        //      CustomEvent do DOM) and return immediately when an error
+        //      arrives. Timeout after 3s.
         //   4. Re-check after subscribing to close the race window between
         //      the initial check and the addEventListener.
         const RECENCY_WINDOW = 5000
@@ -5295,27 +5296,25 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         if (!hasRecentErrors() && hasRecentActivity()) {
           await new Promise<void>(resolve => {
             let timer: ReturnType<typeof setTimeout>
-            const handler = (e: Event) => {
-              const detail = (e as CustomEvent<{ level: string }>).detail
-              if (detail.level === 'error') {
+            const unsubscribe = onDevServerLogAdded((level) => {
+              if (level === 'error') {
                 clearTimeout(timer)
-                window.removeEventListener(DEV_LOG_EVENT, handler)
+                unsubscribe()
                 resolve()
               }
-            }
-            window.addEventListener(DEV_LOG_EVENT, handler)
+            })
 
             // Re-check: error may have arrived between hasRecentErrors()
-            // and addEventListener — close the race window.
+            // and the subscription — close the race window.
             if (hasRecentErrors()) {
               clearTimeout(timer!)
-              window.removeEventListener(DEV_LOG_EVENT, handler)
+              unsubscribe()
               resolve()
               return
             }
 
             timer = setTimeout(() => {
-              window.removeEventListener(DEV_LOG_EVENT, handler)
+              unsubscribe()
               resolve()
             }, 3000)
           })

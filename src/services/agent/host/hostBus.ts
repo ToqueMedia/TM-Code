@@ -96,3 +96,31 @@ export function emitToolProgress(e: ToolProgressEvent): void {
     /* progresso é melhor-esforço — nunca parte o run */
   }
 }
+
+// ── Logs do dev server (P3.3 — portão duro nº5) ───────────────────────────
+// O read_dev_logs esperava por um CustomEvent do DOM disparado pelo
+// layoutStore (pipeline WebView do preview → IPC → addDevServerLog). O canal
+// passa pelo bus: o emissor continua a ser quem adiciona logs; o executor
+// subscreve sem tocar em window.
+
+type DevServerLogHandler = (level: string) => void
+const devServerLogHandlers = new Set<DevServerLogHandler>()
+
+/** Emitido sempre que uma entrada de log do dev server é adicionada. */
+export function emitDevServerLogAdded(level: string): void {
+  for (const handler of Array.from(devServerLogHandlers)) {
+    try {
+      handler(level)
+    } catch {
+      /* um subscritor partido não trava os restantes */
+    }
+  }
+}
+
+/** Subscreve novas entradas de log do dev server. Devolve o unsubscribe. */
+export function onDevServerLogAdded(handler: DevServerLogHandler): () => void {
+  devServerLogHandlers.add(handler)
+  return () => {
+    devServerLogHandlers.delete(handler)
+  }
+}
