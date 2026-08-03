@@ -60,25 +60,24 @@ describe('permissionStore — Modo YOLO (sem diálogos)', () => {
     expect(usePermissionStore.getState().pendingPermission).toBeNull()
   })
 
-  it("YOLO NÃO auto-aprova a válvula do .env — 'env_file' fura o shortcut (F1-9)", async () => {
+  it("YOLO auto-aprova TAMBÉM a válvula do .env — fura tudo, sem excepções (decisão 03-08)", async () => {
     resetStore({ autoModePermissions: true })
 
-    const pending = usePermissionStore.getState().requestPermission(
+    const decision = await usePermissionStore.getState().requestPermission(
       'read_file',
       { file_path: '/p/.env' },
       'env_file',
     )
 
-    // Em vez do yoloApprove imediato, o diálogo foi ENFILEIRADO — decisão
-    // humana obrigatória (o selo do .env sobrevive ao YOLO).
-    const entry = usePermissionStore.getState().pendingPermission
-    expect(entry).not.toBeNull()
-    expect(entry?.promptReason).toBe('env_file')
-
-    usePermissionStore.getState().approve()
-    const decision = await pending
-    expect(decision.approved).toBe(true)
-    expect(decision.prompted).toBe(true)
+    // "O YOLO fura tudo; o único travão é o humano" — nenhum diálogo, nem
+    // para o .env. Em modo NORMAL a válvula mostra sempre o diálogo (testes
+    // do executor cobrem-no); em YOLO, autonomia total significa total.
+    expect(decision).toEqual(expect.objectContaining({
+      approved: true,
+      prompted: false,
+      source: 'yolo',
+    }))
+    expect(usePermissionStore.getState().pendingPermission).toBeNull()
   })
 
   it('YOLO ON: forcePrompt (dangerous_command) também não pede', async () => {

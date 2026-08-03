@@ -588,11 +588,11 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
     // ON: zero permission UI for this project (tools, dangerous cmds, secrets,
     // path access via requestPathAccess). Diffs auto-accept in chatStore when
     // autoModePermissions is set. OFF: full normal flow below.
-    // EXCEPÇÃO ÚNICA ao short-circuit (task F1-9, 2026-08-03): 'env_file' —
-    // a válvula de leitura do .env exige SEMPRE decisão humana explícita.
-    // O YOLO nunca a auto-aprova: a doutrina "o selo do .env sobrevive ao
-    // YOLO" mantém-se; a válvula só muda o hard-block por um diálogo.
-    if (isAutoModeEnabled(projectId) && promptReason !== 'env_file') {
+    // SEM excepções (decisão do produto, 2026-08-03): "o YOLO fura tudo; o
+    // único travão é o humano" — que o liga e desliga. A válvula do .env
+    // ('env_file', F1-9) também é auto-aprovada aqui: em modo normal ela
+    // mostra SEMPRE o diálogo; em YOLO, autonomia total significa total.
+    if (isAutoModeEnabled(projectId)) {
       return Promise.resolve(yoloApprove())
     }
 

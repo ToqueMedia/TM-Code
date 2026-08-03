@@ -34,9 +34,11 @@ describe('createHeadlessAgentHost', () => {
     expect((await host.requestPathAccess('/fora/x', '/fora')).approved).toBe(false)
   })
 
-  it('válvula do .env: negada SEMPRE — mesmo com --yolo não há humano', async () => {
-    const host = createHeadlessAgentHost({ yolo: true })
-    const denied = await host.canUseTool('read_file', { file_path: '/p/.env' }, 'env_file')
+  it('válvula do .env: com --yolo aprova (YOLO fura tudo); sem --yolo nega', async () => {
+    const yoloHost = createHeadlessAgentHost({ yolo: true })
+    expect((await yoloHost.canUseTool('read_file', { file_path: '/p/.env' }, 'env_file')).approved).toBe(true)
+    const soberHost = createHeadlessAgentHost({ yolo: false })
+    const denied = await soberHost.canUseTool('read_file', { file_path: '/p/.env' }, 'env_file')
     expect(denied.approved).toBe(false)
     expect(denied.denyReason).toMatch(/human approval/)
   })

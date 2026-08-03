@@ -66,12 +66,13 @@ export function createHeadlessAgentHost(opts: { yolo: boolean }): AgentHost {
   const { yolo } = opts
   return {
     async canUseTool(toolName, _args, forcePrompt) {
-      // A válvula do .env exige um humano a decidir — headless nega SEMPRE,
-      // mesmo com --yolo (espelho da regra "o selo sobrevive ao YOLO").
-      if (forcePrompt === 'env_file') {
+      // Válvula do .env sem --yolo: não há humano para aprovar → nega. COM
+      // --yolo aprova, como tudo (decisão do produto 03-08: o YOLO fura
+      // tudo; o humano ligou-o explicitamente ao lançar o runner).
+      if (forcePrompt === 'env_file' && !yolo) {
         return decision(
           false,
-          'headless: reading .env requires an explicit human approval — not available in a runner.',
+          'headless without --yolo: reading .env needs a human approval — re-run with --yolo or handle it in the window.',
         )
       }
       if (yolo || HEADLESS_READ_ONLY.has(toolName)) return decision(true)

@@ -1260,10 +1260,10 @@ class ToolExecutor {
     const filePath = (input.file_path || input.oldPath || input.directory || '') as string
     // VÁLVULA DE LEITURA do .env (task F1-9, 2026-08-03): os DOIS tools de
     // leitura dedicados deixam de bater num hard-block e passam a pedir
-    // aprovação humana explícita com o motivo 'env_file' — que FURA o
-    // short-circuit do YOLO (permissionStore.requestPermission): o selo
-    // sobrevive ao YOLO; a válvula só troca o muro por um diálogo. Caso de
-    // uso que motivou: debugging da classe env-leak no próprio repo do TM.
+    // aprovação humana explícita com o motivo 'env_file'. Em YOLO a válvula
+    // auto-aprova como tudo o resto (decisão do produto: "o YOLO fura tudo;
+    // o único travão é o humano" — que o liga). Caso de uso que motivou:
+    // debugging da classe env-leak no próprio repo do TM.
     // Tudo o resto mantém o selo integral: escrita é exclusiva do
     // request_credentials, e search/glob/shell eram as classes de bypass da
     // auditoria de 2026-07-28.
