@@ -243,9 +243,8 @@ async function runJob(job: RunnerJob): Promise<void> {
       if (finished) return
       try {
         const session = useChatStore.getState().getActiveSession()
-        const last = [...(session?.messages ?? [])]
-          .reverse()
-          .find(m => m.role === 'assistant')
+        const msgs = session?.messages ?? []
+        const last = [...msgs].reverse().find(m => m.role === 'assistant')
         let text = typeof last?.content === 'string' ? last.content : ''
         if (!text && last?.contentBlocks?.length) {
           text = last.contentBlocks
@@ -255,11 +254,33 @@ async function runJob(job: RunnerJob): Promise<void> {
             })
             .join('')
         }
-        finish(0, { type: 'result', subtype: 'success', text })
+        // Raio-X (smoke #10: text vazio SOBREVIVEU ao fallback — em vez de
+        // mais uma hipótese, o result carrega a anatomia real da sessão).
+        const lastX = last as
+          | (typeof last & { reasoningContent?: string; isStreaming?: boolean })
+          | undefined
+        finish(0, {
+          type: 'result',
+          subtype: 'success',
+          text,
+          diag: {
+            sessionId: (session as { id?: string } | undefined)?.id ?? null,
+            messageCount: msgs.length,
+            lastRoles: msgs.slice(-4).map(m => m.role),
+            lastAssistant: lastX
+              ? {
+                  contentLen: typeof lastX.content === 'string' ? lastX.content.length : -1,
+                  blocks: lastX.contentBlocks?.map(b => (b as { type?: string }).type ?? '?') ?? [],
+                  reasoningLen: lastX.reasoningContent?.length ?? 0,
+                  isStreaming: lastX.isStreaming ?? false,
+                }
+              : null,
+          },
+        })
       } catch (err) {
         finish(1, { type: 'result', subtype: 'error', error: String(err) })
       }
-    }, 150)
+    }, 500)
   })
 
   hardTimer = setTimeout(() => {
