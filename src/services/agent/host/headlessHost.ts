@@ -65,7 +65,15 @@ function decision(approved: boolean, denyReason?: string): PermissionDecision {
 export function createHeadlessAgentHost(opts: { yolo: boolean }): AgentHost {
   const { yolo } = opts
   return {
-    async canUseTool(toolName) {
+    async canUseTool(toolName, _args, forcePrompt) {
+      // A válvula do .env exige um humano a decidir — headless nega SEMPRE,
+      // mesmo com --yolo (espelho da regra "o selo sobrevive ao YOLO").
+      if (forcePrompt === 'env_file') {
+        return decision(
+          false,
+          'headless: reading .env requires an explicit human approval — not available in a runner.',
+        )
+      }
       if (yolo || HEADLESS_READ_ONLY.has(toolName)) return decision(true)
       return decision(
         false,

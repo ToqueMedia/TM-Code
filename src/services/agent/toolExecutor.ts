@@ -1258,8 +1258,25 @@ class ToolExecutor {
     // dialog, secrets returned as match lines. Broad searches that merely
     // *contain* a .env are handled at the source, in search.rs.
     const filePath = (input.file_path || input.oldPath || input.directory || '') as string
-    if (this.isEnvFile(filePath) && ['read_file', READ_AROUND, 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file', 'search_files', 'glob'].includes(toolName)) {
-      return 'Blocked: .env is sealed (it holds secrets) — the agent cannot read or write it. This block is by design and is NOT a sign that a key is missing. To supply a credential, call request_credentials (it writes straight to .env); once it returns "Credentials saved to .env", that key IS present — trust that result, do not re-read .env to verify, and never ask the developer to edit .env by hand. A .env.example with placeholder values is fine for documentation only.'
+    // VÁLVULA DE LEITURA do .env (task F1-9, 2026-08-03): os DOIS tools de
+    // leitura dedicados deixam de bater num hard-block e passam a pedir
+    // aprovação humana explícita com o motivo 'env_file' — que FURA o
+    // short-circuit do YOLO (permissionStore.requestPermission): o selo
+    // sobrevive ao YOLO; a válvula só troca o muro por um diálogo. Caso de
+    // uso que motivou: debugging da classe env-leak no próprio repo do TM.
+    // Tudo o resto mantém o selo integral: escrita é exclusiva do
+    // request_credentials, e search/glob/shell eram as classes de bypass da
+    // auditoria de 2026-07-28.
+    if (this.isEnvFile(filePath) && ['read_file', READ_AROUND].includes(toolName)) {
+      const decision = await getAgentHost().canUseTool(toolName, input, 'env_file', this.resolvePermissionOrigin())
+      this.recordPermission(toolCallId, decision)
+      if (!decision.approved) {
+        const reason = decision.denyReason ? ` User says: ${decision.denyReason}` : ''
+        return `Blocked: .env read denied by the developer.${reason} The seal is by design and NOT a sign that a key is missing — to supply a credential call request_credentials; to see which keys the project EXPECTS, read .env.example.`
+      }
+      // Aprovado → cai para a execução normal da leitura.
+    } else if (this.isEnvFile(filePath) && ['write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file', 'search_files', 'glob'].includes(toolName)) {
+      return 'Blocked: .env is sealed (it holds secrets) — the agent cannot write, edit, delete or bulk-scan it (a direct read_file may be REQUESTED and needs the developer\'s explicit approval). This block is by design and is NOT a sign that a key is missing. To supply a credential, call request_credentials (it writes straight to .env); once it returns "Credentials saved to .env", that key IS present — trust that result, do not re-read .env to verify, and never ask the developer to edit .env by hand. A .env.example with placeholder values is fine for documentation only.'
     }
 
     // Same seal, shell surfaces. A path-based check cannot see `cat .env`, so

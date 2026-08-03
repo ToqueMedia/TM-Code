@@ -171,6 +171,7 @@ export default function PermissionDialog({
   const isCommand = isCommandScoped || promptReason === 'dangerous_command'
 
   const reasonTag =
+    promptReason === 'env_file' ? t('perm.envFile') :
     promptReason === 'sensitive_file' ? t('perm.sensitiveFile') :
     promptReason === 'dangerous_command' ? t('perm.dangerousCommand') :
     promptReason === 'browser_action' ? t('perm.browserAction') :

@@ -51,7 +51,7 @@
 ### Self-hosting — trabalhar NESTE repo a partir do próprio TM Code
 - Dogfood SÓ a partir da **build instalada**. Editar `src/` não afecta a instância instalada que te hospeda — mas numa instância `yarn tauri dev` afectaria: o HMR recarrega o webview onde o TEU loop corre. A instância dev é **alvo de verificação** (processo separado, lançado em background/PTY e observado pelos logs), nunca o hospedeiro do agente.
 - **Nunca** matar a porta/árvore de processos da própria IDE — o teu processo hospedeiro morre contigo dentro.
-- O `.env` deste repo está mecanicamente selado (como em todos): debugging da classe env-leak passa pelo developer, não por tentativas de leitura.
+- O `.env` deste repo está selado (como em todos) para escrita/edição/scan; a LEITURA directa pode ser pedida via válvula (F1-9): diálogo de aprovação explícita ao developer, que fura o YOLO — e que o runner headless nega sempre. Útil exactamente para a classe env-leak deste repo.
 - Builds longas (`yarn tauri:build:*`, suite Jest completa, cargo) excedem o tecto de 600s do shell bloqueante: usa `execute_command_background` com `timeout_secs` explícito (tecto 3600 — o sistema acorda-te no fim, nunca sondar) ou a shell PTY persistente. Nunca o `execute_command` bloqueante.
 - Abrir o mesmo projecto na instância dev dispara o aviso de double-open do window-lock — é esperado; confirma com o developer.
 - Paralelismo: a política autoritativa é **F3 = um agente por projecto** (`src/services/agent/parallelTasks/policy.ts` + ARCHITECTURE.md → "Current parallel model"). Não contornar sem decisão escrita do developer nesse documento.

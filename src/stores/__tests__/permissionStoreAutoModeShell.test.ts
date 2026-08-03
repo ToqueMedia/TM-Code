@@ -60,6 +60,27 @@ describe('permissionStore — Modo YOLO (sem diálogos)', () => {
     expect(usePermissionStore.getState().pendingPermission).toBeNull()
   })
 
+  it("YOLO NÃO auto-aprova a válvula do .env — 'env_file' fura o shortcut (F1-9)", async () => {
+    resetStore({ autoModePermissions: true })
+
+    const pending = usePermissionStore.getState().requestPermission(
+      'read_file',
+      { file_path: '/p/.env' },
+      'env_file',
+    )
+
+    // Em vez do yoloApprove imediato, o diálogo foi ENFILEIRADO — decisão
+    // humana obrigatória (o selo do .env sobrevive ao YOLO).
+    const entry = usePermissionStore.getState().pendingPermission
+    expect(entry).not.toBeNull()
+    expect(entry?.promptReason).toBe('env_file')
+
+    usePermissionStore.getState().approve()
+    const decision = await pending
+    expect(decision.approved).toBe(true)
+    expect(decision.prompted).toBe(true)
+  })
+
   it('YOLO ON: forcePrompt (dangerous_command) também não pede', async () => {
     resetStore({ autoModePermissions: true })
 

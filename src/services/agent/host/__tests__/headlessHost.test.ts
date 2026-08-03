@@ -34,6 +34,13 @@ describe('createHeadlessAgentHost', () => {
     expect((await host.requestPathAccess('/fora/x', '/fora')).approved).toBe(false)
   })
 
+  it('válvula do .env: negada SEMPRE — mesmo com --yolo não há humano', async () => {
+    const host = createHeadlessAgentHost({ yolo: true })
+    const denied = await host.canUseTool('read_file', { file_path: '/p/.env' }, 'env_file')
+    expect(denied.approved).toBe(false)
+    expect(denied.denyReason).toMatch(/human approval/)
+  })
+
   it('credenciais e perguntas respondem "cancelado" imediatamente', async () => {
     const host = createHeadlessAgentHost({ yolo: true })
     expect(await host.requestCredentials({

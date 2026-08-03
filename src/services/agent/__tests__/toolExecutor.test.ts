@@ -799,12 +799,21 @@ describe('A: execute() orchestration', () => {
 // ═══════════════════════════════════════════════════════════════════════
 
 describe('B: Security blocks', () => {
-  it('blocks read_file on .env files', async () => {
+  it('read_file no .env passa pela VÁLVULA (F1-9): pede env_file; negado → block', async () => {
     const exec = freshExecutor()
-    const result = await exec.execute('read_file', { file_path: '/projects/test-app/.env' })
-    expect(result).toContain('Blocked')
-    expect(result).toContain('.env')
-    expect(result).toContain('secrets')
+    // Negado pelo developer → bloqueio com a razão.
+    mockRequestPermission.mockResolvedValueOnce({ approved: false, prompted: true, source: 'user' })
+    const denied = await exec.execute('read_file', { file_path: '/projects/test-app/.env' })
+    expect(denied).toContain('Blocked: .env read denied')
+    expect(mockRequestPermission).toHaveBeenCalledWith(
+      'read_file',
+      expect.objectContaining({ file_path: '/projects/test-app/.env' }),
+      'env_file',
+      undefined,
+    )
+    // Aprovado (default do mock) → a leitura prossegue, sem block.
+    const approved = await exec.execute('read_file', { file_path: '/projects/test-app/.env' })
+    expect(approved).not.toContain('Blocked')
   })
 
   it('blocks write_file on .env files', async () => {
@@ -930,11 +939,15 @@ describe('B: Security blocks', () => {
     expect(result).not.toContain('Blocked: .env')
   })
 
-  it('blocks .env.local, .env.production, .env.test', async () => {
+  it('variantes .env.local/.env.production/.env.test passam pela válvula e negadas bloqueiam', async () => {
     const exec = freshExecutor()
     for (const variant of ['.env.local', '.env.production', '.env.test', '.env.development']) {
+      mockRequestPermission.mockResolvedValueOnce({ approved: false, prompted: true, source: 'user' })
       const result = await exec.execute('read_file', { file_path: `/projects/test-app/${variant}` })
       expect(result).toContain('Blocked')
+      expect(mockRequestPermission).toHaveBeenLastCalledWith(
+        'read_file', expect.anything(), 'env_file', undefined,
+      )
     }
   })
 

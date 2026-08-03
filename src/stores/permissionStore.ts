@@ -371,7 +371,7 @@ function getToolScope(toolName: string): 'core' | 'mcp' {
 }
 
 /** Why this permission requires a forced prompt (bypasses "Accept All") */
-export type PromptReason = 'sensitive_file' | 'dangerous_command' | 'browser_action' | 'path_access' | 'generated_file' | 'untracked_file' | null
+export type PromptReason = 'sensitive_file' | 'dangerous_command' | 'browser_action' | 'path_access' | 'generated_file' | 'untracked_file' | 'env_file' | null
 
 /**
  * Outcome of a permission request — enriched so callers can record the path
@@ -588,7 +588,11 @@ export const usePermissionStore = create<PermissionState & PermissionActions>()(
     // ON: zero permission UI for this project (tools, dangerous cmds, secrets,
     // path access via requestPathAccess). Diffs auto-accept in chatStore when
     // autoModePermissions is set. OFF: full normal flow below.
-    if (isAutoModeEnabled(projectId)) {
+    // EXCEPÇÃO ÚNICA ao short-circuit (task F1-9, 2026-08-03): 'env_file' —
+    // a válvula de leitura do .env exige SEMPRE decisão humana explícita.
+    // O YOLO nunca a auto-aprova: a doutrina "o selo do .env sobrevive ao
+    // YOLO" mantém-se; a válvula só muda o hard-block por um diálogo.
+    if (isAutoModeEnabled(projectId) && promptReason !== 'env_file') {
       return Promise.resolve(yoloApprove())
     }
 
