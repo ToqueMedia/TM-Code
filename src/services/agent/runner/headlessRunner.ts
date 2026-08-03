@@ -139,23 +139,32 @@ async function runJob(job: RunnerJob): Promise<void> {
     // mensagem da sessão — o diagnóstico que a janela mostraria.
     if (state.status === 'error') {
       if (finished) return
-      let lastMessage = ''
-      try {
-        const session = useChatStore.getState().getActiveSession()
-        const last = [...(session?.messages ?? [])].reverse()[0]
-        lastMessage =
-          typeof last?.content === 'string'
-            ? last.content.slice(-2000)
-            : JSON.stringify(last?.content ?? '').slice(-2000)
-      } catch {
-        /* diagnóstico é melhor-esforço */
-      }
-      finish(1, {
-        type: 'result',
-        subtype: 'error',
-        error: state.error ?? 'agent status = error (sem mensagem no store)',
-        lastMessage,
-      })
+      // setStatus('error') e setError(message) são DOIS set() separados no
+      // mainDispatch.onError — este subscriber acorda no primeiro, antes de
+      // a mensagem existir (smoke #6 devolveu "sem mensagem no store" com o
+      // erro real a aterrar um tick depois). Espera-se um tick curto para
+      // recolher o diagnóstico completo.
+      setTimeout(() => {
+        if (finished) return
+        let lastMessage = ''
+        try {
+          const session = useChatStore.getState().getActiveSession()
+          const last = [...(session?.messages ?? [])].reverse()[0]
+          lastMessage =
+            typeof last?.content === 'string'
+              ? last.content.slice(-2000)
+              : JSON.stringify(last?.content ?? '').slice(-2000)
+        } catch {
+          /* diagnóstico é melhor-esforço */
+        }
+        finish(1, {
+          type: 'result',
+          subtype: 'error',
+          error: useAgentStore.getState().error
+            ?? 'agent status = error (sem mensagem no store)',
+          lastMessage,
+        })
+      }, 120)
       return
     }
     if (state.status !== 'idle') {
