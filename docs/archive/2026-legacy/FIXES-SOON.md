@@ -1,3 +1,5 @@
+> **HISTÓRICO (arquivado 2026-08-03) — NÃO reflecte o presente.** Fragmento (itens 4–6); vários pontos já resolvidos (ex.: tools independentes correm em paralelo hoje).
+
 4. Sem percepção do estado do editor                                                                                                                                                                                                                                         
                                                                                                                                                                                                                                                                                
   Não sabe que ficheiro está aberto, onde está o cursor, que erro o developer está a ver. Trabalha "às cegas" em relação à UI.                                                                                                                                                 

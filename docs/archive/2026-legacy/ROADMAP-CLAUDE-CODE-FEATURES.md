@@ -1,3 +1,5 @@
+> **HISTÓRICO (arquivado 2026-08-03) — NÃO reflecte o presente.** Os P0s aqui listados como "em falta" (plan mode, memória, sub-agentes, background tasks) foram construídos entretanto. Fonte actual: `TMS.md` + `ARCHITECTURE.md` na raiz.
+
 # Features Absorvidas do Claude Code — Roadmap
 
 > Análise de features do Claude Code Desktop que o TM Code pode absorver para superar o Cursor.

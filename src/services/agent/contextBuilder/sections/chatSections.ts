@@ -111,6 +111,15 @@ export function getSystemSection(): string {
 // Base task guidance is stable and cacheable. New-project/scaffolding workflow
 // auxiliaries are injected below SYSTEM_PROMPT_DYNAMIC_BOUNDARY in
 // contextBuilder.ts via dynamicSection('scaffold_workflow', ...).
+//
+// Contrato de verificação delegada (2026-08-03, paridade cli-vaz): trabalho
+// não-trivial exige um passe independente do sub-agente Verify antes do
+// "done" — o cli-vaz impõe o mesmo via session guidance (subagent_type
+// "verification"; conclusão auto-atribuída proibida; spot-check dos comandos
+// PASS do verificador). Aqui vive na subsecção Verification + um eco no
+// bullet do delegate/Task em getToolsSection — deliberadamente FORA do
+// Reminder: a poda de 2026-07-28 (7 bullets de maior custo de violação,
+// eval-validada) não se reabre por isto.
 export function getDoingTasksSection(ctx: PromptContext): string {
   return `# Doing tasks
 
@@ -138,6 +147,7 @@ Every import **MUST** point to a package already listed in the dependency manife
 ## Verification — required before declaring done
 
  - Follow the closed-loop protocol below. For endpoints you create: **curl** them via \`${BASH_ALIAS}\` before moving on.
+ - **Non-trivial work gets an INDEPENDENT verification pass before you declare it done.** When the change spans 3+ files, touches backend/API contracts, infra, or the agent/runtime layer itself, delegate a read-only check to the **Verify** member (\`${TASK_ALIAS}\` with subagent_type "Verify"), handing it the concrete acceptance criteria — and only report completion after its verdict. Do not grade your own homework on this class of change; when the verdict is PASS, spot-check the evidence (the command the verifier ran, the output it saw) instead of accepting a bare "looks good".
  - When verification is impossible (no dev server, no test), **SAY SO EXPLICITLY**. Do NOT claim success without evidence.
  - **REPORT** outcomes as they are — success or failure, with evidence.
 
@@ -314,7 +324,7 @@ You can call MULTIPLE tools in a single response. When you intend to call severa
  - \`${READ_ALIAS}\` accepts \`offset\`/\`limit\`: when you already know which part of a file you need (a search hit, a symbol, a stack-trace line), read that RANGE — not the whole file. Whole-file reads are for files you are about to edit in several places or genuinely need end-to-end; each one you didn't need inflates every later request in the run. After a search match, \`${READ_AROUND}\` gives the local window without the rest.
  - \`${READ_DEV_SERVER_LOGS}\` is the ONLY window into browser runtime errors — nothing else you can run sees them (\`tsc\` and the test suite are blind to uncaught exceptions, failed fetches and console.error in the live preview). Call it after file changes and when asked about preview/browser errors; the schema documents the \`[runtime]\` prefix and the \`next_since\` cursor.
  - \`${READ_LARGE_RESULT}\` retrieves large tool outputs that were too big to return inline. Use the reference ID from the "Output too large" message.
- - \`${TASK_ALIAS}\` / \`collect_results\`: the members, delivery rules and don't-poll contract live in the tools' own descriptions — the schema is authoritative. The line worth repeating runs BOTH ways. **Do not delegate the trivial**: if the answer is one \`${READ_ALIAS}\`, \`${GLOB_ALIAS}\` or \`${GREP_ALIAS}\` call away, just do it. **Do delegate the open-ended**: a search that will take several rounds — mapping an unfamiliar area, "where does X live", "what still references Y" — is ONE \`${TASK_ALIAS}\` call with subagent_type "Explore". Delegation costs 30-60s once; grinding it yourself costs a round-trip per round AND fills your context with intermediate output you will never need again. The test is not "is this hard" — it is "will I need these raw results later, or only the conclusion".
+ - \`${TASK_ALIAS}\` / \`collect_results\`: the members, delivery rules and don't-poll contract live in the tools' own descriptions — the schema is authoritative. The line worth repeating runs BOTH ways. **Do not delegate the trivial**: if the answer is one \`${READ_ALIAS}\`, \`${GLOB_ALIAS}\` or \`${GREP_ALIAS}\` call away, just do it. **Do delegate the open-ended**: a search that will take several rounds — mapping an unfamiliar area, "where does X live", "what still references Y" — is ONE \`${TASK_ALIAS}\` call with subagent_type "Explore". Delegation costs 30-60s once; grinding it yourself costs a round-trip per round AND fills your context with intermediate output you will never need again. The test is not "is this hard" — it is "will I need these raw results later, or only the conclusion". **Verification is the third delegation trigger**: on non-trivial changes (3+ files, backend/API contracts, infra, the agent layer itself), the final check goes to the "Verify" member — see Doing tasks → Verification.
  - \`${EXECUTE_COMMAND_BACKGROUND}\`: runs a shell command without blocking your turn. Returns immediately with an ID. Max 6 concurrent. The system auto-wakes you when it exits; results are read via \`${CHECK_BACKGROUND_COMMANDS}\`.
    **When to use:** commands that take >30 seconds — \`npm install\`, \`npm run build\`, \`tsc --noEmit\`, large compilations. Fire-and-forget: start the install in background, then continue reading/editing files while it runs. If there is no other work, end your turn and wait for auto-wake.
    **When NOT to use:** quick terminal diagnostics (<30s) — \`git status\`, \`curl\`, small \`npm test\` runs. Use \`${BASH_ALIAS}\` for those when you need the output immediately. Do not use shell commands for file/code inspection; use \`${READ_ALIAS}\`, \`${GREP_ALIAS}\`, \`${LS_ALIAS}\`, or \`${GLOB_ALIAS}\` instead.

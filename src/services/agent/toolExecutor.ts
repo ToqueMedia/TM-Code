@@ -74,7 +74,6 @@ import {
   STOP_DEV_SERVER,
   LSP,
   CAPTURE_URL_DESIGN,
-  SEND_AGENT_MESSAGE,
   ENTER_WORKTREE,
   EXIT_WORKTREE,
   canonicalToolName,
@@ -5090,33 +5089,12 @@ ${preview}
       },
     })
 
-    // === send_agent_message — F3: peer bus off (ONE_AGENT_PER_PROJECT).
-    // Tool stays registered so old transcripts / models get an honest error.
-    this.tools.set(SEND_AGENT_MESSAGE, {
-      definition: {
-        name: SEND_AGENT_MESSAGE,
-        description:
-          'DEPRECATED (F3): there is only ONE agent per project. Inter-agent messaging is no longer available. Do not call this tool.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            target: { type: 'string' },
-            message: { type: 'string' },
-          },
-          required: ['target', 'message'],
-        },
-        concurrencySafe: true,
-      },
-      execute: async () => {
-        const { ONE_AGENT_PER_PROJECT, ONE_AGENT_PER_PROJECT_TOOL_ERROR } = await import(
-          './parallelTasks/policy'
-        )
-        if (ONE_AGENT_PER_PROJECT) {
-          return `Error: send_agent_message is disabled. ${ONE_AGENT_PER_PROJECT_TOOL_ERROR}`
-        }
-        return 'Error: send_agent_message is not available in this build.'
-      },
-    })
+    // send_agent_message — REMOVIDA do registry (2026-08-03). Ficara registada
+    // "para dar um erro honesto a transcrições antigas", mas o preço era o def
+    // viajar em TODOS os pedidos de TODOS os runs — custo permanente a proteger
+    // um caso raro, que agora recebe o erro padrão de tool desconhecida. A
+    // doutrina (um agente por projecto) continua em parallelTasks/policy.ts e
+    // no prompt das tarefas paralelas.
 
     // === execute_command ===
     this.tools.set('execute_command', {

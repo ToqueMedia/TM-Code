@@ -79,7 +79,9 @@ export const WEB_SEARCH = 'web_search'
 export const WEB_FETCH = 'web_fetch'
 /** Navigate + screenshot a URL and return a vision design handoff. */
 export const CAPTURE_URL_DESIGN = 'capture_url_design'
-export const SEND_AGENT_MESSAGE = 'send_agent_message'
+// send_agent_message — REMOVIDA (2026-08-03): desde a F3 estava registada só
+// para errar, e o def viajava em todos os pedidos. A doutrina "um agente por
+// projecto" vive em parallelTasks/policy.ts e no prompt das tarefas.
 export const GET_PROJECT_STATE_DIR = 'get_project_state_dir'
 
 // Sub-agent delegation (v0.7.0 — replaces research, verify, spawn_background_agent)
@@ -132,7 +134,7 @@ export const TOOL_NAMES = [
   AGENT_SHELL_START, AGENT_SHELL_WRITE, AGENT_SHELL_READ, AGENT_SHELL_STOP,
   START_DEV_SERVER, STOP_DEV_SERVER,
   WEB_SEARCH, WEB_FETCH, CAPTURE_URL_DESIGN,
-  DELEGATE, COLLECT_RESULTS, SEND_AGENT_MESSAGE,
+  DELEGATE, COLLECT_RESULTS,
   ENTER_WORKTREE, EXIT_WORKTREE,
   UPDATE_TASKS, GET_PROJECT_STATE_DIR,
   REQUEST_CREDENTIALS, ASK_USER_QUESTION,

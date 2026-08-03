@@ -2985,13 +2985,9 @@ describe('conformidade do contrato das tools', () => {
   const INDIRECT_CONSUMERS: Record<string, string> = {
     _toolCallId: 'injectado pelo bridge; lido por helpers de checkpoint/streaming',
     _abortSignal: 'injectado pelo bridge; passado ao invoke/fetch',
-    // DEPRECIADA de propósito (F3, ONE_AGENT_PER_PROJECT): a tool fica
-    // registada só para dar um erro honesto a transcrições antigas e a modelos
-    // que ainda a conheçam, portanto NÃO lê os seus parâmetros — é o único caso
-    // em que ignorar o input é o comportamento certo. Foi este portão que
-    // revelou que o prompt das tarefas paralelas ainda a anunciava como viva.
-    'send_agent_message.target': 'tool depreciada: erra sempre, sem ler input',
-    'send_agent_message.message': 'tool depreciada: erra sempre, sem ler input',
+    // (send_agent_message saiu daqui a 2026-08-03: a tool foi removida do
+    // registry de vez — ver o tombstone no registerTools. Este portão foi o
+    // que, em tempos, revelou que o prompt das tarefas ainda a anunciava.)
   }
 
   /** Um parâmetro citado num COMENTÁRIO não é consumo. */

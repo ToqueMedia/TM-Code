@@ -1,3 +1,5 @@
+> **HISTÓRICO (arquivado 2026-08-03) — NÃO reflecte o presente.** Ex.: o #3 afirma que o `execute_command` não tem timeout — hoje tem (120s default/600s máx). Fonte actual: `TMS.md` + `ARCHITECTURE.md` na raiz.
+
 # Top 5 Funcionalidades Críticas em Falta
 
 **TM Code — AI Agent-First IDE**
