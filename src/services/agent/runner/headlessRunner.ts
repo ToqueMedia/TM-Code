@@ -133,6 +133,31 @@ async function runJob(job: RunnerJob): Promise<void> {
   // 4. Fim do run: idle DEPOIS de ter estado activo. Subscrito ANTES do
   // enqueue para não haver janela em que o run começa e acaba sem nós.
   unsubscribe = useAgentStore.subscribe((state) => {
+    // 'error' é TERMINAL (smoke P6 #5: o status encravou em error e o
+    // condutor, que só conhecia idle, ficou pendurado até ao hard timeout
+    // sem nunca reportar o erro). Emite o erro do store + a cauda da última
+    // mensagem da sessão — o diagnóstico que a janela mostraria.
+    if (state.status === 'error') {
+      if (finished) return
+      let lastMessage = ''
+      try {
+        const session = useChatStore.getState().getActiveSession()
+        const last = [...(session?.messages ?? [])].reverse()[0]
+        lastMessage =
+          typeof last?.content === 'string'
+            ? last.content.slice(-2000)
+            : JSON.stringify(last?.content ?? '').slice(-2000)
+      } catch {
+        /* diagnóstico é melhor-esforço */
+      }
+      finish(1, {
+        type: 'result',
+        subtype: 'error',
+        error: state.error ?? 'agent status = error (sem mensagem no store)',
+        lastMessage,
+      })
+      return
+    }
     if (state.status !== 'idle') {
       sawActive = true
       return
