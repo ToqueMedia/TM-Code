@@ -384,10 +384,10 @@ export function buildMainLoopCallbacks(
       if (!isBackgroundRun && !agentService.isAborted()) {
         let mainBgRunning = 0
         try {
-          // Lazy import: backgroundCommandStore is store-only, safe from cycles.
+          // Lazy require (P3.1: registry do motor — módulo puro, sem ciclos).
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { useBackgroundCommandStore } = require('../../stores/backgroundCommandStore') as typeof import('../../stores/backgroundCommandStore')
-          for (const c of useBackgroundCommandStore.getState().getAll()) {
+          const { processRegistry } = require('./processRegistry') as typeof import('./processRegistry')
+          for (const c of processRegistry.getAll()) {
             // 'main' or project-bound main stamp (taskId `project:{id}`).
             if (c.status === 'running' && (c.owner === 'main' || c.owner.startsWith('project:'))) {
               mainBgRunning++

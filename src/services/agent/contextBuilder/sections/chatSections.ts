@@ -362,8 +362,10 @@ export const getBackgroundAgentsSection = getTeamSection
 // ── 8b. Background commands (conditional, async) ───────────────
 export async function getBackgroundCommandsSection(): Promise<string | null> {
   try {
-    const { useBackgroundCommandStore } = await import('../../../../stores/backgroundCommandStore')
-    const bgCmds = useBackgroundCommandStore.getState().getAll()
+    // P3.1: o prompt lê o registry do MOTOR — deixa de haver store de UI no
+    // caminho de construção do system prompt para processos de background.
+    const { processRegistry } = await import('../../processRegistry')
+    const bgCmds = processRegistry.getAll()
     if (bgCmds.length === 0) return null
 
     const running = bgCmds.filter(c => c.status === 'running')

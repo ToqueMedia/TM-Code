@@ -84,6 +84,7 @@ import {
   CHECK_BACKGROUND_COMMANDS,
 } from './toolNames'
 import { notifyHost, emitToolProgress } from './host/hostBus'
+import { processRegistry } from './processRegistry'
 import { getAgentHost } from './host/agentHost'
 import { ENTER_WORKTREE_DESCRIPTION, EXIT_WORKTREE_DESCRIPTION } from './toolExecutor/worktrees'
 import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileState, type FileStateCache } from './toolExecutor/fileStateCache'
@@ -5892,13 +5893,13 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         )
         await this.requirePathAccess(cwd)
 
-        const { useBackgroundCommandStore } = await import('../../stores/backgroundCommandStore')
-        const bgCmdStore = useBackgroundCommandStore.getState()
+        // P3.1: o registry do motor é a fonte de verdade — a store zustand
+        // passou a fachada-espelho para a UI.
 
         // Fix #4: GC old completed entries before checking concurrency
-        bgCmdStore.removeCompleted()
+        processRegistry.removeCompleted()
 
-        if (bgCmdStore.getRunningCount() >= 6) {
+        if (processRegistry.getRunningCount() >= 6) {
           return 'Cannot start: maximum 6 background commands running. Wait for one to complete or use check_background_commands.'
         }
 
@@ -5931,7 +5932,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
               bufferedOutput.push({ pid: event.payload.pid, data: event.payload.data })
             } else if (event.payload.pid === targetPid) {
               allOutput.push(event.payload.data)
-              useBackgroundCommandStore.getState().appendOutput(cmdId, event.payload.data)
+              processRegistry.appendOutput(cmdId, event.payload.data)
             }
           }
         )
@@ -5950,10 +5951,10 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
               // 'cancelled' e este exit é consequência do kill — reporta
               // cancel ao auto-wake, não uma falha, e sem notificação de SO
               // (foi o próprio user a terminar o processo).
-              if (useBackgroundCommandStore.getState().getById(cmdId)?.status === 'cancelled') {
+              if (processRegistry.getById(cmdId)?.status === 'cancelled') {
                 wakeForTerminalState('cancelled', code)
               } else if (code === 0) {
-                useBackgroundCommandStore.getState().completeCommand(cmdId, code)
+                processRegistry.completeCommand(cmdId, code)
                 wakeForTerminalState('completed', code)
                 // Send OS notification when command completes successfully
                 notifyHost({
@@ -5962,7 +5963,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
                   dedupKey: `bgcmd-done-${cmdId}`,
                 })
               } else {
-                useBackgroundCommandStore.getState().failCommand(cmdId, `Process exited with code ${code}`)
+                processRegistry.failCommand(cmdId, `Process exited with code ${code}`)
                 wakeForTerminalState('error', code)
                 // Send OS notification when command fails
                 notifyHost({
@@ -5982,7 +5983,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
 
           // Fix #1: addCommand BEFORE flush — so store entry exists when
           // buffered exit events are processed (avoids completeCommand no-op)
-          useBackgroundCommandStore.getState().addCommand({
+          processRegistry.addCommand({
             id: cmdId,
             command: cmd,
             // F2 MDI: stamp the run that owns this process (a parallel task's
@@ -6001,7 +6002,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           for (const ev of bufferedOutput) {
             if (ev.pid === pid) {
               allOutput.push(ev.data)
-              useBackgroundCommandStore.getState().appendOutput(cmdId, ev.data)
+              processRegistry.appendOutput(cmdId, ev.data)
             }
           }
           for (const ev of bufferedExit) {
@@ -6010,10 +6011,10 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
               if (timeoutTimer) clearTimeout(timeoutTimer)
               unOutput(); unExit()
               if (ev.code === 0) {
-                useBackgroundCommandStore.getState().completeCommand(cmdId, ev.code)
+                processRegistry.completeCommand(cmdId, ev.code)
                 wakeForTerminalState('completed', ev.code)
               } else {
-                useBackgroundCommandStore.getState().failCommand(cmdId, `Process exited with code ${ev.code}`)
+                processRegistry.failCommand(cmdId, `Process exited with code ${ev.code}`)
                 wakeForTerminalState('error', ev.code)
               }
             }
@@ -6021,7 +6022,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
 
           // If command already exited during flush, return immediately
           if (finished) {
-            const result = useBackgroundCommandStore.getState().getById(cmdId)
+            const result = processRegistry.getById(cmdId)
             const exitInfo = result?.exitCode !== null ? ` (exit ${result?.exitCode})` : ''
             return `Command completed immediately (PID: ${pid}, id: ${cmdId})${exitInfo}. Use check_background_commands once to see results.`
           }
@@ -6034,12 +6035,12 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
               // Se o user já cancelou mas o kill dele falhou (sem cmd-exit),
               // o timeout é só o backstop do kill — não reclassificar como erro.
               const userCancelled =
-                useBackgroundCommandStore.getState().getById(cmdId)?.status === 'cancelled'
+                processRegistry.getById(cmdId)?.status === 'cancelled'
               try { await invoke('kill_process', { pid }) } catch { /* best effort */ }
               if (userCancelled) {
                 wakeForTerminalState('cancelled', null)
               } else {
-                useBackgroundCommandStore.getState().failCommand(cmdId, `Timed out after ${timeoutSecs}s`)
+                processRegistry.failCommand(cmdId, `Timed out after ${timeoutSecs}s`)
                 wakeForTerminalState('error', null)
               }
             }
@@ -6054,7 +6055,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
                 if (timeoutTimer) clearTimeout(timeoutTimer)
                 unOutput(); unExit()
                 try { await invoke('kill_process', { pid }) } catch { /* best effort */ }
-                useBackgroundCommandStore.getState().cancelCommand(cmdId)
+                processRegistry.cancelCommand(cmdId)
                 wakeForTerminalState('cancelled', null)
               }
             }, { once: true })
@@ -6083,8 +6084,8 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         }
       },
       execute: async (input) => {
-        const { useBackgroundCommandStore } = await import('../../stores/backgroundCommandStore')
-        const bgCmdStore = useBackgroundCommandStore.getState()
+        // P3.1: o registry do motor é a fonte de verdade — a store zustand
+        // passou a fachada-espelho para a UI.
 
         const targetId = input.id as string | undefined
 
@@ -6101,7 +6102,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         // bloqueio: assim que algum comando muda de estado (ou termina), o
         // contador reinicia e a resposta normal volta. O que se recusa é
         // exactamente o gesto inútil — perguntar outra vez o que já se sabe.
-        const stillRunningSignature = bgCmdStore
+        const stillRunningSignature = processRegistry
           .getAll()
           .filter(cmd => cmd.status === 'running')
           .map(cmd => cmd.id)
@@ -6122,7 +6123,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         // tool lhe tinha dito para ir buscar e ouvia "não perguntes outra vez".
         // Uma recusa que bloqueia o gesto certo deixa de ser um guardrail.
         const targetStillRunning = targetId
-          ? bgCmdStore.getById(targetId)?.status === 'running'
+          ? processRegistry.getById(targetId)?.status === 'running'
           : false
         if (this.backgroundPollRepeats >= 1 && (!targetId || targetStillRunning)) {
           return (
@@ -6133,7 +6134,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         }
 
         if (targetId) {
-          const cmd = bgCmdStore.getById(targetId)
+          const cmd = processRegistry.getById(targetId)
           if (!cmd) return `No background command found with id: ${targetId}`
           if (cmd.status !== 'running') {
             const { acknowledgeBackgroundCommandWake } = await import('./backgroundCommands/autoWake')
@@ -6144,7 +6145,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           return formatBackgroundCommandResult(cmd, { full: true })
         }
 
-        const all = bgCmdStore.getAll()
+        const all = processRegistry.getAll()
         if (all.length === 0) return 'No background commands running or recently completed.'
 
         const lines: string[] = []

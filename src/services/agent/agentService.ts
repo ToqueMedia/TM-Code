@@ -59,6 +59,7 @@ import { REQUEST_CONTEXT_NAME, requestContextDefinition, TOOL_SEARCH_NAME, toolS
 import { emitAgentStopRequested } from "./host/hostBus";
 import { windowBudgetHooks } from "./host/windowHost";
 import { getAgentHost } from "./host/agentHost";
+import { processRegistry } from "./processRegistry";
 import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 import { classifyExecuteCommandPurpose, convertShellReadCommand } from "./commandPurpose";
@@ -323,26 +324,24 @@ class AgentService {
     import("../../stores/askUserQuestionStore")
       .then((m) => m.useAskUserQuestionStore.getState().clearAll())
       .catch(() => {});
-    import("../../stores/backgroundCommandStore")
-      .then(async (m) => {
-        const store = m.useBackgroundCommandStore.getState();
-        // F2 MDI: kill ONLY this (main) run's own background processes. A
-        // parallel task's background process (owner = its runId) belongs to a
-        // different project's live run — the main run's cancel/restart/budget
-        // stop must not tear it down. The task kills its own on its abort.
-        const running = store
-          .getAll()
-          .filter((c) => c.status === "running" && c.owner === "main");
-        for (const cmd of running) {
-          try {
-            await invoke("kill_process", { pid: cmd.pid });
-          } catch {
-            /* best effort */
-          }
-          store.cancelCommand(cmd.id);
+    void (async () => {
+      // F2 MDI: kill ONLY this (main) run's own background processes. A
+      // parallel task's background process (owner = its runId) belongs to a
+      // different project's live run — the main run's cancel/restart/budget
+      // stop must not tear it down. The task kills its own on its abort.
+      // (P3.1: registry do motor, não a store.)
+      const running = processRegistry
+        .getAll()
+        .filter((c) => c.status === "running" && c.owner === "main");
+      for (const cmd of running) {
+        try {
+          await invoke("kill_process", { pid: cmd.pid });
+        } catch {
+          /* best effort */
         }
-      })
-      .catch(() => {});
+        processRegistry.cancelCommand(cmd.id);
+      }
+    })().catch(() => {});
     this.isRunning = false;
     if (!this.lightweightOptions) {
       getQueryGuard().forceEnd();

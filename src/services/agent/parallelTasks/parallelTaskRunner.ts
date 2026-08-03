@@ -1080,13 +1080,12 @@ export async function runParallelTask(runId: string): Promise<void> {
     }).catch(() => {})
     // F2 MDI: kill THIS task's own background processes (owner = runId). The
     // main run's cancel kills only owner 'main', so the task reaps its own here.
-    void import('../../../stores/backgroundCommandStore').then(async ({ useBackgroundCommandStore }) => {
+    void import('../processRegistry').then(async ({ processRegistry }) => {
       const { invoke } = await import('@/utils/invokeMetrics')
-      const store = useBackgroundCommandStore.getState()
-      for (const c of store.getAll()) {
+      for (const c of processRegistry.getAll()) {
         if (c.owner === runId && c.status === 'running') {
           try { await invoke('kill_process', { pid: c.pid }) } catch { /* best effort */ }
-          store.cancelCommand(c.id)
+          processRegistry.cancelCommand(c.id)
         }
       }
     }).catch(() => {})
