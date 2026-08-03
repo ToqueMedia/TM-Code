@@ -83,7 +83,7 @@ import {
   DIVERGENT_TRAINED_TOOLS,
   CHECK_BACKGROUND_COMMANDS,
 } from './toolNames'
-import { notifyHost } from './host/hostBus'
+import { notifyHost, emitToolProgress } from './host/hostBus'
 import { getAgentHost } from './host/agentHost'
 import { ENTER_WORKTREE_DESCRIPTION, EXIT_WORKTREE_DESCRIPTION } from './toolExecutor/worktrees'
 import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileState, type FileStateCache } from './toolExecutor/fileStateCache'
@@ -104,7 +104,6 @@ import { getFsVersion, bumpFsVersion } from '../fsVersion'
 import CheckpointService from './checkpointService'
 import { markReadBeforeWriteBlocked, markTmsCreated, markTmsFullContextSent } from './tmsContext'
 import type { MCPTool } from '../mcp/mcpService'
-import { useChatStore } from '../../stores/chatStore'
 
 // === Types ===
 
@@ -2224,7 +2223,7 @@ ${preview}
 
     try {
       if (tcId) {
-        useChatStore.getState().updateToolCallProgress(tcId, 'Installing dependencies...')
+        emitToolProgress({ kind: 'progress', toolCallId: tcId, text: 'Installing dependencies...' })
       }
 
       const pid = await invoke<number>('run_streaming_command', { command, cwd })
@@ -2282,7 +2281,7 @@ ${preview}
 
       if (exitCode === 0) {
         if (tcId) {
-          useChatStore.getState().updateToolCallProgress(tcId, '')
+          emitToolProgress({ kind: 'progress', toolCallId: tcId, text: '' })
         }
         // Return summary for the model
         const lines = fullOutput.split('\n')
@@ -2311,7 +2310,7 @@ ${preview}
     // Each chunk may contain multiple lines. Append in one store update to
     // avoid React/Zustand nested update explosions on verbose commands.
     const chunks = data.split('\n')
-    useChatStore.getState().appendToolCallCommandLogs(toolCallId, chunks)
+    emitToolProgress({ kind: 'command_logs', toolCallId, chunks })
 
     // Show the last meaningful line as progress (single-line summary).
     // Strip ANSI so the chip never shows raw [38;5;Nm color codes.
@@ -2319,7 +2318,7 @@ ${preview}
     const lastLine = stripAnsi(lines[lines.length - 1] || '')
     if (lastLine.length > 0) {
       const display = lastLine.length > 80 ? lastLine.slice(0, 80) + '...' : lastLine
-      useChatStore.getState().updateToolCallProgress(toolCallId, display)
+      emitToolProgress({ kind: 'progress', toolCallId, text: display })
     }
   }
 
@@ -2377,7 +2376,7 @@ ${preview}
 
     try {
       if (tcId) {
-        useChatStore.getState().updateToolCallProgress(tcId, 'Running...')
+        emitToolProgress({ kind: 'progress', toolCallId: tcId, text: 'Running...' })
       }
 
       const pidOrResult = await invoke<number | { stdout: string; stderr: string; exitCode: number; success: boolean; timedOut: boolean }>('run_streaming_command', { command, cwd })
@@ -2449,7 +2448,7 @@ ${preview}
       const fullOutput = allOutput.join('')
 
       if (tcId) {
-        useChatStore.getState().updateToolCallProgress(tcId, '')
+        emitToolProgress({ kind: 'progress', toolCallId: tcId, text: '' })
       }
 
       // Detect dev server URL in output
@@ -3098,10 +3097,11 @@ ${preview}
 
         if (session.activeToolCallId) {
           const lines = clean.split('\n')
-          useChatStore.getState().appendToolCallCommandLogs(
-            session.activeToolCallId,
-            lines.map(line => line.replace(/\r/g, '')),
-          )
+          emitToolProgress({
+            kind: 'command_logs',
+            toolCallId: session.activeToolCallId,
+            chunks: lines.map(line => line.replace(/\r/g, '')),
+          })
         }
       }),
       listen<PtyExitEvent>('pty-exit', (event) => {

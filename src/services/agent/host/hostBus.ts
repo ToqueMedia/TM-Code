@@ -70,3 +70,29 @@ export function notifyHost(n: HostNotification): void {
     /* notificar é melhor-esforço — nunca parte o run */
   }
 }
+
+// ── Progresso de tool calls (P3 — portão duro nº4 do inventário) ──────────
+// O canal de progresso de uma tool em execução ERA o próprio transcript
+// (chatStore.updateToolCallProgress/appendToolCallCommandLogs chamados de
+// dentro do executor). Passa a evento de host: a janela alimenta o
+// transcript; um runner headless reencaminha para o stream de saída.
+
+export type ToolProgressEvent =
+  | { kind: 'progress'; toolCallId: string; text: string }
+  | { kind: 'command_logs'; toolCallId: string; chunks: string[] }
+
+type ToolProgressHandler = (e: ToolProgressEvent) => void
+let toolProgressHandler: ToolProgressHandler | null = null
+
+export function setToolProgressHandler(handler: ToolProgressHandler | null): void {
+  toolProgressHandler = handler
+}
+
+/** Progresso/logs de uma tool em execução. Sem handler é no-op. */
+export function emitToolProgress(e: ToolProgressEvent): void {
+  try {
+    toolProgressHandler?.(e)
+  } catch {
+    /* progresso é melhor-esforço — nunca parte o run */
+  }
+}

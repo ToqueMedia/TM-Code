@@ -10,11 +10,15 @@ import {
   onAgentStopRequested,
   notifyHost,
   setHostNotificationHandler,
+  emitToolProgress,
+  setToolProgressHandler,
   type HostNotification,
+  type ToolProgressEvent,
 } from '../hostBus'
 
 afterEach(() => {
   setHostNotificationHandler(null)
+  setToolProgressHandler(null)
 })
 
 describe('onAgentStopRequested / emitAgentStopRequested', () => {
@@ -81,5 +85,33 @@ describe('notifyHost', () => {
       throw new Error('boom')
     })
     expect(() => notifyHost({ title: 't', body: 'b' })).not.toThrow()
+  })
+})
+
+describe('emitToolProgress (P3 — portão nº4)', () => {
+  it('sem handler é no-op (semântica headless)', () => {
+    expect(() =>
+      emitToolProgress({ kind: 'progress', toolCallId: 'tc-1', text: 'Running...' }),
+    ).not.toThrow()
+  })
+
+  it('entrega progresso e logs ao handler, payload intacto e por ordem', () => {
+    const seen: ToolProgressEvent[] = []
+    setToolProgressHandler((e) => seen.push(e))
+    emitToolProgress({ kind: 'progress', toolCallId: 'tc-1', text: 'Installing dependencies...' })
+    emitToolProgress({ kind: 'command_logs', toolCallId: 'tc-1', chunks: ['a', 'b'] })
+    expect(seen).toEqual([
+      { kind: 'progress', toolCallId: 'tc-1', text: 'Installing dependencies...' },
+      { kind: 'command_logs', toolCallId: 'tc-1', chunks: ['a', 'b'] },
+    ])
+  })
+
+  it('um handler que lança não propaga ao executor', () => {
+    setToolProgressHandler(() => {
+      throw new Error('boom')
+    })
+    expect(() =>
+      emitToolProgress({ kind: 'progress', toolCallId: 'tc-1', text: 'x' }),
+    ).not.toThrow()
   })
 })

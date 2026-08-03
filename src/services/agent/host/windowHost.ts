@@ -6,7 +6,7 @@
  * fornece as suas próprias implementações e este ficheiro nunca é carregado.
  */
 
-import { setHostNotificationHandler } from './hostBus'
+import { setHostNotificationHandler, setToolProgressHandler } from './hostBus'
 // Type-only (apagado na compilação): o ciclo agentHost→windowHost é só de
 // runtime num sentido; este import não o fecha.
 import type { AgentHost, HostGateScope } from './agentHost'
@@ -26,6 +26,23 @@ export function installWindowHost(): void {
         /* melhor-esforço, como sempre foi nos call sites originais */
       })
   })
+
+  // Progresso de tools → transcript (P3): pré-carrega o chatStore UMA vez e
+  // regista um handler SÍNCRONO — comandos verbosos emitem muitos chunks e
+  // não podem pagar um import dinâmico (nem um tick de microtask) por chunk.
+  // Entre o install e o load (bootstrap, microssegundos) não há runs, logo
+  // não há eventos a perder.
+  void import('@/stores/chatStore')
+    .then(({ useChatStore }) => {
+      setToolProgressHandler((e) => {
+        const store = useChatStore.getState()
+        if (e.kind === 'progress') store.updateToolCallProgress(e.toolCallId, e.text)
+        else store.appendToolCallCommandLogs(e.toolCallId, e.chunks)
+      })
+    })
+    .catch(() => {
+      /* sem chatStore não há transcript para alimentar */
+    })
 }
 
 /**
