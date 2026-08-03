@@ -78,7 +78,7 @@ export function processQueueIfReady({
   // that don't compose. F3: `asTask` is legacy — treated as a normal prompt.
   if (isSlashCommand(next) || next.mode === 'bash') {
     const cmd = dequeue()!
-    void executeInput([cmd])
+    dispatchVisible(executeInput, [cmd])
     return { processed: true }
   }
 
@@ -97,12 +97,38 @@ export function processQueueIfReady({
     // enqueue away from a deadlock without this fallback.
     const cmd = dequeue()
     if (!cmd) return { processed: false }
-    void executeInput([cmd])
+    dispatchVisible(executeInput, [cmd])
     return { processed: true }
   }
 
-  void executeInput(commands)
+  dispatchVisible(executeInput, commands)
   return { processed: true }
+}
+
+/**
+ * Despacho com rejeições VISÍVEIS (2026-08-03): o `void executeInput(...)`
+ * puro engolia qualquer rejeição — o item já saíra da fila e nada reportava
+ * a perda (apanhado pelos evals headless: fila a zero, status idle,
+ * silêncio absoluto). Perder uma mensagem em silêncio é bug em QUALQUER
+ * modo; a rejeição vira estado de erro do agente — a janela mostra-o e o
+ * runner reporta-o no result.
+ */
+function dispatchVisible(
+  executeInput: (commands: QueuedCommand[]) => Promise<void>,
+  commands: QueuedCommand[],
+): void {
+  void executeInput(commands).catch(async (err) => {
+    try {
+      const { useAgentStore } = await import('../../stores/agentStore')
+      const store = useAgentStore.getState()
+      store.setError(
+        `queue dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+      store.setStatus('error')
+    } catch {
+      /* sem store não há onde reportar */
+    }
+  })
 }
 
 /**

@@ -1278,7 +1278,16 @@ export function usePromptBar() {
     // is still pending inside the first one. tryStart() inside runAgentLoop
     // transitions dispatching→running; if reserve fails, another dispatch
     // already owns the guard and we yield to it.
-    if (!queryGuard.reserve()) return
+    if (!queryGuard.reserve()) {
+      // Requeue em vez de drop (2026-08-03, apanhado pelos evals headless):
+      // o dequeue já aconteceu no queueProcessor — "yield" sem devolver o
+      // lote à fila era PERDA silenciosa quando a reserva corria contra
+      // outro dispatch. O run que detém o guard termina, o snapshot muda e
+      // o drain volta a pegar nisto.
+      const { enqueue } = await import('../../services/agent/messageQueue')
+      for (const cmd of commands) enqueue(cmd)
+      return
+    }
 
     try {
       // Switch to chat so the user sees the agent working

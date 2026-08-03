@@ -77,6 +77,20 @@ export async function maybeStartHeadlessRunner(): Promise<boolean> {
 async function runJob(job: RunnerJob): Promise<void> {
   // ANTES de qualquer run: o hospedeiro headless responde por política.
   setAgentHost(createHeadlessAgentHost({ yolo: job.yolo }))
+  // Com --yolo, liga TAMBÉM o YOLO do permissionStore: é o interruptor que
+  // faz o createDiffApprovalPromise APLICAR os diffs ao disco pelo caminho
+  // provado da janela (DiffService.acceptDiff, com a honestidade de escrita
+  // falhada ≠ aprovação). Sem isto, o eval write-file mostrou o modelo a
+  // anunciar "ficheiro criado" com o disco intacto — o diff ficava pendente
+  // para sempre.
+  if (job.yolo) {
+    try {
+      const { usePermissionStore } = await import('@/stores/permissionStore')
+      usePermissionStore.getState().setAutoModePermissions(true)
+    } catch {
+      /* sem store não há YOLO para ligar */
+    }
+  }
   emit({ type: 'system', subtype: 'init', project: job.project, yolo: job.yolo })
 
   // Rota activa — diagnóstico do smoke #7: "Connection error (Load failed)"
@@ -144,6 +158,32 @@ async function runJob(job: RunnerJob): Promise<void> {
 
   const startAt = Date.now()
 
+  // 1b. Espera a sessão Firebase restaurar ANTES de tudo (primeira corrida
+  // dos evals: com o binário pré-compilado o boot é rápido demais, o run
+  // disparava antes do restore e morria com "Authentication expired" — nos
+  // smokes o tempo de compilação escondia a corrida). Sem sessão persistida
+  // nenhuma, o erro diz exactamente o que fazer.
+  {
+    const { default: FirebaseAuthService } = await import('@/services/auth/firebaseAuth')
+    const auth = FirebaseAuthService.getInstance()
+    const AUTH_TIMEOUT_MS = 30_000
+    while (!auth.isAuthenticated()) {
+      if (Date.now() - startAt > AUTH_TIMEOUT_MS) {
+        emit({
+          type: 'result',
+          subtype: 'error',
+          error:
+            `no authenticated session after ${AUTH_TIMEOUT_MS / 1000}s — abre o TM Code normal, ` +
+            `faz login, e volta a correr o runner (a sessão persistida é herdada).`,
+        })
+        exit(1)
+        return
+      }
+      await new Promise(r => setTimeout(r, 250))
+    }
+    emit({ type: 'system', subtype: 'auth_ready', waitedMs: Date.now() - startAt })
+  }
+
   // 2. Espera o boot normal abrir o projecto.
   const { useProjectStore } = await import('@/stores/projectStore')
   while (!useProjectStore.getState().currentProject?.path) {
@@ -179,6 +219,11 @@ async function runJob(job: RunnerJob): Promise<void> {
 
   let sawActive = false
   let finished = false
+  // Sessão do RUN, capturada ENQUANTO decorre (streamingSessionId — o idioma
+  // do repo). Nos evals sobre fixture virgem, getActiveSession() apontava a
+  // uma sessão VAZIA (messageCount:0 no diag): o boot cria uma sessão e o
+  // despacho da fila usa outra.
+  let runSessionId: string | null = null
   let unsubscribe: () => void = () => {}
   let hardTimer: ReturnType<typeof setTimeout> | undefined
   let heartbeat: ReturnType<typeof setInterval> | undefined
@@ -232,6 +277,11 @@ async function runJob(job: RunnerJob): Promise<void> {
     }
     if (state.status !== 'idle') {
       sawActive = true
+      if (!runSessionId) {
+        try {
+          runSessionId = useChatStore.getState().streamingSessionId ?? null
+        } catch { /* melhor-esforço */ }
+      }
       return
     }
     if (!sawActive || finished) return
@@ -242,7 +292,10 @@ async function runJob(job: RunnerJob): Promise<void> {
     setTimeout(() => {
       if (finished) return
       try {
-        const session = useChatStore.getState().getActiveSession()
+        const chat = useChatStore.getState()
+        const session =
+          (runSessionId ? chat.sessions.get(runSessionId) : null) ??
+          chat.getActiveSession()
         const msgs = session?.messages ?? []
         const last = [...msgs].reverse().find(m => m.role === 'assistant')
         let text = typeof last?.content === 'string' ? last.content : ''
@@ -264,6 +317,7 @@ async function runJob(job: RunnerJob): Promise<void> {
           subtype: 'success',
           text,
           diag: {
+            runSessionId,
             sessionId: (session as { id?: string } | undefined)?.id ?? null,
             messageCount: msgs.length,
             lastRoles: msgs.slice(-4).map(m => m.role),
@@ -319,6 +373,14 @@ async function runJob(job: RunnerJob): Promise<void> {
   }, 3000)
 
   // 3. Tarefa pelo caminho normal da fila — por último, com tudo armado.
+  // Antes: limpar um planResumePending herdado de OUTRO projecto/sessão —
+  // no executeQueuedInput, o guard de wrong-project engolia o item com uma
+  // system message que ninguém vê headless (a intermitência dos evals). Um
+  // job de runner é sempre uma tarefa fresca; planos pendentes de outro
+  // mundo não lhe dizem respeito.
+  try {
+    useChatStore.getState().setPlanResumePending?.(null)
+  } catch { /* sem plan-resume não há nada a limpar */ }
   enqueue({ value: job.task, mode: 'prompt' })
   emit({ type: 'system', subtype: 'enqueued', queue: getCommandQueueSnapshot().length })
 }

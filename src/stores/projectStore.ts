@@ -332,7 +332,19 @@ export const useProjectStore = create<ProjectStore>()(
         if (prevProject?.path !== path) {
           try {
             const { isProjectOpenElsewhere } = await import('../services/projectWindowLockService');
-            const openElsewhere = await isProjectOpenElsewhere(path);
+            // Runner headless (evals P6): um runner SIGKILLado deixa um lock
+            // fresco (<90s de staleness) e o aviso de double-open é um
+            // diálogo que ninguém responde numa janela oculta — o projecto
+            // nunca abria ("project did not open within 60s"). Em modo
+            // runner o guard é saltado: a única "outra janela" plausível é o
+            // cadáver da corrida anterior. (Residual do design doc:
+            // identidade própria do runner no bus de disco.)
+            let runnerMode = false;
+            try {
+              const { invoke } = await import('@/utils/invokeMetrics');
+              runnerMode = !!(await invoke('runner_get_job'));
+            } catch { /* fora do Tauri: não é runner */ }
+            const openElsewhere = runnerMode ? false : await isProjectOpenElsewhere(path);
             const { useSettingsStore } = await import('./settingsStore');
             const { doubleOpenDecision } = await import('../services/doubleOpenGuard');
             const decision = doubleOpenDecision(
