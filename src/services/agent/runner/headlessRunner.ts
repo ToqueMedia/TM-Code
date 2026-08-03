@@ -85,7 +85,12 @@ export async function maybeStartHeadlessRunner(): Promise<boolean> {
   })
 
   // 3. Tarefa pelo caminho normal da fila.
-  const { enqueue } = await import('../messageQueue')
+  const {
+    enqueue,
+    getCommandQueueSnapshot,
+    isQueuePaused,
+    setQueuePaused,
+  } = await import('../messageQueue')
   enqueue({ value: job.task, mode: 'prompt' })
 
   // 4. Fim do run: idle DEPOIS de ter estado activo.
@@ -99,9 +104,38 @@ export async function maybeStartHeadlessRunner(): Promise<boolean> {
     finished = true
     unsubscribe()
     clearTimeout(hardTimer)
+    clearInterval(heartbeat)
     emit(payload)
     exit(code)
   }
+
+  // Diagnóstico até o run arrancar (smoke P6 de 03-08: init+project_open
+  // chegaram e depois silêncio — os portões da drenagem eram invisíveis).
+  // Cada batimento emite o estado dos QUATRO portões do useQueueProcessor;
+  // e uma fila PAUSADA não pode reter o job do runner: a rehidratação do
+  // snapshot persistido do projecto pausa a fila quando traz tarefas
+  // parqueadas (messageQueue.hydrateCommandQueue) — em modo runner isso é
+  // estado de uma sessão de janela antiga, não uma decisão do operador.
+  const { getQueryGuard } = await import('../queryGuard')
+  const { useBillingStore } = await import('@/stores/billingStore')
+  const heartbeat = setInterval(() => {
+    if (finished || sawActive) return
+    if (isQueuePaused()) {
+      emit({ type: 'system', subtype: 'queue_resumed', note: 'persisted pause overridden by runner' })
+      setQueuePaused(false)
+    }
+    const billing = useBillingStore.getState()
+    emit({
+      type: 'system',
+      subtype: 'heartbeat',
+      queue: getCommandQueueSnapshot().length,
+      queuePaused: isQueuePaused(),
+      agentStatus: useAgentStore.getState().status,
+      queryActive: getQueryGuard().getSnapshot(),
+      billingStatus: billing.status,
+      noCredits: billing.noCredits,
+    })
+  }, 3000)
 
   const unsubscribe = useAgentStore.subscribe((state) => {
     if (state.status !== 'idle') {
