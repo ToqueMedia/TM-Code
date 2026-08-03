@@ -235,19 +235,31 @@ async function runJob(job: RunnerJob): Promise<void> {
       return
     }
     if (!sawActive || finished) return
-    try {
-      const session = useChatStore.getState().getActiveSession()
-      const last = [...(session?.messages ?? [])]
-        .reverse()
-        .find(m => m.role === 'assistant')
-      const text =
-        typeof last?.content === 'string'
-          ? last.content
-          : JSON.stringify(last?.content ?? '')
-      finish(0, { type: 'result', subtype: 'success', text })
-    } catch (err) {
-      finish(1, { type: 'result', subtype: 'error', error: String(err) })
-    }
+    // Mesmo tick de espera do caminho de erro: o idle chega com os deltas
+    // finais ainda em buffer (smoke #9: success com text vazio e 105 tokens
+    // de completion reais). E se content chegar vazio, os contentBlocks
+    // (renderização intercalada) são a segunda fonte do texto.
+    setTimeout(() => {
+      if (finished) return
+      try {
+        const session = useChatStore.getState().getActiveSession()
+        const last = [...(session?.messages ?? [])]
+          .reverse()
+          .find(m => m.role === 'assistant')
+        let text = typeof last?.content === 'string' ? last.content : ''
+        if (!text && last?.contentBlocks?.length) {
+          text = last.contentBlocks
+            .map((b) => {
+              const block = b as { type?: string; text?: string }
+              return block.type === 'text' ? (block.text ?? '') : ''
+            })
+            .join('')
+        }
+        finish(0, { type: 'result', subtype: 'success', text })
+      } catch (err) {
+        finish(1, { type: 'result', subtype: 'error', error: String(err) })
+      }
+    }, 150)
   })
 
   hardTimer = setTimeout(() => {
