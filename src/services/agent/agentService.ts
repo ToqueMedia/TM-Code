@@ -1816,7 +1816,14 @@ class AgentService {
         import("../../stores/projectStore"),
         import("./memoryWriteTracker"),
       ]);
-      const sessionId = useChatStore.getState().activeSessionId;
+      // Sessão do RUN, não a activa (P1 headless, portão nº9): o extractor
+      // corre no FIM do run — se o utilizador trocou de sessão a meio,
+      // activeSessionId aponta à sessão errada e o guard/propostas iam para
+      // o balde errado. streaming-primeiro é o idioma já usado pelo arquivo
+      // pré-compactação e pelo taskOps (getTaskOrigin ?? streaming ?? activa).
+      const chatState = useChatStore.getState();
+      const sessionId =
+        chatState.streamingSessionId ?? chatState.activeSessionId;
       if (sessionId && hasMemoryWriteSinceTurnStart(sessionId)) return;
       const projectPath =
         useProjectStore.getState().currentProject?.path ?? null;
