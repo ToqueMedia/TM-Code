@@ -5873,7 +5873,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           properties: {
             command: { type: 'string', description: 'Shell command to execute (e.g., "npm install", "npm run build", "tsc --noEmit")' },
             cwd: { type: 'string', description: 'Working directory. Default: project root' },
-            timeout_secs: { type: 'number', description: 'Timeout in seconds. Default: 300. Max: 600.' }
+            timeout_secs: { type: 'number', description: 'Timeout in seconds. Default: 300. Max: 3600 — for release builds or full test suites, request the ceiling explicitly.' }
           },
           required: ['command']
         }
@@ -6026,7 +6026,12 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
             return `Command completed immediately (PID: ${pid}, id: ${cmdId})${exitInfo}. Use check_background_commands once to see results.`
           }
 
-          const timeoutSecs = Math.min((input.timeout_secs as number) || 300, 600)
+          // Tecto de 1h (task F1-8, 2026-08-03): builds de release
+          // (yarn tauri:build ~15-30min) e suites completas não cabiam nos
+          // 600s — e no background o auto-wake torna esperas longas seguras
+          // (nenhum turno fica bloqueado). O BLOQUEANTE mantém 600s de
+          // propósito: trabalho longo pertence aqui, não a segurar o turno.
+          const timeoutSecs = Math.min((input.timeout_secs as number) || 300, 3600)
           timeoutTimer = setTimeout(async () => {
             if (!finished) {
               finished = true
