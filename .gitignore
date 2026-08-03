@@ -43,3 +43,6 @@ dist-ssr
 /vite.config.js
 /vite.config.d.ts
 *.tsbuildinfo
+
+# Artefactos dos evals do agente (write-cases)
+evals/fixtures/**/EVAL.md

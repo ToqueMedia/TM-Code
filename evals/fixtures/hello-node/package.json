@@ -1,0 +1,9 @@
+{
+  "name": "hello-evals-node",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture mínima para os evals do agente headless do TM Code.",
+  "scripts": {
+    "start": "node index.js"
+  }
+}

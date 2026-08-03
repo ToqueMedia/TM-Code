@@ -7,6 +7,14 @@
 import { createHeadlessAgentHost } from '../headlessHost'
 import { hasOpenHumanGates } from '../hostBus'
 
+// approveDiff em yolo delega no createDiffApprovalPromise REAL (que aplica o
+// diff ao disco via DiffService quando o YOLO da permissionStore está ligado
+// — o condutor liga-o). No teste, a store é mockada: o contrato aqui é a
+// DELEGAÇÃO, não a aplicação (essa vive nos testes do chatStore).
+jest.mock('@/stores/chatStore', () => ({
+  createDiffApprovalPromise: jest.fn(async () => true),
+}))
+
 describe('createHeadlessAgentHost', () => {
   it('com --yolo aprova escrita, path access e diffs', async () => {
     const host = createHeadlessAgentHost({ yolo: true })

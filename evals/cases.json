@@ -1,0 +1,25 @@
+[
+  {
+    "id": "read-package",
+    "project": "evals/fixtures/hello-node",
+    "task": "Lê o package.json deste projecto e responde APENAS com o nome exacto do pacote, nada mais.",
+    "expect": ["hello-evals-node"],
+    "timeoutSec": 180
+  },
+  {
+    "id": "code-comprehension",
+    "project": "evals/fixtures/hello-node",
+    "task": "Abre o index.js e diz que número a função answer() devolve. Responde só com o número.",
+    "expect": ["42"],
+    "timeoutSec": 180
+  },
+  {
+    "id": "write-file",
+    "project": "evals/fixtures/hello-node",
+    "task": "Cria um ficheiro chamado EVAL.md na raiz do projecto contendo exactamente o texto: eval ok",
+    "expect": [],
+    "expectFiles": ["EVAL.md"],
+    "cleanupFiles": ["EVAL.md"],
+    "timeoutSec": 240
+  }
+]

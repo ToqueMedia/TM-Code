@@ -81,10 +81,17 @@ export function createHeadlessAgentHost(opts: { yolo: boolean }): AgentHost {
       )
     },
 
-    async approveDiff() {
-      // Num run delegado com --yolo, aplicar é o objectivo; sem --yolo os
-      // writes nem chegam cá (negados no canUseTool).
-      return yolo
+    async approveDiff(toolCallId) {
+      // Sem --yolo os writes nem chegam cá (negados no canUseTool).
+      if (!yolo) return false
+      // Delega no caminho PROVADO da janela: com o YOLO do permissionStore
+      // ligado (o condutor liga-o no arranque), createDiffApprovalPromise
+      // APLICA o diff ao disco via DiffService.acceptDiff e devolve a
+      // verdade da escrita — devolver `true` seco daqui deixava o diff
+      // pendente para sempre e o modelo a anunciar ficheiros que o disco
+      // nunca viu (eval write-file, 2026-08-03).
+      const { createDiffApprovalPromise } = await import('@/stores/chatStore')
+      return createDiffApprovalPromise(toolCallId)
     },
 
     async requestCredentials() {
