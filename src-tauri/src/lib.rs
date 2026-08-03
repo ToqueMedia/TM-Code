@@ -874,6 +874,18 @@ pub fn run() {
                 }
             }
 
+            // Runner headless: processo de FUNDO verdadeiro no macOS — sem
+            // ícone no Dock nem activação por clique. Sem isto o Dock
+            // mostrava a app do runner e o clique tentava activar uma janela
+            // que os gates mantêm escondida de propósito ("abre minimizada e
+            // não permite abrir", nota do smoke de 03-08).
+            #[cfg(target_os = "macos")]
+            if commands::runner::runner_mode_active() {
+                let _ = app
+                    .handle()
+                    .set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+
             // ── File-association launch args ───────────────────────────
             // On Windows/Linux, "Open with TM Code" launches the binary
             // with file paths in argv[1..]. macOS routes these through
