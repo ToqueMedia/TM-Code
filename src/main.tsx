@@ -35,6 +35,13 @@ disableInputAssist();
 // notificações de SO no hostBus antes de qualquer run poder notificar.
 installWindowHost();
 
+// Runner headless (P5, `--run`): se o processo carrega um job, o condutor
+// instala o hospedeiro headless (substitui o de janela no registry) e conduz
+// o run — a app continua a montar normalmente, numa janela invisível.
+void import("@/services/agent/runner/headlessRunner")
+  .then((m) => m.maybeStartHeadlessRunner())
+  .catch(() => { /* fora do Tauri não há runner */ });
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement, {
   onUncaughtError: logRootError("Uncaught render error"),
   onCaughtError: logRootError("Caught render error (ErrorBoundary)"),

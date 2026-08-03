@@ -18,6 +18,7 @@ pub mod memory;
 pub mod port_guard;
 pub mod project;
 pub mod project_state;
+pub mod runner;
 pub mod sandbox;
 pub mod screenshot;
 pub mod search;

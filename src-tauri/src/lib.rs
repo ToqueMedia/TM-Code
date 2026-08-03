@@ -532,6 +532,11 @@ fn app_ready(app: tauri::AppHandle) -> std::result::Result<(), String> {
     if let Some(splash) = app.get_webview_window("splash") {
         let _ = splash.close();
     }
+    // Runner headless (--run): a janela principal NUNCA é mostrada — o motor
+    // corre no webview invisível e o output sai por runner_emit.
+    if commands::runner::runner_mode_active() {
+        return Ok(());
+    }
     if let Some(win) = app.get_webview_window("main") {
         win.show().map_err(|e| format!("show failed: {}", e))?;
         win.set_focus()
@@ -544,6 +549,11 @@ fn app_ready(app: tauri::AppHandle) -> std::result::Result<(), String> {
 /// residual — another window wrote focus-request.json for our pid).
 #[tauri::command]
 fn focus_main_window(app: tauri::AppHandle) -> std::result::Result<(), String> {
+    // Runner headless: um focus-request de outra janela não pode revelar a
+    // janela invisível do runner.
+    if commands::runner::runner_mode_active() {
+        return Ok(());
+    }
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.unminimize();
         win.show().map_err(|e| format!("show failed: {}", e))?;
@@ -813,6 +823,38 @@ pub fn run() {
                 }
             }
 
+            // ── Headless runner launch args (P5, docs/DESIGN-HEADLESS-RUNNER.md) ──
+            // `--run "<tarefa>" --project <dir> [--yolo]` arranca a app com a
+            // janela INVISÍVEL: o mesmo motor, hospedado sem UI. O --project
+            // reutiliza o slot pending_open_project (o caminho normal de
+            // abertura de projecto); o job fica disponível ao frontend via o
+            // comando runner_get_job.
+            {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                if let Some(i) = args.iter().position(|a| a == "--run") {
+                    if let Some(task) = args.get(i + 1) {
+                        let project = args
+                            .iter()
+                            .position(|a| a == "--project")
+                            .and_then(|j| args.get(j + 1))
+                            .cloned();
+                        let yolo = args.iter().any(|a| a == "--yolo");
+                        if let Some(p) = project.clone() {
+                            if std::path::Path::new(&p).is_dir() {
+                                if let Ok(mut slot) = pending_open_project().lock() {
+                                    *slot = Some(p);
+                                }
+                            }
+                        }
+                        commands::runner::set_runner_job(commands::runner::RunnerJob {
+                            task: task.clone(),
+                            project: project.unwrap_or_default(),
+                            yolo,
+                        });
+                    }
+                }
+            }
+
             // ── File-association launch args ───────────────────────────
             // On Windows/Linux, "Open with TM Code" launches the binary
             // with file paths in argv[1..]. macOS routes these through
@@ -888,7 +930,8 @@ pub fn run() {
                 .center()
                 .skip_taskbar(true)
                 .always_on_top(false)
-                .visible(true);
+                // Runner headless (--run): splash invisível — nada aparece.
+                .visible(!commands::runner::runner_mode_active());
 
             #[cfg(target_os = "macos")]
             {
@@ -1336,6 +1379,11 @@ pub fn run() {
             let app_handle_for_failsafe = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                // Runner headless: janela invisível é o estado DESEJADO — o
+                // failsafe de show não se aplica.
+                if commands::runner::runner_mode_active() {
+                    return;
+                }
                 if let Some(win) = app_handle_for_failsafe.get_webview_window("main") {
                     if let Ok(false) = win.is_visible() {
                         eprintln!("[splash] failsafe: 5s elapsed without app_ready — forcing show");
@@ -1428,6 +1476,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::runner::runner_get_job,
+            commands::runner::runner_emit,
+            commands::runner::runner_exit,
             open_project,
             create_project,
             get_recent_projects,
