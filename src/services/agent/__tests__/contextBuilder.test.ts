@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import ContextBuilder from '../contextBuilder'
+import { BOUNDED_INLINE_CONTEXTS } from '../contextBuilder/auxiliaryRegistry'
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../contextBuilder/helpers'
 import { getCriticalReinjectionReminder } from '../contextBuilder/sections/chatSections'
 import { WRITE_ALIAS, EDIT_ALIAS, CREATE_FILE } from '../toolNames'
@@ -131,13 +132,16 @@ describe('ContextBuilder', () => {
       expect(sel?.loaded.map(l => l.id)).toContain('vision.image_rules')
     })
 
-    it('sem imagem fica em bugfix_local e NÃO carrega as regras de visão', async () => {
+    it('sem imagem fica em bugfix_local (full delivery inclui as regras de visão)', async () => {
       await builder.buildSystemPrompt(
         '/test/project', 'web', undefined, undefined, 'corrige este bug',
       )
       const sel = builder.getLastAuxiliarySelection()
       expect(sel?.profile).toBe('bugfix_local')
-      expect(sel?.loaded.map(l => l.id)).not.toContain('vision.image_rules')
+      // Doutrina full-delivery (2026-08-03): vision.image_rules é bounded e
+      // vai inline em todos os perfis — o CONTEÚDO adapta-se à capacidade do
+      // modelo (getVisionSection lê supportsAttachments), não a presença.
+      expect(sel?.loaded.map(l => l.id)).toContain('vision.image_rules')
     })
 
     it('returns a string', async () => {
@@ -213,16 +217,17 @@ describe('ContextBuilder', () => {
       // Planner desligado: ZERO chamadas sidecar; seleção determinística.
       expect(fetchMock).toHaveBeenCalledTimes(0)
       expect(selection?.profile).toBe('bugfix_local')
-      expect(selection?.contextPlannerStatus).toBe('fallback')
-      // Determinística NÃO quer dizer VAZIA (auditoria 2026-07-28): a seleção
-      // vazia deixava auxLoadedContent={} e matava no prompt as secções que só
-      // lêem de lá — git status e estado do dev-server incluídos, apesar de o
-      // gatherGitContext() continuar a correr. A baseline de delivery é sempre
-      // carregada; o resto fica on-demand via request_context.
-      expect(selection?.contextPlan.selectedContexts).toEqual([
-        'delivery.git_status',
-        'delivery.dev_server',
-      ])
+      // 'deterministic', não 'fallback' (2026-08-03): não há planner para
+      // falhar — a selecção determinística é o desenho, e a telemetria não
+      // pode auto-descrever o desenho como degradação.
+      expect(selection?.contextPlannerStatus).toBe('deterministic')
+      // Determinística NÃO quer dizer VAZIA (auditoria 2026-07-28) e, desde a
+      // doutrina full-delivery (2026-08-03), também não quer dizer mínima: as
+      // secções BOUNDED vão todas inline (BOUNDED_INLINE_CONTEXTS) + a
+      // baseline de delivery; on-demand ficam só as unbounded.
+      expect([...(selection?.contextPlan.selectedContexts ?? [])].sort()).toEqual(
+        [...BOUNDED_INLINE_CONTEXTS, 'delivery.git_status', 'delivery.dev_server'].sort(),
+      )
       expect(prompt).not.toContain('__TM_SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
     })
 

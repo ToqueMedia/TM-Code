@@ -21,6 +21,9 @@ export interface TmsTurnTelemetry {
   tmsBootstrapInputTokens: number
   tmsBootstrapOutputTokens: number
   tmsBootstrapPhase?: string
+  /** Secções em falta quando a phase termina em `_invalid` — o PORQUÊ do
+   *  inválido, espelho da lista que o prompt já mostra ao modelo. */
+  tmsMissingSections?: string[]
   tmsBootstrapToolset?: string
   tmsWriteAttempted: boolean
   tmsWriteToolCallId?: string

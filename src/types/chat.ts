@@ -602,6 +602,14 @@ export interface RequestUsageEntry {
   provider?: string
   /** Model id the request was sent to. */
   model: string
+  /** Model id that ACTUALLY served the response (X-TM-Model do data-plane).
+   *  `model` é o placeholder pedido ("tm-active-model"); sem este campo o
+   *  export de sessão não permite análise por modelo real (custo/qualidade
+   *  por modelo — pré-requisito da auto-análise). Ausente em BYOK directo
+   *  (o provider não emite o header) e em respostas sem headers. */
+  servedModel?: string
+  /** Provider real que serviu a resposta (X-TM-Provider). */
+  servedProvider?: string
   /** Real input tokens from the provider's usage chunk. */
   inputTokens: number
   /** Real output tokens from the provider's usage chunk. */
@@ -627,6 +635,11 @@ export interface RequestUsageEntry {
   tmsBootstrapInputTokens?: number
   tmsBootstrapOutputTokens?: number
   tmsBootstrapPhase?: string
+  /** Secções obrigatórias em falta quando tmsBootstrapPhase termina em
+   *  `_invalid` (2026-08-03). O prompt já avisa o modelo ("INCOMPLETE
+   *  (missing: …)"); sem este campo o export dizia "invalid" sem dizer
+   *  PORQUÊ e a auto-análise lia-o como estado contraditório. */
+  tmsMissingSections?: string[]
   tmsBootstrapToolset?: string
   tmsWriteAttempted?: boolean
   tmsWriteToolCallId?: string
@@ -848,9 +861,9 @@ export interface RequestUsageEntry {
    *  fell back ('fallback'), with the raw output / error for diagnosis. */
   /** 'parsed' = planner returned valid JSON; 'fallback' = invalid/missing and
    *  a deterministic per-profile plan was used instead. */
-  contextPlannerStatus?: 'parsed' | 'fallback'
+  contextPlannerStatus?: 'parsed' | 'deterministic' | 'fallback'
   /** 'model' when the context plan came from a model. 'fallback' exists for legacy exports only. */
-  contextPlannerSource?: 'model' | 'fallback'
+  contextPlannerSource?: 'model' | 'deterministic' | 'fallback'
   /** Which model layer produced the plan. 'code' means utility planner retries failed and the code model returned valid JSON. */
   contextPlannerModel?: 'utility' | 'code'
   /** When status === 'fallback', the failure reason (schema/parse/HTTP/…). */

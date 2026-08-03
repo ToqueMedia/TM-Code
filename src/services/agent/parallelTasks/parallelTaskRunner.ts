@@ -40,7 +40,7 @@ import {
   canonicalToolName,
   WRITE_FILE, EDIT_FILE, CREATE_FILE, DELETE_FILE, RENAME_FILE, CREATE_DIRECTORY,
 } from '../toolNames'
-import { REQUEST_CONTEXT_NAME, requestContextDefinition } from '../toolPolicy'
+import { REQUEST_CONTEXT_NAME, requestContextDefinition, TOOL_SEARCH_NAME, toolSearchDefinition, searchDeferredTools } from '../toolPolicy'
 import type ContextBuilderT from '../contextBuilder'
 import { formatError } from '../../../utils/errors'
 import { useBillingStore } from '../../../stores/billingStore'
@@ -388,6 +388,43 @@ export async function runParallelTask(runId: string): Promise<void> {
         return { content: `Error loading auxiliary context: ${formatError(err)}`, isError: true }
       }
     }
+    // ToolSearch: procura/carrega defs MCP diferidos, empurrados para o
+    // openaiTools DESTA tarefa (mesma referência que o engine dela envia por
+    // pedido). Espelho do bridge do agentService — ver toolPolicy.ts.
+    if (toolName === TOOL_SEARCH_NAME) {
+      const queryStr = typeof toolInput.query === 'string' ? toolInput.query : ''
+      const maxResults = typeof toolInput.max_results === 'number' && toolInput.max_results > 0
+        ? toolInput.max_results
+        : 5
+      if (!queryStr.trim()) {
+        return { content: 'No query provided. Use "select:<tool_name>" (comma-separated for several) or keywords to search the deferred tool list.', isError: false }
+      }
+      const matches = searchDeferredTools(queryStr, toolExecutor.getDeferredToolIndex(), maxResults)
+      if (matches.length === 0) {
+        return { content: 'No matching deferred tools found', isError: false }
+      }
+      const { defs } = toolExecutor.getDeferredToolDefinitions(matches)
+      for (const def of defs) {
+        if (!openaiTools.some(t => t.function.name === def.function.name)) {
+          openaiTools.push({
+            type: 'function' as const,
+            function: {
+              name: def.function.name,
+              description: def.function.description,
+              parameters: def.function.parameters as Record<string, unknown>,
+            },
+          })
+        }
+      }
+      const lines = defs.map(d =>
+        `<function>${JSON.stringify({
+          description: d.function.description,
+          name: d.function.name,
+          parameters: d.function.parameters,
+        })}</function>`,
+      )
+      return { content: `<functions>\n${lines.join('\n')}\n</functions>`, isError: false }
+    }
     const canonical = canonicalToolName(toolName)
     // Caminhos do modelo → referencial do worktree (execução, claims e
     // display coerentes; sem isto os ficheiros aninhavam no próprio worktree).
@@ -461,6 +498,10 @@ export async function runParallelTask(runId: string): Promise<void> {
     // efémero). Sem omissões, nada a injetar.
     const omittedIds = builder.getLastAuxiliarySelection()?.omitted.map(o => o.id) ?? []
     if (omittedIds.length > 0) openaiTools.push(requestContextDefinition(omittedIds))
+    // Espelho do main: defs MCP diferidos + meta-tool ToolSearch. O bridge
+    // desta tarefa empurra os defs carregados para ESTE openaiTools (array
+    // vivo do engine da tarefa), não para o do singleton.
+    if (toolExecutor.getDeferredToolIndex().length > 0) openaiTools.push(toolSearchDefinition())
     // FASE B: volátil na mensagem (system prompt da tarefa byte-estável —
     // vale ouro nas CONTINUAÇÕES, que repetem o mesmo prefixo).
     taskVolatileCtx = builder.getLastVolatileContext()

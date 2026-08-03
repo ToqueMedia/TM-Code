@@ -338,20 +338,16 @@ class ContextBuilder {
         return ctx?.promptCtx ? getProjectStructureSection(ctx.promptCtx) : null
       case 'agent_runtime.mcp_routing':
         return ctx?.promptCtx ? sharedMcpBlock(ctx.promptCtx.mcpTools, 'developer') : null
+      // O case `agent_runtime.request_context_policy` foi removido (2026-08-03)
+      // com a meta correspondente: a política vive inline no cabeçalho do
+      // índice on-demand (buildOnDemandIndex) — ver a nota lá sobre a
+      // circularidade que isto corrige.
       case 'agent_runtime.tool_profiles':
         return [
-          '# Agent runtime: tool profiles',
-          'Tool profiles choose the starter toolset for the current task. They do not cap what can be loaded later.',
-          'Use request_tools whenever the current active set lacks a required capability; a registered tool should be delivered on demand unless an explicit no-edit/read-only policy blocks it.',
-          'Expected files: src/services/agent/toolsetSelector.ts and callers that pass selectedPromptProfile.',
-        ].join('\n')
-      case 'agent_runtime.request_context_policy':
-        return [
-          '# Agent runtime: request_context policy',
-          'Choose the smallest sufficient context: capability-specific > domain summary > project overview > full project tree.',
-          'When locating functions, classes, components, hooks, handlers, stores, providers, or services, request project.symbol_index before broad project structure.',
-          'Use project.structure_full only after specific contexts fail, files are unknown, architecture is broad, or dependency mapping spans areas.',
-          'Expected files: src/services/agent/contextBuilder/auxiliaryRegistry.ts, src/services/agent/contextBuilder.ts, src/services/agent/payloadInspector.ts.',
+          '# Agent runtime: tool loading',
+          'Local tool definitions are FROZEN for the whole run (stable schemas keep the provider prompt-cache prefix intact).',
+          'MCP tool definitions are DEFERRED: the MCP section of the system prompt lists their names, and full schemas are only sent after you fetch them with `ToolSearch` (query "select:name" or keywords). One fetch is a single cache break at the moment of need — cheaper than shipping every MCP schema on every request.',
+          'Expected files: src/services/agent/toolPolicy.ts (meta-tool definitions), src/services/agent/toolExecutor.ts (registry + deferral).',
         ].join('\n')
       case 'agent_runtime.memory_context':
         if (!ctx?.promptCtx) return null
@@ -692,13 +688,13 @@ class ContextBuilder {
         candidateContexts: Array.from(new Set([...basePlan.candidateContexts, ...deliveryBaseline])),
         selectedContexts: Array.from(new Set([...basePlan.selectedContexts, ...deliveryBaseline])),
         rejectedContexts: [],
-        reason: 'Deterministic per-profile selection + always-on delivery baseline; anything else on-demand via request_context.',
+        reason: 'Full delivery: bounded sections inline + always-on delivery baseline; only unbounded contexts on-demand via request_context.',
       },
-      source: 'fallback',
+      source: 'deterministic',
       confidence: 'none',
-      reason: 'deterministic selection (no model call, no bias) + on-demand by the primary agent',
+      reason: 'deterministic full-delivery selection (no model call, no bias); unbounded contexts on-demand by the primary agent',
     }
-    const plannerReason = `${contextPlan.source === 'model' ? 'model context planner' : 'context planner fallback'}: ${contextPlan.reason}`
+    const plannerReason = `deterministic context selection: ${contextPlan.reason}`
     const auxSelection = selectAuxiliaries(
       auxProfile,
       userMessage,
@@ -707,7 +703,12 @@ class ContextBuilder {
       intentOverride?.source ? { source: intentOverride.source, confidence: intentOverride.confidence, error: intentOverride.error, diagnostics: intentOverride.diagnostics } : undefined,
       contextPlan.plan,
       {
-        status: 'fallback',
+        // 'deterministic', não 'fallback' (correcção 2026-08-03): fallback
+        // implica que um planner falhou. Não há planner — a selecção
+        // determinística É o desenho. Telemetria que auto-descreve o desenho
+        // como degradação envenena a auto-análise (sessão momenu 02-08 lida
+        // como "planner partido?" quando estava tudo como desenhado).
+        status: 'deterministic',
         source: contextPlan.source,
         selectionReason: contextPlan.reason,
       },
@@ -1104,7 +1105,6 @@ class ContextBuilder {
         'entrypoint summary loaded only for architecture/routing tasks'),
       dynamicSection('agent_runtime_policy', () => [
         auxLoadedContent['agent_runtime.tool_profiles'] ?? '',
-        auxLoadedContent['agent_runtime.request_context_policy'] ?? '',
         auxLoadedContent['agent_runtime.memory_context'] ?? '',
       ].filter(Boolean).join('\n\n') || null,
         'agent runtime context loaded only for tool/context/memory tasks'),

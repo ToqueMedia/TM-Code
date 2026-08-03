@@ -1646,6 +1646,10 @@ export async function* query(
     let authRefreshAttempts = 0;
     let credentialConfigRetries = 0;
     let rateLimitRetries = 0;
+    // Modelo/provider reais servidos (X-TM-Model/X-TM-Provider) — capturados
+    // nos headers da resposta e gravados no requestUsageLog deste pedido.
+    let servedModel: string | null = null;
+    let servedProvider: string | null = null;
     const semanticIdleTimeoutMs = Math.max(
       1,
       params.streamSemanticIdleTimeoutMs ?? STREAM_SEMANTIC_IDLE_TIMEOUT_MS,
@@ -1690,6 +1694,11 @@ export async function* query(
           : { data: await responsePromise, response: null };
       if (response?.headers) {
         onResponseHeaders?.(response.headers);
+        // Modelo/provider REAIS desta resposta — para o requestUsageLog.
+        // `model` (o pedido) é o placeholder "tm-active-model"; sem isto o
+        // export de sessão não distingue que modelo serviu que pedido.
+        servedModel = response.headers.get("X-TM-Model") ?? servedModel;
+        servedProvider = response.headers.get("X-TM-Provider") ?? servedProvider;
       }
 
       // Process OpenAI stream chunks
@@ -2477,6 +2486,8 @@ export async function* query(
           turn: state.turnCount,
           executionPhase,
           model,
+          servedModel: servedModel ?? undefined,
+          servedProvider: servedProvider ?? undefined,
           inputTokens: turnUsage?.prompt_tokens ?? 0,
           outputTokens: turnUsage?.completion_tokens ?? 0,
           usageAvailable: !!turnUsage,

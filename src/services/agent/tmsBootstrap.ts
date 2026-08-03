@@ -324,6 +324,10 @@ export async function runTmsPreflight(options: {
     tmsBootstrapInputTokens: shouldBootstrap ? estimateTokens(buildTmsBootstrapOnlyPrompt(result, options.originalUserMessage)) : 0,
     tmsBootstrapOutputTokens: 0,
     tmsBootstrapPhase: reason === 'ok' ? 'already_exists' : `already_exists_${reason}`,
+    // Diz PORQUÊ o TMS é inválido — o export deixava o leitor a adivinhar
+    // ("existe mas inválido... contraditório?"). O prompt já avisa o modelo
+    // com a mesma lista (chatSections: "INCOMPLETE (missing: …)").
+    tmsMissingSections: reason === 'invalid' ? missingTmsSections(existing) : undefined,
     tmsBootstrapToolset: undefined,
     tmsWriteAttempted: false,
     tmsWriteToolCallId: undefined,

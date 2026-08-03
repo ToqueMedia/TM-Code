@@ -147,10 +147,13 @@ const mockGetState_chat = jest.fn(() => ({
   recordToolPermission: mockRecordToolPermission,
   updateToolCallProgress: mockUpdateToolCallProgress,
   tasks: [] as Array<{ id: string; description: string; status: string }>,
+  // permissionAwareTimeout lê pendingDiffs no arranque de qualquer execução
+  // MCP — sem isto, executar uma tool MCP em teste rebenta no wrapper.
+  pendingDiffs: [] as unknown[],
 }))
 
 jest.mock('../../../stores/permissionStore', () => ({
-  usePermissionStore: { getState: mockGetState_permission },
+  usePermissionStore: { getState: mockGetState_permission, subscribe: jest.fn(() => jest.fn()) },
   getProjectGrants: mockGetProjectGrants,
   // O gate de dangerous_command consulta isto ANTES do hard-block de Settings
   // (9db8082); sem o stub, todos os testes de execute_command rebentam com
@@ -183,7 +186,7 @@ jest.mock('../../../stores/layoutStore', () => ({
 }))
 
 jest.mock('../../../stores/chatStore', () => ({
-  useChatStore: { getState: mockGetState_chat, setState: jest.fn() },
+  useChatStore: { getState: mockGetState_chat, setState: jest.fn(), subscribe: jest.fn(() => jest.fn()) },
   appendTextDeltaBuffered: jest.fn(),
   appendReasoningDeltaBuffered: jest.fn(),
 }))
@@ -1872,6 +1875,84 @@ describe('I: Tool definitions and metadata', () => {
     expect(count).toBe(coreCount)
   })
 
+  // ── Defs MCP diferidos (2026-08-03) ─────────────────────────────────
+  // Doutrina do toolPolicy.ts: reintroduzir selecção de tools exige um
+  // produtor real E um teste que prove que ela corre. Este é o teste. O
+  // produtor (injecção do load_tools + intercepção no bridge) é verificado
+  // por asserção de source no deadGateRewiring.test.ts, no estilo dos
+  // portões que lá vivem.
+  describe('deferred MCP tool definitions', () => {
+    const sampleMcpTools = [
+      {
+        serverName: 'chakra-ui',
+        name: 'get_theme',
+        description: 'Returns the Chakra theme tokens.',
+        inputSchema: { type: 'object', properties: {}, required: [] },
+      },
+      {
+        serverName: 'chakra-ui',
+        name: 'list_components',
+        description: 'Lists available Chakra components.',
+        inputSchema: { type: 'object', properties: {}, required: [] },
+      },
+    ]
+    const callToolFn = jest.fn().mockResolvedValue('mcp result')
+
+    it('registerMCPTools regista como deferred: fora do getToolDefinitions, dentro do índice', () => {
+      const exec = freshExecutor()
+      exec.registerMCPTools(sampleMcpTools as never, callToolFn)
+
+      const advertised = exec.getToolDefinitions().map(d => d.function.name)
+      expect(advertised).not.toContain('mcp__chakra-ui__get_theme')
+      expect(advertised).not.toContain('mcp__chakra-ui__list_components')
+
+      const index = exec.getDeferredToolIndex()
+      expect(index.map(d => d.name).sort()).toEqual([
+        'mcp__chakra-ui__get_theme',
+        'mcp__chakra-ui__list_components',
+      ])
+      // A descrição alimenta o scoring da keyword search do ToolSearch.
+      for (const entry of index) {
+        expect(entry.description.length).toBeGreaterThan(0)
+      }
+    })
+
+    it('getDeferredToolDefinitions devolve o schema completo e separa os desconhecidos', () => {
+      const exec = freshExecutor()
+      exec.registerMCPTools(sampleMcpTools as never, callToolFn)
+
+      const { defs, missing } = exec.getDeferredToolDefinitions([
+        'mcp__chakra-ui__get_theme',
+        'mcp__inexistente__tool',
+        'Read', // local, não diferida — não pode ser "carregável"
+      ])
+      expect(defs).toHaveLength(1)
+      expect(defs[0].function.name).toBe('mcp__chakra-ui__get_theme')
+      expect(defs[0].function.parameters).toBeDefined()
+      expect(missing.sort()).toEqual(['Read', 'mcp__inexistente__tool'])
+    })
+
+    it('a execução de uma tool diferida continua registada e funcional', async () => {
+      // Deferral é sobre o que VIAJA nos pedidos, não sobre o que existe: se
+      // o modelo chamar a tool (schema carregado ou alucinado), ela corre.
+      const exec = freshExecutor()
+      exec.registerMCPTools(sampleMcpTools as never, callToolFn)
+
+      const result = await exec.execute('mcp__chakra-ui__get_theme', {}, 'tu-1')
+      expect(callToolFn).toHaveBeenCalledWith('chakra-ui', 'get_theme', expect.any(Object))
+      expect(result).toContain('mcp result')
+    })
+
+    it('tools locais nunca são diferidas', () => {
+      const exec = freshExecutor()
+      exec.registerMCPTools(sampleMcpTools as never, callToolFn)
+      const names = exec.getToolDefinitions().map(d => d.function.name)
+      for (const trained of ['Read', 'Grep', 'Bash', 'Edit', 'Write']) {
+        expect(names).toContain(trained)
+      }
+    })
+  })
+
   it('isConcurrencySafe returns true for read_file', () => {
     const exec = freshExecutor()
     expect(exec.isConcurrencySafe('read_file')).toBe(true)
@@ -1900,7 +1981,7 @@ describe('I: Tool definitions and metadata', () => {
     expect(exec.isConcurrencySafe('nonexistent_tool')).toBe(false)
   })
 
-  it('registerMCPTools adds MCP tools with mcp__ prefix', () => {
+  it('registerMCPTools adds MCP tools with mcp__ prefix (deferred, fora das defs)', () => {
     const exec = freshExecutor()
     const initialCount = exec.getCoreToolCount()
 
@@ -1909,10 +1990,10 @@ describe('I: Tool definitions and metadata', () => {
       jest.fn().mockResolvedValue('result')
     )
 
-    const defs = exec.getToolDefinitions()
-    const mcpDefs = defs.filter(d => d.function.name.startsWith('mcp__'))
-    expect(mcpDefs.length).toBe(1)
-    expect(mcpDefs[0].function.name).toBe('mcp__brave__search')
+    // Deferred (2026-08-03): o def NÃO viaja em getToolDefinitions — vive no
+    // índice de diferidas até o modelo o carregar via ToolSearch.
+    expect(exec.getToolDefinitions().some(d => d.function.name.startsWith('mcp__'))).toBe(false)
+    expect(exec.getDeferredToolIndex().map(d => d.name)).toEqual(['mcp__brave__search'])
 
     // Core count should be unchanged
     expect(exec.getCoreToolCount()).toBe(initialCount)
@@ -1930,9 +2011,7 @@ describe('I: Tool definitions and metadata', () => {
       jest.fn()
     )
 
-    const defs = exec.getToolDefinitions()
-    const mcpNames = defs.filter(d => d.function.name.startsWith('mcp__')).map(d => d.function.name)
-    expect(mcpNames).toEqual(['mcp__srv__tool2'])
+    expect(exec.getDeferredToolIndex().map(d => d.name)).toEqual(['mcp__srv__tool2'])
   })
 
   it('resetSessionState clears large result tracking', () => {

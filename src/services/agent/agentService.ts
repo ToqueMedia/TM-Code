@@ -56,7 +56,7 @@ import { useByokStore } from "../../stores/byokStore";
 import { buildByokClientFromSnapshot, buildByokThinkingConfig } from "./byokRouting";
 import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
-import { REQUEST_CONTEXT_NAME, requestContextDefinition } from "./toolPolicy";
+import { REQUEST_CONTEXT_NAME, requestContextDefinition, TOOL_SEARCH_NAME, toolSearchDefinition, searchDeferredTools } from "./toolPolicy";
 import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 import { classifyExecuteCommandPurpose, convertShellReadCommand } from "./commandPurpose";
@@ -146,6 +146,13 @@ class AgentService {
   // Só é atualizado em runs não-lightweight (lightweight não envia o header
   // X-TM-Speed nem liga onResponseHeaders) e é reposto no início de cada run.
   private lastResponseSpeedApplied = false;
+
+  // Array de tool defs do RUN CORRENTE — a mesma referência que o QueryEngine
+  // envia em cada pedido (query.ts usa `activeTools = tools` sem cópia). O
+  // bridge do `load_tools` empurra defs MCP diferidos para aqui a meio do
+  // run; do turno seguinte em diante seguem nos pedidos. Reatribuído no
+  // início de cada run (runQueryEngineLoop), nunca mutado fora do bridge.
+  private activeRunTools: OpenAI.ChatCompletionTool[] | null = null;
 
   // ── BYOK direct-routing state (set per run in runQueryEngineLoop) ──
   // When byokActive, the run routes IDE → SDK → provider DIRECT (bypassing the
@@ -700,7 +707,26 @@ class AgentService {
       if (omittedIds.length > 0) {
         openaiTools.push(requestContextDefinition(omittedIds));
       }
+
+      // Defs MCP DIFERIDOS (2026-08-03): getToolDefinitions() já não os
+      // inclui — o modelo procura/carrega os schemas de que precisa via
+      // `ToolSearch` (uma quebra de cache no momento da necessidade, em vez
+      // de todos os schemas MCP em todos os pedidos). Os nomes diferidos
+      // vivem na secção MCP do prompt; o def do ToolSearch é byte-estável
+      // (sem interpolações), portanto o prefixo de cache fica intacto até o
+      // modelo DECIDIR carregar.
+      // Optional-chaining defensivo (estilo getProjectRootForDiagnostics): um
+      // executor sem esta capacidade nunca pode abortar o arranque do run.
+      const deferredIndex = this.toolExecutor.getDeferredToolIndex?.() ?? [];
+      if (deferredIndex.length > 0) {
+        openaiTools.push(toolSearchDefinition());
+      }
     }
+
+    // Array VIVO do run: o query loop envia `activeTools` por referência em
+    // cada pedido, portanto o bridge do load_tools pode empurrar defs para
+    // aqui a meio do run e eles seguem do turno seguinte em diante.
+    this.activeRunTools = openaiTools;
 
     // 5. Create tool executor bridge
     const executeTool = this.createToolExecutorBridge(callbacks);
@@ -1498,6 +1524,53 @@ class AgentService {
           content: `# Auxiliary context: ${name}\n\n${content}`,
           isError: false,
         };
+      }
+
+      // Intercepta o meta-tool ToolSearch (contrato de treino do cli-vaz) —
+      // o modelo procura/seleciona tools MCP diferidas; o bridge devolve os
+      // schemas no bloco <functions> E empurra os defs para o array vivo do
+      // run (this.activeRunTools). Nunca chega ao toolExecutor. Ver a nota
+      // no toolPolicy.ts sobre a diferença face ao request_tools morto.
+      if (toolName === TOOL_SEARCH_NAME) {
+        const queryStr = typeof toolInput.query === 'string' ? toolInput.query : '';
+        const maxResults = typeof toolInput.max_results === 'number' && toolInput.max_results > 0
+          ? toolInput.max_results
+          : 5;
+        if (!queryStr.trim()) {
+          return {
+            content: 'No query provided. Use "select:<tool_name>" (comma-separated for several) or keywords to search the deferred tool list.',
+            isError: false,
+          };
+        }
+        const index = this.toolExecutor.getDeferredToolIndex();
+        const matches = searchDeferredTools(queryStr, index, maxResults);
+        if (matches.length === 0) {
+          return { content: 'No matching deferred tools found', isError: false };
+        }
+        const { defs } = this.toolExecutor.getDeferredToolDefinitions(matches);
+        const target = this.activeRunTools;
+        for (const def of defs) {
+          if (target && !target.some((t) => t.function.name === def.function.name)) {
+            target.push({
+              type: 'function' as const,
+              function: {
+                name: def.function.name,
+                description: def.function.description,
+                parameters: def.function.parameters as Record<string, unknown>,
+              },
+            });
+          }
+        }
+        // Formato do contrato: uma linha <function>{...}</function> por match
+        // — o mesmo encoding da lista de tools do topo do prompt.
+        const lines = defs.map((d) =>
+          `<function>${JSON.stringify({
+            description: d.function.description,
+            name: d.function.name,
+            parameters: d.function.parameters,
+          })}</function>`,
+        );
+        return { content: `<functions>\n${lines.join('\n')}\n</functions>`, isError: false };
       }
 
       // DUAS variáveis, de propósito — e a distinção é cara.

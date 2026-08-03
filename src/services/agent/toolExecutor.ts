@@ -156,6 +156,13 @@ export interface OpenAIToolDefinition {
 interface ToolEntry {
   definition: ToolDefinition
   execute: (input: Record<string, unknown>) => Promise<string>
+  /**
+   * Def DIFERIDO (2026-08-03, só MCP): não segue em getToolDefinitions().
+   * O prompt anuncia nome+resumo e o modelo carrega o schema via o meta-tool
+   * `load_tools` quando precisa. O execute continua registado e funcional —
+   * a deferral é sobre o que VIAJA nos pedidos, não sobre o que existe.
+   */
+  deferred?: boolean
 }
 
 interface ReadFileWithSignatureResult {
@@ -1582,14 +1589,60 @@ class ToolExecutor {
    * por treino. O caminho de volta é o `canonicalToolName` do execute().
    */
   getToolDefinitions(): OpenAIToolDefinition[] {
-    return Array.from(this.tools.values()).map(t => ({
-      type: 'function' as const,
-      function: {
+    // Defs diferidos (MCP) ficam de fora — são carregados pelo modelo via
+    // `load_tools` (ver getDeferredToolIndex/getDeferredToolDefinitions).
+    return Array.from(this.tools.values())
+      .filter(t => !t.deferred)
+      .map(t => ({
+        type: 'function' as const,
+        function: {
+          name: advertisedToolName(t.definition.name),
+          description: t.definition.description,
+          parameters: t.definition.input_schema
+        }
+      }))
+  }
+
+  /**
+   * Nomes + descrição dos defs diferidos. A descrição serve o SCORING da
+   * keyword search do ToolSearch (searchDeferredTools em toolPolicy.ts) —
+   * nunca é enviada em índices ao modelo: as tools diferidas anunciam-se só
+   * pelo nome (contrato cli-vaz; o A/B de hints não mostrou benefício).
+   */
+  getDeferredToolIndex(): Array<{ name: string; description: string }> {
+    return Array.from(this.tools.values())
+      .filter(t => t.deferred)
+      .map(t => ({
         name: advertisedToolName(t.definition.name),
         description: t.definition.description,
-        parameters: t.definition.input_schema
+      }))
+  }
+
+  /**
+   * Defs completos de tools diferidas, por nome anunciado. Chamado pelo
+   * bridge quando o modelo pede `ToolSearch` — os defs devolvidos são
+   * devolvidos no bloco <functions> E empurrados para o array vivo do run.
+   * Nomes desconhecidos (ou não diferidos) voltam em `missing`.
+   */
+  getDeferredToolDefinitions(names: string[]): { defs: OpenAIToolDefinition[]; missing: string[] } {
+    const defs: OpenAIToolDefinition[] = []
+    const missing: string[] = []
+    for (const name of names) {
+      const entry = this.tools.get(name) ?? this.tools.get(canonicalToolName(name))
+      if (entry?.deferred) {
+        defs.push({
+          type: 'function' as const,
+          function: {
+            name: advertisedToolName(entry.definition.name),
+            description: entry.definition.description,
+            parameters: entry.definition.input_schema,
+          },
+        })
+      } else {
+        missing.push(name)
       }
-    }))
+    }
+    return { defs, missing }
   }
 
   /**
@@ -1632,6 +1685,9 @@ class ToolExecutor {
       const isBrowserTool = tool.serverName === 'browser'
 
       this.tools.set(fullName, {
+        // Diferido: o schema só viaja depois de o modelo o carregar via
+        // `load_tools`. Ver a nota no ToolEntry — a execução não é afectada.
+        deferred: true,
         definition: {
           name: fullName,
           description: `[MCP: ${tool.serverName}] ${tool.description}`,

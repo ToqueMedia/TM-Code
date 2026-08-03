@@ -107,4 +107,25 @@ describe('portões de segurança fora do ToolsetSelector', () => {
     expect(agentService).not.toContain('postTmsBootstrapToolProfile')
     expect(read('mainDispatch.ts')).not.toContain('clearPostTmsBootstrapToolProfile')
   })
+
+  // ── ToolSearch (2026-08-03): o sucessor do request_tools TEM produtor ──
+  // A doutrina do toolPolicy.ts exige que qualquer selecção de tools volte
+  // com um produtor real e um teste que prove que corre. O comportamento do
+  // executor está no toolExecutor.test.ts ("deferred MCP tool definitions");
+  // aqui fica a prova estrutural de que o meta-tool é INJECTADO e RESPONDIDO
+  // nos dois runners — a combinação que faltou ao request_tools (definição
+  // sem injecção = tool invisível; intercepção sem injecção = código morto).
+  it('ToolSearch é injectado e interceptado no agentService (produtor real)', () => {
+    expect(agentService).toContain('openaiTools.push(toolSearchDefinition());')
+    expect(agentService).toContain('if (toolName === TOOL_SEARCH_NAME) {')
+    // O bridge empurra para o array VIVO do run — sem isto a activação não
+    // chega aos pedidos seguintes (query.ts envia `activeTools` por referência).
+    expect(agentService).toContain('this.activeRunTools = openaiTools;')
+  })
+
+  it('ToolSearch é injectado e interceptado no parallelTaskRunner (espelho)', () => {
+    const runner = read('parallelTasks/parallelTaskRunner.ts')
+    expect(runner).toContain('openaiTools.push(toolSearchDefinition())')
+    expect(runner).toContain('if (toolName === TOOL_SEARCH_NAME) {')
+  })
 })

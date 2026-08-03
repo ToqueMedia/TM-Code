@@ -170,6 +170,8 @@ When to call:
  - **Live external state** (issues, calendar, repo metadata, sheet values): read via MCP — don't fabricate.
  - **Side-effects in external systems** (create ticket, post message, comment, generate design): use the MCP instead of telling the ${actor} what to click. Confirm intent first when destructive or publishing.
 
+MCP tool schemas are DEFERRED: none of these is callable until you fetch its definition with \`ToolSearch\` — use \`{ query: "select:mcp__server__tool" }\` (comma-separated for several) or keywords, and fetch everything you expect to need in one call.
+
 Calls require ${actor} approval. If denied, fall back and note the limitation.${canvaGuidance}`
 }
 
@@ -190,6 +192,7 @@ export function sharedMcpIndexBlock(mcpTools: MCPToolSummary[]): string | null {
     '# MCP tools (index)',
     `Connected MCP servers/tools: ${servers}.`,
     `Examples: ${examples}${mcpTools.length > 8 ? `, +${mcpTools.length - 8} more` : ''}.`,
+    'MCP tool schemas are DEFERRED — before calling one, fetch its definition with `ToolSearch` (`{ query: "select:mcp__server__tool" }`, comma-separated for several; fetch everything you expect to need in one call).',
     'Use `request_context({ auxiliary: "agent_runtime.mcp_routing" })` when the task explicitly involves MCPs, live external state, external side effects, or API/docs that should be read from an MCP.',
   ].join('\n')
 }
@@ -239,6 +242,7 @@ Operate like an interactive shell operator, not a script generator.
    - \`${GLOB_ALIAS}\` — find files by pattern (replaces \`find\`, \`fd\`)
    - \`${BASH_ALIAS}\` — run CLIs, tests, builds, package managers, git diagnostics, curl, and system operations
  - **Observe before continuing**: after every \`${BASH_ALIAS}\`, read the full result. Exit code ≠ 0, timeout, or meaningful stderr is a blocker to diagnose, not noise to skip.
+ - **Pipes swallow exit codes**: \`cmd | tail\` reports the exit code of the LAST command in the pipe, not \`cmd\`'s. Run validation commands (typecheck, build, tests) WITHOUT a pipe; if you must pipe, prefix \`set -o pipefail;\` — and never claim "exit 0" for a piped validation without it.
  - **Choose blocking vs background deliberately**: quick commands that you need immediately go through \`${BASH_ALIAS}\`. ${backgroundGuidance}
  - **Keep commands inspectable**: quote paths, pass an explicit \`cwd\` when needed, and split multi-step workflows into named tool calls unless the shell composition is itself the operation being tested.
  - **Escalate risky actions**: destructive, shared-state, or hard-to-reverse shell actions require explicit confirmation from the ${actor} before execution.`
