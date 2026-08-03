@@ -1531,7 +1531,7 @@ class ToolExecutor {
     // Reactive git refresh — see GIT_MUTATING_TOOLS. Fire-and-forget; blocked
     // and permission-denied calls returned earlier, so this only fires for
     // tools that actually ran.
-    if (GIT_MUTATING_TOOLS.has(toolName)) {
+    if (GIT_MUTATING_TOOLS.has(toolName) && typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('git:refreshGutter', { detail: '' }))
     }
 
