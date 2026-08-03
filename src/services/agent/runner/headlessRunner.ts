@@ -79,6 +79,27 @@ async function runJob(job: RunnerJob): Promise<void> {
   setAgentHost(createHeadlessAgentHost({ yolo: job.yolo }))
   emit({ type: 'system', subtype: 'init', project: job.project, yolo: job.yolo })
 
+  // Rota activa — diagnóstico do smoke #7: "Connection error (Load failed)"
+  // era o VITE_AI_WORKER_URL do .env local a apontar ao worker de dev
+  // (localhost:8788) sem `yarn tauri:dev:all` a corrê-lo. Com a rota no
+  // NDJSON, esse desalinhamento lê-se na primeira linha em vez de se
+  // deduzir à sétima iteração.
+  try {
+    const [{ useByokStore }, { resolveAIWorkerUrl }] = await Promise.all([
+      import('@/stores/byokStore'),
+      import('@/utils/devUrls'),
+    ])
+    const byok = useByokStore.getState()
+    emit({
+      type: 'system',
+      subtype: 'route',
+      byokEnabled: byok.enabled,
+      aiWorkerUrl: resolveAIWorkerUrl(),
+    })
+  } catch {
+    /* diagnóstico é melhor-esforço */
+  }
+
   const startAt = Date.now()
 
   // 2. Espera o boot normal abrir o projecto.
