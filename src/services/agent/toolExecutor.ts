@@ -5,7 +5,7 @@ import { t } from '@/i18n'
 import { useFileTreeRepository } from '../../stores/fileTreeStore'
 import { useEditorRepository } from '../../stores/editorStore'
 import { useProjectStore } from '../../stores/projectStore'
-import { getProjectGrants, usePermissionStore } from '../../stores/permissionStore'
+import { getProjectGrants } from '../../stores/permissionStore'
 import { findBlockingClaim, registerFileClaim, MAIN_CLAIM_OWNER } from './fileClaims'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useLayoutStore } from '../../stores/layoutStore'
@@ -84,6 +84,7 @@ import {
   CHECK_BACKGROUND_COMMANDS,
 } from './toolNames'
 import { notifyHost } from './host/hostBus'
+import { getAgentHost } from './host/agentHost'
 import { ENTER_WORKTREE_DESCRIPTION, EXIT_WORKTREE_DESCRIPTION } from './toolExecutor/worktrees'
 import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileState, type FileStateCache } from './toolExecutor/fileStateCache'
 import { recordReadRange, clearReadRangeTracker } from './toolExecutor/readRangeTracker'
@@ -103,10 +104,7 @@ import { getFsVersion, bumpFsVersion } from '../fsVersion'
 import CheckpointService from './checkpointService'
 import { markReadBeforeWriteBlocked, markTmsCreated, markTmsFullContextSent } from './tmsContext'
 import type { MCPTool } from '../mcp/mcpService'
-import { useChatStore, hasPendingDiffApprovals, getPendingDiffApprovalToolIds } from '../../stores/chatStore'
-import { isInActiveWriteBatch } from './writeBatch'
-import { useAskUserQuestionStore } from '../../stores/askUserQuestionStore'
-import { useCredentialRequestStore } from '../../stores/credentialRequestStore'
+import { useChatStore } from '../../stores/chatStore'
 
 // === Types ===
 
@@ -942,7 +940,7 @@ class ToolExecutor {
     // menção é descartada silenciosamente (o user acabou de decidir isso
     // no diálogo; nenhum conteúdo chega ao modelo).
     if (toolName === 'read_file' && this.isSensitiveFile(filePath)) {
-      const decision = await usePermissionStore.getState().requestPermission(
+      const decision = await getAgentHost().canUseTool(
         'read_file', input, 'sensitive_file',
       )
       if (!decision.approved) {
@@ -1089,63 +1087,18 @@ class ToolExecutor {
    * espera imediatamente no próximo tick.
    */
   private async waitForUserGates(signal?: AbortSignal, toolUseId?: string): Promise<void> {
-    // F2 multi-project: only wait for gates that belong to THIS run. A
-    // permission dialog for project A must not freeze tool execution of a
-    // parallel/background run on project B (global pause was a known
-    // blocker in the MDI inventory).
-    const myProjectId = this.runProjectContext?.projectId ?? null
-    const myTaskId = this.permissionOrigin?.taskId ?? null
-
-    const gateIsMine = (originTaskId?: string, projectId?: string | null): boolean => {
-      if (projectId && myProjectId) return projectId === myProjectId
-      if (originTaskId && myTaskId) return originTaskId === myTaskId
-      // Unscoped prompt (main, no origin): only the unbound main waits.
-      if (!originTaskId && !projectId) return !myTaskId
-      // Prompt has identity we don't match — not ours.
-      if (originTaskId || projectId) return false
-      return true
-    }
-
-    const gateOpen = (): boolean => {
-      try {
-        const perm = usePermissionStore.getState().pendingPermission
-        if (perm && gateIsMine(perm.origin?.taskId, perm.projectId)) return true
-        // Also block if a queued permission for US is waiting behind another dialog
-        // (we will eventually need to answer it). Don't block for other projects.
-        for (const q of usePermissionStore.getState().permissionQueue) {
-          if (gateIsMine(q.origin?.taskId, q.projectId)) return true
-        }
-        for (const entry of useAskUserQuestionStore.getState().pending.values()) {
-          if (gateIsMine(entry.origin?.taskId, undefined)) return true
-        }
-        for (const entry of useCredentialRequestStore.getState().pending.values()) {
-          if (gateIsMine(entry.origin?.taskId, undefined)) return true
-        }
-        // Diff approvals are keyed by toolCallId, not project — only the
-        // unbound main (or any run without project isolation) waits globally.
-        // Background project-runs skip: their file writes use cmdMode alreadyApplied
-        // path and don't use the main diff UI. Parallel tasks same.
-        //
-        // Excepção de LOTE (writeBatch.ts): writes do MESMO turno despachadas
-        // em conjunto pelo query.ts atravessam o gate — os seus diffs devem
-        // acumular na barra de aprovação e ser decididos juntos. Bloqueia se
-        // (a) houver um diff pendente que NÃO pertence ao lote ativo, ou
-        // (b) esta tool não for membro do lote.
-        if (!myProjectId && !myTaskId && hasPendingDiffApprovals()) {
-          const selfInBatch = toolUseId !== undefined && isInActiveWriteBatch(toolUseId)
-          const strayPending = getPendingDiffApprovalToolIds()
-            .some(id => !isInActiveWriteBatch(id))
-          if (strayPending || !selfInBatch) return true
-        }
-      } catch {
-        return false
-      }
-      return false
-    }
-    while (gateOpen()) {
-      if (signal?.aborted) return
-      await new Promise(resolve => setTimeout(resolve, 120))
-    }
+    // P2 headless (2026-08-03): o corpo — gateIsMine + poll de 120ms sobre as
+    // 4 stores, incluindo a excepção de lote do writeBatch — mudou-se
+    // tal-e-qual para o hospedeiro-janela (windowHost, waitForUserGates); um
+    // host de teste/headless resolve imediatamente, porque não existe UI que
+    // possa estar aberta.
+    await getAgentHost().waitForUserGates(
+      {
+        projectId: this.runProjectContext?.projectId ?? null,
+        taskId: this.permissionOrigin?.taskId ?? null,
+      },
+      { signal, toolUseId },
+    )
   }
 
   /** Tools de escrita sujeitas ao registry de claims (Fase 4b/6b). */
@@ -1339,7 +1292,7 @@ class ToolExecutor {
     if (pathForScope && FILE_SCOPE_TOOLS.has(toolName)) {
       const scopeCheck = this.checkPathScope(pathForScope)
       if (!scopeCheck.allowed) {
-        const decision = await usePermissionStore.getState()
+        const decision = await getAgentHost()
           .requestPathAccess(pathForScope, scopeCheck.directoryToAdd, this.runProjectContext?.projectId)
         this.recordPermission(toolCallId, decision)
         if (!decision.approved) {
@@ -1436,7 +1389,7 @@ class ToolExecutor {
           }
         }
         // YOLO: still record an auto-approval; OFF: forcePrompt dialog.
-        const decision = await usePermissionStore.getState().requestPermission(
+        const decision = await getAgentHost().canUseTool(
           toolName, input, 'dangerous_command', this.resolvePermissionOrigin(),
         )
         this.recordPermission(toolCallId, decision)
@@ -1477,7 +1430,7 @@ class ToolExecutor {
       const promptReason = deletionRisk.kind !== 'none'
         ? (deletionRisk.kind === 'generated' ? 'generated_file' : 'untracked_file')
         : isSensitive ? 'sensitive_file' : false
-      const decision = await usePermissionStore.getState().requestPermission(toolName, input, promptReason, this.resolvePermissionOrigin())
+      const decision = await getAgentHost().canUseTool(toolName, input, promptReason, this.resolvePermissionOrigin())
       this.recordPermission(toolCallId, decision)
       if (!decision.approved) {
         const target = (input.file_path || input.command || input.name || '') as string
@@ -2674,7 +2627,7 @@ ${preview}
   private async requirePathAccess(filePath: string): Promise<void> {
     const scope = this.checkPathScope(filePath)
     if (scope.allowed) return
-    const decision = await usePermissionStore.getState().requestPathAccess(filePath, scope.directoryToAdd)
+    const decision = await getAgentHost().requestPathAccess(filePath, scope.directoryToAdd)
     if (!decision.approved) {
       const reason = decision.denyReason ? ` ${decision.denyReason}` : ''
       throw new Error(`Access denied: path "${filePath}" is outside the ${scope.scopeName}.${reason}`)

@@ -18,7 +18,6 @@ import FirebaseAuthService from "../auth/firebaseAuth";
 import { ServiceError, formatError } from "../../utils/errors";
 import { MODEL_PROFILES, getProfileForPlan } from "./modelProfiles";
 import {
-  createDiffApprovalPromise,
   generateId,
   resolveAllPendingDiffApprovals,
   useChatStore,
@@ -59,6 +58,7 @@ import { QueryEngine, toQueryMessages } from "./queryEngine";
 import { REQUEST_CONTEXT_NAME, requestContextDefinition, TOOL_SEARCH_NAME, toolSearchDefinition, searchDeferredTools } from "./toolPolicy";
 import { emitAgentStopRequested } from "./host/hostBus";
 import { windowBudgetHooks } from "./host/windowHost";
+import { getAgentHost } from "./host/agentHost";
 import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 import { classifyExecuteCommandPurpose, convertShellReadCommand } from "./commandPurpose";
@@ -1730,7 +1730,9 @@ class AgentService {
             // code path that registers pendingDiffs, so waiting first deadlocks:
             // no approval UI exists yet to resolve createDiffApprovalPromise.
             callbacks.onToolResult(toolUseId, effectiveToolName, content, false);
-            const approved = await createDiffApprovalPromise(toolUseId);
+            // P2 headless: a espera pela decisão humana do diff vive no
+            // hospedeiro (janela: createDiffApprovalPromise do chatStore).
+            const approved = await getAgentHost().approveDiff(toolUseId);
             if (signal?.aborted) {
               return { content: "Aborted", isError: true };
             }
