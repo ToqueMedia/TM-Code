@@ -84,20 +84,62 @@ async function runJob(job: RunnerJob): Promise<void> {
   // (localhost:8788) sem `yarn tauri:dev:all` a corrê-lo. Com a rota no
   // NDJSON, esse desalinhamento lê-se na primeira linha em vez de se
   // deduzir à sétima iteração.
+  let aiWorkerUrl: string | null = null
+  let byokEnabled = false
   try {
     const [{ useByokStore }, { resolveAIWorkerUrl }] = await Promise.all([
       import('@/stores/byokStore'),
       import('@/utils/devUrls'),
     ])
-    const byok = useByokStore.getState()
+    byokEnabled = useByokStore.getState().enabled
+    aiWorkerUrl = resolveAIWorkerUrl()
     emit({
       type: 'system',
       subtype: 'route',
-      byokEnabled: byok.enabled,
-      aiWorkerUrl: resolveAIWorkerUrl(),
+      byokEnabled,
+      aiWorkerUrl,
     })
   } catch {
     /* diagnóstico é melhor-esforço */
+  }
+
+  // Preflight da rota gerida (smoke #8: com o VITE_AI_WORKER_URL local e o
+  // wrangler ainda a arrancar — ou nem lançado — o primeiro request morria
+  // em "Load failed" e o run inteiro ia ao chão por uma corrida de boot).
+  // Qualquer resposta HTTP prova que há alguém a ouvir (o 404 tm_not_found
+  // do worker serve); sem resposta em 30s o run nem arranca e o erro diz
+  // exactamente o que falta. BYOK directo não passa pelo worker — salta.
+  if (aiWorkerUrl && !byokEnabled) {
+    const ROUTE_PREFLIGHT_TIMEOUT_MS = 30_000
+    const preflightStart = Date.now()
+    let reachable = false
+    while (Date.now() - preflightStart < ROUTE_PREFLIGHT_TIMEOUT_MS) {
+      try {
+        await fetch(aiWorkerUrl, { method: 'GET', mode: 'cors' })
+        reachable = true
+        break
+      } catch {
+        await new Promise(r => setTimeout(r, 500))
+      }
+    }
+    if (!reachable) {
+      emit({
+        type: 'result',
+        subtype: 'error',
+        error:
+          `AI route unreachable at ${aiWorkerUrl} after ${ROUTE_PREFLIGHT_TIMEOUT_MS / 1000}s — ` +
+          `em dev com worker local (VITE_AI_WORKER_URL), arranca-o com \`yarn tauri:dev:all\`, ` +
+          `ou aponta ao worker de produção: VITE_AI_WORKER_URL=https://… antes do comando.`,
+      })
+      exit(1)
+      return
+    }
+    emit({
+      type: 'system',
+      subtype: 'route_ready',
+      aiWorkerUrl,
+      waitedMs: Date.now() - preflightStart,
+    })
   }
 
   const startAt = Date.now()
