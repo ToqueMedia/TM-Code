@@ -54,7 +54,7 @@
 - O `.env` deste repo está selado (como em todos) para escrita/edição/scan; a LEITURA directa pode ser pedida via válvula (F1-9): diálogo de aprovação explícita ao developer em modo normal; em YOLO auto-aprova como tudo (doutrina: o YOLO fura tudo — o travão é o humano que o liga). Runner headless: aprova só com `--yolo`. Útil exactamente para a classe env-leak deste repo.
 - Builds longas (`yarn tauri:build:*`, suite Jest completa, cargo) excedem o tecto de 600s do shell bloqueante: usa `execute_command_background` com `timeout_secs` explícito (tecto 3600 — o sistema acorda-te no fim, nunca sondar) ou a shell PTY persistente. Nunca o `execute_command` bloqueante.
 - Abrir o mesmo projecto na instância dev dispara o aviso de double-open do window-lock — é esperado; confirma com o developer.
-- Paralelismo: a política autoritativa é **F3 = um agente por projecto** (`src/services/agent/parallelTasks/policy.ts` + ARCHITECTURE.md → "Current parallel model"). Não contornar sem decisão escrita do developer nesse documento.
+- Paralelismo: a política autoritativa é **F3 = um agente por projecto** para janelas (`src/services/agent/parallelTasks/policy.ts` + ARCHITECTURE.md → "Current parallel model"). Decisão 2026-08-03 (opção A): executores headless `--run` em checkout ISOLADO (worktree/cópia) ficam FORA do slot F3; sobre a MESMA working tree de uma janela aberta continua não suportado.
 
 ## Confirmed
 - Billing dividido: metering por pedido é EXCLUSIVO do data-plane (usage real + commit atómico); o ciclo (reset/carry-over/anchoring) é do control-plane no read path de `/v1/me` (event-driven: launch, focus, pós-compra — nunca polled). A IDE só exibe.
@@ -69,7 +69,7 @@
 - A instância dev lançada como alvo de verificação abre o último projecto/Welcome; o comportamento exacto do arranque em dogfood fica por confirmar na prática.
 
 ## Pending Confirmation
-- Sucessor da política F3 para executores TM Work (decisão do developer, a registar no ARCHITECTURE.md "Current parallel model" antes de qualquer fan-out multi-agente).
+- None currently known.
 
 ## lastGeneratedAt
 2026-08-03

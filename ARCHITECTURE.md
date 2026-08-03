@@ -137,6 +137,27 @@ in the IDE's billing memories.)
 - `send_agent_message` tool → **removed from the registry** (2026-08-03; was error-only under F3 — a call from an old transcript now gets the standard unknown-tool error)  
 - Status writer assumes a single live owner per project file  
 
+### Decision 2026-08-03 — F3 successor: headless carve-out (option A)
+
+Product decision (developer, 2026-08-03): **F3 stays** as the rule for
+interactive windows — one live agent per project, no in-window fan-out, no
+peer messaging (the `send_agent_message` tool is gone). The carve-out:
+
+- **Headless runner executors (`--run`) are OUTSIDE the F3 slot** when they
+  operate on an ISOLATED checkout (git worktree, or a copied tree as the eval
+  harness does). F3 exists to prevent two agents colliding on one working
+  tree; isolation removes the collision — so N runners × N isolated checkouts
+  of the same repo are fine. This is the substrate for a future TM Work fleet.
+- A runner pointed at the SAME working tree as an open window remains
+  unsupported for concurrent use (the runner's window-lock bypass exists to
+  survive its own previous corpse, not to co-edit with a live window).
+- Coordination between executors stays result/disk-based; peer messaging does
+  not return.
+
+Nothing flips in code today: `ONE_AGENT_PER_PROJECT` remains `true` (it
+governs every in-window path). Building the worktree spawn mode for executors
+is future TM Work implementation — now unblocked by written doctrine.
+
 ### Session / UI invariants (still hold)
 
 1. Streaming is **per-session** (`streamingSessionId`), not per visible tab.  

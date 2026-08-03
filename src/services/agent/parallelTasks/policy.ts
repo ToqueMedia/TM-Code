@@ -14,6 +14,12 @@
  *
  * Set false only with an explicit product decision to re-enable worktree fan-out
  * and peer messaging (and update ARCHITECTURE + prompts + tests together).
+ *
+ * DECISÃO 2026-08-03 (ver ARCHITECTURE.md → "Decision 2026-08-03 — F3
+ * successor"): F3 MANTÉM-SE para janelas; executores headless (`--run`) em
+ * checkout ISOLADO (worktree/cópia) ficam FORA deste slot — o F3 previne
+ * colisões numa working tree partilhada, e o isolamento remove a colisão.
+ * Esta flag continua a governar todos os caminhos in-window.
  */
 
 /** F3: refuse concurrent agents on the same project path. */
