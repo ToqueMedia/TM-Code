@@ -120,6 +120,16 @@ export function getSystemSection(): string {
 // bullet do delegate/Task em getToolsSection — deliberadamente FORA do
 // Reminder: a poda de 2026-07-28 (7 bullets de maior custo de violação,
 // eval-validada) não se reabre por isto.
+//
+// RECONCILIAÇÃO 2026-08-03 (post-mortem cgk-doc-app + pergunta do user
+// "há instrução a conflituar?"): o Reminder #3 dizia "one verification
+// path is enough / do not run extra defensive checks after a clean pass" —
+// RECÊNCIA a contradizer este contrato do meio do prompt, e o glm-5.2
+// obedeceu à recência (tsc limpo → done, sem Verify). As duas frases do
+// checkpoint e o bullet "re-verifying" do core ganharam a excepção
+// explícita: em mudanças não-triviais, o veredicto do Verify FAZ PARTE do
+// checkpoint. Contradição por omissão — a classe do
+// contradictionByOmission.test — introduzida pela própria Fase 0.
 export function getDoingTasksSection(ctx: PromptContext): string {
   return `# Doing tasks
 
@@ -1346,7 +1356,7 @@ export function getReminderSection(ctx: PromptContext): string {
 
 1. **COMPLETE** every file. Output goes to disk as-is — omitted code is deleted code.
 2. **AFTER** file changes with a dev server running: \`${READ_DEV_SERVER_LOGS}\` and fix errors before continuing. Track the \`next_since\` cursor — without it you re-read stale entries.
-3. **FINAL CHECKPOINT**: run one highest-signal verification path for the change (dev-server logs, typecheck/build, targeted test, or endpoint curl). If it passes: update \`${UPDATE_TASKS}\`; when the task was significant and durable project facts changed, write those into TMS.md (commands, entrypoints, patterns, agent rules, confirmed/inferred/pending) so the next run starts with an accurate snapshot; then stop with summary + verification + next steps. A clean \`npx tsc\`/typecheck/build/test is enough evidence for the touched files — do not re-read files just to confirm after it passes. End the report with a CTA for user-visible work: tell the developer to click the **Preview** button at the top-right of Chat to see what changed when a dev server/static preview is available. Keep dev servers running by default; use \`${STOP_DEV_SERVER}\` only on explicit request, required restart, project switch/removal, or port/process cleanup. **Do not run extra defensive checks after a clean pass.** If verification isn't possible, say so explicitly. When the task tracker has \`in_progress\` rows still open, never call the run "done" or mark everything completed in one \`${UPDATE_TASKS}\` jump; resume the in_progress row and flip statuses one at a time as each acceptance is verified.
+3. **FINAL CHECKPOINT**: run one highest-signal verification path for the change (dev-server logs, typecheck/build, targeted test, or endpoint curl). If it passes: update \`${UPDATE_TASKS}\`; when the task was significant and durable project facts changed, write those into TMS.md (commands, entrypoints, patterns, agent rules, confirmed/inferred/pending) so the next run starts with an accurate snapshot; then stop with summary + verification + next steps. For a TRIVIAL change, a clean \`npx tsc\`/typecheck/build/test is enough evidence — do not re-read files just to confirm after it passes. For a NON-TRIVIAL change (3+ files, backend/API/DB contracts, infra), the checkpoint is NOT closed by your own checks alone: the independent Verify pass (Doing tasks → Verification) is part of "done" — delegate it and wait for the verdict. End the report with a CTA for user-visible work: tell the developer to click the **Preview** button at the top-right of Chat to see what changed when a dev server/static preview is available. Keep dev servers running by default; use \`${STOP_DEV_SERVER}\` only on explicit request, required restart, project switch/removal, or port/process cleanup. **Do not run extra defensive checks after the checkpoint closes** (for non-trivial changes that means after the Verify verdict, not after your own clean pass). If verification isn't possible, say so explicitly. When the task tracker has \`in_progress\` rows still open, never call the run "done" or mark everything completed in one \`${UPDATE_TASKS}\` jump; resume the in_progress row and flip statuses one at a time as each acceptance is verified.
 4. **AFTER** \`${BASH_ALIAS}\`: **READ** the output. If exit code ≠ 0, **DIAGNOSE AND FIX** the actual error. **DO NOT BLINDLY RETRY** the exact same command.
 5. **Do NOT re-read a file you just edited/wrote** — the tool result already shows the applied state. **For SYMBOL questions** (where is X defined, what is its type, who uses it) and for type-checking ONE file after an edit, use \`${LSP}\` (goToDefinition/findReferences/hover/documentSymbol/diagnostics) — compiler-grade answers, cheaper than grep + speculative reads. After a search match, \`${READ_AROUND}\` gives the local window instead of re-reading the whole file.
 6. **DEVELOPER-OWNED env vars** (third-party services the developer integrates — LLM, payments, email, SMTP, analytics, webhooks): call \`${REQUEST_CREDENTIALS}\` in the SAME turn you write \`process.env.X\`. For DB, local dev uses \`DATABASE_URL=file:./dev.db\`.
