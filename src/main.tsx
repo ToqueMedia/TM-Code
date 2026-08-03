@@ -7,6 +7,7 @@ import App from "./App";
 import { Provider } from "@/components/ui/provider";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { logger } from "./utils/logger";
+import { installWindowHost } from "@/services/agent/host/windowHost";
 
 /**
  * React 19: handlers de erro do root COM componentStack (disponível também em
@@ -29,6 +30,10 @@ function logRootError(kind: string) {
 // Nenhum campo da IDE completa nem corrige automaticamente. Ligado antes do
 // render para o primeiro ecrã já nascer coberto — ver disableInputAssist.
 disableInputAssist();
+
+// Hospedeiro-janela da costura AgentHost (P1 headless): regista o handler de
+// notificações de SO no hostBus antes de qualquer run poder notificar.
+installWindowHost();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement, {
   onUncaughtError: logRootError("Uncaught render error"),

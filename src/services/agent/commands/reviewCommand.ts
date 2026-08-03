@@ -10,6 +10,7 @@ import { languageDirective } from './_languageInstruction'
 import { logger } from '../../../utils/logger'
 import { t } from '../../../i18n'
 import { GLOB_ALIAS, GREP_ALIAS, LS_ALIAS, READ_ALIAS } from '../toolNames'
+import { onAgentStopRequested } from '../host/hostBus'
 
 /**
  * Cap on how many files we ask the sub-agent to review when scope is
@@ -175,11 +176,10 @@ export async function executeReview(
   // the sub-agent keeps burning reasoning tokens in the background.
   const abortController = new AbortController()
   const stopHandler = () => abortController.abort()
-  // The chatStore's stop event is dispatched when the user clicks the Stop
-  // button (handleStop in AgentStatusBar) — listen for it.
-  if (typeof window !== 'undefined') {
-    window.addEventListener('agent-stop-requested', stopHandler, { once: true })
-  }
+  // O stop do run principal chega pelo hostBus (P1 headless): era um
+  // CustomEvent no window; o emissor é agentService.cancelLoop, disparado
+  // pelo botão Stop (handleStop no AgentStatusBar).
+  const unsubscribeStop = onAgentStopRequested(stopHandler, { once: true })
 
   const maxTurns = computeMaxTurns(resolved.files.length)
   const subAgent = AgentService.createLightweight({
@@ -299,9 +299,7 @@ export async function executeReview(
     agentStore.setStatus('error')
   } finally {
     subAgent.setRequestType(null)
-    if (typeof window !== 'undefined') {
-      window.removeEventListener('agent-stop-requested', stopHandler)
-    }
+    unsubscribeStop()
   }
 }
 

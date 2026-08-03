@@ -41,6 +41,8 @@ import {
   WRITE_FILE, EDIT_FILE, CREATE_FILE, DELETE_FILE, RENAME_FILE, CREATE_DIRECTORY,
 } from '../toolNames'
 import { REQUEST_CONTEXT_NAME, requestContextDefinition, TOOL_SEARCH_NAME, toolSearchDefinition, searchDeferredTools } from '../toolPolicy'
+import { notifyHost } from '../host/hostBus'
+import { windowBudgetHooks } from '../host/windowHost'
 import type ContextBuilderT from '../contextBuilder'
 import { formatError } from '../../../utils/errors'
 import { useBillingStore } from '../../../stores/billingStore'
@@ -563,6 +565,8 @@ export async function runParallelTask(runId: string): Promise<void> {
   }
 
   const engine = new QueryEngine({
+    // P1 headless: hooks de orçamento da janela — ver windowHost.
+    ...windowBudgetHooks(),
     client,
     refreshClient,
     model,
@@ -983,13 +987,11 @@ export async function runParallelTask(runId: string): Promise<void> {
           })
         }
         stampTaskSessionStatus(run.sessionId, 'completed')
-        void import('@/services/notificationService').then(({ notify }) =>
-          notify({
-            title: `✅ Task completed`,
-            body: `"${run.description}" finished`,
-            dedupKey: `parallel-task-done-${runId}`,
-          }),
-        )
+        notifyHost({
+          title: `✅ Task completed`,
+          body: `"${run.description}" finished`,
+          dedupKey: `parallel-task-done-${runId}`,
+        })
       }
     }
   } catch (err) {

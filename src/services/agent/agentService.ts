@@ -57,6 +57,8 @@ import { buildByokClientFromSnapshot, buildByokThinkingConfig } from "./byokRout
 import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
 import { REQUEST_CONTEXT_NAME, requestContextDefinition, TOOL_SEARCH_NAME, toolSearchDefinition, searchDeferredTools } from "./toolPolicy";
+import { emitAgentStopRequested } from "./host/hostBus";
+import { windowBudgetHooks } from "./host/windowHost";
 import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 import { classifyExecuteCommandPurpose, convertShellReadCommand } from "./commandPurpose";
@@ -344,9 +346,10 @@ class AgentService {
     this.isRunning = false;
     if (!this.lightweightOptions) {
       getQueryGuard().forceEnd();
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("agent-stop-requested"));
-      }
+      // P1 headless: o CustomEvent 'agent-stop-requested' no window virou
+      // hostBus — o único listener (reviewCommand) subscreve o bus, e um
+      // hospedeiro sem DOM continua a conseguir cancelar sub-agentes.
+      emitAgentStopRequested();
     }
   }
 
@@ -774,6 +777,9 @@ class AgentService {
 
     // 7. Create QueryEngine
     const engine = new QueryEngine({
+      // P1 headless: hooks de orçamento da janela (billingStore) — o loop
+      // deixou de conhecer a store; ver windowHost.windowBudgetHooks.
+      ...windowBudgetHooks(),
       client,
       refreshClient,
       model: this.resolveModel(),

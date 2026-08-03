@@ -385,6 +385,16 @@ export interface QueryParams {
   getExtraHeaders?: () => Record<string, string> | undefined;
   /** Called as soon as streaming response headers are available. */
   onResponseHeaders?: (headers: Headers) => void;
+  /** Costura de host (P1 headless, docs/DESIGN-HEADLESS-RUNNER.md): true
+   *  quando o utilizador é membro de equipa sem ser owner — muda a mensagem
+   *  do 402 ("fala com o admin" em vez de "compra consumo"). Ausente = false.
+   *  Na janela: windowHost.windowBudgetHooks() (lê o billingStore). */
+  isTeamMemberBudgetBlocked?: () => Promise<boolean>;
+  /** Costura de host (P1 headless): marcar "sem créditos" após um 402 TM.
+   *  Na janela flipa billingStore.setNoCredits() — que dispara o budget-stop
+   *  watcher; um hospedeiro headless decide a sua própria terminação.
+   *  Chamado DEPOIS do yield do erro — ver o comentário de ordem no handler. */
+  onBudgetExhausted?: () => void | Promise<void>;
   /**
    * Inter-turn attachment collector — claude-vaz parity (query.ts runs
    * getAttachmentMessages after every tool round). Called after each batch
@@ -2049,11 +2059,12 @@ export async function* query(
       if (errorStatus(error) === 402) {
         const apiInfo = apiErrorInfo(error);
         const isTeamByokExhausted = apiInfo.type === "tm_team_byok_exhausted";
+        // P1 headless: a leitura do billingStore saiu para o hospedeiro
+        // (windowHost.windowBudgetHooks) — o loop só pergunta.
         let teamMemberBlocked = false;
         try {
-          const { useBillingStore } = await import("../../stores/billingStore");
-          const store = useBillingStore.getState();
-          teamMemberBlocked = !!store.team && store.team.role !== "owner";
+          teamMemberBlocked =
+            (await params.isTeamMemberBudgetBlocked?.()) ?? false;
         } catch {
           /* non-critical */
         }
@@ -2075,17 +2086,18 @@ export async function* query(
           type: "error",
           message,
         };
-        // setNoCredits DEPOIS do yield, nunca antes: o flip dispara o
-        // budget-stop watcher (cancelLoop global) e, se corresse antes de o
+        // onBudgetExhausted DEPOIS do yield, nunca antes: na janela o
+        // callback flipa billingStore.setNoCredits(), que dispara o
+        // budget-stop watcher (cancelLoop global) — se corresse antes de o
         // consumer processar este evento, o ramo isAborted() dos handlers
-        // engolia a mensagem tipada — um membro de equipa via "compra
+        // engolia a mensagem tipada e um membro de equipa via "compra
         // consumo" (do watcher) em vez de "fala com o admin". O for-await
         // do consumer só faz resume do generator depois de processar o
-        // evento, por isso aqui a mensagem já está no chat.
+        // evento, por isso aqui a mensagem já está no chat. (P1 headless:
+        // a escrita da store saiu para o hospedeiro — windowBudgetHooks.)
         if (!isTeamByokExhausted) {
           try {
-            const { useBillingStore } = await import("../../stores/billingStore");
-            useBillingStore.getState().setNoCredits();
+            await params.onBudgetExhausted?.();
           } catch {
             /* non-critical */
           }

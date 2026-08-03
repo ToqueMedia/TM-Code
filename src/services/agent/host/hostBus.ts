@@ -1,0 +1,72 @@
+/**
+ * Host bus — o primeiro pedaço da costura AgentHost (P1 do
+ * docs/DESIGN-HEADLESS-RUNNER.md, 2026-08-03).
+ *
+ * O núcleo do agente NÃO pode falar com o DOM nem com serviços que assumem
+ * janela (window.dispatchEvent, notificações de SO): num hospedeiro headless
+ * nada disso existe. Este módulo é o canal neutro — o núcleo emite; quem
+ * hospeda (janela OU runner) decide o que fazer. Sem handler registado tudo é
+ * no-op, que é exactamente a semântica headless desejada (`notify?` é OPCIONAL
+ * no contrato AgentHost).
+ *
+ * Zero dependências, zero React, zero Tauri — importável de qualquer contexto.
+ */
+
+export interface HostNotification {
+  title: string
+  body: string
+  /** Mostrar mesmo com a janela focada (só relevante no hospedeiro janela). */
+  evenWhenFocused?: boolean
+  /** Chave de deduplicação de notificações repetidas (passa ao handler). */
+  dedupKey?: string
+}
+
+type StopHandler = () => void
+const stopHandlers = new Set<StopHandler>()
+
+/** Emite "o run principal foi parado/cancelado" aos subscritores do host. */
+export function emitAgentStopRequested(): void {
+  // Cópia antes de iterar: um handler `once` remove-se durante o fire.
+  for (const handler of Array.from(stopHandlers)) {
+    try {
+      handler()
+    } catch {
+      /* um subscritor partido nunca pode travar o cancel dos restantes */
+    }
+  }
+}
+
+/** Subscreve o stop; devolve o unsubscribe. `once` auto-remove no 1º fire. */
+export function onAgentStopRequested(
+  handler: StopHandler,
+  opts?: { once?: boolean },
+): () => void {
+  const wrapped: StopHandler = opts?.once
+    ? () => {
+        stopHandlers.delete(wrapped)
+        handler()
+      }
+    : handler
+  stopHandlers.add(wrapped)
+  return () => {
+    stopHandlers.delete(wrapped)
+  }
+}
+
+type NotificationHandler = (n: HostNotification) => void
+let notificationHandler: NotificationHandler | null = null
+
+/** O hospedeiro regista aqui o caminho real das notificações de SO
+ *  (janela: notificationService; headless: nada). */
+export function setHostNotificationHandler(handler: NotificationHandler | null): void {
+  notificationHandler = handler
+}
+
+/** Notificação para o hospedeiro. Sem handler (headless/testes) é no-op. */
+export function notifyHost(n: HostNotification): void {
+  try {
+    notificationHandler?.(n)
+  } catch {
+    /* notificar é melhor-esforço — nunca parte o run */
+  }
+}

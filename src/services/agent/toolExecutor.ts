@@ -83,6 +83,7 @@ import {
   DIVERGENT_TRAINED_TOOLS,
   CHECK_BACKGROUND_COMMANDS,
 } from './toolNames'
+import { notifyHost } from './host/hostBus'
 import { ENTER_WORKTREE_DESCRIPTION, EXIT_WORKTREE_DESCRIPTION } from './toolExecutor/worktrees'
 import { createFileStateCacheWithSizeLimit, type FileContentSignature, type FileState, type FileStateCache } from './toolExecutor/fileStateCache'
 import { recordReadRange, clearReadRangeTracker } from './toolExecutor/readRangeTracker'
@@ -6002,24 +6003,20 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
                 useBackgroundCommandStore.getState().completeCommand(cmdId, code)
                 wakeForTerminalState('completed', code)
                 // Send OS notification when command completes successfully
-                import('@/services/notificationService').then(({ notify }) => {
-                  notify({
-                    title: '✅ Command completed',
-                    body: cmd.length > 60 ? cmd.slice(0, 57) + '...' : cmd,
-                    dedupKey: `bgcmd-done-${cmdId}`,
-                  })
+                notifyHost({
+                  title: '✅ Command completed',
+                  body: cmd.length > 60 ? cmd.slice(0, 57) + '...' : cmd,
+                  dedupKey: `bgcmd-done-${cmdId}`,
                 })
               } else {
                 useBackgroundCommandStore.getState().failCommand(cmdId, `Process exited with code ${code}`)
                 wakeForTerminalState('error', code)
                 // Send OS notification when command fails
-                import('@/services/notificationService').then(({ notify }) => {
-                  notify({
-                    title: '❌ Command failed',
-                    body: `${cmd.length > 40 ? cmd.slice(0, 37) + '...' : cmd} (exit ${code})`,
-                    evenWhenFocused: true,
-                    dedupKey: `bgcmd-fail-${cmdId}`,
-                  })
+                notifyHost({
+                  title: '❌ Command failed',
+                  body: `${cmd.length > 40 ? cmd.slice(0, 37) + '...' : cmd} (exit ${code})`,
+                  evenWhenFocused: true,
+                  dedupKey: `bgcmd-fail-${cmdId}`,
                 })
               }
             }

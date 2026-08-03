@@ -76,6 +76,10 @@ export interface QueryEngineOptions {
   extraHeaders?: Record<string, string>
   /** Called as soon as streaming response headers are available. */
   onResponseHeaders?: (headers: Headers) => void
+  /** Costura de host (P1 headless) — ver QueryParams.isTeamMemberBudgetBlocked. */
+  isTeamMemberBudgetBlocked?: () => Promise<boolean>
+  /** Costura de host (P1 headless) — ver QueryParams.onBudgetExhausted. */
+  onBudgetExhausted?: () => void | Promise<void>
   /** Inter-turn attachment collector — see QueryParams.collectInterTurnContext. */
   collectInterTurnContext?: () => Promise<string>
   /** Queued-message steering collector — see QueryParams.collectQueuedSteering. */
@@ -216,6 +220,8 @@ export class QueryEngine {
       },
       compactInstructions: this.options.compactInstructions,
       onResponseHeaders: this.options.onResponseHeaders,
+      isTeamMemberBudgetBlocked: this.options.isTeamMemberBudgetBlocked,
+      onBudgetExhausted: this.options.onBudgetExhausted,
       collectInterTurnContext: this.options.collectInterTurnContext,
       collectQueuedSteering: this.options.collectQueuedSteering,
       getContextLimits: this.options.getContextLimits,
