@@ -124,3 +124,51 @@ export function onDevServerLogAdded(handler: DevServerLogHandler): () => void {
     devServerLogHandlers.delete(handler)
   }
 }
+
+// ── Gates de espera humana (P4 — portão nº7) ──────────────────────────────
+// O permissionAwareTimeout subtraía o tempo-de-humano subscrevendo TRÊS
+// stores do renderer. Depois da P2, TODA a espera humana passa pelo
+// AgentHost — o host-janela abre um span à volta de cada await
+// (beginHumanGate/end) e quem precisa de saber "há um humano a decidir?"
+// pergunta ao bus. Um host headless nunca abre gates → nada pausa, que é a
+// semântica certa (não há diálogo nenhum aberto).
+
+let openHumanGates = 0
+type HumanGateListener = () => void
+const humanGateListeners = new Set<HumanGateListener>()
+
+function notifyHumanGates(): void {
+  for (const listener of Array.from(humanGateListeners)) {
+    try {
+      listener()
+    } catch {
+      /* um subscritor partido não trava os restantes */
+    }
+  }
+}
+
+/** Abre um span de espera humana; devolve o fecho (idempotente). */
+export function beginHumanGate(): () => void {
+  openHumanGates += 1
+  notifyHumanGates()
+  let ended = false
+  return () => {
+    if (ended) return
+    ended = true
+    openHumanGates -= 1
+    notifyHumanGates()
+  }
+}
+
+/** Há alguma decisão humana em curso (qualquer via do AgentHost)? */
+export function hasOpenHumanGates(): boolean {
+  return openHumanGates > 0
+}
+
+/** Subscreve transições de abertura/fecho de gates. Devolve o unsubscribe. */
+export function onHumanGatesChange(listener: HumanGateListener): () => void {
+  humanGateListeners.add(listener)
+  return () => {
+    humanGateListeners.delete(listener)
+  }
+}

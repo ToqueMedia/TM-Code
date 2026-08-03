@@ -6,7 +6,7 @@
  * fornece as suas próprias implementações e este ficheiro nunca é carregado.
  */
 
-import { setHostNotificationHandler, setToolProgressHandler } from './hostBus'
+import { setHostNotificationHandler, setToolProgressHandler, beginHumanGate } from './hostBus'
 // Type-only (apagado na compilação): o ciclo agentHost→windowHost é só de
 // runtime num sentido; este import não o fecha.
 import type { AgentHost, HostGateScope } from './agentHost'
@@ -92,19 +92,41 @@ export function createWindowAgentHost(): AgentHost {
     // passam 4 com origin possivelmente undefined) — os testes de contrato
     // distinguem "não passado" de "undefined" e a fidelidade é o requisito
     // da P2 ("movido, não reescrito").
+    // P4 (portão nº7): cada via humana abre um span beginHumanGate/end — é
+    // daqui que o permissionAwareTimeout deriva o tempo-de-humano a
+    // subtrair, em vez de subscrever 3 stores. Duas divergências
+    // deliberadas e CONSERVADORAS face ao original: o span cobre também o
+    // tempo na FILA de permissões e as perguntas estruturadas (que a
+    // subscrição antiga ignorava) — deadline maior, menos timeouts falsos
+    // de MCP com o utilizador a decidir.
     async canUseTool(...callArgs) {
       const { usePermissionStore } = await import('@/stores/permissionStore')
-      return usePermissionStore.getState().requestPermission(...callArgs)
+      const endGate = beginHumanGate()
+      try {
+        return await usePermissionStore.getState().requestPermission(...callArgs)
+      } finally {
+        endGate()
+      }
     },
 
     async requestPathAccess(...callArgs) {
       const { usePermissionStore } = await import('@/stores/permissionStore')
-      return usePermissionStore.getState().requestPathAccess(...callArgs)
+      const endGate = beginHumanGate()
+      try {
+        return await usePermissionStore.getState().requestPathAccess(...callArgs)
+      } finally {
+        endGate()
+      }
     },
 
     async approveDiff(toolCallId) {
       const { createDiffApprovalPromise } = await import('@/stores/chatStore')
-      return createDiffApprovalPromise(toolCallId)
+      const endGate = beginHumanGate()
+      try {
+        return await createDiffApprovalPromise(toolCallId)
+      } finally {
+        endGate()
+      }
     },
 
     async requestCredentials({ serviceName, fields, projectRoot, taskOrigin, signal }) {
@@ -132,27 +154,33 @@ export function createWindowAgentHost(): AgentHost {
         taskOrigin?.sessionId,
       )
 
-      const result = await new Promise<{ submitted: boolean; keys?: string[] }>((resolve) => {
-        let settled = false
-        const onAbort = () => {
-          if (settled) return
-          settled = true
-          useCredentialRequestStore.getState().cancel(requestId)
-          resolve({ submitted: false })
-        }
-        if (signal) {
-          if (signal.aborted) {
-            onAbort()
-            return
+      const endGate = beginHumanGate()
+      let result: { submitted: boolean; keys?: string[] }
+      try {
+        result = await new Promise<{ submitted: boolean; keys?: string[] }>((resolve) => {
+          let settled = false
+          const onAbort = () => {
+            if (settled) return
+            settled = true
+            useCredentialRequestStore.getState().cancel(requestId)
+            resolve({ submitted: false })
           }
-          signal.addEventListener('abort', onAbort, { once: true })
-        }
-        requestPromise.then((r) => {
-          if (settled) return
-          settled = true
-          resolve(r)
+          if (signal) {
+            if (signal.aborted) {
+              onAbort()
+              return
+            }
+            signal.addEventListener('abort', onAbort, { once: true })
+          }
+          requestPromise.then((r) => {
+            if (settled) return
+            settled = true
+            resolve(r)
+          })
         })
-      })
+      } finally {
+        endGate()
+      }
 
       if (result.submitted) {
         chatStore.markCredentialRequestSubmitted(cardMessageId, result.keys ?? [])
@@ -185,27 +213,33 @@ export function createWindowAgentHost(): AgentHost {
         taskOrigin?.sessionId,
       )
 
-      const result = await new Promise<Record<string, string | string[]>>((resolve) => {
-        let settled = false
-        const onAbort = () => {
-          if (settled) return
-          settled = true
-          useAskUserQuestionStore.getState().cancel(requestId)
-          resolve({})
-        }
-        if (signal) {
-          if (signal.aborted) {
-            onAbort()
-            return
+      const endGate = beginHumanGate()
+      let result: Record<string, string | string[]>
+      try {
+        result = await new Promise<Record<string, string | string[]>>((resolve) => {
+          let settled = false
+          const onAbort = () => {
+            if (settled) return
+            settled = true
+            useAskUserQuestionStore.getState().cancel(requestId)
+            resolve({})
           }
-          signal.addEventListener('abort', onAbort, { once: true })
-        }
-        answerPromise.then((r) => {
-          if (settled) return
-          settled = true
-          resolve(r)
+          if (signal) {
+            if (signal.aborted) {
+              onAbort()
+              return
+            }
+            signal.addEventListener('abort', onAbort, { once: true })
+          }
+          answerPromise.then((r) => {
+            if (settled) return
+            settled = true
+            resolve(r)
+          })
         })
-      })
+      } finally {
+        endGate()
+      }
 
       if (!result || Object.keys(result).length === 0) {
         chatStore.updateCardStatus(cardMessageId, 'cancelled')
