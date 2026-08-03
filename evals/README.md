@@ -20,6 +20,16 @@ yarn evals:agent --only read-package    # um caso
   `EVALS_AI_WORKER_URL`).
 - Precisa da sessão TM Code autenticada nesta máquina (o runner herda-a).
 
+## "CI" = gate local pré-merge (decisão de design)
+
+Esta suite NÃO corre em CI hospedado, de propósito: cada caso gasta tokens
+reais do ciclo e precisa de uma sessão TM Code autenticada — pôr isso num
+runner do GitHub a cada PR seria pagar modelo por push e provisionar
+credenciais de produto num terceiro. O gate é LOCAL e disciplinar: **mudou a
+camada do agente (services/agent, host, runner, prompt)? `yarn evals:agent`
+verde antes do merge.** A regra vive no TMS.md (Agent Rules); CI hospedado
+fica como evolução futura se um dia houver auth de service-account dedicada.
+
 ## Custo — ler antes de correr em ciclo
 
 Cada caso é um run REAL: chamadas ao modelo activo, tokens debitados no ciclo

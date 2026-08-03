@@ -46,6 +46,7 @@
 ## Agent Rules
 - Antes de editar um ficheiro existente, inspecciona o ficheiro/range actual primeiro; navegação por search/símbolos antes de leituras largas quando o alvo é desconhecido.
 - Testes focados para mudanças de agente/runtime; `yarn build` para mudanças TS largas; mudanças no worker AI → `yarn test:ai-worker` + typecheck do worker.
+- Mudanças à CAMADA DO AGENTE (services/agent, host/, runner/, prompt): `yarn evals:agent` verde antes do merge — é o gate local que substitui CI hospedado (custo real de tokens; ver evals/README.md).
 - Preserva as alterações do developer no worktree; não reverter ficheiros alheios à tarefa.
 ### Self-hosting — trabalhar NESTE repo a partir do próprio TM Code
 - Dogfood SÓ a partir da **build instalada**. Editar `src/` não afecta a instância instalada que te hospeda — mas numa instância `yarn tauri dev` afectaria: o HMR recarrega o webview onde o TEU loop corre. A instância dev é **alvo de verificação** (processo separado, lançado em background/PTY e observado pelos logs), nunca o hospedeiro do agente.

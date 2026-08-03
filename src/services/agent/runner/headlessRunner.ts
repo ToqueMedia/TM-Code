@@ -216,9 +216,12 @@ async function runJob(job: RunnerJob): Promise<void> {
   const { useChatStore } = await import('@/stores/chatStore')
   const { getQueryGuard } = await import('../queryGuard')
   const { useBillingStore } = await import('@/stores/billingStore')
+  const { usePermissionStore } = await import('@/stores/permissionStore')
 
   let sawActive = false
   let finished = false
+  let enqueuedAt: number | null = null
+  let redispatches = 0
   // Sessão do RUN, capturada ENQUANTO decorre (streamingSessionId — o idioma
   // do repo). Nos evals sobre fixture virgem, getActiveSession() apontava a
   // uma sessão VAZIA (messageCount:0 no diag): o boot cria uma sessão e o
@@ -358,6 +361,33 @@ async function runJob(job: RunnerJob): Promise<void> {
       emit({ type: 'system', subtype: 'queue_resumed', note: 'persisted pause overridden by runner' })
       setQueuePaused(false)
     }
+    // Re-asserção do YOLO (evals write-file: o set do arranque corria ANTES
+    // da hidratação do estado persistido da permissionStore, que o repunha a
+    // false — o diff ficava parqueado à espera de um humano inexistente e o
+    // run pendurava em awaiting_response até ao tecto). Idempotente; vence
+    // qualquer hidratação tardia.
+    if (job.yolo && !usePermissionStore.getState().autoModePermissions) {
+      usePermissionStore.getState().setAutoModePermissions(true)
+      emit({ type: 'system', subtype: 'yolo_reasserted' })
+    }
+    // Watchdog de despacho (evals 03-08, a "3ª via de perda muda"): o
+    // executeQueuedInput pode consumir o lote e o runAgentForPrompt recusar
+    // entrada em silêncio (concurrent-guard — o próprio finally dele admite
+    // o cenário), tipicamente contra restos de estado persistido no boot.
+    // Se nada ficou activo E a fila está vazia passado um tempo razoável,
+    // o condutor re-enfileira o job — perda vira retry, com tecto.
+    if (
+      !sawActive &&
+      enqueuedAt !== null &&
+      Date.now() - enqueuedAt > 15_000 &&
+      getCommandQueueSnapshot().length === 0 &&
+      redispatches < 2
+    ) {
+      redispatches += 1
+      enqueuedAt = Date.now()
+      emit({ type: 'system', subtype: 'redispatch', attempt: redispatches })
+      enqueue({ value: job.task, mode: 'prompt' })
+    }
     const billing = useBillingStore.getState()
     emit({
       type: 'system',
@@ -381,6 +411,7 @@ async function runJob(job: RunnerJob): Promise<void> {
   try {
     useChatStore.getState().setPlanResumePending?.(null)
   } catch { /* sem plan-resume não há nada a limpar */ }
+  enqueuedAt = Date.now()
   enqueue({ value: job.task, mode: 'prompt' })
   emit({ type: 'system', subtype: 'enqueued', queue: getCommandQueueSnapshot().length })
 }

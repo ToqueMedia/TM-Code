@@ -22,7 +22,8 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -90,7 +91,15 @@ async function ensureStack() {
 }
 
 function runCase(c) {
-  const project = path.join(ROOT, c.project)
+  // HERMÉTICO (03-08): cada caso corre numa CÓPIA fresca da fixture em
+  // temp-dir. Correr no lugar contaminava as corridas seguintes — o TM Code
+  // persiste sessões/snapshots de fila/locks por projecto (state-dir keyed
+  // ao path), e restos de um run morto interferiam de forma
+  // não-determinística com o boot do seguinte (a flakiness inteira da 1ª
+  // bateria). Path novo = estado app-managed virgem.
+  const fixture = path.join(ROOT, c.project)
+  const project = mkdtempSync(path.join(tmpdir(), `tm-eval-${c.id}-`))
+  cpSync(fixture, project, { recursive: true })
   for (const f of c.cleanupFiles ?? []) {
     rmSync(path.join(project, f), { force: true })
   }
@@ -149,6 +158,9 @@ function runCase(c) {
       const missingText = (c.expect ?? []).filter((rx) => !new RegExp(rx, 'i').test(text))
       const missingFiles = (c.expectFiles ?? []).filter((f) => !existsSync(path.join(project, f)))
       const ok = missingText.length === 0 && missingFiles.length === 0
+      // A cópia temp só é limpa em SUCESSO — num falhanço fica no disco para
+      // autópsia (o path segue no reason).
+      if (ok) rmSync(project, { recursive: true, force: true })
       resolve({
         c,
         ok,
@@ -157,7 +169,7 @@ function runCase(c) {
         diag: result.diag,
         reason: ok
           ? ''
-          : `em falta: ${[...missingText.map((m) => `texto /${m}/`), ...missingFiles.map((f) => `ficheiro ${f}`)].join(' | ')}`,
+          : `em falta: ${[...missingText.map((m) => `texto /${m}/`), ...missingFiles.map((f) => `ficheiro ${f}`)].join(' | ')} (autópsia: ${project})`,
       })
     })
   })
