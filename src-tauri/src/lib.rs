@@ -1199,6 +1199,21 @@ pub fn run() {
                 .inner_size(1250.0, 850.0)
                 .min_inner_size(900.0, 600.0)
                 .decorations(false)
+                // Runner headless (--run): a janela fica invisível para
+                // SEMPRE, e o WKWebView acelera/suspende timers de janelas
+                // ocultas (o mesmo fenómeno documentado abaixo para o rAF do
+                // arranque — no smoke P6 os setInterval do condutor nunca
+                // dispararam). Sem timers não há heartbeats, watchdogs nem
+                // retries no motor. Em modo runner o throttling é DESLIGADO;
+                // no modo janela fica Suspend — que a doc do enum declara ser
+                // o comportamento default quando nenhuma política é definida
+                // ("fully suspends tasks" numa webview sem janela: a prova
+                // documental do bug do smoke).
+                .background_throttling(if commands::runner::runner_mode_active() {
+                    tauri::utils::config::BackgroundThrottlingPolicy::Disabled
+                } else {
+                    tauri::utils::config::BackgroundThrottlingPolicy::Suspend
+                })
                 // Start hidden — the React entry, on first mount, calls the
                 // `app_ready` command which shows the window. This eliminates
                 // the visible flash of an empty (vibrancy-only on macOS, dark

@@ -167,7 +167,9 @@ async function runJob(job: RunnerJob): Promise<void> {
   // traz tarefas parqueadas — numa janela oculta isso é estado de uma
   // sessão antiga, não uma decisão do operador; o runner retoma e regista.
   heartbeat = setInterval(() => {
-    if (finished || sawActive) return
+    // Bate também DURANTE o run (smoke P6: o silêncio pós-arranque era
+    // indistinguível de um encravamento) — só o finish o cala.
+    if (finished) return
     if (isQueuePaused()) {
       emit({ type: 'system', subtype: 'queue_resumed', note: 'persisted pause overridden by runner' })
       setQueuePaused(false)
@@ -176,6 +178,7 @@ async function runJob(job: RunnerJob): Promise<void> {
     emit({
       type: 'system',
       subtype: 'heartbeat',
+      elapsedSec: Math.round((Date.now() - startAt) / 1000),
       queue: getCommandQueueSnapshot().length,
       queuePaused: isQueuePaused(),
       agentStatus: useAgentStore.getState().status,
