@@ -829,29 +829,48 @@ pub fn run() {
             // reutiliza o slot pending_open_project (o caminho normal de
             // abertura de projecto); o job fica disponível ao frontend via o
             // comando runner_get_job.
+            //
+            // DUAS entradas para o mesmo job:
+            //  - argv (--run/--project/--yolo) — para o binário instalado,
+            //    onde os args chegam directos;
+            //  - env (TM_RUN_TASK/TM_RUN_PROJECT/TM_RUN_YOLO=1) — para o
+            //    `yarn tauri dev`: a corrente yarn→tauri→cargo desfaz o
+            //    forwarding de `--` (o smoke de 03-08 viu o cargo receber
+            //    `--run` como arg PRÓPRIO, sem aspas); as env vars atravessam
+            //    as três camadas intactas.
             {
                 let args: Vec<String> = std::env::args().skip(1).collect();
-                if let Some(i) = args.iter().position(|a| a == "--run") {
-                    if let Some(task) = args.get(i + 1) {
-                        let project = args
-                            .iter()
-                            .position(|a| a == "--project")
-                            .and_then(|j| args.get(j + 1))
-                            .cloned();
-                        let yolo = args.iter().any(|a| a == "--yolo");
-                        if let Some(p) = project.clone() {
-                            if std::path::Path::new(&p).is_dir() {
-                                if let Ok(mut slot) = pending_open_project().lock() {
-                                    *slot = Some(p);
-                                }
+                let arg_task = args
+                    .iter()
+                    .position(|a| a == "--run")
+                    .and_then(|i| args.get(i + 1))
+                    .cloned();
+                let task = arg_task.or_else(|| {
+                    std::env::var("TM_RUN_TASK").ok().filter(|s| !s.is_empty())
+                });
+                if let Some(task) = task {
+                    let project = args
+                        .iter()
+                        .position(|a| a == "--project")
+                        .and_then(|j| args.get(j + 1))
+                        .cloned()
+                        .or_else(|| {
+                            std::env::var("TM_RUN_PROJECT").ok().filter(|s| !s.is_empty())
+                        });
+                    let yolo = args.iter().any(|a| a == "--yolo")
+                        || std::env::var("TM_RUN_YOLO").map(|v| v == "1").unwrap_or(false);
+                    if let Some(p) = project.clone() {
+                        if std::path::Path::new(&p).is_dir() {
+                            if let Ok(mut slot) = pending_open_project().lock() {
+                                *slot = Some(p);
                             }
                         }
-                        commands::runner::set_runner_job(commands::runner::RunnerJob {
-                            task: task.clone(),
-                            project: project.unwrap_or_default(),
-                            yolo,
-                        });
                     }
+                    commands::runner::set_runner_job(commands::runner::RunnerJob {
+                        task,
+                        project: project.unwrap_or_default(),
+                        yolo,
+                    });
                 }
             }
 
