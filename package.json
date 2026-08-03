@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "vite",
+    "evals:agent": "node scripts/agent-evals.mjs",
     "dev:ai-worker": "yarn --cwd workers/ai-pass-through dev",
     "dev:collab-worker": "yarn --cwd workers/collab-signaling dev",
     "dev:workers": "concurrently -k -n ai,collab -c blue,magenta \"yarn dev:ai-worker\" \"yarn dev:collab-worker\"",
