@@ -4,6 +4,7 @@ import { FiCheck, FiLoader, FiX, FiChevronRight, FiChevronDown, FiAlertTriangle 
 import { ToolCallDisplay as ToolCallDisplayType } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n/useTranslation'
+import { shallowArrayEqual } from '@/utils/shallowArrayEqual'
 
 /**
  * Consolidated row for a streak of consecutive `read_large_result` tool
@@ -186,4 +187,7 @@ function ReadOutputBatchComponent({ calls }: ReadOutputBatchProps) {
   )
 }
 
-export default memo(ReadOutputBatchComponent)
+// Comparador por IDENTIDADE dos elementos (task #14) — ver nota no
+// ExplorationBatch: arrays novos por flush, elementos estáveis.
+export default memo(ReadOutputBatchComponent, (prev, next) =>
+  shallowArrayEqual(prev.calls, next.calls))

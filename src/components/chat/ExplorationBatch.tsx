@@ -10,6 +10,7 @@ import {
 import ToolCallDisplayComponent, { getInputSummary } from './ToolCallDisplay'
 import ReadOutputBatch from './ReadOutputBatch'
 import { useProjectStore } from '../../stores/projectStore'
+import { shallowArrayEqual } from '@/utils/shallowArrayEqual'
 import { canonicalToolName, normalizeToolInputForCanonical } from '@/services/agent/toolNames'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n/useTranslation'
@@ -222,4 +223,9 @@ function ExplorationBatchComponent({ calls }: ExplorationBatchProps) {
   )
 }
 
-export default memo(ExplorationBatchComponent)
+// Comparador por IDENTIDADE dos elementos (task #14): o pai reconstrói o
+// array `calls` a cada flush de streaming, mas os toolCalls preservam
+// identidade — o memo shallow default nunca segurava e este lote
+// re-renderizava a árvore Chakra inteira ~10×/s.
+export default memo(ExplorationBatchComponent, (prev, next) =>
+  shallowArrayEqual(prev.calls, next.calls))

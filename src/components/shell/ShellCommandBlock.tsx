@@ -4,6 +4,7 @@ import { FiCheck, FiChevronDown, FiChevronRight, FiLoader, FiTerminal, FiX } fro
 import type { ToolCallDisplay } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
 import { normalizeTerminalText } from '@/utils/stripAnsi'
+import { shallowArrayEqual } from '@/utils/shallowArrayEqual'
 
 interface ShellCommandBlockProps {
   toolCall: ToolCallDisplay
@@ -987,4 +988,12 @@ export const ShellSessionBlock = memo(function ShellSessionBlock({
       )}
     </Box>
   )
-})
+}, (prev, next) =>
+  // Comparador por IDENTIDADE dos elementos (task #14): o MessageBubble
+  // reconstrói o array toolCalls do bloco a cada flush de streaming
+  // (filter por sessão), mas os elementos preservam identidade — o memo
+  // shallow default nunca segurava e o terminal re-renderizava inteiro
+  // ~10×/s durante o streaming.
+  prev.mode === next.mode &&
+  prev.nested === next.nested &&
+  shallowArrayEqual(prev.toolCalls, next.toolCalls))
