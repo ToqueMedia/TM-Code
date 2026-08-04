@@ -1336,6 +1336,59 @@ test('billing: TM Speed served applies the 3x multiplier server-side', async () 
   assert.equal(transforms[0].increment.integerValue, '450') // (100+50) × 3
 })
 
+test('billing: persona costMultiplier applies server-side ((100+50)×2)', async () => {
+  // Espelho do teste do Speed 3× acima: persona expert com costMultiplier 2
+  // via env fallback → commit = (100 prompt + 50 completion) × 2 = 300. O
+  // desconto de cache entraria ANTES do multiplicador (billableTokenTotal),
+  // por isso cache paga 50% do valor do admin — coberto em cacheBilling.test.
+  const { tasks, ctx } = collectorCtx()
+  const upstreamResponse = () => sseUpstream([USAGE_CHUNK])
+  const fetcher = {
+    firestoreCalls: [] as Array<{ method: string; body: any }>,
+    async fetch(input: RequestInfo | URL, init?: RequestInit) {
+      const url = String(input)
+      if (url.includes(':runQuery')) {
+        return Response.json([{ readTime: '2026-06-12T00:00:00Z' }])
+      }
+      if (url.includes('firestore.googleapis.com')) {
+        const method = init?.method ?? 'GET'
+        this.firestoreCalls.push({
+          method,
+          body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+        })
+        if (method === 'POST') return Response.json({ writeResults: [] })
+        return firestoreUserDoc({ plan: 'pro' })
+      }
+      return upstreamResponse()
+    },
+  }
+
+  const req = new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer valid-user-token',
+      'content-type': 'application/json',
+      'x-tm-persona': 'expert',
+    },
+    body: JSON.stringify({ stream: true }),
+  })
+  const res = await handleRequest(
+    req,
+    env({
+      PERSONA_EXPERT_CONFIG_JSON: JSON.stringify({ ...activeConfig, model: 'expert-model', costMultiplier: 2 }),
+    }),
+    { fetcher, ctx },
+  )
+  assert.equal(res.headers.get('x-tm-config-key'), 'persona:expert')
+  await res.text()
+  await Promise.all(tasks)
+
+  const commits = fetcher.firestoreCalls.filter(c => c.method === 'POST')
+  assert.equal(commits.length, 1)
+  const transforms = commits[0].body.writes[0].transform.fieldTransforms
+  assert.equal(transforms[0].increment.integerValue, '300') // (100+50) × 2
+})
+
 test('billing: overage commit decrements extraUsageBalance and floors it at 0', async () => {
   const fetcher = fakeFetcher(
     sseUpstream([USAGE_CHUNK]),

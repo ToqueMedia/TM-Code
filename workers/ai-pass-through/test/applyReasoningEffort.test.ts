@@ -3,11 +3,13 @@ import test from 'node:test'
 import { applyReasoningEffort } from '../src/applyReasoningEffort'
 
 test('writes reasoning_effort for any provider', () => {
+  // Provider genuinamente desconhecido (o MiMo deixou de servir de arquétipo
+  // aqui — desde 2026-08-05 tem regras próprias: thinking_object, sem effort).
   const body: Record<string, unknown> = { model: 'x' }
   applyReasoningEffort(body, 'high', {
-    provider: 'mimo',
+    provider: 'acme',
     baseUrl: 'https://provider.test/v1',
-    model: 'mimo-v2.5',
+    model: 'acme-coder-1',
   })
   assert.equal(body.reasoning_effort, 'high')
 })
@@ -136,6 +138,32 @@ test('Grok 4.5: strips thinking companions', () => {
   assert.equal('enable_thinking' in body, false)
 })
 
+// MiMo hospedado (2026-08-05): thinking_object on/off, SEM reasoning_effort.
+// Default OFF por recomendação oficial da Xiaomi para tool calling (FAQ:
+// thinking ligado torna tool_calls instáveis) — todo o tráfego TM é agentic.
+test('MiMo: default é thinking disabled e nunca envia reasoning_effort', () => {
+  const body: Record<string, unknown> = { enable_thinking: true }
+  applyReasoningEffort(body, '', {
+    provider: 'mimo',
+    baseUrl: 'https://api.xiaomimimo.com/v1',
+    model: 'mimo-v2.5-pro',
+  })
+  assert.deepEqual(body.thinking, { type: 'disabled' })
+  assert.equal('reasoning_effort' in body, false)
+  assert.equal('enable_thinking' in body, false)
+})
+
+test('MiMo: effort "on" liga thinking:{type:enabled}', () => {
+  const body: Record<string, unknown> = {}
+  applyReasoningEffort(body, 'on', {
+    provider: 'mimo',
+    baseUrl: 'https://api.xiaomimimo.com/v1',
+    model: 'mimo-v2.5-pro',
+  })
+  assert.deepEqual(body.thinking, { type: 'enabled' })
+  assert.equal('reasoning_effort' in body, false)
+})
+
 // Cloudflare AI Gateway (swap 2026-08-04): provider 'cloudflare' + model em
 // sintaxe author/model. As regras por-modelo TÊM de continuar a disparar —
 // era exatamente o buraco do startsWith() sem bareModel.
@@ -185,11 +213,12 @@ test('empty effort on a model WITH a known default applies that default', () => 
 test('empty effort on an UNKNOWN provider is still a no-op', () => {
   // A intenção original do teste acima, preservada onde continua a valer: não
   // inventamos um valor para uma API cujo conjunto válido não conhecemos.
+  // (O MiMo saiu deste fixture — agora tem default 'off' por doc da Xiaomi.)
   const body: Record<string, unknown> = { foo: 1 }
   applyReasoningEffort(body, '  ', {
-    provider: 'mimo',
-    baseUrl: 'https://api.xiaomimimo.com/v1',
-    model: 'mimo-v2.5',
+    provider: 'acme',
+    baseUrl: 'https://provider.test/v1',
+    model: 'acme-coder-1',
   })
   assert.deepEqual(body, { foo: 1 })
 })

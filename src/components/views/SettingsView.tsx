@@ -2127,15 +2127,15 @@ function formatContextWindow(n: number): string {
   return CONTEXT_WINDOW_OPTIONS.find(o => o.value === n)?.label ?? `${Math.round(n / 1000)}k`
 }
 
+// O painel "Data Plane de IA activo" foi REMOVIDO (decisão 2026-08-05): as
+// PERSONAS substituem-no — o admin atribui modelo + janela + multiplicador por
+// persona, e publicar a Standard escreve também a chave `active` (o fallback
+// do worker para clientes antigos/sidecars/personas em falta). O painel de
+// verificação continua a mostrar a `active` como espelho do que a Standard
+// publicou.
 function AdminSection() {
   const t = useTranslation()
-  const [models, setModels] = useState<import('../../services/adminService').AdminModel[]>([])
-  const [activeLive, setActiveLive] = useState<string>('')
-  const [activeSelection, setActiveSelection] = useState<string>('')
-  const [contextWindow, setContextWindow] = useState<number>(DEFAULT_CONTEXT_WINDOW)
-  const [activeConfig, setActiveConfig] = useState<import('../../services/adminService').ActiveAIConfig | null>(null)
   const [isLoading, setIsLoading] = useState(true)
-  const [isSavingActive, setIsSavingActive] = useState(false)
   const [forbidden, setForbidden] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [verify, setVerify] = useState<import('../../services/adminService').VerifyResponse | null>(null)
@@ -2145,25 +2145,8 @@ function AdminSection() {
     setIsLoading(true)
     setError(null)
     try {
-      const { fetchAdminModels, fetchAdminVerify } = await import('../../services/adminService')
-      const [modelsData, verifyData] = await Promise.all([
-        fetchAdminModels(),
-        fetchAdminVerify(),
-      ])
-      const activeId = findActiveModelId(modelsData.models, verifyData.activeAIConfig)
-
-      const initialId = activeId || modelsData.models[0]?.id || ''
-      setModels(modelsData.models)
-      setVerify(verifyData)
-      setActiveConfig(verifyData.activeAIConfig ?? null)
-      setActiveLive(activeId)
-      setActiveSelection(initialId)
-      // Pré-preenche o Select: janela publicada → default do modelo no catálogo → 1M.
-      setContextWindow(
-        verifyData.activeAIConfig?.contextWindow
-        ?? modelsData.models.find(m => m.id === initialId)?.activeConfig.contextWindow
-        ?? DEFAULT_CONTEXT_WINDOW,
-      )
+      const { fetchAdminVerify } = await import('../../services/adminService')
+      setVerify(await fetchAdminVerify())
     } catch (err) {
       if (err instanceof Error && err.message === 'FORBIDDEN') {
         setForbidden(true)
@@ -2179,57 +2162,15 @@ function AdminSection() {
     setIsVerifying(true)
     try {
       const { fetchAdminVerify } = await import('../../services/adminService')
-      const data = await fetchAdminVerify()
-      const activeId = findActiveModelId(models, data.activeAIConfig)
-      setVerify(data)
-      setActiveConfig(data.activeAIConfig ?? null)
-      setActiveLive(activeId)
-      if (activeId) setActiveSelection(activeId)
-      if (data.activeAIConfig?.contextWindow) setContextWindow(data.activeAIConfig.contextWindow)
+      setVerify(await fetchAdminVerify())
     } catch (err) {
       if (err instanceof Error && err.message === 'FORBIDDEN') setForbidden(true)
     } finally {
       setIsVerifying(false)
     }
-  }, [models])
+  }, [])
 
   useEffect(function () { load() }, [load])
-
-  const handleSelectModel = useCallback(function (id: string) {
-    setActiveSelection(id)
-    // Pré-preenche a janela com o default do modelo no catálogo (se for uma das
-    // opções); senão mantém a escolha atual do admin.
-    const m = models.find(x => x.id === id)
-    const w = m?.activeConfig.contextWindow
-    if (w && CONTEXT_WINDOW_OPTIONS.some(o => o.value === w)) setContextWindow(w)
-  }, [models])
-
-  async function handlePublishActive() {
-    const model = models.find(m => m.id === activeSelection)
-    if (!model) return
-    setIsSavingActive(true)
-    setError(null)
-    try {
-      const { publishActiveAIConfig } = await import('../../services/adminService')
-      // Publica a config do modelo COM a janela de contexto escolhida no Select.
-      const config = await publishActiveAIConfig({ ...model.activeConfig, contextWindow })
-      setActiveConfig(config)
-      setActiveLive(model.id)
-      setActiveSelection(model.id)
-      await refreshVerify()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('admin.saveError'))
-    } finally {
-      setIsSavingActive(false)
-    }
-  }
-
-  // Publish enabled quando o modelo mudou OU a janela difere da publicada.
-  const liveContextWindow = activeConfig?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
-  const publishDisabled =
-    isSavingActive ||
-    !activeSelection ||
-    (activeSelection === activeLive && contextWindow === liveContextWindow)
 
   if (forbidden) {
     return <Text fontSize="13px" color={tokens.colors.accent.red}>{t('admin.forbidden')}</Text>
@@ -2249,85 +2190,9 @@ function AdminSection() {
         </Box>
       )}
 
-      <SettingsGroup title="Data Plane de IA activo" badge={t('admin.coderModels')}>
-        <Text fontSize="11px" color={tokens.colors.text.muted} mb={3}>
-          Publica a configuração activa que o ai-pass-through-worker lê em ACTIVE_AI_CONFIG. O agente usa apenas VITE_AI_WORKER_URL.
-        </Text>
-        <ModelRadioList
-          models={models}
-          selectedId={activeSelection}
-          liveId={activeLive}
-          onChange={handleSelectModel}
-        />
-        <Flex align="center" justify="space-between" mt={3} gap={3}>
-          <Box>
-            <Text fontSize="12px" fontWeight="600" color={tokens.colors.text.primary}>Janela de Contexto</Text>
-            <Text fontSize="10px" color={tokens.colors.text.muted}>
-              Emitida em X-Model-Context-Window — define a pressão de contexto e o auto-compact na IDE.
-            </Text>
-          </Box>
-          <NativeSelect.Root size="sm" width="110px" flexShrink={0}>
-            <NativeSelect.Field
-              bg={tokens.colors.bg.input}
-              borderColor={tokens.colors.border.input}
-              color={tokens.colors.text.primary}
-              value={String(contextWindow)}
-              onChange={function (e) { setContextWindow(Number(e.target.value)) }}
-            >
-              {CONTEXT_WINDOW_OPTIONS.map(function (opt) {
-                return <option key={opt.value} value={opt.value}>{opt.label}</option>
-              })}
-            </NativeSelect.Field>
-            <NativeSelect.Indicator />
-          </NativeSelect.Root>
-        </Flex>
-        {activeConfig && (
-          <Box
-            mt={3}
-            p={3}
-            borderRadius={tokens.radius.lg}
-            bg={tokens.colors.bg.card}
-            border="1px solid"
-            borderColor={activeConfig.enabled ? tokens.colors.bg.cardBorder : tokens.colors.accent.orange}
-          >
-            <Flex justify="space-between" align="center" mb={1}>
-              <Text fontSize="12px" fontWeight="600" color={tokens.colors.text.primary}>Active AI Config</Text>
-              <Text fontSize="10px" color={activeConfig.enabled ? tokens.colors.accent.green : tokens.colors.accent.orange}>
-                {activeConfig.enabled ? 'enabled' : 'disabled'}
-              </Text>
-            </Flex>
-            <Text fontSize="11px" color={tokens.colors.text.muted} fontFamily={tokens.fontFamily.mono}>
-              {activeConfig.provider} / {activeConfig.model}
-            </Text>
-            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} mt={1}>
-              {activeConfig.baseUrl}{activeConfig.chatCompletionsPath}
-            </Text>
-            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} mt={1}>
-              {activeConfig.authHeader} · {activeConfig.authScheme} · {activeConfig.apiKeyEnv}
-            </Text>
-            <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} mt={1}>
-              ctx window · {activeConfig.contextWindow ? formatContextWindow(activeConfig.contextWindow) : '— (fallback de perfil)'}
-            </Text>
-          </Box>
-        )}
-        <Flex justify="flex-end" mt={3}>
-          <Button
-            size="sm"
-            disabled={publishDisabled}
-            onClick={handlePublishActive}
-            bg={tokens.colors.accent.primary}
-            color="white"
-            _hover={{ bg: tokens.colors.accent.primaryDark }}
-            _disabled={{ opacity: 0.4, cursor: 'not-allowed' }}
-          >
-            {isSavingActive ? t('admin.saving') : 'Publicar active config'}
-          </Button>
-        </Flex>
-      </SettingsGroup>
+      <PersonasPanel onPublished={refreshVerify} />
 
       <SidecarsPanel />
-
-      <PersonasPanel />
 
       <SettingsGroup title={t('admin.verifyTitle')}>
         <Text fontSize="11px" color={tokens.colors.text.muted} mb={3}>{t('admin.verifyDesc')}</Text>
@@ -2390,32 +2255,6 @@ function AdminSection() {
       </SettingsGroup>
     </VStack>
   )
-}
-
-function findActiveModelId(
-  models: import('../../services/adminService').AdminModel[],
-  config: import('../../services/adminService').ActiveAIConfig | null | undefined,
-): string {
-  if (!config) return ''
-  return models.find(model => activeConfigMatches(model.activeConfig, config))?.id || ''
-}
-
-function activeConfigMatches(
-  expected: import('../../services/adminService').ActiveAIConfigInput,
-  actual: import('../../services/adminService').ActiveAIConfig,
-): boolean {
-  return expected.provider === actual.provider &&
-    expected.model === actual.model &&
-    trimTrailingSlashes(expected.baseUrl) === trimTrailingSlashes(actual.baseUrl) &&
-    expected.chatCompletionsPath === actual.chatCompletionsPath &&
-    expected.authHeader === actual.authHeader &&
-    expected.authScheme === actual.authScheme &&
-    expected.apiKeyEnv === actual.apiKeyEnv &&
-    expected.enabled === actual.enabled
-}
-
-function trimTrailingSlashes(value: string): string {
-  return value.replace(/\/+$/, '')
 }
 
 // ─── Sidecars panel (admin) ──────────────────────────────────────────────────
@@ -2587,13 +2426,53 @@ const PERSONA_SLOTS: Array<{ type: import('../../services/adminService').Persona
   { type: 'master', label: 'Master', desc: 'Capacidade máxima — o topo do catálogo, consumo no topo.' },
 ]
 
-function PersonasPanel() {
+/** Select estilizado do painel admin (pedido UI/UX 2026-08-05): substitui os
+ *  NativeSelect crus — label por cima, campo escuro com borda que reage a
+ *  hover/focus, chevron discreto. Um wrapper, não um design system novo. */
+function AdminSelect(props: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  children: React.ReactNode
+  width?: string
+  flex?: string
+}) {
+  return (
+    <Box flex={props.flex} width={props.width} minW={0}>
+      <Text fontSize="9.5px" fontWeight="700" letterSpacing="0.06em" textTransform="uppercase"
+        color={tokens.colors.text.disabled} mb="4px">
+        {props.label}
+      </Text>
+      <NativeSelect.Root size="sm">
+        <NativeSelect.Field
+          bg={tokens.colors.bg.input}
+          borderColor={tokens.colors.border.input}
+          borderRadius="8px"
+          color={tokens.colors.text.primary}
+          fontSize="12px"
+          h="32px"
+          transition={`border-color ${tokens.transition.fast}, box-shadow ${tokens.transition.fast}`}
+          _hover={{ borderColor: tokens.colors.accent.primaryMuted }}
+          _focus={{ borderColor: tokens.colors.accent.primary, boxShadow: `0 0 0 1px ${tokens.colors.accent.primaryMuted}` }}
+          value={props.value}
+          onChange={function (e) { props.onChange(e.target.value) }}
+        >
+          {props.children}
+        </NativeSelect.Field>
+        <NativeSelect.Indicator color={tokens.colors.text.disabled} />
+      </NativeSelect.Root>
+    </Box>
+  )
+}
+
+function PersonasPanel({ onPublished }: { onPublished?: () => void }) {
   const [data, setData] = useState<import('../../services/adminService').PersonasResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [sel, setSel] = useState<Record<string, string>>({})
   const [mult, setMult] = useState<Record<string, string>>({})
+  const [ctxWin, setCtxWin] = useState<Record<string, string>>({})
 
   const load = useCallback(async function () {
     setLoading(true)
@@ -2602,17 +2481,21 @@ function PersonasPanel() {
       const { fetchPersonas } = await import('../../services/adminService')
       const d = await fetchPersonas()
       setData(d)
-      // Seed selects + multipliers from the published configs.
+      // Seed dos controlos a partir das configs publicadas (ou dos defaults
+      // do preset do modelo quando a persona ainda não foi publicada).
       const nextSel: Record<string, string> = {}
       const nextMult: Record<string, string> = {}
+      const nextCtx: Record<string, string> = {}
       for (const slot of PERSONA_SLOTS) {
         const cur = d.current[`persona:${slot.type}`]
         const match = cur ? d.catalog.find(m => m.activeConfig.model === cur.model) : undefined
         nextSel[slot.type] = match?.id ?? ''
         nextMult[slot.type] = cur?.costMultiplier != null ? String(cur.costMultiplier) : '1'
+        nextCtx[slot.type] = String(cur?.contextWindow ?? match?.activeConfig.contextWindow ?? DEFAULT_CONTEXT_WINDOW)
       }
       setSel(nextSel)
       setMult(nextMult)
+      setCtxWin(nextCtx)
     } catch (err) {
       setError(err instanceof Error && err.message === 'FORBIDDEN' ? 'Sem permissão.' : (err instanceof Error ? err.message : String(err)))
     } finally {
@@ -2620,6 +2503,13 @@ function PersonasPanel() {
     }
   }, [])
   useEffect(function () { load() }, [load])
+
+  function pickModel(type: string, id: string) {
+    setSel(s => ({ ...s, [type]: id }))
+    // Pré-preenche a janela com a do preset do modelo escolhido.
+    const preset = data?.catalog.find(m => m.id === id)?.activeConfig.contextWindow
+    if (preset) setCtxWin(s => ({ ...s, [type]: String(preset) }))
+  }
 
   async function apply(type: import('../../services/adminService').PersonaType, action: 'publish' | 'disable') {
     setBusy(type)
@@ -2633,9 +2523,11 @@ function PersonasPanel() {
         if (!Number.isFinite(multiplier) || multiplier <= 0 || multiplier > 100) {
           throw new Error('Multiplicador inválido — número > 0 e ≤ 100.')
         }
-        await svc.setPersona(type, sel[type], multiplier)
+        await svc.setPersona(type, sel[type], multiplier, Number(ctxWin[type]) || undefined)
       }
       await load()
+      // A Standard também escreve a `active` — refresca o painel de verificação.
+      onPublished?.()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -2646,104 +2538,131 @@ function PersonasPanel() {
   return (
     <SettingsGroup title="Personas" badge="standard · expert · master">
       <Text fontSize="11px" color={tokens.colors.text.muted} mb={3}>
-        O selector do utilizador mostra as personas SEM revelar os modelos. Atribui aqui o modelo
-        e o multiplicador de consumo de cada uma (tokens × multiplicador; cache fatura a 50% desse
-        valor). Publicadas em <Box as="code" fontSize="10px">persona:*</Box> no KV; não publicada → usa a config ativa.
+        As personas SUBSTITUEM a config ativa: o selector do utilizador mostra Standard/Expert/Master
+        sem revelar os modelos, e cada persona leva modelo + janela de contexto + multiplicador de
+        consumo (tokens × N; cache fatura a 50% de N). Publicar a <b>Standard</b> actualiza também a
+        chave <Box as="code" fontSize="10px">active</Box> — o fallback para clientes antigos e sidecars.
       </Text>
 
       {loading ? (
         <Text fontSize="12px" color={tokens.colors.text.muted}>A carregar…</Text>
       ) : (
-        <VStack align="stretch" gap={2}>
+        <VStack align="stretch" gap={3}>
           {PERSONA_SLOTS.map(function (slot) {
             const cur = data?.current[`persona:${slot.type}`] ?? null
             const published = !!cur && cur.enabled
             const selModel = (data?.catalog ?? []).find(m => m.id === sel[slot.type])
             const isCurrent = published && !!selModel && selModel.activeConfig.model === cur!.model
               && String(cur!.costMultiplier ?? 1) === (mult[slot.type] || '1')
+              && String(cur!.contextWindow ?? '') === (ctxWin[slot.type] || '')
             const canPublish = !!sel[slot.type] && !isCurrent && busy !== slot.type
             return (
               <Box
                 key={slot.type}
-                p={3}
+                p="14px"
                 borderRadius={tokens.radius.lg}
                 bg={tokens.colors.bg.card}
                 border="1px solid"
                 borderColor={published ? tokens.colors.bg.cardBorder : tokens.colors.border.panel}
+                transition={`border-color ${tokens.transition.fast}`}
+                _hover={{ borderColor: tokens.colors.accent.primaryMuted }}
               >
-                <Flex justify="space-between" align="center" mb={2} gap={2}>
-                  <Flex align="center" gap={2} minW={0}>
-                    <Box w="7px" h="7px" borderRadius="full" flexShrink={0}
-                      bg={published ? tokens.colors.accent.green : tokens.colors.text.disabled} />
-                    <Box minW={0}>
-                      <Text fontSize="12px" fontWeight="600" color={tokens.colors.text.primary}>{slot.label}</Text>
-                      <Text fontSize="10px" color={tokens.colors.text.muted}>{slot.desc}</Text>
-                    </Box>
-                  </Flex>
-                  <Text
-                    fontSize="10px"
-                    fontFamily={tokens.fontFamily.mono}
-                    flexShrink={0}
-                    color={published ? tokens.colors.accent.green : tokens.colors.text.disabled}
-                  >
-                    {published ? `${cur!.model} · ${cur!.costMultiplier ?? 1}×` : 'não publicada'}
-                  </Text>
+                {/* Cabeçalho: persona + estado publicado como badge */}
+                <Flex justify="space-between" align="flex-start" mb="12px" gap={2}>
+                  <Box minW={0}>
+                    <Flex align="center" gap="8px">
+                      <Text fontSize="13px" fontWeight="700" color={tokens.colors.text.primary}>{slot.label}</Text>
+                      {published ? (
+                        <Flex align="center" gap="5px" px="8px" py="2px" borderRadius="999px"
+                          bg="rgba(63, 185, 80, 0.12)" border="1px solid rgba(63, 185, 80, 0.25)">
+                          <Box w="5px" h="5px" borderRadius="full" bg={tokens.colors.accent.green} />
+                          <Text fontSize="9.5px" fontWeight="700" color={tokens.colors.accent.green}>live</Text>
+                        </Flex>
+                      ) : (
+                        <Flex px="8px" py="2px" borderRadius="999px" bg={tokens.colors.bg.whiteSubtle}>
+                          <Text fontSize="9.5px" fontWeight="600" color={tokens.colors.text.disabled}>não publicada</Text>
+                        </Flex>
+                      )}
+                    </Flex>
+                    <Text fontSize="10.5px" color={tokens.colors.text.muted} mt="2px">{slot.desc}</Text>
+                  </Box>
+                  {published && (
+                    <Text fontSize="10px" fontFamily={tokens.fontFamily.mono} flexShrink={0} textAlign="right"
+                      color={tokens.colors.text.secondary}>
+                      {cur!.model}
+                      <Text as="span" color={tokens.colors.text.disabled}>
+                        {' '}· {formatContextWindow(cur!.contextWindow ?? DEFAULT_CONTEXT_WINDOW)} · {cur!.costMultiplier ?? 1}×
+                      </Text>
+                    </Text>
+                  )}
                 </Flex>
-                <Flex align="center" gap={2}>
-                  <NativeSelect.Root size="sm" flex="1">
-                    <NativeSelect.Field
+
+                {/* Controlos: modelo + janela + multiplicador + ações */}
+                <Flex align="flex-end" gap="10px" wrap="wrap">
+                  <AdminSelect label="Modelo" flex="1" value={sel[slot.type] ?? ''}
+                    onChange={function (v) { pickModel(slot.type, v) }}>
+                    <option value="">— escolher —</option>
+                    {(data?.catalog ?? []).map(m => (
+                      <option key={m.id} value={m.id}>{m.name} · {m.providerLabel}</option>
+                    ))}
+                  </AdminSelect>
+                  <AdminSelect label="Janela" width="96px" value={ctxWin[slot.type] ?? String(DEFAULT_CONTEXT_WINDOW)}
+                    onChange={function (v) { setCtxWin(s => ({ ...s, [slot.type]: v })) }}>
+                    {CONTEXT_WINDOW_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </AdminSelect>
+                  <Box width="76px" flexShrink={0}>
+                    <Text fontSize="9.5px" fontWeight="700" letterSpacing="0.06em" textTransform="uppercase"
+                      color={tokens.colors.text.disabled} mb="4px">
+                      Consumo
+                    </Text>
+                    <Input
+                      size="sm"
+                      h="32px"
+                      type="number"
+                      min={0.1}
+                      max={100}
+                      step={0.5}
+                      title="Multiplicador de consumo (tokens × N; cache a 50% de N)"
                       bg={tokens.colors.bg.input}
                       borderColor={tokens.colors.border.input}
+                      borderRadius="8px"
+                      fontSize="12px"
                       color={tokens.colors.text.primary}
-                      value={sel[slot.type] ?? ''}
-                      onChange={function (e) { const v = e.target.value; setSel(s => ({ ...s, [slot.type]: v })) }}
-                    >
-                      <option value="">— escolher modelo —</option>
-                      {(data?.catalog ?? []).map(m => <option key={m.id} value={m.id}>{m.name} · {m.providerLabel}</option>)}
-                    </NativeSelect.Field>
-                    <NativeSelect.Indicator />
-                  </NativeSelect.Root>
-                  <Input
-                    size="sm"
-                    w="72px"
-                    flexShrink={0}
-                    type="number"
-                    min={0.1}
-                    max={100}
-                    step={0.5}
-                    title="Multiplicador de consumo (tokens × N; cache a 50% de N)"
-                    bg={tokens.colors.bg.input}
-                    borderColor={tokens.colors.border.input}
-                    color={tokens.colors.text.primary}
-                    value={mult[slot.type] ?? '1'}
-                    onChange={function (e) { const v = e.target.value; setMult(s => ({ ...s, [slot.type]: v })) }}
-                  />
-                  <Text fontSize="11px" color={tokens.colors.text.muted} flexShrink={0}>×</Text>
-                  <Button
-                    size="sm"
-                    flexShrink={0}
-                    disabled={!canPublish}
-                    onClick={function () { apply(slot.type, 'publish') }}
-                    bg={tokens.colors.accent.primary}
-                    color="white"
-                    _hover={{ bg: tokens.colors.accent.primaryDark }}
-                    _disabled={{ opacity: 0.4, cursor: 'not-allowed' }}
-                  >
-                    {busy === slot.type ? '…' : 'Publicar'}
-                  </Button>
-                  {published && (
+                      _hover={{ borderColor: tokens.colors.accent.primaryMuted }}
+                      _focus={{ borderColor: tokens.colors.accent.primary, boxShadow: `0 0 0 1px ${tokens.colors.accent.primaryMuted}` }}
+                      value={mult[slot.type] ?? '1'}
+                      onChange={function (e) { const v = e.target.value; setMult(s => ({ ...s, [slot.type]: v })) }}
+                    />
+                  </Box>
+                  <Flex gap="6px" flexShrink={0}>
                     <Button
                       size="sm"
-                      variant="ghost"
-                      flexShrink={0}
-                      disabled={busy === slot.type}
-                      onClick={function () { apply(slot.type, 'disable') }}
-                      color={tokens.colors.text.secondary}
-                      _hover={{ color: tokens.colors.accent.red, bg: tokens.colors.bg.hoverSubtle }}
+                      h="32px"
+                      disabled={!canPublish}
+                      onClick={function () { apply(slot.type, 'publish') }}
+                      bg={tokens.colors.accent.primary}
+                      color="white"
+                      borderRadius="8px"
+                      _hover={{ bg: tokens.colors.accent.primaryDark }}
+                      _disabled={{ opacity: 0.4, cursor: 'not-allowed' }}
                     >
-                      Desligar
+                      {busy === slot.type ? '…' : 'Publicar'}
                     </Button>
-                  )}
+                    {published && (
+                      <Button
+                        size="sm"
+                        h="32px"
+                        variant="ghost"
+                        borderRadius="8px"
+                        disabled={busy === slot.type}
+                        onClick={function () { apply(slot.type, 'disable') }}
+                        color={tokens.colors.text.secondary}
+                        _hover={{ color: tokens.colors.accent.red, bg: tokens.colors.bg.hoverSubtle }}
+                      >
+                        Desligar
+                      </Button>
+                    )}
+                  </Flex>
                 </Flex>
               </Box>
             )
@@ -2753,67 +2672,6 @@ function PersonasPanel() {
 
       {error && <Text fontSize="11px" color={tokens.colors.accent.red} mt={2}>{error}</Text>}
     </SettingsGroup>
-  )
-}
-
-function ModelRadioList(props: {
-  models: import('../../services/adminService').AdminModel[]
-  selectedId: string
-  liveId: string
-  onChange: (id: string) => void
-}) {
-  return (
-    <VStack align="stretch" gap={1}>
-      {props.models.map(function (m) {
-        const isSelected = props.selectedId === m.id
-        const isLive = props.liveId === m.id
-        return (
-          <Box
-            key={m.id}
-            as="button"
-            onClick={function () { props.onChange(m.id) }}
-            textAlign="left"
-            px={3} py="10px"
-            borderRadius={tokens.radius.lg}
-            bg={isSelected ? tokens.colors.bg.activeItem : tokens.colors.bg.card}
-            border="1px solid"
-            borderColor={isSelected ? tokens.colors.accent.primary : tokens.colors.bg.cardBorder}
-            cursor="pointer"
-            transition={tokens.transition.fast}
-            _hover={{ borderColor: isSelected ? tokens.colors.accent.primary : tokens.colors.border.default }}
-          >
-            <Flex align="center" justify="space-between">
-              <HStack gap={3}>
-                <Box
-                  w="14px" h="14px" borderRadius="full"
-                  border="2px solid"
-                  borderColor={isSelected ? tokens.colors.accent.primary : tokens.colors.border.default}
-                  display="flex" alignItems="center" justifyContent="center"
-                >
-                  {isSelected && (
-                    <Box w="6px" h="6px" borderRadius="full" bg={tokens.colors.accent.primary} />
-                  )}
-                </Box>
-                <Text fontSize="13px" fontWeight="500" color={tokens.colors.text.primary}>{m.name}</Text>
-                <Text fontSize="11px" color={tokens.colors.text.muted}>({m.providerLabel})</Text>
-              </HStack>
-              {isLive && (
-                <Box
-                  px={2} py="1px"
-                  borderRadius={tokens.radius.full}
-                  bg={tokens.colors.accent.greenSubtle}
-                  color={tokens.colors.accent.green}
-                  fontSize="10px"
-                  fontWeight="500"
-                >
-                  live
-                </Box>
-              )}
-            </Flex>
-          </Box>
-        )
-      })}
-    </VStack>
   )
 }
 

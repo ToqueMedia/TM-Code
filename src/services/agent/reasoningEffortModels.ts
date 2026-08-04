@@ -55,6 +55,18 @@ export const EFFORT_BY_MODEL: Record<string, ReasoningEffortOptions> = {
     options: ['low', 'medium', 'xhigh'],
     default: 'xhigh',
   },
+  // MiMo V2.5 Pro (Xiaomi hospedado): SEM reasoning_effort graded — só o
+  // toggle thinking:{type} (thinking_object). Default OFF por recomendação
+  // OFICIAL da Xiaomi para tool calling (FAQ mimo.mi.com, lida 2026-08-05:
+  // "tool_calls in reasoning content indicates instability... recommended
+  // to disable thinking when calling tool") — e o TM Code é 100% agentic.
+  // Antes o MiMo nem estava neste mapa: header nunca saía e a API ficava no
+  // default dela (thinking ON), contra a própria doc.
+  'mimo-v2.5-pro': {
+    param: 'thinking_object',
+    options: ['off', 'on'],
+    default: 'off',
+  },
 }
 
 /**
@@ -93,6 +105,8 @@ export function normalizeEffortModelId(
   if (bare.startsWith('grok-4.5') || bare === 'grok-build-latest') return 'grok-4.5'
   if (bare.startsWith('kimi-k3')) return 'kimi-k3'
   if (bare.startsWith('qwen3.8-max')) return 'qwen3.8-max'
+  // Cobre 'mimo-v2.5-pro' e variantes (ex.: -ultraspeed do TM Speed).
+  if (bare.startsWith('mimo-v2.5-pro')) return 'mimo-v2.5-pro'
   return bare
 }
 

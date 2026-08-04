@@ -107,6 +107,12 @@ function isGlmModel(model: string): boolean {
   return lower(model).includes('glm')
 }
 
+function isMimo(ctx: ApplyReasoningEffortCtx): boolean {
+  const p = lower(ctx.provider)
+  const b = lower(ctx.baseUrl)
+  return p === 'mimo' || b.includes('xiaomimimo.com') || bareModel(ctx.model).startsWith('mimo-')
+}
+
 /**
  * Effort que desliga o thinking no GLM.
  * Frontend só expõe `none|high|max`, mas aceitamos `minimal` (legado) como off.
@@ -137,6 +143,11 @@ export function defaultEffortFor(ctx: ApplyReasoningEffortCtx): string {
   if (isMoonshot(ctx)) return isKimiK3(ctx.model) ? 'max' : ''
   if (isXai(ctx)) return 'high'
   if (isGlmModel(ctx.model) && (isZai(ctx) || isDashScope(ctx))) return 'max'
+  // MiMo hospedado: default 'off' por recomendação OFICIAL da Xiaomi para
+  // tool calling (FAQ: thinking ligado torna tool_calls instáveis) — todo o
+  // tráfego TM é agentic. Antes não havia default: a API ficava no default
+  // dela (thinking ON), contra a própria doc.
+  if (isMimo(ctx)) return 'off'
   // Qwen 3.8 Max (swap 2026-08-04): low|medium|xhigh, default xhigh — o
   // extraBody da KV já traz reasoning_effort:'xhigh', isto cobre o caso de
   // uma KV publicada sem ele + mantém o guarda-espelho do frontend honesto.
@@ -156,6 +167,16 @@ export function applyReasoningEffort(
 ): void {
   const effort = effortRaw.trim() || defaultEffortFor(ctx)
   if (!effort) return
+
+  // MiMo hospedado (thinking_object on/off, SEM reasoning_effort): traduz o
+  // toggle para thinking:{type} e NÃO envia reasoning_effort (param não
+  // documentado na API da Xiaomi). Ramo ANTES da escrita genérica abaixo.
+  if (isMimo(ctx)) {
+    body.thinking = { type: effort === 'off' ? 'disabled' : 'enabled' }
+    delete body.enable_thinking
+    delete body.reasoning_effort
+    return
+  }
 
   // Valor nativo — o frontend já validou contra as options do modelo.
   body.reasoning_effort = effort
