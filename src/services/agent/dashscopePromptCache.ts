@@ -23,6 +23,7 @@ const EXPLICIT_CACHE_MIN_HISTORY_BYTES = 4096
 const MAX_CACHE_MARKERS = 4
 
 const DASHSCOPE_EXPLICIT_CACHE_MODELS = new Set([
+  'qwen3.8-max',
   'qwen3.7-max',
   'qwen3.7-max-2026-05-20',
   'qwen3.7-max-2026-06-08',

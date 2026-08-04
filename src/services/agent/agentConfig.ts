@@ -8,8 +8,9 @@
 // ── Model / sampling ──
 
 export const MAX_OUTPUT_TOKENS = 32_768
-export const DEFAULT_MODEL = 'mimo-v2.5-pro-1m'
-export const MIMO_CONTEXT_WINDOW = 1_000_000
+// DEFAULT_MODEL/MIMO_CONTEXT_WINDOW removidos no swap de catálogo 2026-08-04:
+// não tinham importadores (o queryEngine usa 'tm-active-model' e a janela real
+// vem de X-Model-Context-Window; fallback de perfil em modelProfiles.ts).
 export const DEFAULT_CONTEXT_WINDOW = 131_072 // Conservative fallback (128K)
 
 // ── Loop control ──

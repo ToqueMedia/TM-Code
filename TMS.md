@@ -70,10 +70,12 @@
 
 ## Pending Confirmation
 - **Congelamento de deploy até à build da IDE v1.0.2 (decisão do developer, 2026-08-04).** Nada vai a prod até lá; está tudo preparado localmente. Checklist do deploy quando a v1.0.2 for buildada:
-  1. Deploy do data-plane worker (`workers/ai-pass-through`) — leva o mapa de sidecars actualizado (`utility` entrou; `intent-router`/`context-planner` saíram — NÃO serão ligados, decisão de produto) e o fallback de env `SIDECAR_*_CONFIG_JSON`.
-  2. Publicar `sidecar:utility` no KV de prod: qwen3.7-flash DashScope US com `extraBody.enable_thinking:false` **obrigatório** (bench 04-08: thinking default = 5× latência/tokens; config exacta no `.dev.vars` local, chave `SIDECAR_UTILITY_CONFIG_JSON`).
-  3. A release v1.0.2 da IDE leva o fix de língua do `PROMPT_IMPROVER_SYSTEM` (o flash respondia EN a PT sem ele — validado 3/3 pós-fix).
-  - Validação pré-deploy: `node scripts/utility-bench.mjs` (35/35 esperado) + `yarn test:ai-worker`.
+  1. **Secret novo no data-plane:** `CLOUDFLARE_AI_GATEWAY_TOKEN` (API token Cloudflare com permissão "AI Gateway", conta 871d…474) — o Grok 4.5 e o Kimi K3 via gateway NÃO funcionam sem ele; garantir créditos Cloudflare carregados (billing unificado dos modelos de parceiros).
+  2. Deploy do data-plane worker (`workers/ai-pass-through`) — mapa de sidecars (`utility` entrou; `intent-router`/`context-planner` saíram de vez, decisão de produto 04-08), fallback de env `SIDECAR_*_CONFIG_JSON`, e o `applyReasoningEffort` com reconhecimento dos ids `author/model` do gateway (`xai/grok-4.5`, `moonshotai/kimi-k3`).
+  3. Deploy do control-plane (tree completa via Docker/colima — a tree É prod) — catálogo novo: swap 04-08 (saíram DeepSeek V4 Pro, MiMo V2.5 base, Qwen 3.7 Max, Qwen 3.6 Plus; **o MiMo V2.5 Pro MANTÉM-SE**; entraram qwen3.8-max, grok-4.5 via Cloudflare, kimi-k3-cloudflare; sidecar-eligible = qwen3.7-plus vision/web_search + qwen3.7-flash utility). O endpoint `/v1/admin/mimo-trajectory` + logger foram REMOVIDOS (decisão 04-08); dados históricos ficam no R2.
+  4. Republicar no KV de prod via admin: `sidecar:utility` (qwen3.7-flash, `enable_thinking:false` **obrigatório** — bench 04-08: thinking default = 5× latência/tokens), `sidecar:vision` e `sidecar:web_search` (qwen3.7-plus). A config activa (glm-5.2) não muda.
+  5. A release v1.0.2 da IDE leva: fix de língua do `PROMPT_IMPROVER_SYSTEM`, perfis novos (qwen3.8-max; aliases do gateway; default continua MiMo V2.5 Pro), fixes perf task #14.
+  - Validação pré-deploy: `node scripts/utility-bench.mjs` (35/35 esperado) + `yarn test:ai-worker` + `yarn test` + vitest no repo da API.
 
 ## lastGeneratedAt
 2026-08-04

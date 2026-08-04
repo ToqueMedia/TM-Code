@@ -136,6 +136,37 @@ test('Grok 4.5: strips thinking companions', () => {
   assert.equal('enable_thinking' in body, false)
 })
 
+// Cloudflare AI Gateway (swap 2026-08-04): provider 'cloudflare' + model em
+// sintaxe author/model. As regras por-modelo TÊM de continuar a disparar —
+// era exatamente o buraco do startsWith() sem bareModel.
+test('Grok 4.5 via Cloudflare gateway (xai/grok-4.5) keeps the xAI rules', () => {
+  const body: Record<string, unknown> = { thinking: { type: 'enabled' } }
+  applyReasoningEffort(body, '', {
+    provider: 'cloudflare',
+    baseUrl: 'https://api.cloudflare.com/client/v4/accounts/abc/ai/v1',
+    model: 'xai/grok-4.5',
+  })
+  // default 'high' aplicado + companions limpos
+  assert.equal(body.reasoning_effort, 'high')
+  assert.equal('thinking' in body, false)
+})
+
+test('Kimi K3 via Cloudflare gateway (moonshotai/kimi-k3) keeps the K3 rules', () => {
+  const body: Record<string, unknown> = {
+    enable_thinking: true,
+    temperature: 0.7,
+  }
+  applyReasoningEffort(body, '', {
+    provider: 'cloudflare',
+    baseUrl: 'https://api.cloudflare.com/client/v4/accounts/abc/ai/v1',
+    model: 'moonshotai/kimi-k3',
+  })
+  // default 'max' aplicado, thinking limpo, temperature≠1 removida
+  assert.equal(body.reasoning_effort, 'max')
+  assert.equal('enable_thinking' in body, false)
+  assert.equal('temperature' in body, false)
+})
+
 // MUDANÇA DELIBERADA (2026-08): "effort vazio = no-op" deixou de valer para
 // modelos com default conhecido. Motivo: até este worker ser deployado o header
 // era ignorado, portanto há builds da IDE lá fora que não o enviam — e sem

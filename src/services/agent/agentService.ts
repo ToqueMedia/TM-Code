@@ -605,7 +605,7 @@ class AgentService {
 
     // 3. Build tool definitions in OpenAI format
     // web_search NUNCA vai no schema: modelos com pesquisa nativa
-    // (supportsSearch, ex.: qwen3.7-max-2026-06-08) pesquisam SERVER-SIDE
+    // (supportsSearch, ex.: qwen3.8-max) pesquisam SERVER-SIDE
     // via extraBody.enable_search injetado pelo worker — expor uma function
     // tool convidaria o modelo a chamá-la em vez de usar a capacidade
     // nativa. E o execute local desta tool aponta para o /v1/messages do

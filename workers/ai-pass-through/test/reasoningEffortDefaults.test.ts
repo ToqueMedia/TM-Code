@@ -41,6 +41,7 @@ const CTX: Record<string, { provider: string; baseUrl: string; model: string }> 
   'glm-5.2': { provider: 'zai', baseUrl: 'https://api.z.ai/api/paas/v4', model: 'glm-5.2' },
   'grok-4.5': { provider: 'xai', baseUrl: 'https://api.x.ai/v1', model: 'grok-4.5' },
   'kimi-k3': { provider: 'moonshot', baseUrl: 'https://api.moonshot.ai/v1', model: 'kimi-k3' },
+  'qwen3.8-max': { provider: 'dashscope', baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1', model: 'qwen3.8-max' },
 }
 
 test('o parse do mapa do frontend não sai vazio', () => {

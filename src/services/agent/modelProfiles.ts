@@ -96,40 +96,22 @@ const GLM_5_2: ModelProfile = {
 }
 
 // ─────────────────────────────────────────────────
-// DeepSeek V4 Pro — DeepSeek oficial. 1M contexto, até 384K de saída.
-// Thinking toggleable via config do data-plane (`thinking:{type}` +
-// `reasoning_effort`) e text-only; visão/pesquisa seguem por sidecars.
-// ─────────────────────────────────────────────────
-
-const DEEPSEEK_V4_PRO: ModelProfile = {
-  id: 'deepseek-v4-pro',
-  name: 'DeepSeek V4 Pro',
-  modelId: 'deepseek-v4-pro',
-  contextWindow: 1_000_000,
-  maxOutputTokens: 393_216,
-
-  thinkingMode: 'toggleable',
-  supportsThinking: true,
-  thinkingMandatory: false,
-
-  supportsAttachments: false,
-  supportsSearch: false,
-  counterweights: [],
-}
-
-// ─────────────────────────────────────────────────
-// Qwen 3.7 Max (snapshot 2026-06-08) — Alibaba China (DashScope)
+// Qwen 3.8 Max — Alibaba US (DashScope, lançado 2026-08-03)
 //
-// Flagship Alibaba Cloud. 1M contexto, Visual Understanding + web search
-// NATIVOS (supportsAttachments/supportsSearch ligados dispensam os sidecars).
+// Flagship Qwen (2.4T MoE). 1M contexto, até 131K de saída. Multimodal
+// NATIVO (Image/Text/Video) + web search built-in — dispensa os sidecars.
+// Thinking HÍBRIDO (enable_thinking) com reasoning_effort low|medium|xhigh
+// (default xhigh, docs qwencloud 2026-08); a forma vem da config gerida.
+// (Swap 2026-08-04: substitui DeepSeek V4 Pro, MiMo V2.5 base e Qwen 3.7 Max,
+// removidos do catálogo — histórico no git. O MiMo V2.5 Pro mantém-se.)
 // ─────────────────────────────────────────────────
 
-const QWEN_3_7_MAX: ModelProfile = {
-  id: 'qwen3.7-max-2026-06-08',
-  name: 'Qwen 3.7 Max',
-  modelId: 'qwen3.7-max-2026-06-08',
+const QWEN_3_8_MAX: ModelProfile = {
+  id: 'qwen3.8-max',
+  name: 'Qwen 3.8 Max',
+  modelId: 'qwen3.8-max',
   contextWindow: 1_000_000,
-  maxOutputTokens: 65_536,
+  maxOutputTokens: 131_072,
 
   thinkingMode: 'toggleable',
   supportsThinking: true,
@@ -142,6 +124,7 @@ const QWEN_3_7_MAX: ModelProfile = {
 
 // ─────────────────────────────────────────────────
 // MiMo V2.5 Pro 1M — Xiaomi. 1M contexto, thinking toggleable.
+// MANTIDO no swap 2026-08-04 (só o V2.5 base saiu; o Pro continua gerido).
 // ─────────────────────────────────────────────────
 
 const MIMO_V2_5_PRO_1M: ModelProfile = {
@@ -161,41 +144,22 @@ const MIMO_V2_5_PRO_1M: ModelProfile = {
 }
 
 // ─────────────────────────────────────────────────
-// MiMo V2.5 1M — Xiaomi. Irmão menor, mesma forma de thinking.
-// ─────────────────────────────────────────────────
-
-const MIMO_V2_5_1M: ModelProfile = {
-  id: 'mimo-v2.5-1m',
-  name: 'MiMo V2.5 · 1M',
-  modelId: 'mimo-v2.5',
-  contextWindow: 1_048_576,
-  maxOutputTokens: 32_768,
-
-  thinkingMode: 'toggleable',
-  supportsThinking: true,
-  thinkingMandatory: false,
-
-  supportsAttachments: true,
-  supportsSearch: false,
-  counterweights: [],
-}
-
-// ─────────────────────────────────────────────────
-// Grok 4.5 — xAI (api.x.ai/v1, OpenAI-compatible, Bearer)
+// Grok 4.5 — desde 2026-08-04 servido via Cloudflare AI Gateway
+// (api.cloudflare.com/client/v4/accounts/{id}/ai/v1, model `xai/grok-4.5`,
+// billing unificado Cloudflare) — antes era xAI directo (api.x.ai/v1).
 //
 // Modelo agentic/coding de fronteira da xAI (também por trás do "Grok Build").
 // Reasoning SEMPRE ativo (mandatory) — não se desliga. O stream expõe o
 // raciocínio em `reasoning_content`, que a IDE já parseia genericamente (sem
 // código de parsing novo). Input text+image → text; a IDE não envia
-// penalties/stop (que os modelos de reasoning do xAI rejeitam). Confirmado nas
-// docs oficiais docs.x.ai (2026-07). Search vai por sidecar.
+// penalties/stop (que os modelos de reasoning do xAI rejeitam). Search por
+// sidecar.
 //
 // JANELA CAPADA EM 200K (deliberado, não é a janela real de 500K): o preço do
-// Grok tem dois patamares por tamanho de prompt — <200k tokens = input $2 /
-// cached $0.30 / output $6; ao ATINGIR 200k salta para $4/$0.60/$12 em TODOS os
-// tokens. Manter a janela em 200k prende-nos ao patamar barato. Nota de borda:
-// o patamar vira quando o prompt "atinge" 200k, por isso 200k exato é o limiar
-// — se quiseres garantia dura do tier $2, deixa folga (~190k).
+// Grok directo na xAI tinha dois patamares por tamanho de prompt (<200k =
+// $2/$0.30/$6; ≥200k = $4/$0.60/$12) e o cap prendia-nos ao barato. Via
+// gateway o preço de tabela do provider presume-se repassado — manter o cap
+// até o billing unificado provar o contrário.
 // ─────────────────────────────────────────────────
 
 const GROK_4_5: ModelProfile = {
@@ -252,20 +216,19 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   // DashScope/Alibaba Cloud (US) ainda pode reportar o id base 'glm-5' em
   // X-TM-Model — alias para o MESMO perfil, senão o lookup cairia no default.
   'glm-5': GLM_5_2,
-  'deepseek-v4-pro': DEEPSEEK_V4_PRO,
-  'qwen3.7-max-2026-06-08': QWEN_3_7_MAX,
-  // Alias do id antigo → mesmo perfil enquanto a config ativa não republicar
-  // o snapshot datado.
-  'qwen3.7-max': QWEN_3_7_MAX,
+  'qwen3.8-max': QWEN_3_8_MAX,
   'mimo-v2.5-pro-1m': MIMO_V2_5_PRO_1M,
-  'mimo-v2.5-1m': MIMO_V2_5_1M,
-  // Grok 4.5 (xAI). X-TM-Model reporta 'grok-4.5'; os aliases 'grok-4.5-latest'
-  // / 'grok-build-latest' mapeiam para o mesmo perfil caso a config os reporte.
+  // Grok 4.5. Via Cloudflare AI Gateway o X-TM-Model reporta 'xai/grok-4.5'
+  // (sintaxe author/model do gateway); os restantes aliases cobrem ids xAI
+  // directos caso a config volte a apontar lá.
   'grok-4.5': GROK_4_5,
+  'xai/grok-4.5': GROK_4_5,
   'grok-4.5-latest': GROK_4_5,
   'grok-build-latest': GROK_4_5,
-  // Kimi K3 (Moonshot). Id plano, sem snapshots datados nas docs oficiais.
+  // Kimi K3 — Moonshot directo reporta 'kimi-k3'; via Cloudflare AI Gateway
+  // reporta 'moonshotai/kimi-k3'. Mesmo perfil.
   'kimi-k3': KIMI_K3,
+  'moonshotai/kimi-k3': KIMI_K3,
 }
 
 export const DEFAULT_MODEL_ID = 'mimo-v2.5-pro-1m'
@@ -299,10 +262,10 @@ export function getModelProfile(modelId: string): ModelProfile {
 /**
  * Returns the model profile for the user's billing plan.
  *
- * Post-refactor: always returns MiMo V2.5 Pro 1M regardless of plan. The
+ * Post-refactor: always returns the DEFAULT profile regardless of plan. The
  * data-plane (KV config) controls actual model routing; this is only the
  * pre-handshake / unknown-model fallback.
  */
 export function getProfileForPlan(_plan: UserPlanName): ModelProfile {
-  return MIMO_V2_5_PRO_1M
+  return MODEL_PROFILES[DEFAULT_MODEL_ID]
 }

@@ -29,6 +29,19 @@ function lower(s: string): string {
   return (s ?? '').toLowerCase()
 }
 
+/**
+ * Id de modelo SEM o prefixo de autor. O Cloudflare AI Gateway (catálogo
+ * unificado, 2026-08-04) usa a sintaxe `author/model` — `xai/grok-4.5`,
+ * `moonshotai/kimi-k3` — e os detectores por startsWith() abaixo falhavam
+ * com o prefixo: o Grok/K3 via gateway ficava sem as regras de companion
+ * fields (thinking apagado, temperature do K3, etc.).
+ */
+function bareModel(model: string): string {
+  const m = lower(model)
+  const slash = m.lastIndexOf('/')
+  return slash >= 0 ? m.slice(slash + 1) : m
+}
+
 function isDashScope(ctx: ApplyReasoningEffortCtx): boolean {
   const p = lower(ctx.provider)
   const b = lower(ctx.baseUrl)
@@ -58,30 +71,34 @@ function isZai(ctx: ApplyReasoningEffortCtx): boolean {
 function isMoonshot(ctx: ApplyReasoningEffortCtx): boolean {
   const p = lower(ctx.provider)
   const b = lower(ctx.baseUrl)
-  const m = lower(ctx.model)
-  // provider pode ser `moonshot`, `moonshotai`, `kimi`, …
+  const m = bareModel(ctx.model)
+  // provider pode ser `moonshot`, `moonshotai`, `kimi`, … — e via Cloudflare
+  // AI Gateway o provider é `cloudflare` e o modelo `moonshotai/kimi-k3`
+  // (bareModel + o prefixo de autor no id cobrem esse caso).
   return (
     p.includes('moonshot') ||
     p.includes('kimi') ||
     b.includes('moonshot') ||
     b.includes('kimi.ai') ||
+    lower(ctx.model).startsWith('moonshotai/') ||
     m.startsWith('kimi-k3') ||
     m.startsWith('kimi-k2')
   )
 }
 
 function isKimiK3(model: string): boolean {
-  return lower(model).startsWith('kimi-k3')
+  return bareModel(model).startsWith('kimi-k3')
 }
 
 function isXai(ctx: ApplyReasoningEffortCtx): boolean {
   const p = lower(ctx.provider)
   const b = lower(ctx.baseUrl)
-  const m = lower(ctx.model)
+  const m = bareModel(ctx.model)
   return (
     p === 'xai' ||
     p === 'x.ai' ||
     b.includes('api.x.ai') ||
+    lower(ctx.model).startsWith('xai/') ||
     m.startsWith('grok-')
   )
 }
@@ -120,6 +137,10 @@ export function defaultEffortFor(ctx: ApplyReasoningEffortCtx): string {
   if (isMoonshot(ctx)) return isKimiK3(ctx.model) ? 'max' : ''
   if (isXai(ctx)) return 'high'
   if (isGlmModel(ctx.model) && (isZai(ctx) || isDashScope(ctx))) return 'max'
+  // Qwen 3.8 Max (swap 2026-08-04): low|medium|xhigh, default xhigh — o
+  // extraBody da KV já traz reasoning_effort:'xhigh', isto cobre o caso de
+  // uma KV publicada sem ele + mantém o guarda-espelho do frontend honesto.
+  if (isDashScope(ctx) && bareModel(ctx.model).startsWith('qwen3.8-max')) return 'xhigh'
   return ''
 }
 

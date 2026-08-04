@@ -8,12 +8,9 @@
  * per turn before `buildSystemPrompt` finalises the prompt.
  *
  * Routing — picked by the backend via `X-Request-Type: memory-selector`:
- *
- *   coder model              →  selector model
- *   mimo-v2.5-pro / -pro-1m  →  mimo-v2.5      (smaller sibling)
- *   glm                      →  qwen3.6-plus   (DashScope, fast)
- *   deepseek-v4-flash        →  qwen3.6-plus   (free-tier fallback)
- *   anything else            →  qwen3.6-plus   (safe default)
+ * o data-plane roteia para o `sidecar:utility` publicado no KV (desde
+ * 2026-08-04: qwen3.7-flash com enable_thinking:false, bench em
+ * scripts/utility-bench.mjs); sem sidecar degrada para a config ativa.
  *
  * The selector model returns a JSON object listing the memory entries
  * worth injecting. The local cache keys by (sessionId, userMessageHash)

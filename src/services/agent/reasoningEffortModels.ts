@@ -47,6 +47,14 @@ export const EFFORT_BY_MODEL: Record<string, ReasoningEffortOptions> = {
     options: ['low', 'high', 'max'],
     default: 'max',
   },
+  // Qwen 3.8 Max (DashScope US, swap 2026-08-04): híbrido com
+  // reasoning_effort low|medium|xhigh (default xhigh, docs qwencloud) —
+  // sem 'high'/'max' e sem nível off no /chat/completions.
+  'qwen3.8-max': {
+    param: 'reasoning_effort',
+    options: ['low', 'medium', 'xhigh'],
+    default: 'xhigh',
+  },
 }
 
 /**
@@ -84,6 +92,7 @@ export function normalizeEffortModelId(
   if (bare.startsWith('glm-5.2')) return 'glm-5.2'
   if (bare.startsWith('grok-4.5') || bare === 'grok-build-latest') return 'grok-4.5'
   if (bare.startsWith('kimi-k3')) return 'kimi-k3'
+  if (bare.startsWith('qwen3.8-max')) return 'qwen3.8-max'
   return bare
 }
 
