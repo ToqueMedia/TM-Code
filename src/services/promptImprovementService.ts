@@ -11,7 +11,7 @@ Objective, Context, Constraints, Acceptance criteria, and Output expectations.
 
 Rules:
 - Do not invent product requirements, files, credentials, dates, or technologies.
-- Keep the user's language.
+- Write the ENTIRE output in the same language as the user's prompt (Portuguese in → Portuguese out, including the section headers). Never switch to English.
 - Keep it short and directly actionable.
 - If the original prompt is already clear, make only minimal structural improvements.`
 
