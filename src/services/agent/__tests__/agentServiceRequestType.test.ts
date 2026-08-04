@@ -3,6 +3,7 @@ import AgentService from '../agentService'
 
 const mockQueryEngineOptions: Array<Record<string, unknown>> = []
 let mockTmSpeedEnabled = false
+let mockSelectedPersona = 'standard'
 // Escolha nativa do user (null = default do modelo).
 let mockSelectedEffort: string | null = 'max'
 // Modelo ativo (null = não enviar X-TM-Reasoning-Effort — evita max em Grok).
@@ -85,6 +86,16 @@ jest.mock('../../../stores/tmSpeedStore', () => ({
   useTmSpeedStore: {
     getState: () => ({
       enabled: mockTmSpeedEnabled,
+    }),
+  },
+}))
+
+// Persona (Escolha do Modelo): sempre presente no caminho gerido não-lightweight
+// — o default 'standard' faz parte do contrato de headers desde 2026-08-04.
+jest.mock('../../../stores/personaStore', () => ({
+  usePersonaStore: {
+    getState: () => ({
+      selected: mockSelectedPersona,
     }),
   },
 }))
@@ -232,7 +243,7 @@ describe('AgentService X-TM-Speed header', () => {
     const headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
 
     // Com uma escolha nativa ativa ('max'), o agente principal envia o header.
-    expect(headers).toEqual({ 'X-TM-Speed': 'true', 'X-TM-Reasoning-Effort': 'max' })
+    expect(headers).toEqual({ 'X-TM-Speed': 'true', 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'max' })
   })
 
   it('combines X-TM-Speed with X-Request-Type when both are present', () => {
@@ -242,14 +253,14 @@ describe('AgentService X-TM-Speed header', () => {
 
     const headers = (service as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
 
-    expect(headers).toEqual({ 'X-Request-Type': 'plan', 'X-TM-Speed': 'true', 'X-TM-Reasoning-Effort': 'max' })
+    expect(headers).toEqual({ 'X-Request-Type': 'plan', 'X-TM-Speed': 'true', 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'max' })
   })
 
   it('sends the user reasoning-effort (native value) on the main agent (managed)', () => {
     mockSelectedEffort = 'high'
     const headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
 
-    expect(headers).toEqual({ 'X-TM-Reasoning-Effort': 'high' })
+    expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'high' })
   })
 
   it('maps legacy GLM effort aliases before sending (medium → high)', () => {
@@ -257,7 +268,7 @@ describe('AgentService X-TM-Speed header', () => {
     mockActiveModelId = 'glm-5.2'
     const headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
 
-    expect(headers).toEqual({ 'X-TM-Reasoning-Effort': 'high' })
+    expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'high' })
   })
 
   it('sends the model DEFAULT reasoning-effort when the user made no choice', () => {
@@ -266,7 +277,7 @@ describe('AgentService X-TM-Speed header', () => {
     mockActiveModelId = 'glm-5.2'
     const headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
 
-    expect(headers).toEqual({ 'X-TM-Reasoning-Effort': 'max' })
+    expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'max' })
   })
 
   it('sends Grok official default high when model is grok-4.5 and user made no choice', () => {
@@ -274,7 +285,7 @@ describe('AgentService X-TM-Speed header', () => {
     mockActiveModelId = 'grok-4.5'
     const headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
 
-    expect(headers).toEqual({ 'X-TM-Reasoning-Effort': 'high' })
+    expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'high' })
   })
 
   it('does not send X-TM-Reasoning-Effort when active model is unknown', () => {
@@ -284,7 +295,8 @@ describe('AgentService X-TM-Speed header', () => {
     mockAgentModelName = null
     const headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
 
-    expect(headers).toBeUndefined()
+    // Sem effort (modelo desconhecido), mas a persona vai sempre no gerido.
+    expect(headers).toEqual({ 'X-TM-Persona': 'standard' })
   })
 
   it('falls back to agentStore.modelName (X-TM-Model) when Firestore model is null', () => {
@@ -295,7 +307,7 @@ describe('AgentService X-TM-Speed header', () => {
     mockAgentModelName = 'grok-4.5'
     const headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
 
-    expect(headers).toEqual({ 'X-TM-Reasoning-Effort': 'low' })
+    expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'low' })
   })
 
   it('sends Grok low as low (not GLM-legacy-mapped to high)', () => {
@@ -303,27 +315,27 @@ describe('AgentService X-TM-Speed header', () => {
     mockActiveModelId = 'grok-4.5'
     const headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
 
-    expect(headers).toEqual({ 'X-TM-Reasoning-Effort': 'low' })
+    expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'low' })
   })
 
   it('sends Kimi low/high/max natively; medium falls back to max default', () => {
     mockActiveModelId = 'kimi-k3'
     mockSelectedEffort = 'low'
     let headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
-    expect(headers).toEqual({ 'X-TM-Reasoning-Effort': 'low' })
+    expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'low' })
 
     mockSelectedEffort = 'high'
     headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
-    expect(headers).toEqual({ 'X-TM-Reasoning-Effort': 'high' })
+    expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'high' })
 
     mockSelectedEffort = 'max'
     headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
-    expect(headers).toEqual({ 'X-TM-Reasoning-Effort': 'max' })
+    expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'max' })
 
     // Preferência legada do Grok (medium) → default Kimi max
     mockSelectedEffort = 'medium'
     headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
-    expect(headers).toEqual({ 'X-TM-Reasoning-Effort': 'max' })
+    expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'max' })
   })
 
   it('does not send X-TM-Reasoning-Effort for unmapped models', () => {
@@ -331,7 +343,8 @@ describe('AgentService X-TM-Speed header', () => {
     mockActiveModelId = 'mimo-v2.5'
     const headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
 
-    expect(headers).toBeUndefined()
+    // Sem effort (modelo fora do mapa), mas a persona vai sempre no gerido.
+    expect(headers).toEqual({ 'X-TM-Persona': 'standard' })
   })
 
   it('does not add X-TM-Speed to lightweight sidecar agents', async () => {

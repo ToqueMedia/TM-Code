@@ -1796,6 +1796,80 @@ test('sidecar: env fallback serves utility when the KV key is absent (KV wins wh
   assert.equal(fetcher.calls[0].body.model, 'kv-model')
 })
 
+// ── Personas (Escolha do Modelo, 2026-08-04) ────────────────────────────
+// X-TM-Persona → KV `persona:*` no main loop; sidecar tem prioridade;
+// persona não publicada degrada para a ativa. O costMultiplier vive na
+// config da persona e aplica-se no metering (testado em billableTokenTotal +
+// parse; o produto multiplier×cache = 50% do valor do admin sai da ordem
+// das operações: billable já desconta cache ANTES do multiplicador).
+
+test('persona: X-TM-Persona routes the main path to the published persona config', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const req = new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer valid-user-token',
+      'Content-Type': 'application/json',
+      'X-TM-Persona': 'expert',
+    },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  const res = await handleRequest(
+    req,
+    kvEnv({ 'persona:expert': JSON.stringify({ ...utilitySidecarConfig, model: 'expert-model', costMultiplier: 2 }) }),
+    { fetcher },
+  )
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-tm-config-key'), 'persona:expert')
+  assert.equal(fetcher.calls[0].body.model, 'expert-model')
+  // O header NUNCA segue upstream (filtro x-tm-* em headers.ts).
+  assert.equal(fetcher.calls[0].headers.get('x-tm-persona'), null)
+})
+
+test('persona: unpublished/unknown persona degrades silently to the active config', async () => {
+  for (const persona of ['master', 'nonsense']) {
+    clearActiveConfigCache()
+    const fetcher = fakeFetcher(Response.json({ ok: true }))
+    const req = new Request('https://worker.test/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer valid-user-token',
+        'Content-Type': 'application/json',
+        'X-TM-Persona': persona,
+      },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    const res = await handleRequest(req, kvEnv({}), { fetcher })
+    assert.equal(res.status, 200, persona)
+    assert.equal(res.headers.get('x-tm-config-key'), 'active', persona)
+  }
+})
+
+test('persona: sidecar request types win over the persona header', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const req = new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer valid-user-token',
+      'Content-Type': 'application/json',
+      'X-Request-Type': 'summarize',
+      'X-TM-Persona': 'expert',
+    },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  const res = await handleRequest(
+    req,
+    kvEnv({
+      'sidecar:utility': JSON.stringify(utilitySidecarConfig),
+      'persona:expert': JSON.stringify({ ...utilitySidecarConfig, model: 'expert-model' }),
+    }),
+    { fetcher },
+  )
+  assert.equal(res.headers.get('x-tm-config-key'), 'sidecar:utility')
+})
+
 test('sidecar: unknown request types never consult the KV sidecar namespace', async () => {
   const fetcher = fakeFetcher(Response.json({ ok: true }))
   const res = await handleRequest(typedRequest('totally-unknown'), kvEnv({}), { fetcher })

@@ -35,6 +35,7 @@ import {
   shouldSendEffort,
 } from "./reasoningEffortModels";
 import { useTmSpeedStore } from "../../stores/tmSpeedStore";
+import { usePersonaStore } from "../../stores/personaStore";
 import { useReasoningEffortStore } from "../../stores/reasoningEffortStore";
 import { invoke } from "@/utils/invokeMetrics";
 import { logger } from "../../utils/logger";
@@ -1412,6 +1413,14 @@ class AgentService {
     if (this.requestType) headers["X-Request-Type"] = this.requestType;
     if (!this.lightweightOptions && useTmSpeedStore.getState().enabled) {
       headers["X-TM-Speed"] = "true";
+    }
+    // Persona (Escolha do Modelo): roteia o main loop para a config
+    // `persona:*` publicada pelo admin, com multiplicador de custo próprio.
+    // Sempre enviada no caminho gerido (default 'standard'); pedidos com
+    // X-Request-Type são sidecar-first no worker, portanto o header é
+    // inofensivo nos auxiliares. Persona não publicada degrada para a ativa.
+    if (!this.lightweightOptions) {
+      headers["X-TM-Persona"] = usePersonaStore.getState().selected;
     }
     // Reasoning-effort EFETIVO — mesma resolução de modelId que o seletor e o
     // carimbo da mensagem (Firestore → fallback X-TM-Model em agentStore).

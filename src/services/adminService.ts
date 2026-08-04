@@ -79,6 +79,9 @@ export interface ActiveAIConfig {
   /** Extras de request do provider (ex.: DashScope enable_search, Gemini
    *  thinking_config) merged no corpo pelo data-plane. */
   extraBody?: Record<string, unknown>
+  /** Multiplicador de custo da persona (só nas configs `persona:*`): o
+   *  data-plane fatura billableTokenTotal (cache já a 50%) × este valor. */
+  costMultiplier?: number
   updatedAt?: string
   updatedBy?: string
 }
@@ -173,5 +176,70 @@ export async function disableSidecar(type: SidecarType): Promise<void> {
   if (!res.ok && res.status !== 404) {
     if (res.status === 403) throw new Error('FORBIDDEN')
     throw new Error(`Failed to disable sidecar (${res.status})`)
+  }
+}
+
+// ─── Personas (Escolha do Modelo, 2026-08-04) ───────────────────────────────
+// O selector do utilizador expõe Standard/Expert/Master sem revelar modelos;
+// o admin atribui aqui um modelo do catálogo coder + um costMultiplier a cada
+// persona. O control-plane publica `persona:*` no KV do data-plane, que fatura
+// billableTokenTotal (cache já a 50%) × multiplier.
+
+export type PersonaType = 'standard' | 'expert' | 'master'
+
+export interface PersonasResponse {
+  /** Catálogo coder completo — o admin escolhe entre estes por persona. */
+  catalog: AdminModel[]
+  /** Keyed by full KV key, e.g. `persona:expert`. null when not published. */
+  current: Record<string, ActiveAIConfig | null>
+}
+
+export async function fetchPersonas(): Promise<PersonasResponse> {
+  const res = await tauriFetch(`${resolveWorkerUrl()}/v1/admin/ai/personas`, {
+    headers: await authHeaders(),
+  })
+  if (!res.ok) {
+    if (res.status === 403) throw new Error('FORBIDDEN')
+    const detail = await res.text().catch(() => '')
+    throw new Error(`Failed to load personas (${res.status}): ${detail.slice(0, 200)}`)
+  }
+  const data = (await res.json()) as Partial<PersonasResponse>
+  return { catalog: data.catalog ?? [], current: data.current ?? {} }
+}
+
+export async function setPersona(
+  persona: PersonaType,
+  modelId: string,
+  costMultiplier: number,
+): Promise<ActiveAIConfig> {
+  const res = await tauriFetch(`${resolveWorkerUrl()}/v1/admin/ai/personas`, {
+    method: 'PUT',
+    headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ persona, modelId, costMultiplier }),
+  })
+  if (!res.ok) {
+    if (res.status === 403) throw new Error('FORBIDDEN')
+    const raw = await res.text().catch(() => '')
+    let human = raw
+    try {
+      const parsed = JSON.parse(raw) as { error?: string }
+      human = parsed.error || raw
+    } catch { /* keep raw */ }
+    throw new Error(`Failed to set persona (${res.status}): ${human.slice(0, 300)}`)
+  }
+  const data = (await res.json()) as { config?: ActiveAIConfig }
+  if (!data.config) throw new Error('Failed to set persona: missing config in response')
+  return data.config
+}
+
+export async function disablePersona(persona: PersonaType): Promise<void> {
+  const res = await tauriFetch(`${resolveWorkerUrl()}/v1/admin/ai/personas`, {
+    method: 'PUT',
+    headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ persona, disable: true }),
+  })
+  if (!res.ok && res.status !== 404) {
+    if (res.status === 403) throw new Error('FORBIDDEN')
+    throw new Error(`Failed to disable persona (${res.status})`)
   }
 }

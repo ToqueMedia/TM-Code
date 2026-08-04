@@ -255,9 +255,15 @@ async function handleChatCompletions(
   // O header NUNCA segue upstream (filtro em headers.ts) e a resposta leva
   // X-TM-Config-Key para o cliente saber quem serviu.
   const requestType = request.headers.get('x-request-type')
+  // Personas (Escolha do Modelo): o selector da IDE manda X-TM-Persona
+  // (standard/expert/master) e o main loop roteia para a config `persona:*`
+  // publicada pelo admin — SEM revelar o modelo ao user. Sidecar tem
+  // prioridade; persona não publicada degrada para a ativa. O multiplicador
+  // de custo da persona (config.costMultiplier) aplica-se no metering abaixo.
+  const persona = request.headers.get('x-tm-persona')
   // `let` because Team BYOK may override the MAIN-path config after we know the
   // requester's team (resolved below, post-suspension-gate).
-  let active = await getConfigForRequest(env, requestType)
+  let active = await getConfigForRequest(env, requestType, persona)
   let config = active.config
 
   // Sidecars ESPECIALIZADOS (vision/web_search/fim) NÃO podem degradar para o
@@ -567,7 +573,15 @@ async function handleChatCompletions(
     responseBody = observer.body
     request.signal.addEventListener('abort', observer.settle, { once: true })
 
-    const multiplier = speedApplied ? resolveSpeedMultiplier(env) : 1
+    // Multiplicador composto: persona (costMultiplier do admin, default 1×) ×
+    // speed (3×, se aplicado). O desconto de cache (billableTokenTotal) entra
+    // ANTES — tokens cacheados custam sempre 50% do valor da persona, como
+    // definido pelo produto. Team BYOK não passa por aqui (ledger raw 1×).
+    const personaMultiplier =
+      typeof config.costMultiplier === 'number' && config.costMultiplier > 0
+        ? config.costMultiplier
+        : 1
+    const multiplier = personaMultiplier * (speedApplied ? resolveSpeedMultiplier(env) : 1)
     const asOverage = budgetCheck?.asOverage ?? false
     const teamId = budgetState?.team?.teamId
     waitUntil(observer.done.then(async (usage) => {

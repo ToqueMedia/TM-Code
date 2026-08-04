@@ -2327,6 +2327,8 @@ function AdminSection() {
 
       <SidecarsPanel />
 
+      <PersonasPanel />
+
       <SettingsGroup title={t('admin.verifyTitle')}>
         <Text fontSize="11px" color={tokens.colors.text.muted} mb={3}>{t('admin.verifyDesc')}</Text>
         {verify ? (
@@ -2532,6 +2534,191 @@ function SidecarsPanel() {
                     </NativeSelect.Field>
                     <NativeSelect.Indicator />
                   </NativeSelect.Root>
+                  <Button
+                    size="sm"
+                    flexShrink={0}
+                    disabled={!canPublish}
+                    onClick={function () { apply(slot.type, 'publish') }}
+                    bg={tokens.colors.accent.primary}
+                    color="white"
+                    _hover={{ bg: tokens.colors.accent.primaryDark }}
+                    _disabled={{ opacity: 0.4, cursor: 'not-allowed' }}
+                  >
+                    {busy === slot.type ? '…' : 'Publicar'}
+                  </Button>
+                  {published && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      flexShrink={0}
+                      disabled={busy === slot.type}
+                      onClick={function () { apply(slot.type, 'disable') }}
+                      color={tokens.colors.text.secondary}
+                      _hover={{ color: tokens.colors.accent.red, bg: tokens.colors.bg.hoverSubtle }}
+                    >
+                      Desligar
+                    </Button>
+                  )}
+                </Flex>
+              </Box>
+            )
+          })}
+        </VStack>
+      )}
+
+      {error && <Text fontSize="11px" color={tokens.colors.accent.red} mt={2}>{error}</Text>}
+    </SettingsGroup>
+  )
+}
+
+// ─── Personas panel (admin) — Escolha do Modelo (2026-08-04) ─────────────────
+//
+// O selector do UTILIZADOR (PromptActions) expõe Standard/Expert/Master sem
+// revelar modelos; aqui o admin atribui a cada persona um modelo do catálogo
+// coder + o costMultiplier ("quantas vezes consome"). O control-plane publica
+// `persona:*` no KV; o data-plane fatura billableTokenTotal (cache já a 50%)
+// × multiplier — ou seja, tokens cacheados custam metade do valor definido.
+// Persona não publicada → o worker degrada para a config ativa (o selector do
+// user continua a funcionar, só sem diferenciação).
+
+const PERSONA_SLOTS: Array<{ type: import('../../services/adminService').PersonaType; label: string; desc: string }> = [
+  { type: 'standard', label: 'Standard', desc: 'Persona base — o dia-a-dia. Consumo típico: 1×.' },
+  { type: 'expert', label: 'Expert', desc: 'Trabalho complexo — modelo mais forte, consumo maior.' },
+  { type: 'master', label: 'Master', desc: 'Capacidade máxima — o topo do catálogo, consumo no topo.' },
+]
+
+function PersonasPanel() {
+  const [data, setData] = useState<import('../../services/adminService').PersonasResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [sel, setSel] = useState<Record<string, string>>({})
+  const [mult, setMult] = useState<Record<string, string>>({})
+
+  const load = useCallback(async function () {
+    setLoading(true)
+    setError(null)
+    try {
+      const { fetchPersonas } = await import('../../services/adminService')
+      const d = await fetchPersonas()
+      setData(d)
+      // Seed selects + multipliers from the published configs.
+      const nextSel: Record<string, string> = {}
+      const nextMult: Record<string, string> = {}
+      for (const slot of PERSONA_SLOTS) {
+        const cur = d.current[`persona:${slot.type}`]
+        const match = cur ? d.catalog.find(m => m.activeConfig.model === cur.model) : undefined
+        nextSel[slot.type] = match?.id ?? ''
+        nextMult[slot.type] = cur?.costMultiplier != null ? String(cur.costMultiplier) : '1'
+      }
+      setSel(nextSel)
+      setMult(nextMult)
+    } catch (err) {
+      setError(err instanceof Error && err.message === 'FORBIDDEN' ? 'Sem permissão.' : (err instanceof Error ? err.message : String(err)))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+  useEffect(function () { load() }, [load])
+
+  async function apply(type: import('../../services/adminService').PersonaType, action: 'publish' | 'disable') {
+    setBusy(type)
+    setError(null)
+    try {
+      const svc = await import('../../services/adminService')
+      if (action === 'disable') {
+        await svc.disablePersona(type)
+      } else if (sel[type]) {
+        const multiplier = Number(mult[type])
+        if (!Number.isFinite(multiplier) || multiplier <= 0 || multiplier > 100) {
+          throw new Error('Multiplicador inválido — número > 0 e ≤ 100.')
+        }
+        await svc.setPersona(type, sel[type], multiplier)
+      }
+      await load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <SettingsGroup title="Personas" badge="standard · expert · master">
+      <Text fontSize="11px" color={tokens.colors.text.muted} mb={3}>
+        O selector do utilizador mostra as personas SEM revelar os modelos. Atribui aqui o modelo
+        e o multiplicador de consumo de cada uma (tokens × multiplicador; cache fatura a 50% desse
+        valor). Publicadas em <Box as="code" fontSize="10px">persona:*</Box> no KV; não publicada → usa a config ativa.
+      </Text>
+
+      {loading ? (
+        <Text fontSize="12px" color={tokens.colors.text.muted}>A carregar…</Text>
+      ) : (
+        <VStack align="stretch" gap={2}>
+          {PERSONA_SLOTS.map(function (slot) {
+            const cur = data?.current[`persona:${slot.type}`] ?? null
+            const published = !!cur && cur.enabled
+            const selModel = (data?.catalog ?? []).find(m => m.id === sel[slot.type])
+            const isCurrent = published && !!selModel && selModel.activeConfig.model === cur!.model
+              && String(cur!.costMultiplier ?? 1) === (mult[slot.type] || '1')
+            const canPublish = !!sel[slot.type] && !isCurrent && busy !== slot.type
+            return (
+              <Box
+                key={slot.type}
+                p={3}
+                borderRadius={tokens.radius.lg}
+                bg={tokens.colors.bg.card}
+                border="1px solid"
+                borderColor={published ? tokens.colors.bg.cardBorder : tokens.colors.border.panel}
+              >
+                <Flex justify="space-between" align="center" mb={2} gap={2}>
+                  <Flex align="center" gap={2} minW={0}>
+                    <Box w="7px" h="7px" borderRadius="full" flexShrink={0}
+                      bg={published ? tokens.colors.accent.green : tokens.colors.text.disabled} />
+                    <Box minW={0}>
+                      <Text fontSize="12px" fontWeight="600" color={tokens.colors.text.primary}>{slot.label}</Text>
+                      <Text fontSize="10px" color={tokens.colors.text.muted}>{slot.desc}</Text>
+                    </Box>
+                  </Flex>
+                  <Text
+                    fontSize="10px"
+                    fontFamily={tokens.fontFamily.mono}
+                    flexShrink={0}
+                    color={published ? tokens.colors.accent.green : tokens.colors.text.disabled}
+                  >
+                    {published ? `${cur!.model} · ${cur!.costMultiplier ?? 1}×` : 'não publicada'}
+                  </Text>
+                </Flex>
+                <Flex align="center" gap={2}>
+                  <NativeSelect.Root size="sm" flex="1">
+                    <NativeSelect.Field
+                      bg={tokens.colors.bg.input}
+                      borderColor={tokens.colors.border.input}
+                      color={tokens.colors.text.primary}
+                      value={sel[slot.type] ?? ''}
+                      onChange={function (e) { const v = e.target.value; setSel(s => ({ ...s, [slot.type]: v })) }}
+                    >
+                      <option value="">— escolher modelo —</option>
+                      {(data?.catalog ?? []).map(m => <option key={m.id} value={m.id}>{m.name} · {m.providerLabel}</option>)}
+                    </NativeSelect.Field>
+                    <NativeSelect.Indicator />
+                  </NativeSelect.Root>
+                  <Input
+                    size="sm"
+                    w="72px"
+                    flexShrink={0}
+                    type="number"
+                    min={0.1}
+                    max={100}
+                    step={0.5}
+                    title="Multiplicador de consumo (tokens × N; cache a 50% de N)"
+                    bg={tokens.colors.bg.input}
+                    borderColor={tokens.colors.border.input}
+                    color={tokens.colors.text.primary}
+                    value={mult[slot.type] ?? '1'}
+                    onChange={function (e) { const v = e.target.value; setMult(s => ({ ...s, [slot.type]: v })) }}
+                  />
+                  <Text fontSize="11px" color={tokens.colors.text.muted} flexShrink={0}>×</Text>
                   <Button
                     size="sm"
                     flexShrink={0}

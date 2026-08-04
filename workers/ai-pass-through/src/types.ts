@@ -19,6 +19,15 @@ export interface ActiveAIConfig {
    *  É o esquema exigido pela Vertex AI, que não aceita API keys estáticas. */
   authScheme: 'Bearer' | 'none' | 'google_oauth'
   apiKeyEnv: string
+  /**
+   * Multiplicador de CUSTO da persona (feature Escolha do Modelo, 2026-08-04):
+   * o admin atribui um modelo a cada persona (standard/expert/master) e define
+   * quantas vezes ela consome — tokens faturáveis = billableTokenTotal × este
+   * valor. O desconto de cache (50%) aplica-se ANTES do multiplicador, por isso
+   * tokens cacheados custam sempre metade do valor definido pelo admin.
+   * Ausente/inválido → 1×. Compõe com o multiplicador do TM Speed.
+   */
+  costMultiplier?: number
   /** Inline provider key — ONLY for Team BYOK configs (`team:{teamId}`), whose
    *  key is per-team and dynamic and so cannot be a static worker env secret
    *  like the managed `active`/`sidecar:*` configs (those always use
@@ -103,6 +112,10 @@ export interface Env {
   SIDECAR_VISION_CONFIG_JSON?: string
   SIDECAR_WEB_SEARCH_CONFIG_JSON?: string
   SIDECAR_FIM_CONFIG_JSON?: string
+  // Personas (Escolha do Modelo) — mesmo par KV/env; ver PERSONA_ENV_FALLBACK.
+  PERSONA_STANDARD_CONFIG_JSON?: string
+  PERSONA_EXPERT_CONFIG_JSON?: string
+  PERSONA_MASTER_CONFIG_JSON?: string
   AUTH_MODE?: 'firebase_jwt' | 'firebase_emulator' | 'test_static'
   TEST_USER_TOKEN?: string
   FIREBASE_PROJECT_ID?: string

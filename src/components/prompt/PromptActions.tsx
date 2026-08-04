@@ -10,6 +10,7 @@ import { useCheckpointStore } from '../../stores/checkpointStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import { EffortSelector } from './EffortSelector'
+import { PersonaSelector } from './PersonaSelector'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -203,6 +204,13 @@ function PromptActions({
         {/* Bloqueado durante o run: o effort é carimbado por turno, portanto
             uma troca a meio não se aplica ao turno em voo (ver EffortSelector). */}
         {!byokInUse && <EffortSelector disabled={isAgentBusy} />}
+
+        {/* Persona (Escolha do Modelo) — Standard/Expert/Master, SEM revelar
+            os modelos (white-labeling; a atribuição modelo+multiplicador é do
+            admin). Só no caminho gerido: em BYOK o modelo é a escolha do
+            próprio user e o header X-TM-Persona não teria efeito. Bloqueado
+            durante o run pela mesma razão do effort. */}
+        {!byokInUse && <PersonaSelector disabled={isAgentBusy} />}
 
         {/* Editor toggle — bloqueado durante o run pela mesma razão que o
             effort: o editor mostra ficheiros que o agente está a reescrever,

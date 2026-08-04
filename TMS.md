@@ -74,7 +74,8 @@
   2. Deploy do data-plane worker (`workers/ai-pass-through`) — mapa de sidecars (`utility` entrou; `intent-router`/`context-planner` saíram de vez, decisão de produto 04-08), fallback de env `SIDECAR_*_CONFIG_JSON`, e o `applyReasoningEffort` com reconhecimento dos ids `author/model` do gateway (`xai/grok-4.5`, `moonshotai/kimi-k3`).
   3. Deploy do control-plane (tree completa via Docker/colima — a tree É prod) — catálogo novo: swap 04-08 (saíram DeepSeek V4 Pro, MiMo V2.5 base, Qwen 3.7 Max, Qwen 3.6 Plus; **o MiMo V2.5 Pro MANTÉM-SE**; entraram qwen3.8-max, grok-4.5 via Cloudflare, kimi-k3-cloudflare; sidecar-eligible = qwen3.7-plus vision/web_search + qwen3.7-flash utility). O endpoint `/v1/admin/mimo-trajectory` + logger foram REMOVIDOS (decisão 04-08); dados históricos ficam no R2.
   4. Republicar no KV de prod via admin: `sidecar:utility` (qwen3.7-flash, `enable_thinking:false` **obrigatório** — bench 04-08: thinking default = 5× latência/tokens), `sidecar:vision` e `sidecar:web_search` (qwen3.7-plus). A config activa (glm-5.2) não muda.
-  5. A release v1.0.2 da IDE leva: fix de língua do `PROMPT_IMPROVER_SYSTEM`, perfis novos (qwen3.8-max; aliases do gateway; default continua MiMo V2.5 Pro), fixes perf task #14.
+  5. A release v1.0.2 da IDE leva: fix de língua do `PROMPT_IMPROVER_SYSTEM`, perfis novos (qwen3.8-max; aliases do gateway; default continua MiMo V2.5 Pro), fixes perf task #14, e a feature **Personas** (selector Standard/Expert/Master no composer + painel admin no Settings).
+  6. **Personas em prod:** depois do deploy dos dois workers, o admin publica as 3 personas no painel Settings → Personas (modelo + multiplicador; o data-plane fatura cache a 50% do multiplicador). Sem publicar, o selector degrada para a config ativa — funciona, mas sem diferenciação.
   - Validação pré-deploy: `node scripts/utility-bench.mjs` (35/35 esperado) + `yarn test:ai-worker` + `yarn test` + vitest no repo da API.
 
 ## lastGeneratedAt

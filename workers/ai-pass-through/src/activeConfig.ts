@@ -52,6 +52,34 @@ const SIDECAR_ENV_FALLBACK: Record<string, keyof Env> = {
   'sidecar:fim': 'SIDECAR_FIM_CONFIG_JSON',
 }
 
+// ── Personas (Escolha do Modelo, 2026-08-04) ──────────────────────────────
+//
+// O selector da IDE expõe 3 personas — Standard/Expert/Master — SEM revelar
+// os modelos (white-labeling). O admin atribui a cada persona um modelo do
+// catálogo coder + um costMultiplier, publicados no KV como `persona:*`
+// (mesmo schema da ativa). O pedido principal traz `X-TM-Persona`; persona
+// ausente/não-publicada/inválida degrada SILENCIOSAMENTE para a `active` —
+// uma persona mal publicada nunca parte o chat. Sidecar (X-Request-Type)
+// tem prioridade sobre persona: os auxiliares correm no utility/vision/…
+// independentemente do que o user escolheu para o main loop.
+const PERSONA_TO_KEY: Record<string, string> = {
+  'standard': 'persona:standard',
+  'expert': 'persona:expert',
+  'master': 'persona:master',
+}
+
+export function personaKeyFor(persona: string | null): string | null {
+  if (!persona) return null
+  return PERSONA_TO_KEY[persona.trim().toLowerCase()] ?? null
+}
+
+// Espelho do fallback de env dos sidecars, pela mesma razão (dev local).
+const PERSONA_ENV_FALLBACK: Record<string, keyof Env> = {
+  'persona:standard': 'PERSONA_STANDARD_CONFIG_JSON',
+  'persona:expert': 'PERSONA_EXPERT_CONFIG_JSON',
+  'persona:master': 'PERSONA_MASTER_CONFIG_JSON',
+}
+
 export function sidecarKeyForRequestType(requestType: string | null): string | null {
   if (!requestType) return null
   return REQUEST_TYPE_TO_SIDECAR_KEY[requestType.trim().toLowerCase()] ?? null
@@ -117,6 +145,14 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     ? Math.floor(obj.maxOutputTokens)
     : undefined
 
+  // Multiplicador de custo da persona. Mesma tolerância dos numéricos acima:
+  // ausente/inválido/≤0 → undefined e o billing usa 1×. O tecto de 100 é
+  // sanidade contra typos do admin (1000× apagaria um budget num turno).
+  const costMultiplier = typeof obj.costMultiplier === 'number'
+    && Number.isFinite(obj.costMultiplier) && obj.costMultiplier > 0 && obj.costMultiplier <= 100
+    ? obj.costMultiplier
+    : undefined
+
   // Capacidades do modelo, emitidas em X-Model-Capabilities.
   //
   // PORQUÊ (auditoria 2026-07-29): a IDE tem uma tabela MODEL_PROFILES cozida
@@ -158,6 +194,7 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     extraBody,
     contextWindow,
     maxOutputTokens,
+    costMultiplier,
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
   }
 }
@@ -187,37 +224,60 @@ export async function getActiveConfig(env: Env, now = Date.now()): Promise<Resol
 }
 
 /**
- * Resolve a config para um pedido: sidecar publicado para o X-Request-Type
- * quando existe e está ativo, senão a config ativa. Sidecar com JSON
- * inválido ou disabled NUNCA propaga erro — degrada para a ativa com um
- * warn nos logs (um sidecar mal publicado não pode partir o produto).
+ * Tenta resolver uma config auxiliar (sidecar:* ou persona:*) do KV com
+ * fallback de env. Inválida/disabled/ausente → null (o caller degrada para a
+ * ativa) — uma config auxiliar mal publicada nunca parte o produto.
+ */
+async function resolveAuxConfig(
+  env: Env,
+  key: string,
+  envVar: keyof Env | undefined,
+  now: number,
+): Promise<ResolvedActiveAIConfig | null> {
+  const cached = configCache.get(key)
+  if (cached && cached.expiresAt > now) return cached.value
+
+  const kvRaw = env.ACTIVE_AI_CONFIG ? await env.ACTIVE_AI_CONFIG.get(key) : null
+  const envRaw = envVar && typeof env[envVar] === 'string' ? (env[envVar] as string) : null
+  const raw = kvRaw || envRaw
+  if (!raw) return null
+  try {
+    const config = parseActiveConfig(raw)
+    if (!config.enabled) return null
+    const resolved: ResolvedActiveAIConfig = { config, source: kvRaw ? 'kv' : 'env', key }
+    configCache.set(key, { value: resolved, expiresAt: now + CONFIG_CACHE_MS })
+    return resolved
+  } catch (error) {
+    console.warn(`[ai-pass-through] config ${key} invalid, falling back to active:`, error)
+    return null
+  }
+}
+
+/**
+ * Resolve a config para um pedido, por prioridade:
+ *   1. sidecar publicado para o X-Request-Type (auxiliares correm no modelo
+ *      barato/especializado independentemente da persona escolhida);
+ *   2. persona publicada para o X-TM-Persona (main loop);
+ *   3. config ativa.
+ * Config auxiliar com JSON inválido ou disabled NUNCA propaga erro — degrada
+ * para a ativa com um warn nos logs.
  */
 export async function getConfigForRequest(
   env: Env,
   requestType: string | null,
+  persona: string | null = null,
   now = Date.now(),
 ): Promise<ResolvedActiveAIConfig> {
   const sidecarKey = sidecarKeyForRequestType(requestType)
   if (sidecarKey) {
-    const cached = configCache.get(sidecarKey)
-    if (cached && cached.expiresAt > now) return cached.value
-
-    const kvRaw = env.ACTIVE_AI_CONFIG ? await env.ACTIVE_AI_CONFIG.get(sidecarKey) : null
-    const envVar = SIDECAR_ENV_FALLBACK[sidecarKey]
-    const envRaw = envVar && typeof env[envVar] === 'string' ? (env[envVar] as string) : null
-    const raw = kvRaw || envRaw
-    if (raw) {
-      try {
-        const config = parseActiveConfig(raw)
-        if (config.enabled) {
-          const resolved: ResolvedActiveAIConfig = { config, source: kvRaw ? 'kv' : 'env', key: sidecarKey }
-          configCache.set(sidecarKey, { value: resolved, expiresAt: now + CONFIG_CACHE_MS })
-          return resolved
-        }
-      } catch (error) {
-        console.warn(`[ai-pass-through] sidecar config ${sidecarKey} invalid, falling back to active:`, error)
-      }
-    }
+    const resolved = await resolveAuxConfig(env, sidecarKey, SIDECAR_ENV_FALLBACK[sidecarKey], now)
+    if (resolved) return resolved
+    return getActiveConfig(env, now)
+  }
+  const personaKey = personaKeyFor(persona)
+  if (personaKey) {
+    const resolved = await resolveAuxConfig(env, personaKey, PERSONA_ENV_FALLBACK[personaKey], now)
+    if (resolved) return resolved
   }
   return getActiveConfig(env, now)
 }
