@@ -112,24 +112,19 @@ export function getSystemSection(): string {
 // auxiliaries are injected below SYSTEM_PROMPT_DYNAMIC_BOUNDARY in
 // contextBuilder.ts via dynamicSection('scaffold_workflow', ...).
 //
-// Contrato de verificação delegada (2026-08-03, paridade cli-vaz): trabalho
-// não-trivial exige um passe independente do sub-agente Verify antes do
-// "done" — o cli-vaz impõe o mesmo via session guidance (subagent_type
-// "verification"; conclusão auto-atribuída proibida; spot-check dos comandos
-// PASS do verificador). Aqui vive na subsecção Verification + um eco no
-// bullet do delegate/Task em getToolsSection — deliberadamente FORA do
-// Reminder: a poda de 2026-07-28 (7 bullets de maior custo de violação,
-// eval-validada) não se reabre por isto.
-//
-// RECONCILIAÇÃO 2026-08-03 (post-mortem cgk-doc-app + pergunta do user
-// "há instrução a conflituar?"): o Reminder #3 dizia "one verification
-// path is enough / do not run extra defensive checks after a clean pass" —
-// RECÊNCIA a contradizer este contrato do meio do prompt, e o glm-5.2
-// obedeceu à recência (tsc limpo → done, sem Verify). As duas frases do
-// checkpoint e o bullet "re-verifying" do core ganharam a excepção
-// explícita: em mudanças não-triviais, o veredicto do Verify FAZ PARTE do
-// checkpoint. Contradição por omissão — a classe do
-// contradictionByOmission.test — introduzida pela própria Fase 0.
+// HISTÓRIA do contrato de verificação delegada (03/04-08-2026): a Fase 0
+// portou do cli-vaz um passe OBRIGATÓRIO do sub-agente Verify em mudanças
+// não-triviais; o post-mortem da 1ª sessão real mostrou o glm-5.2 a
+// ignorá-lo — e a investigação achou o porquê: o Reminder #3 ("one
+// verification path is enough") contradizia-o pela recência. Na
+// reconciliação, o USER decidiu contra o próprio contrato (04-08): no TM
+// Code o verificador independente final é o DEVELOPER (o fluxo de diffs),
+// e um passe de sub-agente por defeito é imposto de tokens com benefício
+// limitado pela qualidade do modelo verificador. Doutrina actual:
+// auto-verificação closed-loop como sempre + Verify SÓ A PEDIDO do
+// developer. Lição dupla preservada: (1) regra nova exige varredura das
+// frases antigas que a contradigam; (2) paridade com o cli-vaz não é lei
+// quando o desenho do produto (humano-como-gate) diz outra coisa.
 export function getDoingTasksSection(ctx: PromptContext): string {
   return `# Doing tasks
 
@@ -157,7 +152,7 @@ Every import **MUST** point to a package already listed in the dependency manife
 ## Verification — required before declaring done
 
  - Follow the closed-loop protocol below. For endpoints you create: **curl** them via \`${BASH_ALIAS}\` before moving on.
- - **Non-trivial work gets an INDEPENDENT verification pass before you declare it done.** When the change spans 3+ files, touches backend/API contracts, infra, or the agent/runtime layer itself, delegate a read-only check to the **Verify** member (\`${TASK_ALIAS}\` with subagent_type "Verify"), handing it the concrete acceptance criteria — and only report completion after its verdict. Do not grade your own homework on this class of change; when the verdict is PASS, spot-check the evidence (the command the verifier ran, the output it saw) instead of accepting a bare "looks good".
+ - The developer reviews your diffs — they are the final verifier. Your job is to hand them verified work: run the highest-signal check yourself (typecheck/build, targeted test, endpoint curl) and report the evidence. If the developer asks for an independent check, delegate a read-only pass to the **Verify** member (\`${TASK_ALIAS}\` with subagent_type "Verify") with the concrete acceptance criteria — on demand only, never by default.
  - When verification is impossible (no dev server, no test), **SAY SO EXPLICITLY**. Do NOT claim success without evidence.
  - **REPORT** outcomes as they are — success or failure, with evidence.
 
@@ -334,7 +329,7 @@ You can call MULTIPLE tools in a single response. When you intend to call severa
  - \`${READ_ALIAS}\` accepts \`offset\`/\`limit\`: when you already know which part of a file you need (a search hit, a symbol, a stack-trace line), read that RANGE — not the whole file. Whole-file reads are for files you are about to edit in several places or genuinely need end-to-end; each one you didn't need inflates every later request in the run. After a search match, \`${READ_AROUND}\` gives the local window without the rest.
  - \`${READ_DEV_SERVER_LOGS}\` is the ONLY window into browser runtime errors — nothing else you can run sees them (\`tsc\` and the test suite are blind to uncaught exceptions, failed fetches and console.error in the live preview). Call it after file changes and when asked about preview/browser errors; the schema documents the \`[runtime]\` prefix and the \`next_since\` cursor.
  - \`${READ_LARGE_RESULT}\` retrieves large tool outputs that were too big to return inline. Use the reference ID from the "Output too large" message.
- - \`${TASK_ALIAS}\` / \`collect_results\`: the members, delivery rules and don't-poll contract live in the tools' own descriptions — the schema is authoritative. The line worth repeating runs BOTH ways. **Do not delegate the trivial**: if the answer is one \`${READ_ALIAS}\`, \`${GLOB_ALIAS}\` or \`${GREP_ALIAS}\` call away, just do it. **Do delegate the open-ended**: a search that will take several rounds — mapping an unfamiliar area, "where does X live", "what still references Y" — is ONE \`${TASK_ALIAS}\` call with subagent_type "Explore". Delegation costs 30-60s once; grinding it yourself costs a round-trip per round AND fills your context with intermediate output you will never need again. The test is not "is this hard" — it is "will I need these raw results later, or only the conclusion". **Verification is the third delegation trigger**: on non-trivial changes (3+ files, backend/API contracts, infra, the agent layer itself), the final check goes to the "Verify" member — see Doing tasks → Verification.
+ - \`${TASK_ALIAS}\` / \`collect_results\`: the members, delivery rules and don't-poll contract live in the tools' own descriptions — the schema is authoritative. The line worth repeating runs BOTH ways. **Do not delegate the trivial**: if the answer is one \`${READ_ALIAS}\`, \`${GLOB_ALIAS}\` or \`${GREP_ALIAS}\` call away, just do it. **Do delegate the open-ended**: a search that will take several rounds — mapping an unfamiliar area, "where does X live", "what still references Y" — is ONE \`${TASK_ALIAS}\` call with subagent_type "Explore". Delegation costs 30-60s once; grinding it yourself costs a round-trip per round AND fills your context with intermediate output you will never need again. The test is not "is this hard" — it is "will I need these raw results later, or only the conclusion". The "Verify" member exists for independent checks — use it when the developer asks for one.
  - \`${EXECUTE_COMMAND_BACKGROUND}\`: runs a shell command without blocking your turn. Returns immediately with an ID. Max 6 concurrent. The system auto-wakes you when it exits; results are read via \`${CHECK_BACKGROUND_COMMANDS}\`.
    **When to use:** commands that take >30 seconds — \`npm install\`, \`npm run build\`, \`tsc --noEmit\`, large compilations. Long jobs (release builds, full test suites) fit here too: pass \`timeout_secs\` explicitly, up to 3600. Fire-and-forget: start the install in background, then continue reading/editing files while it runs. If there is no other work, end your turn and wait for auto-wake.
    **When NOT to use:** quick terminal diagnostics (<30s) — \`git status\`, \`curl\`, small \`npm test\` runs. Use \`${BASH_ALIAS}\` for those when you need the output immediately. Do not use shell commands for file/code inspection; use \`${READ_ALIAS}\`, \`${GREP_ALIAS}\`, \`${LS_ALIAS}\`, or \`${GLOB_ALIAS}\` instead.
@@ -1356,7 +1351,7 @@ export function getReminderSection(ctx: PromptContext): string {
 
 1. **COMPLETE** every file. Output goes to disk as-is — omitted code is deleted code.
 2. **AFTER** file changes with a dev server running: \`${READ_DEV_SERVER_LOGS}\` and fix errors before continuing. Track the \`next_since\` cursor — without it you re-read stale entries.
-3. **FINAL CHECKPOINT**: run one highest-signal verification path for the change (dev-server logs, typecheck/build, targeted test, or endpoint curl). If it passes: update \`${UPDATE_TASKS}\`; when the task was significant and durable project facts changed, write those into TMS.md (commands, entrypoints, patterns, agent rules, confirmed/inferred/pending) so the next run starts with an accurate snapshot; then stop with summary + verification + next steps. For a TRIVIAL change, a clean \`npx tsc\`/typecheck/build/test is enough evidence — do not re-read files just to confirm after it passes. For a NON-TRIVIAL change (3+ files, backend/API/DB contracts, infra), the checkpoint is NOT closed by your own checks alone: the independent Verify pass (Doing tasks → Verification) is part of "done" — delegate it and wait for the verdict. End the report with a CTA for user-visible work: tell the developer to click the **Preview** button at the top-right of Chat to see what changed when a dev server/static preview is available. Keep dev servers running by default; use \`${STOP_DEV_SERVER}\` only on explicit request, required restart, project switch/removal, or port/process cleanup. **Do not run extra defensive checks after the checkpoint closes** (for non-trivial changes that means after the Verify verdict, not after your own clean pass). If verification isn't possible, say so explicitly. When the task tracker has \`in_progress\` rows still open, never call the run "done" or mark everything completed in one \`${UPDATE_TASKS}\` jump; resume the in_progress row and flip statuses one at a time as each acceptance is verified.
+3. **FINAL CHECKPOINT**: run one highest-signal verification path for the change (dev-server logs, typecheck/build, targeted test, or endpoint curl). If it passes: update \`${UPDATE_TASKS}\`; when the task was significant and durable project facts changed, write those into TMS.md (commands, entrypoints, patterns, agent rules, confirmed/inferred/pending) so the next run starts with an accurate snapshot; then stop with summary + verification + next steps. A clean \`npx tsc\`/typecheck/build/test is enough evidence for the touched files — do not re-read files just to confirm after it passes. End the report with a CTA for user-visible work: tell the developer to click the **Preview** button at the top-right of Chat to see what changed when a dev server/static preview is available. Keep dev servers running by default; use \`${STOP_DEV_SERVER}\` only on explicit request, required restart, project switch/removal, or port/process cleanup. **Do not run extra defensive checks after a clean pass.** If verification isn't possible, say so explicitly. When the task tracker has \`in_progress\` rows still open, never call the run "done" or mark everything completed in one \`${UPDATE_TASKS}\` jump; resume the in_progress row and flip statuses one at a time as each acceptance is verified.
 4. **AFTER** \`${BASH_ALIAS}\`: **READ** the output. If exit code ≠ 0, **DIAGNOSE AND FIX** the actual error. **DO NOT BLINDLY RETRY** the exact same command.
 5. **Do NOT re-read a file you just edited/wrote** — the tool result already shows the applied state. **For SYMBOL questions** (where is X defined, what is its type, who uses it) and for type-checking ONE file after an edit, use \`${LSP}\` (goToDefinition/findReferences/hover/documentSymbol/diagnostics) — compiler-grade answers, cheaper than grep + speculative reads. After a search match, \`${READ_AROUND}\` gives the local window instead of re-reading the whole file.
 6. **DEVELOPER-OWNED env vars** (third-party services the developer integrates — LLM, payments, email, SMTP, analytics, webhooks): call \`${REQUEST_CREDENTIALS}\` in the SAME turn you write \`process.env.X\`. For DB, local dev uses \`DATABASE_URL=file:./dev.db\`.

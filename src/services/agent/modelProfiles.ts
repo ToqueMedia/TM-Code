@@ -78,24 +78,17 @@ const GLM_5_2: ModelProfile = {
 
   supportsAttachments: false,
   supportsSearch: false,
-  // Dois desvios observados na MESMA sessão real (cgk-doc-app, 2026-08-03
-  // 20:15, export analisado em post-mortem): com as regras JÁ no prompt, o
-  // glm-5.2 (a) fechou 34 escritas backend+frontend+BD com auto-verificação,
-  // sem nunca invocar o passe independente do Verify; (b) validou com
-  // `tsc --noEmit 2>&1 | head -40` — pipe sem pipefail numa validação.
-  // Counterweights = eco em PRIMAZIA das duas regras de maior custo de
-  // violação para este modelo. Rever após mais sessões: se deixar de
-  // derrapar, remover.
+  // Desvio observado em sessão real (cgk-doc-app, 2026-08-03 20:15, export
+  // analisado em post-mortem): com a regra JÁ no prompt, o glm-5.2 validou
+  // com `tsc --noEmit 2>&1 | head -40` — pipe sem pipefail numa validação.
+  // Counterweight = eco em PRIMAZIA. Rever após mais sessões; se deixar de
+  // derrapar, remover. (Um 2º counterweight — Verify obrigatório — existiu
+  // por umas horas e saiu a 04-08: o user removeu o próprio contrato do
+  // prompt; ver a nota histórica em chatSections, secção Doing tasks.)
   counterweights: [
     {
-      rule: 'Before declaring a multi-file change done (3+ files, or any backend/API/DB change), you MUST delegate the independent verification pass — Task with subagent_type "Verify" — and wait for its verdict. Self-run checks (tsc, tests) are necessary but do NOT replace it.',
-      addedFor: 'glm-5.2 fechou 34 escritas com auto-verificação, sem invocar o Verify (sessão cgk-doc-app 2026-08-03 20:15)',
-      addedOn: '2026-08-03',
-      reviewAfter: '2026-09-01',
-    },
-    {
       rule: 'Never pipe a validation command (tsc, build, tests). Run it bare so the exit code is real; if output must be trimmed, prefix `set -o pipefail;`.',
-      addedFor: 'tsc --noEmit 2>&1 | head -40 sem pipefail, na mesma sessão',
+      addedFor: 'tsc --noEmit 2>&1 | head -40 sem pipefail (sessão cgk-doc-app 2026-08-03 20:15)',
       addedOn: '2026-08-03',
       reviewAfter: '2026-09-01',
     },
