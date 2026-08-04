@@ -65,7 +65,62 @@ interface SubAgentStoreState {
 
 let nextRunId = 1
 
-export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
+// ── Coalescência de tool-events (task #14, "tremeliques" do chat) ──────────
+// addToolCall/updateToolCall chegam a vários por segundo POR sub-agent, e até
+// 4 correm em paralelo. Cada set() troca o Map e notifica TODOS os
+// subscritores React (cards de equipa, barras de estado) — por EVENTO isso
+// dava re-render Chakra + repin de scroll do stick-to-bottom várias vezes por
+// segundo enquanto o agente principal só esperava: o chat "tremia". As duas
+// mutações de alta frequência acumulam aqui e aplicam-se numa ÚNICA troca de
+// Map a cada FLUSH_MS (imperceptível num feed vivo). Tudo o que precisa de
+// estado completo — ciclo de vida (finalize/error/timeout/abort/clear) e
+// leituras via get() (getRunSummaries do check_team) — faz flush síncrono
+// primeiro, por isso nenhum caminho de dados vê estado atrasado.
+const FLUSH_MS = 150
+
+type PendingToolCallOp =
+  | { kind: 'add'; runId: string; summary: SubAgentToolCallSummary }
+  | { kind: 'update'; runId: string; callId: string; update: Partial<SubAgentToolCallSummary> }
+
+let pendingToolCallOps: PendingToolCallOp[] = []
+let toolCallFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+export const useSubAgentStore = create<SubAgentStoreState>((set, get) => {
+  const flushToolCallOps = () => {
+    if (toolCallFlushTimer) {
+      clearTimeout(toolCallFlushTimer)
+      toolCallFlushTimer = null
+    }
+    if (pendingToolCallOps.length === 0) return
+    const ops = pendingToolCallOps
+    pendingToolCallOps = []
+    set((state) => {
+      const next = new Map(state.runs)
+      for (const op of ops) {
+        const run = next.get(op.runId)
+        if (!run) continue
+        if (op.kind === 'add') {
+          next.set(op.runId, { ...run, toolCalls: [...run.toolCalls, op.summary] })
+        } else {
+          next.set(op.runId, {
+            ...run,
+            toolCalls: run.toolCalls.map(tc =>
+              tc.callId === op.callId ? { ...tc, ...op.update } : tc
+            ),
+          })
+        }
+      }
+      return { runs: next }
+    })
+  }
+
+  const scheduleToolCallFlush = () => {
+    if (!toolCallFlushTimer) {
+      toolCallFlushTimer = setTimeout(flushToolCallOps, FLUSH_MS)
+    }
+  }
+
+  return {
   runs: new Map(),
 
   startRun: (def, prompt, description, parentMessageId, ownerTaskId) => {
@@ -112,31 +167,17 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
   },
 
   addToolCall: (runId, summary) => {
-    set((state) => {
-      const run = state.runs.get(runId)
-      if (!run) return state
-      const next = new Map(state.runs)
-      next.set(runId, { ...run, toolCalls: [...run.toolCalls, summary] })
-      return { runs: next }
-    })
+    pendingToolCallOps.push({ kind: 'add', runId, summary })
+    scheduleToolCallFlush()
   },
 
   updateToolCall: (runId, callId, update) => {
-    set((state) => {
-      const run = state.runs.get(runId)
-      if (!run) return state
-      const next = new Map(state.runs)
-      next.set(runId, {
-        ...run,
-        toolCalls: run.toolCalls.map(tc =>
-          tc.callId === callId ? { ...tc, ...update } : tc
-        ),
-      })
-      return { runs: next }
-    })
+    pendingToolCallOps.push({ kind: 'update', runId, callId, update })
+    scheduleToolCallFlush()
   },
 
   finalizeRun: (runId, finalText, tokenUsage) => {
+    flushToolCallOps()
     set((state) => {
       const run = state.runs.get(runId)
       if (!run || run.status !== 'running') return state
@@ -158,6 +199,7 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
   },
 
   errorRun: (runId, errorText) => {
+    flushToolCallOps()
     set((state) => {
       const run = state.runs.get(runId)
       if (!run || run.status !== 'running') return state
@@ -169,6 +211,7 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
   },
 
   timeoutRun: (runId, partialText) => {
+    flushToolCallOps()
     set((state) => {
       const run = state.runs.get(runId)
       if (!run || run.status !== 'running') return state
@@ -180,6 +223,7 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
   },
 
   abortRun: (runId) => {
+    flushToolCallOps()
     const run = get().runs.get(runId)
     if (!run) return
     run.abortController.abort()
@@ -192,6 +236,7 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
   },
 
   abortAll: () => {
+    flushToolCallOps()
     const { runs } = get()
     for (const [_id, run] of runs) {
       if (run.status === 'running') {
@@ -213,6 +258,7 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
   },
 
   abortByOwner: (ownerTaskId) => {
+    flushToolCallOps()
     const { runs } = get()
     for (const [, run] of runs) {
       if (run.ownerTaskId === ownerTaskId && run.status === 'running') {
@@ -242,6 +288,7 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
   },
 
   getRunSummaries: () => {
+    flushToolCallOps()
     const summaries: SubAgentRunSummary[] = []
     for (const run of get().runs.values()) {
       summaries.push({
@@ -280,6 +327,7 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
   },
 
   clearCompleted: () => {
+    flushToolCallOps()
     set((state) => {
       const next = new Map<string, SubAgentRun>()
       for (const [id, run] of state.runs) {
@@ -292,6 +340,12 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
   },
 
   clearAll: () => {
+    // Descarta pendentes — os runs vão todos embora de qualquer forma.
+    pendingToolCallOps = []
+    if (toolCallFlushTimer) {
+      clearTimeout(toolCallFlushTimer)
+      toolCallFlushTimer = null
+    }
     // Abort any running before clearing
     for (const run of get().runs.values()) {
       if (run.status === 'running') {
@@ -301,4 +355,5 @@ export const useSubAgentStore = create<SubAgentStoreState>((set, get) => ({
     }
     set({ runs: new Map() })
   },
-}))
+  }
+})

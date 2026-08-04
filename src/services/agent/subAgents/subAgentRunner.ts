@@ -1,6 +1,9 @@
 /**
  * Sub-agent runner — creates a lightweight QueryEngine instance and runs
  * the agent loop in background. Publishes events to subAgentStore (NOT chatStore).
+ * Nota (task #14): o store coalesce addToolCall/updateToolCall (~150ms) —
+ * não assumir que um get() imediatamente a seguir vê o call publicado;
+ * caminhos que precisam do estado completo passam por acções que fazem flush.
  *
  * v0.8.0 — migrated from AgentService.createLightweight + runAgentLoop to
  * QueryEngine + OpenAI SDK native streaming (claude-vaz parity).

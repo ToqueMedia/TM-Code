@@ -9,6 +9,7 @@
 import { memo, useEffect, useMemo, useState } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiChevronRight, FiChevronDown, FiCheck, FiX, FiClock, FiLoader } from 'react-icons/fi'
+import { useShallow } from 'zustand/react/shallow'
 import { useSubAgentStore } from '../../stores/subAgentStore'
 import { AGENT_COLORS } from '../../services/agent/subAgents/colors'
 import type { SubAgentRun, SubAgentToolCallSummary } from '../../services/agent/subAgents/types'
@@ -117,7 +118,10 @@ const SubAgentRunCard = memo(function SubAgentRunCard({ runId }: { runId: string
         <Text fontSize="11px" color={tokens.colors.text.secondary} truncate maxW="180px">
           {run.description}
         </Text>
-        <Text fontSize="10px" color={tokens.colors.text.disabled}>
+        {/* tabular-nums: sem isto a largura do texto oscilava a cada update
+            (duração/contagem) e o chevron ml=auto dançava — parte do
+            "tremelique" da task #14. */}
+        <Text fontSize="10px" color={tokens.colors.text.disabled} css={{ fontVariantNumeric: 'tabular-nums' }}>
           {run.status === 'running' ? 'running' : run.status} · {duration}
           {run.toolCalls.length > 0 && ` · ${run.toolCalls.length} calls`}
         </Text>
@@ -204,19 +208,20 @@ const SubAgentRunCard = memo(function SubAgentRunCard({ runId }: { runId: string
 function SubAgentCard({ runIds }: SubAgentCardProps) {
   const [containerExpanded, setContainerExpanded] = useState(false)
 
-  // Subscribe to the Map reference — only changes when runs are added/removed.
-  // Individual run mutations (status changes, tool calls) are tracked by
-  // SubAgentRunCard via its own store subscription.
-  const runsMap = useSubAgentStore(state => state.runs)
-
-  const runs = useMemo(() => {
-    const result: SubAgentRun[] = []
-    for (const id of runIds) {
-      const run = runsMap.get(id)
-      if (run) result.push(run)
-    }
-    return result
-  }, [runsMap, runIds])
+  // Subscrição LIMITADA aos runs deste card (task #14): a subscrição antiga
+  // era ao Map inteiro — cada tool-event de QUALQUER sub-agent re-renderizava
+  // todos os SubAgentCards da história da conversa. Com useShallow sobre a
+  // projecção, este card só re-renderiza quando um dos SEUS runs muda.
+  const runs = useSubAgentStore(
+    useShallow(state => {
+      const result: SubAgentRun[] = []
+      for (const id of runIds) {
+        const run = state.runs.get(id)
+        if (run) result.push(run)
+      }
+      return result
+    }),
+  )
 
   const runningCount = useMemo(() => runs.filter(r => r.status === 'running').length, [runs])
   const completedCount = useMemo(() => runs.filter(r => r.status !== 'running').length, [runs])
