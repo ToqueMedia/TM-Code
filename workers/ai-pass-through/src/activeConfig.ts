@@ -23,6 +23,10 @@ export function clearActiveConfigCache(): void {
 // header X-TM-Config-Key da resposta.
 
 const REQUEST_TYPE_TO_SIDECAR_KEY: Record<string, string> = {
+  // 'utility' é o tipo genérico que os serviços one-shot da IDE já enviam
+  // (promptImprovementService) — estava FORA do mapa, logo caía no fallback
+  // silencioso e pagava preço de flagship na config ativa (achado 04-08).
+  'utility': 'sidecar:utility',
   'web_search': 'sidecar:web_search',
   'vision': 'sidecar:vision',
   'fim': 'sidecar:fim',
