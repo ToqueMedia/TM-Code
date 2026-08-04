@@ -269,12 +269,11 @@ async function handleChatCompletions(
   // por isso o 503 dá o MESMO desfecho — só mais limpo, rápido e barato. O tipo
   // `vision` só é enviado quando o modelo ativo é cego (cliente verifica o
   // perfil antes), logo nunca há um modelo ativo com visão a ser bloqueado aqui.
-  // `context-planner` também não pode degradar silenciosamente: ele tem contrato
-  // JSON e o cliente já tem fallback explícito para o modelo de código quando o
-  // sidecar utilitário falha. `summarize`/memory ficam de fora — o modelo ativo
-  // sabe resumir/extrair, degradam como desenhado.
+  // `summarize`/memory/`utility` ficam de fora — o modelo ativo sabe
+  // resumir/extrair, degradam como desenhado. (`context-planner` era strict
+  // pelo contrato JSON; saiu com a decisão 2026-08-04 de não ligar o planner.)
   const requestedSidecar = sidecarKeyForRequestType(requestType)
-  const strictSidecarRequestType = ['vision', 'web_search', 'fim', 'context-planner'].includes(
+  const strictSidecarRequestType = ['vision', 'web_search', 'fim'].includes(
     requestType?.trim().toLowerCase() ?? '',
   )
   if (requestedSidecar && strictSidecarRequestType && active.key !== requestedSidecar) {

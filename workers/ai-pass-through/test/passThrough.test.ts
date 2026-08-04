@@ -1710,8 +1710,10 @@ test('sidecar: X-Request-Type web_search routes to the published sidecar config'
   assert.equal(res.headers.get('x-tm-model'), 'qwen3.7-plus')
 })
 
-test('sidecar: memory/planner/router and summarize share the utility sidecar', async () => {
-  for (const type of ['memory-extractor', 'memory-selector', 'memory-distiller', 'summarize', 'intent-router', 'context-planner']) {
+test('sidecar: memory, summarize and utility share the utility sidecar', async () => {
+  // intent-router/context-planner saíram do mapa (decisão 2026-08-04: não
+  // serão ligados); 'utility' entrou (promptImprovementService pagava flagship).
+  for (const type of ['memory-extractor', 'memory-selector', 'memory-distiller', 'summarize', 'utility']) {
     clearActiveConfigCache()
     const fetcher = fakeFetcher(Response.json({ ok: true }))
     const res = await handleRequest(
@@ -1723,12 +1725,11 @@ test('sidecar: memory/planner/router and summarize share the utility sidecar', a
   }
 })
 
-test('sidecar: unpublished strict sidecar (vision/web_search/fim/context-planner) returns 503 without an upstream call', async () => {
+test('sidecar: unpublished strict sidecar (vision/web_search/fim) returns 503 without an upstream call', async () => {
   // Degradar visão/pesquisa/FIM para o modelo ativo GERAL produz 404 (imagem a
   // modelo de texto), alucinação (pesquisa sem motor) ou lixo (FIM sem template).
-  // O context-planner exige JSON; degradar para active mascara o erro e devolve
-  // prosa ao parser. O worker falha já com 503 e o cliente usa fallback de código.
-  for (const type of ['vision', 'web_search', 'fim', 'context-planner']) {
+  // O worker falha já com 503 e o cliente usa fallback de código.
+  for (const type of ['vision', 'web_search', 'fim']) {
     clearActiveConfigCache()
     const fetcher = fakeFetcher(Response.json({ ok: true }))
     const res = await handleRequest(typedRequest(type), kvEnv({}), { fetcher })
@@ -1764,6 +1765,35 @@ test('sidecar: utility/summarize WITHOUT a published sidecar still degrades to a
     assert.equal(String(fetcher.calls[0].input), 'https://provider.test/v1/chat/completions', type)
     assert.equal(res.headers.get('x-tm-config-key'), 'active', type)
   }
+})
+
+test('sidecar: env fallback serves utility when the KV key is absent (KV wins when both exist)', async () => {
+  // Espelho do par kvRaw||envRaw da active: em `wrangler dev` o KV é simulação
+  // vazia e sem isto o dev local nunca exercita um sidecar (gap invisível até
+  // prod). SIDECAR_UTILITY_CONFIG_JSON alimenta o dev local com o flash.
+  clearActiveConfigCache()
+  let fetcher = fakeFetcher(Response.json({ ok: true }))
+  let res = await handleRequest(
+    typedRequest('summarize'),
+    kvEnv({}, { SIDECAR_UTILITY_CONFIG_JSON: JSON.stringify(utilitySidecarConfig) }),
+    { fetcher },
+  )
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-tm-config-key'), 'sidecar:utility')
+  assert.equal(String(fetcher.calls[0].input), 'https://sidecar.test/v1/chat/completions')
+
+  // KV publicado ganha ao env — prod nunca é governado por um segredo esquecido.
+  clearActiveConfigCache()
+  fetcher = fakeFetcher(Response.json({ ok: true }))
+  res = await handleRequest(
+    typedRequest('summarize'),
+    kvEnv(
+      { 'sidecar:utility': JSON.stringify({ ...utilitySidecarConfig, model: 'kv-model' }) },
+      { SIDECAR_UTILITY_CONFIG_JSON: JSON.stringify(utilitySidecarConfig) },
+    ),
+    { fetcher },
+  )
+  assert.equal(fetcher.calls[0].body.model, 'kv-model')
 })
 
 test('sidecar: unknown request types never consult the KV sidecar namespace', async () => {

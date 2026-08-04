@@ -34,17 +34,22 @@ const REQUEST_TYPE_TO_SIDECAR_KEY: Record<string, string> = {
   'memory-selector': 'sidecar:utility',
   'memory-distiller': 'sidecar:utility',
   'summarize': 'sidecar:utility',
-  // Intent Router — classifies the user's request into a PromptProfile +
-  // readOnly flag BEFORE the main agent loop. Same utility sidecar (MiMo
-  // V2.5): a cheap, JSON-capable model. Without this mapping the worker
-  // degrades to the active (flagship) model, which may not honour
-  // response_format:json_object and returns unparseable content.
-  'intent-router': 'sidecar:utility',
-  // Context Planner — selects small on-demand context domains before the main
-  // agent loop. It has the same JSON-capable utility-model requirement as the
-  // intent router. Without this mapping it falls through to the active coding
-  // model and often returns prose instead of JSON.
-  'context-planner': 'sidecar:utility',
+  // intent-router e context-planner SAÍRAM do mapa (decisão 2026-08-04): o
+  // cliente nunca os enviou (o dispatch usa heurística local, "Intent (sem
+  // router)") e a decisão de produto é não os ligar. Se um dia voltarem,
+  // lembrar que o context-planner era STRICT (503 sem sidecar) — ver
+  // git blame deste bloco e o strictSidecarRequestType no index.ts.
+}
+
+// Fallback de env por sidecar — espelho exacto do par KV/env da `active`
+// (kvRaw || envRaw, KV ganha). Motivo: em `wrangler dev` o KV é simulação
+// local vazia e não há caminho de admin para publicar sidecars — sem isto o
+// dev local NUNCA exercita um sidecar, e o gap ficava invisível até prod.
+const SIDECAR_ENV_FALLBACK: Record<string, keyof Env> = {
+  'sidecar:utility': 'SIDECAR_UTILITY_CONFIG_JSON',
+  'sidecar:vision': 'SIDECAR_VISION_CONFIG_JSON',
+  'sidecar:web_search': 'SIDECAR_WEB_SEARCH_CONFIG_JSON',
+  'sidecar:fim': 'SIDECAR_FIM_CONFIG_JSON',
 }
 
 export function sidecarKeyForRequestType(requestType: string | null): string | null {
@@ -193,16 +198,19 @@ export async function getConfigForRequest(
   now = Date.now(),
 ): Promise<ResolvedActiveAIConfig> {
   const sidecarKey = sidecarKeyForRequestType(requestType)
-  if (sidecarKey && env.ACTIVE_AI_CONFIG) {
+  if (sidecarKey) {
     const cached = configCache.get(sidecarKey)
     if (cached && cached.expiresAt > now) return cached.value
 
-    const raw = await env.ACTIVE_AI_CONFIG.get(sidecarKey)
+    const kvRaw = env.ACTIVE_AI_CONFIG ? await env.ACTIVE_AI_CONFIG.get(sidecarKey) : null
+    const envVar = SIDECAR_ENV_FALLBACK[sidecarKey]
+    const envRaw = envVar && typeof env[envVar] === 'string' ? (env[envVar] as string) : null
+    const raw = kvRaw || envRaw
     if (raw) {
       try {
         const config = parseActiveConfig(raw)
         if (config.enabled) {
-          const resolved: ResolvedActiveAIConfig = { config, source: 'kv', key: sidecarKey }
+          const resolved: ResolvedActiveAIConfig = { config, source: kvRaw ? 'kv' : 'env', key: sidecarKey }
           configCache.set(sidecarKey, { value: resolved, expiresAt: now + CONFIG_CACHE_MS })
           return resolved
         }

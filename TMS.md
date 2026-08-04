@@ -69,10 +69,14 @@
 - A instância dev lançada como alvo de verificação abre o último projecto/Welcome; o comportamento exacto do arranque em dogfood fica por confirmar na prática.
 
 ## Pending Confirmation
-- None currently known.
+- **Congelamento de deploy até à build da IDE v1.0.2 (decisão do developer, 2026-08-04).** Nada vai a prod até lá; está tudo preparado localmente. Checklist do deploy quando a v1.0.2 for buildada:
+  1. Deploy do data-plane worker (`workers/ai-pass-through`) — leva o mapa de sidecars actualizado (`utility` entrou; `intent-router`/`context-planner` saíram — NÃO serão ligados, decisão de produto) e o fallback de env `SIDECAR_*_CONFIG_JSON`.
+  2. Publicar `sidecar:utility` no KV de prod: qwen3.7-flash DashScope US com `extraBody.enable_thinking:false` **obrigatório** (bench 04-08: thinking default = 5× latência/tokens; config exacta no `.dev.vars` local, chave `SIDECAR_UTILITY_CONFIG_JSON`).
+  3. A release v1.0.2 da IDE leva o fix de língua do `PROMPT_IMPROVER_SYSTEM` (o flash respondia EN a PT sem ele — validado 3/3 pós-fix).
+  - Validação pré-deploy: `node scripts/utility-bench.mjs` (35/35 esperado) + `yarn test:ai-worker`.
 
 ## lastGeneratedAt
-2026-08-03
+2026-08-04
 
 ## sourceFilesUsed
 - `CLAUDE.md`

@@ -96,6 +96,13 @@ export interface Env {
   ACTIVE_AI_CONFIG?: KVNamespace
   ACTIVE_AI_CONFIG_KEY?: string
   ACTIVE_AI_CONFIG_JSON?: string
+  // Fallback de env por sidecar (mesmo par KV/env da active; KV ganha).
+  // Em prod os sidecars vivem no KV — isto serve o dev local (`wrangler dev`),
+  // onde o KV é simulação vazia. Ver SIDECAR_ENV_FALLBACK em activeConfig.ts.
+  SIDECAR_UTILITY_CONFIG_JSON?: string
+  SIDECAR_VISION_CONFIG_JSON?: string
+  SIDECAR_WEB_SEARCH_CONFIG_JSON?: string
+  SIDECAR_FIM_CONFIG_JSON?: string
   AUTH_MODE?: 'firebase_jwt' | 'firebase_emulator' | 'test_static'
   TEST_USER_TOKEN?: string
   FIREBASE_PROJECT_ID?: string
