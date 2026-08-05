@@ -122,22 +122,27 @@ export function resetBillingDisabledWarning(): void {
   warnedBillingDisabled = false
 }
 
-export function resolveSpeedMultiplier(env: Env): number {
-  const raw = typeof env.TM_SPEED_BILLING_MULTIPLIER === 'string' ? Number(env.TM_SPEED_BILLING_MULTIPLIER) : NaN
-  return Number.isFinite(raw) && raw >= 1 ? raw : 3
+// ── Constantes de consumo (2026-08-05, decisão de produto) ────────────────
+// Valores de CONSUMO não são mutáveis por env — "por isso é que tem UI": o
+// único knob de consumo configurável é o costMultiplier POR PERSONA,
+// publicado pelo admin no painel (→ KV). Os antigos envs
+// TM_SPEED_BILLING_MULTIPLIER e TM_CACHE_BILLING_FACTOR foram removidos —
+// um secret esquecido não pode mudar a fatura de ninguém.
+
+/** Multiplicador do TM Speed (3× — feature retirada; constante mantida pelo
+ *  caminho de código ainda existente). */
+export function resolveSpeedMultiplier(_env: Env): number {
+  return 3
 }
 
 /**
  * Fração a que os tokens de prompt CACHEADOS são faturados (2026-07-15,
- * decisão de produto): 0.5 = metade do preço. Os tokens não-cacheados
- * continuam a 100%. Num loop agentico o prefixo em cache é a maioria de
- * cada turno, por isso este desconto estica muito a quota (vibe estourava
- * rápido porque cada turno re-faturava o prefixo inteiro a 100%).
- * Configurável por env TM_CACHE_BILLING_FACTOR (0..1); default 0.5.
+ * decisão de produto): 0.5 = metade do preço. Compõe com o costMultiplier
+ * da persona por ORDEM (billable primeiro, multiplicador depois) — cache
+ * custa sempre 50% do valor definido pelo admin, por construção.
  */
-export function resolveCacheBillingFactor(env: Env): number {
-  const raw = typeof env.TM_CACHE_BILLING_FACTOR === 'string' ? Number(env.TM_CACHE_BILLING_FACTOR) : NaN
-  return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.5
+export function resolveCacheBillingFactor(_env: Env): number {
+  return 0.5
 }
 
 /**

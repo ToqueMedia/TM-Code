@@ -40,11 +40,9 @@ test('cached clampado a promptTokens (nunca desconta mais do que o prompt)', () 
   assert.equal(billableTokenTotal({ promptTokens: 500, completionTokens: 50, cachedTokens: 9999 }, 0.5), 300)
 })
 
-test('resolveCacheBillingFactor: default 0.5, respeita env válido, ignora inválido', () => {
-  assert.equal(resolveCacheBillingFactor(env()), 0.5)
-  assert.equal(resolveCacheBillingFactor(env({ TM_CACHE_BILLING_FACTOR: '0.3' })), 0.3)
-  assert.equal(resolveCacheBillingFactor(env({ TM_CACHE_BILLING_FACTOR: '0' })), 0)
-  assert.equal(resolveCacheBillingFactor(env({ TM_CACHE_BILLING_FACTOR: '1' })), 1)
-  assert.equal(resolveCacheBillingFactor(env({ TM_CACHE_BILLING_FACTOR: '2' })), 0.5)   // fora de [0,1]
-  assert.equal(resolveCacheBillingFactor(env({ TM_CACHE_BILLING_FACTOR: 'x' })), 0.5)   // não-numérico
+test('resolveCacheBillingFactor: constante 0.5 — consumo NÃO é mutável por env (decisão 05-08)', () => {
+  // O antigo env TM_CACHE_BILLING_FACTOR foi removido: o único knob de
+  // consumo é o costMultiplier por persona, publicado pela UI do admin.
+  assert.equal(resolveCacheBillingFactor({} as never), 0.5)
+  assert.equal(resolveCacheBillingFactor({ TM_CACHE_BILLING_FACTOR: '0.9' } as never), 0.5)
 })

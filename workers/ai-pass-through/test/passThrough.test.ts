@@ -1372,11 +1372,12 @@ test('billing: persona costMultiplier applies server-side ((100+50)×2)', async 
     },
     body: JSON.stringify({ stream: true }),
   })
+  // Multiplicador via KV (como em produção: UI→control-plane→KV). Configs de
+  // ENV fallback têm o costMultiplier REMOVIDO pelo worker (decisão 05-08:
+  // consumo não é mutável por env) — testado logo abaixo.
   const res = await handleRequest(
     req,
-    env({
-      PERSONA_EXPERT_CONFIG_JSON: JSON.stringify({ ...activeConfig, model: 'expert-model', costMultiplier: 2 }),
-    }),
+    kvEnv({ 'persona:expert': JSON.stringify({ ...activeConfig, model: 'expert-model', costMultiplier: 2 }) }),
     { fetcher, ctx },
   )
   assert.equal(res.headers.get('x-tm-config-key'), 'persona:expert')

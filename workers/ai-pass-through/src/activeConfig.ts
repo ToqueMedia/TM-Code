@@ -217,6 +217,9 @@ export async function getActiveConfig(env: Env, now = Date.now()): Promise<Resol
   if (!config.enabled) {
     throw new HttpError(503, 'tm_active_config_disabled', 'Active AI provider config is disabled.')
   }
+  // Consumo só via UI→KV (2026-08-05): a active vinda do env fallback
+  // (dev local) também não traz multiplicador.
+  if (!kvRaw) delete config.costMultiplier
 
   const resolved = { config, source, key }
   configCache.set(key, { value: resolved, expiresAt: now + CONFIG_CACHE_MS })
@@ -244,6 +247,10 @@ async function resolveAuxConfig(
   try {
     const config = parseActiveConfig(raw)
     if (!config.enabled) return null
+    // Valores de CONSUMO só vêm da UI→KV (decisão 2026-08-05): uma config
+    // vinda do fallback de ENV (dev local) nunca traz multiplicador — um
+    // secret não pode mudar a fatura. Env serve routing/modelo, sempre 1×.
+    if (!kvRaw) delete config.costMultiplier
     const resolved: ResolvedActiveAIConfig = { config, source: kvRaw ? 'kv' : 'env', key }
     configCache.set(key, { value: resolved, expiresAt: now + CONFIG_CACHE_MS })
     return resolved
