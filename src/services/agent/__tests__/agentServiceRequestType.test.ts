@@ -230,11 +230,18 @@ describe('AgentService X-TM-Speed header', () => {
     mockQueryEngineOptions.length = 0
     mockTmSpeedEnabled = false
     mockSelectedEffort = 'max'
+    // Repor SEMPRE os dois sinais de modelo: desde a inversão served-first
+    // (05-08) um mockAgentModelName esquecido de um teste anterior ganha ao
+    // Firestore e contamina o teste seguinte.
+    mockActiveModelId = 'glm-5.2'
+    mockAgentModelName = null
   })
 
   afterEach(() => {
     mockTmSpeedEnabled = false
     mockSelectedEffort = 'max'
+    mockActiveModelId = 'glm-5.2'
+    mockAgentModelName = null
     AgentService.getInstance().setRequestType(null)
   })
 

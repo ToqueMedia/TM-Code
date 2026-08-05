@@ -57,5 +57,14 @@ export const usePersonaStore = create<PersonaStoreState>((set) => ({
     if (!isPersona(persona)) return
     saveSelected(persona)
     set({ selected: persona })
+    // Trocar de persona invalida o "modelo servido" conhecido (X-TM-Model da
+    // última resposta pertence à persona ANTERIOR). Sem isto, o selector de
+    // effort mostrava a escala do modelo antigo até à primeira resposta da
+    // persona nova. Limpo → resolveEffortModelId cai no espelho Firestore
+    // (que segue a Standard) até o X-TM-Model real chegar. Import dinâmico
+    // para não criar ciclo estático entre stores.
+    void import('./agentStore').then(({ useAgentStore }) => {
+      useAgentStore.getState().setModelInfo(null, null)
+    }).catch(() => {})
   },
 }))

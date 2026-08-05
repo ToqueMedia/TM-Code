@@ -119,11 +119,15 @@ describe('resolveEffectiveEffort — preferência-se-válida-senão-default', ()
 })
 
 describe('resolveEffortModelId', () => {
-  it('Firestore primeiro, header a seguir', () => {
-    expect(resolveEffortModelId('grok-4.5', 'glm-5.2')).toBe('grok-4.5')
+  // INVERSÃO 2026-08-05 (Personas): o header X-TM-Model (o que REALMENTE
+  // serviu) manda; o Firestore (espelho da Standard) é o fallback. Antes era
+  // ao contrário e o selector mostrava a escala do GLM com Standard=MiMo.
+  it('servido (X-TM-Model) primeiro, Firestore como fallback', () => {
+    expect(resolveEffortModelId('grok-4.5', 'glm-5.2')).toBe('glm-5.2')
     expect(resolveEffortModelId(null, 'grok-4.5')).toBe('grok-4.5')
+    expect(resolveEffortModelId('grok-4.5', null)).toBe('grok-4.5')
     expect(resolveEffortModelId(null, null)).toBeNull()
-    expect(resolveEffortModelId('  ', 'kimi-k3')).toBe('kimi-k3')
+    expect(resolveEffortModelId('kimi-k3', '  ')).toBe('kimi-k3')
   })
 })
 

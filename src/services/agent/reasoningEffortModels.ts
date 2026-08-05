@@ -148,18 +148,26 @@ export function resolveEffectiveEffort(
 }
 
 /**
- * Modelo id usado para effort: Firestore real-time, senão último X-TM-Model.
- * O seletor e o header DEVEM usar a mesma fonte — senão o UI mostra Grok/Low
- * e o header não sai (activeModelStore null) → provider default (Grok=high).
+ * Modelo id usado para effort: último X-TM-Model (o que REALMENTE serviu),
+ * senão Firestore real-time. O seletor e o header DEVEM usar a mesma fonte.
+ *
+ * INVERSÃO DE PRIORIDADE (2026-08-05, feature Personas): o Firestore
+ * `system/aiActiveModel` espelha só a config ativa (= persona Standard) — com
+ * personas, o modelo depende da PERSONA escolhida e o único sinal por-persona
+ * é o X-TM-Model da resposta. Firestore-primeiro mostrava a escala do GLM com
+ * o Standard publicado como MiMo (bug reportado pelo developer: "vejo High,
+ * Max" num modelo sem esses níveis). O custo da inversão é o cenário antigo
+ * (swap de modelo pelo admin com header ainda do modelo anterior) mostrar a
+ * escala velha durante UM turno — auto-corrige na resposta seguinte, e o
+ * worker ignora valores fora das options do modelo real (nunca há 400).
  */
 export function resolveEffortModelId(
   activeModelId: string | null | undefined,
   headerModelId?: string | null | undefined,
 ): string | null {
-  const primary = activeModelId?.trim() || null
-  if (primary) return primary
-  const fallback = headerModelId?.trim() || null
-  return fallback
+  const served = headerModelId?.trim() || null
+  if (served) return served
+  return activeModelId?.trim() || null
 }
 
 /**
