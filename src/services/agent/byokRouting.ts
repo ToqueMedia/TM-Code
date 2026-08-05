@@ -223,6 +223,21 @@ export function buildByokThinkingConfig(
     case 'gemini_thinking_budget':
       // Gemini's OpenAI-compat endpoint maps reasoning_effort → thinkingConfig.
       return { reasoning_effort: openAICompatibleReasoningEffort(defaultReasoningEffort(snapshot)) }
+    case 'openrouter_reasoning':
+      // OpenRouter normaliza `reasoning.effort` para o formato do modelo por
+      // trás (o-series → reasoning_effort, Anthropic → budget). Antes caía no
+      // default e o effort do user era silenciosamente ignorado.
+      return { reasoning: { effort: openAICompatibleReasoningEffort(defaultReasoningEffort(snapshot)) } }
+    case 'mimo_chat_template_kwargs':
+    case 'moonshot_thinking':
+      // Deliberadamente SEM emissão no estado ON:
+      //  - MiMo: doutrina Xiaomi — thinking degrada tool_calls; o default do
+      //    provider (off) é o comportamento correcto para o agente.
+      //  - Moonshot: só K2.5/K2.6 honram o toggle; os SKUs *-thinking
+      //    raciocinam incondicionalmente e um campo extra arrisca 400.
+      // (Os shapes ficam na tabela de detecção para documentar o param de
+      // disable de cada família — hoje não há toggle OFF no BYOK.)
+      return undefined
     default:
       return undefined
   }

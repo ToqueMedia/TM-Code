@@ -543,7 +543,7 @@ export interface ByokSessionSnapshot {
    *  Plan-profile shapes (`enable_thinking` / `reasoning.enabled`) are
    *  silently ignored by Anthropic/OpenAI/Gemini upstreams, which is why
    *  the toggle was a no-op for BYOK before this field existed. */
-  thinkingShape?: 'anthropic' | 'openai_reasoning_effort' | 'qwen_enable_thinking' | 'gemini_thinking_budget' | 'openrouter_reasoning' | 'mimo_chat_template_kwargs'
+  thinkingShape?: 'anthropic' | 'openai_reasoning_effort' | 'qwen_enable_thinking' | 'gemini_thinking_budget' | 'openrouter_reasoning' | 'mimo_chat_template_kwargs' | 'moonshot_thinking'
   /** User-selected BYOK reasoning depth, frozen with the session. Providers
    *  that only support boolean thinking ignore this. */
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'

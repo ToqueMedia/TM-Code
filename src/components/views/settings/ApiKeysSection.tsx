@@ -1,7 +1,8 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { Box, Button, Flex, HStack, Input, Switch, Text, VStack } from '@chakra-ui/react'
 import { FiCheck, FiAlertCircle, FiTrash2, FiEye, FiTool, FiCpu, FiChevronDown, FiPlus, FiKey, FiPower, FiZap, FiRefreshCw, FiWifi, FiWifiOff, FiLock } from 'react-icons/fi'
-import { useByokStore, type ByokProvider, type ByokProviderConfig, type ByokModel, type ByokModelCapabilities, type ByokReasoningEffort } from '../../../stores/byokStore'
+import { useByokStore, type ByokProvider, type ByokProviderConfig, type ByokModel, type ByokModelCapabilities, type ByokReasoningEffort, type ThinkingShape } from '../../../stores/byokStore'
+import { detectThinkingShapeFromBaseURL } from '../../../services/agent/thinkingShapeDetection'
 import { useBillingStore } from '../../../stores/billingStore'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
@@ -27,6 +28,20 @@ const REASONING_EFFORT_OPTIONS: Array<{ label: string; value: ByokReasoningEffor
   { label: 'High', value: 'high' },
   { label: 'XHigh', value: 'xhigh' },
   { label: 'Max', value: 'max' },
+]
+
+// Formas do parâmetro de thinking para modelos user-defined em hosts que a
+// detecção por baseURL não reconhece (self-hosted, proxies, gateways). As
+// labels são os nomes técnicos dos params — é o vocabulário da doc de cada
+// provider, e é isso que o user vai procurar. `undefined` = não enviar nada
+// (o modelo corre no default nativo — o caminho seguro para APIs desconhecidas).
+const THINKING_SHAPE_OPTIONS: Array<{ label: string; value: ThinkingShape | undefined }> = [
+  { label: 'reasoning_effort (OpenAI-compat)', value: 'openai_reasoning_effort' },
+  { label: 'thinking (Anthropic)', value: 'anthropic' },
+  { label: 'enable_thinking (Qwen/DashScope)', value: 'qwen_enable_thinking' },
+  { label: 'reasoning.effort (OpenRouter)', value: 'openrouter_reasoning' },
+  { label: 'chat_template_kwargs (MiMo)', value: 'mimo_chat_template_kwargs' },
+  { label: 'thinking.enabled (Moonshot Kimi)', value: 'moonshot_thinking' },
 ]
 
 // Per-OS keychain label for the trust line under API key inputs. Tauri uses
@@ -191,6 +206,7 @@ function ApiKeysBody(props: {
         capabilities: userDefined.capabilities,
         contextWindow: 0,
         supportsThinking: userDefined.supportsThinking,
+        thinkingShape: userDefined.thinkingShape,
       }
     } else if (provider.custom || provider.local) {
       // Fallback synthesis: covers (a) custom providers with free-text
@@ -862,6 +878,11 @@ function ProviderCard(props: {
     userDefined?.capabilities ?? { images: false, audio: false, video: false, tools: true },
   )
   const [otherThinking, setOtherThinking] = useState(userDefined?.supportsThinking ?? false)
+  // Forma do thinking para hosts não reconhecidos pela detecção por baseURL.
+  // Em hosts conhecidos a detecção GANHA sempre (resolveThinkingHint), por isso
+  // o picker só aparece quando a declaração do user é o único sinal.
+  const [otherShape, setOtherShape] = useState<ThinkingShape | undefined>(userDefined?.thinkingShape)
+  const hostShapeDetected = detectThinkingShapeFromBaseURL(baseURL || provider.defaultBaseURL) !== null
 
   // No useEffect to sync from activeModel — ProviderCard only renders for
   // NON-active providers (caller filters via otherProviders). The "other mode"
@@ -912,12 +933,15 @@ function ProviderCard(props: {
   const handleSetActive = useCallback(() => {
     if (!selectedModel) return
     // Persist the user-defined "other model" entry so the snapshot/resolveActive
-    // path can synthesize a ByokModel from it on subsequent launches.
-    if (isOtherMode && otherModelId.trim()) {
+    // path can synthesize a ByokModel from it on subsequent launches. Custom
+    // providers (free-text model) persist pelo MESMO mecanismo — sem isto o
+    // resolveActive caía na síntese cega (caps todas false, sem thinking).
+    if ((isOtherMode && otherModelId.trim()) || (isCustom && selectedModel.trim())) {
       setUserDefinedModel(provider.id, {
-        id: otherModelId.trim(),
+        id: (isOtherMode ? otherModelId : selectedModel).trim(),
         capabilities: otherCaps,
         supportsThinking: otherThinking,
+        thinkingShape: otherShape,
       })
     }
     // Local providers don't have a key — confirming the active selection
@@ -934,7 +958,7 @@ function ProviderCard(props: {
     // exceeded". The hero now resolves regardless of `enabled` (see active
     // memo) so the user gets immediate visual feedback after Set Active and
     // can flip the master toggle separately.
-  }, [provider.id, selectedModel, setActive, isOtherMode, otherModelId, otherCaps, otherThinking, setUserDefinedModel, isLocal, isConfigured, markConfigured])
+  }, [provider.id, selectedModel, setActive, isOtherMode, otherModelId, otherCaps, otherThinking, otherShape, isCustom, setUserDefinedModel, isLocal, isConfigured, markConfigured])
 
   const handleRefreshLocalModels = useCallback(async () => {
     setRefreshing(true)
@@ -1315,10 +1339,27 @@ function ProviderCard(props: {
                     id: otherModelId.trim(),
                     capabilities: caps,
                     supportsThinking: thinking,
+                    thinkingShape: otherShape,
                   })
                 }
               }}
             />
+            {otherThinking && !hostShapeDetected && (
+              <ThinkingShapeField
+                value={otherShape}
+                onChange={(shape) => {
+                  setOtherShape(shape)
+                  if (otherModelId.trim()) {
+                    setUserDefinedModel(provider.id, {
+                      id: otherModelId.trim(),
+                      capabilities: otherCaps,
+                      supportsThinking: otherThinking,
+                      thinkingShape: shape,
+                    })
+                  }
+                }}
+              />
+            )}
           </VStack>
         )}
 
@@ -1345,6 +1386,45 @@ function ProviderCard(props: {
               data-1p-ignore
               data-lpignore="true"
             />
+            {/* Declaração de capacidades + thinking do modelo custom — persiste
+                via userDefinedModel (o mesmo mecanismo do "Other model"). Sem
+                isto o resolveActive sintetizava caps todas FALSE: sem tools,
+                sem imagens, sem thinking — um agente inutilizado em silêncio. */}
+            <Text fontSize="10px" color={tokens.colors.text.muted}>
+              {t('settings.byokOtherCapsHint')}
+            </Text>
+            <CapabilityCheckboxes
+              capabilities={otherCaps}
+              supportsThinking={otherThinking}
+              onChange={(caps, thinking) => {
+                setOtherCaps(caps)
+                setOtherThinking(thinking)
+                if (selectedModel.trim()) {
+                  setUserDefinedModel(provider.id, {
+                    id: selectedModel.trim(),
+                    capabilities: caps,
+                    supportsThinking: thinking,
+                    thinkingShape: otherShape,
+                  })
+                }
+              }}
+            />
+            {otherThinking && !hostShapeDetected && (
+              <ThinkingShapeField
+                value={otherShape}
+                onChange={(shape) => {
+                  setOtherShape(shape)
+                  if (selectedModel.trim()) {
+                    setUserDefinedModel(provider.id, {
+                      id: selectedModel.trim(),
+                      capabilities: otherCaps,
+                      supportsThinking: otherThinking,
+                      thinkingShape: shape,
+                    })
+                  }
+                }}
+              />
+            )}
           </VStack>
         )}
 
@@ -1485,6 +1565,145 @@ function CapCheckbox(props: {
         {props.label}
       </Text>
     </HStack>
+  )
+}
+
+// ── ThinkingShapeField ──
+//
+// Selector da FORMA do parâmetro de thinking, para modelos user-defined em
+// hosts desconhecidos (self-hosted / proxies). Em hosts conhecidos a detecção
+// por baseURL ganha sempre (resolveThinkingHint), por isso o caller só o
+// renderiza quando a detecção falhou E o user marcou "thinking". Sem forma
+// declarada o pedido não leva campo nenhum — e o Reasoning effort acima é
+// silenciosamente ignorado.
+
+function ThinkingShapeField(props: {
+  value: ThinkingShape | undefined
+  onChange: (v: ThinkingShape | undefined) => void
+}) {
+  const t = useTranslation()
+  const [isOpen, setIsOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const options: Array<{ label: string; value: ThinkingShape | undefined }> = [
+    { label: t('settings.byokThinkingShapeNone'), value: undefined },
+    ...THINKING_SHAPE_OPTIONS,
+  ]
+  const selected = options.find(o => o.value === props.value) ?? options[0]
+
+  useEffect(() => {
+    if (!isOpen) return
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setIsOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [isOpen])
+
+  return (
+    <VStack align="stretch" gap={1.5} pt={1}>
+      <Text fontSize="11px" color={tokens.colors.text.muted} fontWeight="500">
+        {t('settings.byokThinkingShape')}
+      </Text>
+      <Box ref={ref} position="relative">
+        <Flex
+          as="button"
+          align="center"
+          justify="space-between"
+          w="100%"
+          px={3}
+          py="8px"
+          borderRadius={tokens.radius.md}
+          bg={tokens.colors.bg.sidebar}
+          border="1px solid"
+          textAlign="left"
+          borderColor={isOpen ? 'rgba(254, 16, 99, 0.5)' : tokens.colors.border.default}
+          cursor="pointer"
+          transition={tokens.transition.fast}
+          _hover={{ borderColor: tokens.colors.border.subtle }}
+          _focusVisible={{ borderColor: 'rgba(254, 16, 99, 0.7)', outline: 'none' }}
+          onClick={() => setIsOpen(v => !v)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setIsOpen(false)
+            else if ((e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') && !isOpen) {
+              e.preventDefault()
+              setIsOpen(true)
+            }
+          }}
+          aria-haspopup="listbox"
+          aria-expanded={isOpen}
+        >
+          <Text fontSize="12px" color={tokens.colors.text.primary} fontWeight="500" fontFamily={tokens.fontFamily.mono}>
+            {selected.label}
+          </Text>
+          <Box
+            color={tokens.colors.text.disabled}
+            transition="transform 0.15s"
+            transform={isOpen ? 'rotate(180deg)' : 'rotate(0deg)'}
+          >
+            <FiChevronDown size={14} />
+          </Box>
+        </Flex>
+        {isOpen && (
+          <Box
+            role="listbox"
+            position="absolute"
+            top="calc(100% + 4px)"
+            left={0}
+            right={0}
+            bg={tokens.colors.bg.overlay}
+            border="1px solid"
+            borderColor={tokens.colors.border.panel}
+            borderRadius={tokens.radius.md}
+            boxShadow="0 8px 24px rgba(0,0,0,0.4)"
+            zIndex={tokens.zIndex.dropdown}
+            py={1}
+          >
+            {options.map(opt => {
+              const isSelected = opt.value === props.value
+              return (
+                <Flex
+                  key={opt.value ?? 'none'}
+                  as="button"
+                  role="option"
+                  aria-selected={isSelected}
+                  align="center"
+                  justify="space-between"
+                  w="100%"
+                  px={3}
+                  py="8px"
+                  textAlign="left"
+                  bg={isSelected ? 'rgba(254, 16, 99, 0.08)' : 'transparent'}
+                  cursor="pointer"
+                  transition={tokens.transition.fast}
+                  _hover={{ bg: isSelected ? 'rgba(254, 16, 99, 0.12)' : tokens.colors.bg.hoverSubtle }}
+                  onClick={() => {
+                    props.onChange(opt.value)
+                    setIsOpen(false)
+                  }}
+                >
+                  <Text
+                    fontSize="12px"
+                    fontFamily={tokens.fontFamily.mono}
+                    color={isSelected ? tokens.colors.accent.primary : tokens.colors.text.primary}
+                    fontWeight={isSelected ? '600' : '500'}
+                  >
+                    {opt.label}
+                  </Text>
+                  {isSelected && (
+                    <Box color={tokens.colors.accent.primary} flexShrink={0}>
+                      <FiCheck size={12} />
+                    </Box>
+                  )}
+                </Flex>
+              )
+            })}
+          </Box>
+        )}
+      </Box>
+      <Text fontSize="10px" color={tokens.colors.text.disabled} lineHeight="1.5">
+        {t('settings.byokThinkingShapeHint')}
+      </Text>
+    </VStack>
   )
 }
 

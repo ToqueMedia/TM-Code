@@ -83,13 +83,11 @@ export interface ByokModelCapabilities {
   tools: boolean
 }
 
-export type ThinkingShape =
-  | 'anthropic'
-  | 'openai_reasoning_effort'
-  | 'qwen_enable_thinking'
-  | 'gemini_thinking_budget'
-  | 'openrouter_reasoning'
-  | 'mimo_chat_template_kwargs'
+// Tipo canónico em thinkingShapeDetection.ts (módulo puro, sem imports de
+// runtime) — este alias existia como cópia local e divergiu (faltava
+// 'moonshot_thinking'); agora há UMA fonte para store, snapshot e detecção.
+export type { ThinkingShape } from '../services/agent/thinkingShapeDetection'
+import type { ThinkingShape } from '../services/agent/thinkingShapeDetection'
 
 export type ByokReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
@@ -165,6 +163,10 @@ export interface ByokProviderConfig {
     id: string
     capabilities: ByokModelCapabilities
     supportsThinking: boolean
+    /** Forma do parâmetro de thinking declarada pelo USER (só relevante em
+     *  hosts que a detecção por baseURL não reconhece — nesses, sem shape
+     *  declarada, o pedido não leva thinking nem effort nenhum). */
+    thinkingShape?: ThinkingShape
   }
   /** For local providers: live model list pulled from the local server's
    *  discovery endpoint (Ollama /api/tags, LM Studio /v1/models). NOT
@@ -445,7 +447,12 @@ interface ByokState {
    *  localStorage so the option stays around between launches. */
   setUserDefinedModel: (
     providerId: string,
-    model: { id: string; capabilities: ByokModelCapabilities; supportsThinking: boolean },
+    model: {
+      id: string
+      capabilities: ByokModelCapabilities
+      supportsThinking: boolean
+      thinkingShape?: ThinkingShape
+    },
   ) => void
   clearUserDefinedModel: (providerId: string) => void
   /** Look up effective config for the active selection, including the
@@ -801,6 +808,7 @@ export const useByokStore = create<ByokState>()(
             capabilities: userDefined.capabilities,
             contextWindow: 0,
             supportsThinking: userDefined.supportsThinking,
+            thinkingShape: userDefined.thinkingShape,
           }
           return { provider, model: synthesized, baseURL }
         }

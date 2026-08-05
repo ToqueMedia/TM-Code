@@ -75,4 +75,57 @@ describe('buildByokThinkingConfig', () => {
       reasoningEffort: 'max',
     })).toEqual({ reasoning_effort: 'high' })
   })
+
+  it('emits reasoning.effort for OpenRouter (effort era silenciosamente ignorado)', () => {
+    expect(buildByokThinkingConfig({
+      providerId: 'openrouter',
+      modelId: 'anthropic/claude-sonnet-4-6',
+      baseURL: 'https://openrouter.ai/api/v1',
+      custom: false,
+      supportsThinking: true,
+      reasoningEffort: 'low',
+    })).toEqual({ reasoning: { effort: 'low' } })
+  })
+
+  it('honra a shape declarada pelo user num host DESCONHECIDO (custom/self-hosted)', () => {
+    // Sem detecção por baseURL, a declaração do catálogo do user é o único
+    // sinal — com shape OpenAI-style o effort do Settings viaja no pedido.
+    expect(buildByokThinkingConfig({
+      providerId: 'my-gateway',
+      modelId: 'my-model',
+      baseURL: 'https://llm.internal.example.com/v1',
+      custom: true,
+      supportsThinking: true,
+      thinkingShape: 'openai_reasoning_effort',
+      reasoningEffort: 'high',
+    })).toEqual({ reasoning_effort: 'high' })
+  })
+
+  it('host desconhecido SEM shape declarada não envia campo nenhum', () => {
+    expect(buildByokThinkingConfig({
+      providerId: 'my-gateway',
+      modelId: 'my-model',
+      baseURL: 'https://llm.internal.example.com/v1',
+      custom: true,
+      supportsThinking: true,
+      reasoningEffort: 'high',
+    })).toBeUndefined()
+  })
+
+  it('MiMo/Moonshot em thinking-ON não emitem nada (defaults nativos corretos)', () => {
+    expect(buildByokThinkingConfig({
+      providerId: 'xiaomi',
+      modelId: 'mimo-v2.5-pro',
+      baseURL: 'https://api.xiaomimimo.com/v1',
+      custom: false,
+      supportsThinking: true,
+    })).toBeUndefined()
+    expect(buildByokThinkingConfig({
+      providerId: 'moonshot',
+      modelId: 'kimi-k2.6',
+      baseURL: 'https://api.moonshot.ai/v1',
+      custom: false,
+      supportsThinking: true,
+    })).toBeUndefined()
+  })
 })
