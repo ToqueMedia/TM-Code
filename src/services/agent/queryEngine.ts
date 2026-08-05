@@ -34,6 +34,9 @@ export interface QueryEngineOptions {
   client: OpenAI
   /** Recreate the SDK client with fresh credentials after an auth failure. */
   refreshClient?: () => Promise<OpenAI | null>
+  /** Rota BYOK directa — ver QueryParams.byokDirect: exclui 401s do provider
+   *  do classificador de auth de plataforma (a culpa é da chave BYOK). */
+  byokDirect?: boolean
   /** Placeholder model. The AI pass-through Worker injects the active model. */
   model?: string
   /** System prompt. */
@@ -198,6 +201,7 @@ export class QueryEngine {
       extraHeaders: this.options.extraHeaders,
       client: this.options.client,
       refreshClient: this.options.refreshClient,
+      byokDirect: this.options.byokDirect,
       model: this.options.model ?? DEFAULT_MODEL,
       tools: this.options.tools,
       executeTool: this.options.executeTool,

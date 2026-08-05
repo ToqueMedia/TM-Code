@@ -519,9 +519,15 @@ export function anthropicSSEToOpenAISSE(): TransformStream<Uint8Array, Uint8Arra
     }
 
     if (type === 'error') {
-      // Surface as an OpenAI-style error chunk then close. query.ts treats a
-      // missing finish as an abrupt end; closing the stream is enough.
-      emitDone(controller)
+      // A Messages API emite `event: error` A MEIO do stream (overloaded_error,
+      // api_error) depois de já ter enviado texto. Fechar "normalmente" aqui
+      // apresentava a resposta truncada como completa e o loop continuava em
+      // cima dela (auditoria BYOK 05-08). Errar o stream propaga ao SDK →
+      // query.ts trata como corte (retry/resume), que é a semântica certa.
+      const errObj = evt.error as Record<string, unknown> | undefined
+      const errType = typeof errObj?.type === 'string' ? errObj.type : 'api_error'
+      const errMessage = typeof errObj?.message === 'string' ? errObj.message : 'stream error'
+      controller.error(new Error(`anthropic stream error (${errType}): ${errMessage}`))
     }
   }
 

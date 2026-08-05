@@ -111,6 +111,51 @@ fn format_reqwest_request_error(err: &reqwest::Error) -> String {
     msg
 }
 
+/// Decodifica bytes de stream SSE preservando um sufixo UTF-8 incompleto
+/// entre chunks TCP. O decode per-chunk com `from_utf8_lossy` transformava um
+/// codepoint multi-byte partido na fronteira em U+FFFD IRRECUPERÁVEL (o JS
+/// re-encoda a string) — impacto desproporcional em providers com output CJK
+/// (Qwen/DashScope, Kimi, MiMo) e em emoji/acentuação (auditoria BYOK 05-08).
+/// `pending` guarda o sufixo por decodificar; no fim do stream, o que restar
+/// deve ser drenado com `flush_utf8`.
+fn drain_utf8(pending: &mut Vec<u8>, bytes: &[u8]) -> String {
+    pending.extend_from_slice(bytes);
+    match std::str::from_utf8(pending) {
+        Ok(s) => {
+            let out = s.to_string();
+            pending.clear();
+            out
+        }
+        Err(e) if e.error_len().is_none() => {
+            // Sufixo incompleto (fronteira de chunk): decodifica o prefixo
+            // válido e retém o resto para o próximo chunk.
+            let valid = e.valid_up_to();
+            let out = String::from_utf8_lossy(&pending[..valid]).into_owned();
+            let tail = pending.split_off(valid);
+            *pending = tail;
+            out
+        }
+        Err(_) => {
+            // Byte genuinamente inválido a meio — lossy e segue (um stray byte
+            // não deve derrubar a ligação nem prender o buffer).
+            let out = String::from_utf8_lossy(pending).into_owned();
+            pending.clear();
+            out
+        }
+    }
+}
+
+/// Drena o que restar em `pending` no fim do stream (stream cortado a meio de
+/// um codepoint) — lossy, porque já não vem mais nada.
+fn flush_utf8(pending: &mut Vec<u8>) -> String {
+    if pending.is_empty() {
+        return String::new();
+    }
+    let out = String::from_utf8_lossy(pending).into_owned();
+    pending.clear();
+    out
+}
+
 fn is_unsafe_transport_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -349,7 +394,12 @@ pub async fn byok_local_chat_stream(
     }
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(300))
+        // Teto TOTAL do pedido (inclui ler o corpo em streaming): 300s cortava
+        // turnos legítimos de raciocínio profundo / modelos locais em CPU a
+        // meio, em ciclo de corte-e-retoma (auditoria BYOK 05-08). 30 min dá
+        // folga real; o connect_timeout curto continua a apanhar hosts mortos.
+        .timeout(Duration::from_secs(1800))
+        .connect_timeout(Duration::from_secs(20))
         .http1_only()
         .danger_accept_invalid_certs(true)
         .build()
@@ -398,17 +448,17 @@ pub async fn byok_local_chat_stream(
         }
 
         let mut stream = resp.bytes_stream();
+        let mut utf8_pending: Vec<u8> = Vec::new();
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
-                    // Lossy is fine — SSE upstreams send UTF-8 and a stray byte
-                    // shouldn't tear the connection down. Per-chunk decode means
-                    // a multi-byte codepoint split across chunks gets U+FFFD'd
-                    // on its first half; in practice OpenAI/Ollama servers don't
-                    // split mid-codepoint, but we accept the worst case rather
-                    // than buffer here (the JS-side parser is a string parser
-                    // and would also need partial-utf8 handling otherwise).
-                    let text = String::from_utf8_lossy(&bytes).to_string();
+                    // Fronteiras de chunk podem partir um codepoint multi-byte
+                    // — drain_utf8 retém o sufixo incompleto para o chunk
+                    // seguinte em vez de o U+FFFD'ar (ver o helper).
+                    let text = drain_utf8(&mut utf8_pending, &bytes);
+                    if text.is_empty() {
+                        continue;
+                    }
                     let _ = app.emit(
                         &event_name,
                         serde_json::json!({
@@ -430,6 +480,13 @@ pub async fn byok_local_chat_stream(
             }
         }
 
+        let tail = flush_utf8(&mut utf8_pending);
+        if !tail.is_empty() {
+            let _ = app.emit(
+                &event_name,
+                serde_json::json!({ "type": "chunk", "data": tail }),
+            );
+        }
         let _ = app.emit(
             &event_name,
             serde_json::json!({
@@ -509,7 +566,9 @@ pub async fn byok_chat_stream(
     );
 
     let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(300))
+        // 300s → 1800s: ver o comentário no builder local (mesmo racional).
+        .timeout(Duration::from_secs(1800))
+        .connect_timeout(Duration::from_secs(20))
         .http1_only();
     if is_local {
         // Self-signed local gateways (rare) — accept invalid certs only for
@@ -587,13 +646,19 @@ pub async fn byok_chat_stream(
         }
 
         let mut stream = resp.bytes_stream();
+        let mut utf8_pending: Vec<u8> = Vec::new();
         loop {
             tokio::select! {
                 // Stop button (JS aborted) — drop the stream, emit nothing more.
                 _ = &mut abort_rx => break,
                 maybe = stream.next() => match maybe {
                     Some(Ok(bytes)) => {
-                        let text = String::from_utf8_lossy(&bytes).to_string();
+                        // Codepoint partido na fronteira do chunk → drain_utf8
+                        // retém o sufixo em vez de U+FFFD (ver o helper).
+                        let text = drain_utf8(&mut utf8_pending, &bytes);
+                        if text.is_empty() {
+                            continue;
+                        }
                         let _ = app.emit(
                             &event_name,
                             serde_json::json!({ "type": "chunk", "data": text }),
@@ -607,6 +672,10 @@ pub async fn byok_chat_stream(
                         break;
                     }
                     None => {
+                        let tail = flush_utf8(&mut utf8_pending);
+                        if !tail.is_empty() {
+                            let _ = app.emit(&event_name, serde_json::json!({ "type": "chunk", "data": tail }));
+                        }
                         let _ = app.emit(&event_name, serde_json::json!({ "type": "done" }));
                         break;
                     }

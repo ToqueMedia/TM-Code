@@ -53,7 +53,7 @@ import type OpenAI from "openai";
 import { createAgentClient } from "./sdkClient";
 import { buildRunClient } from "./runClient";
 import { useByokStore } from "../../stores/byokStore";
-import { buildByokClientFromSnapshot, buildByokThinkingConfig } from "./byokRouting";
+import { buildByokClientFromSnapshot, buildByokThinkingConfig, resolveByokSnapshotForSession } from "./byokRouting";
 import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
 import { REQUEST_CONTEXT_NAME, requestContextDefinition, TOOL_SEARCH_NAME, toolSearchDefinition, searchDeferredTools } from "./toolPolicy";
@@ -782,6 +782,7 @@ class AgentService {
       ...windowBudgetHooks(),
       client,
       refreshClient,
+      byokDirect: this.byokActive,
       model: this.resolveModel(),
       systemPrompt: this.systemPrompt,
       tools: openaiTools,
@@ -2007,7 +2008,7 @@ class AgentService {
       // Arquivo em paralelo com a sumarização — a escrita passa pelo IPC e é a
       // segunda operação mais lenta deste caminho.
       const archivePromise = this.archiveForManualCompact(anthropicMessages);
-      const compressed = await this.runCompactViaSDK(anthropicMessages);
+      const compressed = await this.runCompactViaSDK(anthropicMessages, pinnedSessionId);
 
       const { runPostCompactCleanup } = await import("./compactCleanup");
       await runPostCompactCleanup();
@@ -2152,7 +2153,7 @@ class AgentService {
         summary = mechanicalFallback(oldMessages);
       } else {
         try {
-          summary = await this.runCompactSummaryViaSDK(oldMessages);
+          summary = await this.runCompactSummaryViaSDK(oldMessages, pinnedSessionId);
           this.sessionState.resetSummarizationFailures();
         } catch {
           this.sessionState.incrementSummarizationFailures();
@@ -2241,18 +2242,29 @@ class AgentService {
    */
   private async runCompactViaSDK(
     messages: InternalMessage[],
+    sessionId?: string,
   ): Promise<InternalMessage[]> {
-    const authToken = await FirebaseAuthService.getInstance().getIdToken();
-    if (!authToken) return messages; // Can't compact without auth — return unchanged
-
     // Compaction must use the SAME carrier as the conversation — under BYOK
     // it runs on the user's key/model (free plan: their cost), never the worker.
-    const client =
-      this.byokActive && this.byokSnapshot
-        ? await this.buildByokClient(this.byokSnapshot)
-        : createAgentClient(authToken, { maxRetries: 0, timeout: 60_000 });
+    // Resolvido POR SESSÃO e POR CHAMADA (auditoria BYOK 05-08): os campos de
+    // instância (this.byokActive/byokSnapshot) só são escritos dentro de
+    // runQueryEngineLoop — um /compact antes de qualquer envio (campos frios)
+    // mandava um transcript BYOK para o worker gerido (medido/faturado), e um
+    // /compact depois de trocar de sessão usava a chave/provider da ANTERIOR.
+    const { snapshot: byokSnapshot, byokActive } =
+      resolveByokSnapshotForSession(sessionId);
+    let client: OpenAI | null;
+    if (byokActive && byokSnapshot) {
+      client = await this.buildByokClient(byokSnapshot);
+    } else {
+      // Token TM só é necessário no caminho gerido — exigi-lo no BYOK fazia a
+      // compactação virar no-op silencioso com sessão TM expirada/offline.
+      const authToken = await FirebaseAuthService.getInstance().getIdToken();
+      if (!authToken) return messages; // Can't compact without auth — return unchanged
+      client = createAgentClient(authToken, { maxRetries: 0, timeout: 60_000 });
+    }
     if (!client) return messages; // BYOK key missing — skip compaction
-    const model = this.resolveModel();
+    const model = byokActive && byokSnapshot ? byokSnapshot.modelId : "tm-active-model";
 
     // Build compact prompt
     const { getCompactPrompt } = await import("./compact/prompt");
@@ -2278,10 +2290,16 @@ class AgentService {
       // Compact na PERSONA do run (ronda-2 #12): alinha modelo, janela e
       // billing — na `active` (ex.: 200K) uma conversa dimensionada p/ 1M
       // dava 400 upstream e "Conversa comprimida (0K → 0K)".
-      const extraHeaders: Record<string, string> = {
-        ...(this.requestType ? { "X-Request-Type": this.requestType } : {}),
-        "X-TM-Persona": usePersonaStore.getState().selected,
-      };
+      // Headers TM SÓ no caminho gerido — na rota BYOK directa iam no fio para
+      // o provider do user (gateways estritos rejeitam headers desconhecidos →
+      // compact falhava em silêncio; e vazava metadata TM a um terceiro).
+      const extraHeaders: Record<string, string> | undefined =
+        byokActive && byokSnapshot
+          ? undefined
+          : {
+              ...(this.requestType ? { "X-Request-Type": this.requestType } : {}),
+              "X-TM-Persona": usePersonaStore.getState().selected,
+            };
       const response = await client.chat.completions.create(
         {
           model,
@@ -2325,17 +2343,23 @@ class AgentService {
    */
   private async runCompactSummaryViaSDK(
     messages: InternalMessage[],
+    sessionId?: string,
   ): Promise<string> {
-    const authToken = await FirebaseAuthService.getInstance().getIdToken();
-    if (!authToken) return mechanicalFallback(messages);
-
     // Same carrier as the conversation — BYOK summary runs on the user's key.
-    const client =
-      this.byokActive && this.byokSnapshot
-        ? await this.buildByokClient(this.byokSnapshot)
-        : createAgentClient(authToken, { maxRetries: 0, timeout: 60_000 });
+    // Resolução por sessão/chamada + token só no gerido: ver o comentário em
+    // runCompactViaSDK (auditoria BYOK 05-08, mesmo par de fugas).
+    const { snapshot: byokSnapshot, byokActive } =
+      resolveByokSnapshotForSession(sessionId);
+    let client: OpenAI | null;
+    if (byokActive && byokSnapshot) {
+      client = await this.buildByokClient(byokSnapshot);
+    } else {
+      const authToken = await FirebaseAuthService.getInstance().getIdToken();
+      if (!authToken) return mechanicalFallback(messages);
+      client = createAgentClient(authToken, { maxRetries: 0, timeout: 60_000 });
+    }
     if (!client) return mechanicalFallback(messages); // BYOK key missing
-    const model = this.resolveModel();
+    const model = byokActive && byokSnapshot ? byokSnapshot.modelId : "tm-active-model";
     const { getCompactPrompt } = await import("./compact/prompt");
 
     // Narrate full content (tool calls + bounded tool results) — see the
@@ -2351,8 +2375,11 @@ class AgentService {
       }))
       .filter((m) => m.content.length > 0);
 
+    // Headers TM só no caminho gerido (ver runCompactViaSDK).
     const extraHeaders: Record<string, string> | undefined =
-      this.requestType ? { "X-Request-Type": this.requestType } : undefined;
+      !byokActive && this.requestType
+        ? { "X-Request-Type": this.requestType }
+        : undefined;
 
     const response = await client.chat.completions.create(
       {

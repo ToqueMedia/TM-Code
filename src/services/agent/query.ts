@@ -328,6 +328,12 @@ export interface QueryParams {
   client: OpenAI;
   /** Recreate the SDK client with fresh credentials after an auth failure. */
   refreshClient?: () => Promise<OpenAI | null>;
+  /** Rota BYOK directa (IDE → provider do user, sem worker TM). Um 401 aqui é
+   *  a CHAVE BYOK (revogada/errada), nunca a sessão TM — sem este flag o
+   *  classificador de auth de plataforma apanhava-o, "refrescava" o cliente
+   *  com a mesma chave má e mandava o user re-autenticar na conta TM Code
+   *  (auditoria BYOK 05-08). */
+  byokDirect?: boolean;
   /** Model ID to use. */
   model: string;
   /** Tool definitions in OpenAI format. */
@@ -2112,6 +2118,7 @@ export async function* query(
 
       if (
         !outputStarted &&
+        !params.byokDirect &&
         isPlatformAuthError(error)
       ) {
         if (refreshClient && authRefreshAttempts < PLATFORM_AUTH_REFRESH_ATTEMPTS) {

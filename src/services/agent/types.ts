@@ -125,17 +125,6 @@ export interface LightweightAgentOptions {
   abortController?: AbortController
 }
 
-// ── BYOK thinking shapes ──
-
-export type ByokThinkingShape =
-  | 'anthropic'
-  | 'openai_reasoning_effort'
-  | 'qwen_enable_thinking'
-  | 'gemini_thinking_budget'
-  | 'openrouter_reasoning'
-  | 'mimo_chat_template_kwargs'
-  | 'moonshot_thinking'
-
 // ── File access tracking ──
 
 export interface FileAccessEntry {

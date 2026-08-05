@@ -201,6 +201,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
     ...windowBudgetHooks(),
     client,
     refreshClient,
+    byokDirect: byokActive,
     model,
     systemPrompt,
     tools: openaiTools,

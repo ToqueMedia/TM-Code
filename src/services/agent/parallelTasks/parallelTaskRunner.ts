@@ -571,6 +571,7 @@ export async function runParallelTask(runId: string): Promise<void> {
     ...windowBudgetHooks(),
     client,
     refreshClient,
+    byokDirect: byokActive,
     model,
     systemPrompt,
     // Loop fusion residual: re-read each turn so mid-run `/plan` can swap the

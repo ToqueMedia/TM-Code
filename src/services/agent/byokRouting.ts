@@ -28,6 +28,11 @@ const ANTHROPIC_ADAPTIVE_THINKING_MODELS = [
   /^claude-fable-5(?:-|$)/,
   /^claude-mythos-5(?:-|$)/,
   /^claude-mythos-preview(?:-|$)/,
+  // Família 5 completa (auditoria BYOK 05-08): claude-opus-5/claude-sonnet-5
+  // faltavam — caíam no fallback budget_tokens, que esses modelos REJEITAM
+  // com 400 em todos os pedidos (o user via o erro cru do provider).
+  /^claude-opus-5(?:-|$)/,
+  /^claude-sonnet-5(?:-|$)/,
   /^claude-opus-4-(?:6|7|8)(?:-|$)/,
   /^claude-sonnet-4-6(?:-|$)/,
 ]
@@ -128,7 +133,11 @@ export async function byokAuxCompletion(
     messages: params.messages,
     stream: false,
   }
-  if (params.temperature != null) body.temperature = params.temperature
+  // Anthropic: `temperature` foi REMOVIDA na família 5 / Opus 4.7+ — enviá-la
+  // é 400 em todos os pedidos, e com o catch de baixo isso significava
+  // memórias/commit-messages mortos EM SILÊNCIO (auditoria BYOK 05-08). Os
+  // auxiliares toleram o default de temperatura; omitir é o custo mais baixo.
+  if (params.temperature != null && !isAnthropic) body.temperature = params.temperature
   if (params.jsonObject && !isAnthropic) body.response_format = { type: 'json_object' }
   try {
     const resp = await client.chat.completions.create(
@@ -136,7 +145,14 @@ export async function byokAuxCompletion(
       params.signal ? { signal: params.signal } : undefined,
     )
     return extractAssistantTextFromCompletion(resp) || null
-  } catch {
+  } catch (err) {
+    // O fallback (caminho gerido/vazio) continua a ser a resposta certa, mas
+    // a falha tem de deixar rasto — sem isto um 400 sistemático do provider
+    // era indistinguível de "não havia nada a extrair".
+    logger.warn(
+      'byok',
+      `aux completion failed (${snapshot.providerId}/${snapshot.modelId}): ${String(err).slice(0, 200)}`,
+    )
     return null
   }
 }
