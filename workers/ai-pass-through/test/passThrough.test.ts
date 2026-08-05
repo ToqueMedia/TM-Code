@@ -1859,7 +1859,8 @@ test('sidecar: env fallback serves utility when the KV key is absent (KV wins wh
 
 test('persona: X-TM-Persona routes the main path to the published persona config', async () => {
   clearActiveConfigCache()
-  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  // Plano pro: o gate de plano (free→standard) tem teste próprio abaixo.
+  const fetcher = fakeFetcher(Response.json({ ok: true }), () => firestoreUserDoc({ plan: 'pro' }))
   const req = new Request('https://worker.test/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -1881,10 +1882,38 @@ test('persona: X-TM-Persona routes the main path to the published persona config
   assert.equal(fetcher.calls[0].headers.get('x-tm-persona'), null)
 })
 
+test('persona: plano FREE (explorer) só tem Standard — expert/master degradam server-side', async () => {
+  // Decisão de produto 05-08: o selector do cliente também bloqueia, mas o
+  // header é escolha livre do cliente — a defesa real é esta.
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({ ok: true }), () => firestoreUserDoc({ plan: 'explorer' }))
+  const req = new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer valid-user-token',
+      'Content-Type': 'application/json',
+      'X-TM-Persona': 'master',
+    },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  const res = await handleRequest(
+    req,
+    kvEnv({
+      'persona:master': JSON.stringify({ ...utilitySidecarConfig, model: 'master-model', costMultiplier: 5 }),
+      'persona:standard': JSON.stringify({ ...utilitySidecarConfig, model: 'standard-model', costMultiplier: 1 }),
+    }),
+    { fetcher },
+  )
+  assert.equal(res.status, 200)
+  // Servido pela STANDARD, não pela master — e nunca ao multiplicador da master.
+  assert.equal(res.headers.get('x-tm-config-key'), 'persona:standard')
+  assert.equal(fetcher.calls[0].body.model, 'standard-model')
+})
+
 test('persona: unpublished/unknown persona degrades silently to the active config', async () => {
   for (const persona of ['master', 'nonsense']) {
     clearActiveConfigCache()
-    const fetcher = fakeFetcher(Response.json({ ok: true }))
+    const fetcher = fakeFetcher(Response.json({ ok: true }), () => firestoreUserDoc({ plan: 'pro' }))
     const req = new Request('https://worker.test/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -1902,7 +1931,7 @@ test('persona: unpublished/unknown persona degrades silently to the active confi
 
 test('persona: sidecar request types win over the persona header', async () => {
   clearActiveConfigCache()
-  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const fetcher = fakeFetcher(Response.json({ ok: true }), () => firestoreUserDoc({ plan: 'pro' }))
   const req = new Request('https://worker.test/v1/chat/completions', {
     method: 'POST',
     headers: {

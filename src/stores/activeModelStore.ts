@@ -15,6 +15,9 @@ import { usePersonaStore, type Persona } from './personaStore'
 export interface PersonaModelEntry {
   modelId: string
   contextWindow?: number
+  /** Multiplicador de consumo DEFINIDO PELO ADMIN (doc aiPersonas) — o
+   *  selector mostra este valor; nada hardcoded no cliente. */
+  costMultiplier?: number
 }
 
 interface ActiveModelState {

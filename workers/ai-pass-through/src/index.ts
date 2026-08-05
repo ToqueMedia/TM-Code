@@ -312,6 +312,19 @@ async function handleChatCompletions(
   // (mesma filosofia de degradação do billing); o IDE faz o enforcement de
   // UX em tempo-real, esta é a defesa em profundidade no servidor.
   budgetState = await getUserBudgetState(env, user.userId, idToken, fetcher)
+  // ── Gate de plano das PERSONAS (decisão de produto 05-08) ──────────────
+  // "Apenas o Standard fica disponível para o plano free": persona ≠ standard
+  // num plano explorer degrada para a Standard AQUI, server-side — o selector
+  // do cliente também bloqueia, mas o header é escolha livre do cliente e a
+  // única defesa real é esta. Fail-open coerente com o billing: sem
+  // budgetState (lookup falhado) a persona passa. Sidecars não são afetados
+  // (persona só se aplica sem X-Request-Type mapeado).
+  if (persona && persona.trim().toLowerCase() !== 'standard'
+    && budgetState?.plan === 'explorer' && !requestedSidecar) {
+    const downgraded = await getConfigForRequest(env, requestType, 'standard')
+    active = downgraded
+    config = downgraded.config
+  }
   if (budgetState && (budgetState.blocked || budgetState.deleted)) {
     return jsonError(
       403,

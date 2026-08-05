@@ -99,6 +99,9 @@ interface BillingState {
 
   // Cost budget
   consumedPct: number        // 0–1 normal, > 1 overage
+  /** Multiplicador aplicado ao ÚLTIMO pedido (persona; valor do ADMIN via
+   *  X-TM-Cost-Multiplier — nada hardcoded no cliente). */
+  lastCostMultiplier: number
   tokensConsumed: number     // raw tokens in current cycle
   tokenBudget: number        // plan budget (depends on plan)
   cycleEnd: string           // "YYYY-MM-DD"
@@ -146,6 +149,7 @@ const DEFAULT_STATE: BillingState = {
   isActive: true,
   isLoaded: false,
   consumedPct: 0,
+  lastCostMultiplier: 1,
   tokensConsumed: 0,
   tokenBudget: 0,
   cycleEnd: '',
@@ -355,6 +359,16 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
     if (tokensRaw) {
       const tokens = parseInt(tokensRaw, 10)
       if (!isNaN(tokens)) updates.tokensConsumed = tokens
+    }
+
+    // Multiplicador de custo APLICADO a este pedido (X-TM-Cost-Multiplier) —
+    // é o valor que o ADMIN definiu na persona, emitido pelo worker. A UI de
+    // budget mostra-o para explicar "40k tokens → 120k na barra"; NUNCA um
+    // número hardcoded no cliente.
+    const multRaw = headers.get('X-TM-Cost-Multiplier')
+    if (multRaw) {
+      const mult = parseFloat(multRaw)
+      if (!isNaN(mult) && mult > 0) updates.lastCostMultiplier = mult
     }
 
     const statusRaw = headers.get('X-Budget-Status')

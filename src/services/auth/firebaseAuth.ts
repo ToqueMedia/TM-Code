@@ -585,14 +585,16 @@ class FirebaseAuthService {
       (snap) => {
         if (expectedGen !== this.authGeneration) return
         const data = snap.exists() ? snap.data() : null
-        const map: Record<string, { modelId: string; contextWindow?: number }> = {}
+        const map: Record<string, { modelId: string; contextWindow?: number; costMultiplier?: number }> = {}
         for (const persona of ['standard', 'expert', 'master'] as const) {
-          const entry = data?.[persona] as { modelId?: string; enabled?: boolean; contextWindow?: number } | undefined
+          const entry = data?.[persona] as { modelId?: string; enabled?: boolean; contextWindow?: number; costMultiplier?: number } | undefined
           if (entry?.modelId && entry.enabled !== false) {
             const w = Number(entry.contextWindow)
+            const cm = Number(entry.costMultiplier)
             map[persona] = {
               modelId: entry.modelId,
               ...(Number.isFinite(w) && w > 0 ? { contextWindow: w } : {}),
+              ...(Number.isFinite(cm) && cm > 0 ? { costMultiplier: cm } : {}),
             }
           }
         }

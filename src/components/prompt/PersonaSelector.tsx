@@ -4,6 +4,8 @@ import { Box, Flex, Text, VStack } from '@chakra-ui/react'
 import { FiCpu, FiCheck } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { usePersonaStore, PERSONAS, type Persona } from '../../stores/personaStore'
+import { useBillingStore } from '../../stores/billingStore'
+import { useActiveModelStore } from '../../stores/activeModelStore'
 import { t } from '@/i18n'
 
 /**
@@ -37,6 +39,12 @@ function personaDescription(p: Persona): string {
 export function PersonaSelector({ disabled = false }: { disabled?: boolean }) {
   const selected = usePersonaStore((s) => s.selected)
   const setSelected = usePersonaStore((s) => s.setSelected)
+  // Gate de plano (decisão 05-08): só a Standard para o plano free (explorer).
+  // O worker também degrada server-side — isto é a metade honesta da UI.
+  const isFreePlan = useBillingStore((s) => s.plan) === 'explorer'
+  // Multiplicador POR persona definido pelo ADMIN (doc aiPersonas) — mostrado
+  // ao lado da descrição; NUNCA um número hardcoded.
+  const personaModels = useActiveModelStore((s) => s.personaModels)
   const [open, setOpen] = useState(false)
   const [rect, setRect] = useState<DOMRect | null>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
@@ -50,6 +58,13 @@ export function PersonaSelector({ disabled = false }: { disabled?: boolean }) {
   useEffect(() => {
     if (disabled) setOpen(false)
   }, [disabled])
+
+  // Plano free com persona paga guardada (localStorage antigo): o worker já
+  // degrada server-side; reverter aqui evita a UI a dizer "EXPERT" enquanto a
+  // Standard serve por baixo.
+  useEffect(() => {
+    if (isFreePlan && selected !== 'standard') setSelected('standard')
+  }, [isFreePlan, selected, setSelected])
 
   useEffect(() => {
     if (!open) return
@@ -121,6 +136,8 @@ export function PersonaSelector({ disabled = false }: { disabled?: boolean }) {
         >
           {PERSONAS.map((p) => {
             const isActive = p === selected
+            const locked = isFreePlan && p !== 'standard'
+            const adminMultiplier = personaModels[p]?.costMultiplier
             return (
               <Flex
                 key={p}
@@ -133,12 +150,14 @@ export function PersonaSelector({ disabled = false }: { disabled?: boolean }) {
                 px="8px"
                 py="6px"
                 borderRadius="7px"
-                cursor="pointer"
+                cursor={locked ? 'not-allowed' : 'pointer'}
+                opacity={locked ? 0.45 : 1}
                 textAlign="left"
                 bg={isActive ? tokens.colors.accent.primarySubtle : 'transparent'}
                 transition={`background ${tokens.transition.fast}`}
-                _hover={{ bg: isActive ? tokens.colors.accent.primarySubtle : tokens.colors.bg.whiteSubtle }}
-                onClick={(e) => { e.stopPropagation(); setSelected(p); setOpen(false) }}
+                _hover={{ bg: locked ? 'transparent' : (isActive ? tokens.colors.accent.primarySubtle : tokens.colors.bg.whiteSubtle) }}
+                title={locked ? t('prompt.persona.lockedHint') : undefined}
+                onClick={locked ? (e) => e.stopPropagation() : (e) => { e.stopPropagation(); setSelected(p); setOpen(false) }}
               >
                 <Flex align="center" justify="space-between" gap={2}>
                   <Text
@@ -152,6 +171,8 @@ export function PersonaSelector({ disabled = false }: { disabled?: boolean }) {
                 </Flex>
                 <Text fontSize="10.5px" lineHeight="1.35" color={tokens.colors.text.disabled}>
                   {personaDescription(p)}
+                  {typeof adminMultiplier === 'number' && ` \u00B7 \u00D7${adminMultiplier}`}
+                  {locked && ` \u00B7 ${t('prompt.persona.lockedBadge')}`}
                 </Text>
               </Flex>
             )
