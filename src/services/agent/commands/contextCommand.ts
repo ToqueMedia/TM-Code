@@ -1,9 +1,6 @@
 import { useChatStore } from '../../../stores/chatStore'
-import { useAgentStore } from '../../../stores/agentStore'
-import { useBillingStore } from '../../../stores/billingStore'
-import { MODEL_PROFILES, getProfileForPlan } from '../modelProfiles'
+import { getActiveContextWindow } from '../activeContextWindow'
 import {
-  FALLBACK_CONTEXT_WINDOW,
   getEffectiveContextWindowSize,
   getAutoCompactThreshold,
   getToolResultBudgetTokens,
@@ -45,17 +42,15 @@ export async function executeContext(): Promise<void> {
   chatStore.addSystemMessage(renderContextReport(last))
 }
 
-/** Resolve a janela ativa pela MESMA ordem que o resto da app: header do
- *  servidor → perfil conhecido → fallback conservador. */
+/** Resolve a janela ativa pela MESMA cadeia que o pill e o runtime.
+ *
+ *  Este comentário prometia "a mesma ordem que o resto da app" e era falso:
+ *  ignorava BYOK e persona, por isso numa sessão de 1M lia contra 200K e
+ *  imprimia "94% cheio" onde o pill mostrava 19% — e o "auto-compacta aos X"
+ *  não era o limiar por que o agente compactava (auditoria 05-08). */
 function resolveWindow(): { window: number; maxOutput: number | null; modelName: string } {
-  const { modelContextWindow, modelMaxOutputTokens, modelName } = useAgentStore.getState()
-  const known = modelName ? MODEL_PROFILES[modelName] : undefined
-  const profile = known ?? getProfileForPlan(useBillingStore.getState().plan)
-  return {
-    window: modelContextWindow ?? known?.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
-    maxOutput: modelMaxOutputTokens ?? profile.maxOutputTokens ?? null,
-    modelName: modelName || 'modelo ativo',
-  }
+  const { contextWindow, maxOutputTokens, modelName } = getActiveContextWindow()
+  return { window: contextWindow, maxOutput: maxOutputTokens, modelName }
 }
 
 function fmt(n: number): string {

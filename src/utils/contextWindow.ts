@@ -72,6 +72,64 @@ export const WARNING_THRESHOLD_BUFFER_PCT = 0.07
 export const BLOCKING_LIMIT_BUFFER = 3_000
 
 /**
+ * Candidatos à janela de contexto, por ordem de autoridade decrescente.
+ *
+ * PORQUÊ UMA FUNÇÃO ÚNICA (2026-08-05): a cadeia estava escrita QUATRO vezes,
+ * com quatro ordens diferentes — pill, `/context`, runtime do auto-compact e
+ * portão de envio do composer. Consequências medidas: numa sessão BYOK ou de
+ * persona de 1M, o `/context` lia contra 200K e imprimia "94% cheio" enquanto
+ * o pill dizia 19%, e o "auto-compacta aos X" que anunciava não era o limiar
+ * por que o agente compactava; e o portão do composer, que só olhava ao
+ * header, ficava SILENCIOSAMENTE DESLIGADO sempre que a janela viesse de
+ * outro sítio — o utilizador enviava um prompt que estoirava e recebia
+ * `prompt_too_long` em vez do bloqueio.
+ *
+ * Esta função é PURA de propósito: quem vive em React passa os valores a que
+ * já está subscrito (a reactividade fica intacta) e quem não vive usa o
+ * adaptador em `services/agent/activeContextWindow.ts`. Uma definição, um
+ * comportamento.
+ */
+export interface ContextWindowCandidates {
+  /** Snapshot BYOK da sessão/run: o pedido vai DIRECTO ao provedor, portanto
+   *  não há header do worker que o corrija. Manda sobre tudo. */
+  byokContextWindow?: number | null
+  /** `X-Model-Context-Window` da última resposta servida. */
+  headerContextWindow?: number | null
+  /** Janela publicada pelo admin para a persona escolhida — vale antes da 1ª
+   *  resposta, quando ainda não há header. */
+  personaContextWindow?: number | null
+  /** Janela do perfil do modelo conhecido (tabela local). */
+  profileContextWindow?: number | null
+  /** Tecto de output servido; e o do perfil como recurso. */
+  headerMaxOutputTokens?: number | null
+  profileMaxOutputTokens?: number | null
+}
+
+export interface ResolvedContextWindow {
+  contextWindow: number
+  maxOutputTokens: number | null
+}
+
+export function resolveContextWindow(
+  candidates: ContextWindowCandidates,
+): ResolvedContextWindow {
+  const positive = (n: number | null | undefined): number | undefined =>
+    typeof n === 'number' && n > 0 ? n : undefined
+  return {
+    contextWindow:
+      positive(candidates.byokContextWindow) ??
+      positive(candidates.headerContextWindow) ??
+      positive(candidates.personaContextWindow) ??
+      positive(candidates.profileContextWindow) ??
+      FALLBACK_CONTEXT_WINDOW,
+    maxOutputTokens:
+      positive(candidates.headerMaxOutputTokens) ??
+      positive(candidates.profileMaxOutputTokens) ??
+      null,
+  }
+}
+
+/**
  * Window size minus the reserved headroom for the summary call.
  *
  * Models with a known max-output below 20 K shrink the reservation

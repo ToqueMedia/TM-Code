@@ -1,5 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useSyncExternalStore } from 'react'
 import { useChatStore, appendTextDeltaBuffered, flushBufferedDeltas, generateId } from '../../stores/chatStore'
+import { usePersonaStore } from '../../stores/personaStore'
+import { useActiveModelStore } from '../../stores/activeModelStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { MODEL_PROFILES, getProfileForPlan, effectiveCapability } from '../../services/agent/modelProfiles'
 import { describeImagesViaSidecar } from '../../services/agent/visionSidecar'
@@ -46,7 +48,7 @@ import {
 } from '../../services/agent/promptValueHelpers'
 // useSettingsStore removed — agentModel no longer in settings
 import { getQueryGuard } from '../../services/agent/queryGuard'
-import { isAtBlockingLimit, totalContextTokens } from '../../utils/contextWindow'
+import { isAtBlockingLimit, resolveContextWindow, totalContextTokens } from '../../utils/contextWindow'
 import { enqueueSerializedRun } from '../../services/agent/agentRunner'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
 import type { ConversationMessage } from '../../types/chat'
@@ -144,9 +146,36 @@ export function usePromptBar() {
   })
   const headerContextWindow = useAgentStore(s => s.modelContextWindow)
   const modelMaxOutputTokens = useAgentStore(s => s.modelMaxOutputTokens)
+  const modelName = useAgentStore(s => s.modelName)
+  const selectedPersona = usePersonaStore(s => s.selected)
+  const personaContextWindow = useActiveModelStore(s => s.personaModels[selectedPersona]?.contextWindow)
+  const byokContextWindow = useChatStore(s => {
+    if (!s.activeSessionId) return undefined
+    const w = s.sessions.get(s.activeSessionId)?.byokSnapshot?.contextWindow
+    return w && w > 0 ? w : undefined
+  })
+  const byokModelId = useChatStore(s => {
+    if (!s.activeSessionId) return undefined
+    return s.sessions.get(s.activeSessionId)?.byokSnapshot?.modelId
+  })
+  // Cadeia ÚNICA (ver utils/contextWindow.resolveContextWindow). Este portão
+  // olhava SÓ ao header e exigia-o `> 0`, por isso ficava silenciosamente
+  // DESLIGADO em sessões BYOK, com persona antes da 1ª resposta, ou
+  // restauradas do disco — o utilizador enviava um prompt que estoirava e
+  // recebia `prompt_too_long` em vez do bloqueio (auditoria 05-08, ronda 2).
+  const profileModelName = byokModelId ?? modelName ?? ''
+  const resolvedLimits = resolveContextWindow({
+    byokContextWindow,
+    headerContextWindow,
+    personaContextWindow,
+    profileContextWindow: profileModelName
+      ? MODEL_PROFILES[profileModelName]?.contextWindow
+      : undefined,
+    headerMaxOutputTokens: modelMaxOutputTokens,
+  })
   const currentContextTokens = totalContextTokens(currentPromptTokens, currentResponseTokens)
-  const isContextBlocked = currentContextTokens > 0 && (headerContextWindow ?? 0) > 0
-    && isAtBlockingLimit(currentContextTokens, headerContextWindow ?? 0, modelMaxOutputTokens)
+  const isContextBlocked = currentContextTokens > 0 && resolvedLimits.contextWindow > 0
+    && isAtBlockingLimit(currentContextTokens, resolvedLimits.contextWindow, resolvedLimits.maxOutputTokens)
   // Send is blocked during scaffolding or when context is at the blocking limit.
   const isSendBlocked = isScaffolding || isContextBlocked
   // Preview button is ALWAYS visible when a project is open.

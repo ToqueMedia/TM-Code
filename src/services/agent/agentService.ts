@@ -54,6 +54,7 @@ import { createAgentClient } from "./sdkClient";
 import { buildRunClient } from "./runClient";
 import { useByokStore } from "../../stores/byokStore";
 import { buildByokClientFromSnapshot, buildByokThinkingConfig, resolveByokSnapshotForSession } from "./byokRouting";
+import { getActiveContextWindow } from "./activeContextWindow";
 import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
 import { REQUEST_CONTEXT_NAME, requestContextDefinition, TOOL_SEARCH_NAME, toolSearchDefinition, searchDeferredTools } from "./toolPolicy";
@@ -852,31 +853,22 @@ class AgentService {
       // fresh each iteration because the active model is injected server-side
       // and only known after the first response.
       getContextLimits: () => {
-        const { modelContextWindow, modelMaxOutputTokens, modelName } = useAgentStore.getState();
-        // Resolve the window EXACTLY like the UI pill (ContextWindowIndicator):
-        // server header → known profile → conservative
-        // FALLBACK_CONTEXT_WINDOW (200K). Unknown model (no header, not in
-        // MODEL_PROFILES) assumes 200K — NOT the plan profile's 1M — so a small
-        // or unknown model compacts early instead of overflowing; the admin
-        // publishes the real window via Settings → Admin to override it.
-        const knownProfile = modelName ? MODEL_PROFILES[modelName] : undefined;
-        const plan = useBillingStore.getState().plan;
-        const profile = knownProfile ?? getProfileForPlan(plan);
-        // The ADMIN-published window (modelContextWindow, from X-Model-Context-
-        // Window) is authoritative for auto-compact AND the blocking limit (both
-        // read this in query.ts). Never capped here — a 1M model compacts at ~1M,
-        // a 256K model at ~256K. The admin tunes it in Settings → Admin.
-        return {
-          // Janela POR PERSONA entre o header e o perfil (05-08): a escolha
-          // do admin no painel vale antes da 1ª resposta.
-          contextWindow: modelContextWindow ?? getPersonaFallbackContextWindow() ?? knownProfile?.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
-          // O header manda sobre o perfil, tal como na janela: um modelo novo
-          // publicado só no KV herdava o teto do fallback (MiMo, 32K) e ficava
-          // calado aí mesmo sendo capaz de gerar 128K+ — e esse valor é também
-          // o teto da escalada anti-truncagem em query.ts, por isso o efeito
-          // era duplo (auditoria 2026-07-28).
-          maxOutputTokens: modelMaxOutputTokens ?? profile.maxOutputTokens ?? null,
-        };
+        // A janela é a MESMA que o pill e o `/context` mostram — uma só
+        // definição, em utils/contextWindow.resolveContextWindow. Modelo
+        // desconhecido (sem header, fora de MODEL_PROFILES) assume 200K e NÃO
+        // o 1M do perfil do plano, para compactar cedo em vez de estourar; o
+        // admin publica a janela real em Settings → Admin.
+        // Cadeia ÚNICA (05-08): byok(do run) → header → persona → perfil →
+        // fallback. Antes não lia o snapshot BYOK: quando o snapshot não
+        // trazia janela, o auto-compact decidia pela janela da PERSONA gerida,
+        // que pode ser muito maior que a do modelo BYOK — e estourava no
+        // provedor. O header manda sobre o perfil no tecto de output: um
+        // modelo publicado só no KV herdava o teto do fallback (MiMo, 32K) e
+        // calava-se aí, e esse valor é também o teto da escalada
+        // anti-truncagem em query.ts (auditoria 2026-07-28).
+        return getActiveContextWindow({
+          byokContextWindow: this.byokSnapshot?.contextWindow ?? null,
+        });
       },
       // ── Compactação: arquivo + recuperação (paridade claude-vaz) ──
       // Ambos vivem aqui porque o loop (query.ts) não conhece stores nem o

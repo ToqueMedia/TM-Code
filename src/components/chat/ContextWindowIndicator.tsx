@@ -7,7 +7,7 @@ import { usePersonaStore } from '../../stores/personaStore'
 import { useActiveModelStore } from '../../stores/activeModelStore'
 import { MODEL_PROFILES } from '../../services/agent/modelProfiles'
 import {
-  FALLBACK_CONTEXT_WINDOW,
+  resolveContextWindow,
   getAutoCompactThreshold,
   getEffectiveContextWindowSize,
   getWarningThreshold,
@@ -109,24 +109,26 @@ function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIn
   })
   const [hovered, setHovered] = useState(false)
 
-  // Window resolution mirrors the auto-compact decision:
-  // BYOK session snapshot (direct provider path has no worker header)
-  // → server header (X-Model-Context-Window, managed path)
-  // → known MODEL_PROFILES entry → conservative 200K fallback.
+  // BYOK vem primeiro: o header fica pegajoso no agentStore até outra resposta
+  // o actualizar, e um pedido BYOK vai DIRECTO ao provedor, sem passar pelo
+  // worker que emite o X-Model-Context-Window — o snapshot da sessão é a fonte
+  // congelada nas Settings para esta conversa.
   //
-  // BYOK must come first. The header is sticky in agentStore until another
-  // response updates it, and BYOK direct calls bypass the worker that would
-  // normally emit X-Model-Context-Window. The session snapshot is the frozen
-  // source of truth captured from Settings for the current BYOK conversation.
+  // Cadeia ÚNICA, partilhada com o `/context`, o runtime do auto-compact e o
+  // portão de envio (utils/contextWindow.resolveContextWindow). Aqui passam-se
+  // os valores a que o componente JÁ está subscrito, para a reactividade ficar
+  // intacta — o adaptador de stores é para quem não vive em React.
   const profileModelName = sessionByokModelId ?? modelName
-  const rawContextWindow =
-    sessionByokContextWindow ??
-    headerContextWindow ??
-    // Janela POR PERSONA (05-08): a escolha do admin no painel vale antes da
-    // 1ª resposta — sem isto o pill mostrava a janela do perfil do modelo.
-    personaWindow ??
-    (profileModelName ? MODEL_PROFILES[profileModelName]?.contextWindow : undefined) ??
-    FALLBACK_CONTEXT_WINDOW
+  const resolvedWindow = resolveContextWindow({
+    byokContextWindow: sessionByokContextWindow,
+    headerContextWindow,
+    personaContextWindow: personaWindow,
+    profileContextWindow: profileModelName
+      ? MODEL_PROFILES[profileModelName]?.contextWindow
+      : undefined,
+    headerMaxOutputTokens: modelMaxOutputTokens,
+  })
+  const rawContextWindow = resolvedWindow.contextWindow
 
   // Stay hidden only until the window is known. Show 0% as soon as it is —
   // gives the user continuity across resets (compact, new message) instead
@@ -138,9 +140,10 @@ function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIn
   // reserva. Sem o passar (era o caso), a UI assumia sempre o default de 20K e
   // anunciava um "auto-compact at" que não era aquele por que o agente
   // compactava — e divergia do `/context`, que já passava este argumento.
-  const effectiveWindow = getEffectiveContextWindowSize(rawContextWindow, modelMaxOutputTokens)
-  const compactThreshold = getAutoCompactThreshold(rawContextWindow, modelMaxOutputTokens)
-  const warnThreshold = getWarningThreshold(rawContextWindow, modelMaxOutputTokens)
+  const resolvedMaxOutput = resolvedWindow.maxOutputTokens
+  const effectiveWindow = getEffectiveContextWindowSize(rawContextWindow, resolvedMaxOutput)
+  const compactThreshold = getAutoCompactThreshold(rawContextWindow, resolvedMaxOutput)
+  const warnThreshold = getWarningThreshold(rawContextWindow, resolvedMaxOutput)
 
   // Context occupancy = the prompt actually on the wire (input side), which
   // already includes ALL prior history (past user messages, prior assistant
