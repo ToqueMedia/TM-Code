@@ -257,17 +257,51 @@ medido no corpo real e o total ainda em estimativas, a subtracção misturava as
 duas unidades — e podia ficar negativa quando o corpo real excedia a
 estimativa.
 
+## Evals: ganho medido (2026-08-06)
+
+Dois braços, mesmo instrumento (o custo foi instrumentado e depois
+cherry-picked para a baseline), mesma persona — o runner headless força
+`standard`. Baseline = `badefac`.
+
+**Casos determinísticos** (ler package, compreender código, escrever ficheiro),
+médias dos casos com cache quente nos dois braços:
+
+| | baseline | agora | delta |
+|---|---|---|---|
+| verdes | 3/3 | 3/3 | — |
+| input / pedido | 56 426 | 52 732 | **−3 693 (−6,5%)** |
+| input não-cache (preço cheio) | 7 850 | 6 012 | **−1 837 (−23,4%)** |
+| contexto auxiliar / pedido | 4 290 | 1 836 | **−2 454 (−57,2%)** |
+| output | 236 | 236 | idêntico |
+
+Previsto pelo modelo de custo: −2 454 (portão) −1 250 (índice removido) =
+**−3 704**. Medido: **−3 693**. O ganho vem de onde a tese dizia.
+
+**Caso de risco** `ui-page-no-ui-project` — pede-se UI a um projecto sem
+superfície de UI, ou seja o braço novo gera a página SEM
+`design_system.component_patterns` nem `ui_patterns`:
+
+- **Qualidade: 10/10 corridas verdes** nos dois braços (n=6 baseline, n=4
+  novo). A asserção é sobre o CONTEÚDO gerado — tratamento do estado vazio —
+  com enunciado neutro que não o pede. A linha de base sobrevive ao portão
+  porque `sharedUiBaselineReminder()` vai no lembrete final, incondicional, e
+  a versão longa é que é retida.
+- **Custo por pedido: −5,7%**, consistente com os casos determinísticos.
+- **Custo total: +20,1%, e este número NÃO está resolvido.** O nº de pedidos
+  variou 2-5 na baseline e 2-6 no braço novo (médias 3,2 vs 4,0); as
+  amplitudes sobrepõem-se e as amostras são pequenas. Contra a hipótese de
+  degradação: o output do braço novo é MENOR (1 863 vs 2 339 tokens de média),
+  o que não é o que se vê quando um agente itera para corrigir. A favor de a
+  levar a sério: o ponto estimado é pior e não há amostra que o feche.
+
 ### O que continua por fazer / por decidir
 
-- **Sem eval.** As três propriedades de segurança estão testadas; o efeito na
-  QUALIDADE da geração não. O teste que falta é um eval do tipo "projecto
-  backend + 'faz-me uma página de admin'" a comparar a saída com e sem as
-  secções retidas. Sem ele, o argumento de que a condicionalidade por PROJECTO
-  é segura onde a condicionalidade por TAREFA não era continua a ser um
-  raciocínio, não uma medição.
-- **Sem verificação fim-a-fim.** O detector foi sondado contra árvores
-  realistas (incluindo a deste repo, que retém apenas `vision.image_rules`),
-  mas nunca contra a saída real do `buildFileTree` numa app a correr.
+- **Fechar o nº de pedidos do caso de risco.** ~10 corridas por braço decidem
+  se os 4,0 vs 3,2 são variância da tarefa ou perda real. Até lá, o ganho
+  confirmado é POR PEDIDO; o total nesse cenário adversarial fica em aberto.
+- **Sem verificação na app.** O detector foi sondado contra árvores realistas
+  (incluindo a deste repo, que retém apenas `vision.image_rules`) e os evals
+  correm o binário a sério, mas ninguém abriu a janela e olhou.
 - **Dois detectores para a mesma pergunta.** `isVanillaWeb`/`hasFrameworkDeps`
   no `contextBuilder` e `detectProjectContextEvidence` respondem ambos a "que
   tipo de projecto é este" e podem divergir. Consolidar fica em dívida.
