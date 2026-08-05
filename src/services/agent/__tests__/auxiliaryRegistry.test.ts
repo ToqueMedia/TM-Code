@@ -13,7 +13,7 @@ import {
 
 function plan(overrides: Partial<ContextPlan>): ContextPlan {
   return {
-    taskDomain: 'bugfix_local',
+    taskDomain: 'default_task',
     requiredCapabilities: [],
     minimumContextNeeded: 'summary',
     candidateContexts: [],
@@ -29,13 +29,13 @@ describe('auxiliaryRegistry', () => {
 
   // ── selectAuxiliaries ─────────────────────────────────────────
   describe('selectAuxiliaries', () => {
-    it('full delivery: bugfix_local entrega inline as bounded, omite só as unbounded', () => {
+    it('full delivery: default_task entrega inline as bounded, omite só as unbounded', () => {
       // Doutrina invertida a 2026-08-03: a meia-entrega falhava em silêncio
       // (0 request_context em 34 pedidos na sessão momenu-fact de 02-08) e o
       // cache-read torna a entrega total ~10% do preço nominal. Ficam
       // on-demand só as unbounded — ver BOUNDED_INLINE_CONTEXTS.
-      const sel = selectAuxiliaries('bugfix_local', 'fix the retry bug')
-      expect(sel.profile).toBe('bugfix_local')
+      const sel = selectAuxiliaries('default_task', 'fix the retry bug')
+      expect(sel.profile).toBe('default_task')
       expect(sel.loaded.length).toBeGreaterThan(0)
       const omittedIds = sel.omitted.map((o) => o.id)
       expect(omittedIds).toContain('scaffold.workflow')
@@ -62,14 +62,14 @@ describe('auxiliaryRegistry', () => {
     it('does not activate auxiliaries from free-text triggers without a model plan', () => {
       // O texto livre não acrescenta nada à selecção determinística — a
       // lista carregada é EXACTAMENTE a mesma com qualquer mensagem.
-      const withTrigger = selectAuxiliaries('bugfix_local', 'help me provision the database')
-      const bare = selectAuxiliaries('bugfix_local', 'fix the retry bug')
+      const withTrigger = selectAuxiliaries('default_task', 'help me provision the database')
+      const bare = selectAuxiliaries('default_task', 'fix the retry bug')
       expect(withTrigger.loaded.map(l => l.id).sort()).toEqual(bare.loaded.map(l => l.id).sort())
     })
 
     it('does not load UI baseline for an MCP audit just because the profile is frontend_ui', () => {
       const sel = selectAuxiliaries(
-        'bugfix_local',
+        'default_task',
         'audit the MCP routing in src/screens/account/Settings.tsx',
         false,
         'test',
@@ -90,7 +90,7 @@ describe('auxiliaryRegistry', () => {
     })
 
     it('loads UI guidance only when the user explicitly asks for visual work', () => {
-      const sel = selectAuxiliaries('bugfix_local', 'polish the account screen layout', false, 'test', undefined, plan({
+      const sel = selectAuxiliaries('default_task', 'polish the account screen layout', false, 'test', undefined, plan({
         taskDomain: 'design_system/ui',
         requiredCapabilities: ['component_patterns', 'spacing_typography'],
         candidateContexts: ['design_system.component_patterns', 'ui_patterns'],
@@ -104,7 +104,7 @@ describe('auxiliaryRegistry', () => {
 
     it('golden: semantic tokens choose design-system context before project structure', () => {
       const sel = selectAuxiliaries(
-        'bugfix_local',
+        'default_task',
         'Implemente os semantic tokens sidebar.session.item e sidebar.session.itemActive no design system/theme.',
         false,
         'test',
@@ -130,7 +130,7 @@ describe('auxiliaryRegistry', () => {
     })
 
     it('golden: MCP audit chooses agent runtime routing only', () => {
-      const sel = selectAuxiliaries('bugfix_local', 'Faça uma auditoria read-only da integração MCP.', true, 'test', undefined, plan({
+      const sel = selectAuxiliaries('default_task', 'Faça uma auditoria read-only da integração MCP.', true, 'test', undefined, plan({
         taskDomain: 'agent_runtime',
         requiredCapabilities: ['mcp_routing'],
         candidateContexts: ['agent_runtime.mcp_routing', 'agent_runtime.tool_profiles', 'project.structure_overview'],
@@ -145,7 +145,7 @@ describe('auxiliaryRegistry', () => {
     })
 
     it('golden: dev server preview chooses delivery runtime context', () => {
-      const sel = selectAuxiliaries('bugfix_local', 'O preview não abre no browser.', false, 'test', undefined, plan({
+      const sel = selectAuxiliaries('default_task', 'O preview não abre no browser.', false, 'test', undefined, plan({
         taskDomain: 'delivery/runtime',
         requiredCapabilities: ['dev_server'],
         candidateContexts: ['delivery.dev_server', 'delivery.build_scripts', 'project.package_map'],
@@ -160,7 +160,7 @@ describe('auxiliaryRegistry', () => {
     })
 
     it('golden: UI polish chooses design system and UI patterns', () => {
-      const sel = selectAuxiliaries('bugfix_local', 'Melhore visualmente a lista de sessões.', false, 'test', undefined, plan({
+      const sel = selectAuxiliaries('default_task', 'Melhore visualmente a lista de sessões.', false, 'test', undefined, plan({
         taskDomain: 'design_system/ui',
         requiredCapabilities: ['component_patterns', 'semantic_tokens', 'spacing_typography'],
         candidateContexts: ['design_system.component_patterns', 'design_system.semantic_tokens', 'ui_patterns', 'project.structure_overview'],
@@ -177,7 +177,7 @@ describe('auxiliaryRegistry', () => {
     })
 
     it('golden: git commit chooses git delivery context only', () => {
-      const sel = selectAuxiliaries('bugfix_local', 'Faz commit das alterações.', false, 'test', undefined, plan({
+      const sel = selectAuxiliaries('default_task', 'Faz commit das alterações.', false, 'test', undefined, plan({
         taskDomain: 'delivery/git',
         requiredCapabilities: ['git_status', 'changed_files'],
         candidateContexts: ['delivery.git_status', 'delivery.changed_files'],
@@ -193,7 +193,7 @@ describe('auxiliaryRegistry', () => {
     })
 
     it('every loaded entry has a reason', () => {
-      const sel = selectAuxiliaries('bugfix_local', 'create app')
+      const sel = selectAuxiliaries('default_task', 'create app')
       for (const l of sel.loaded) {
         expect(l.reason).toBeTruthy()
         expect(l.reason.length).toBeGreaterThan(5)
@@ -201,7 +201,7 @@ describe('auxiliaryRegistry', () => {
     })
 
     it('every omitted entry has a reason', () => {
-      const sel = selectAuxiliaries('bugfix_local', 'fix bug')
+      const sel = selectAuxiliaries('default_task', 'fix bug')
       for (const o of sel.omitted) {
         expect(o.reason).toBeTruthy()
         expect(o.reason.length).toBeGreaterThan(5)
@@ -210,14 +210,14 @@ describe('auxiliaryRegistry', () => {
 
     // ── Context Planner telemetry ──────────────────────────────
     it('marks a bare profile call (no plan, no telemetry) as planner fallback', () => {
-      const sel = selectAuxiliaries('bugfix_local', 'fix the retry bug')
+      const sel = selectAuxiliaries('default_task', 'fix the retry bug')
       expect(sel.contextPlannerStatus).toBe('fallback')
       expect(sel.contextPlannerSelectionReason).toBeTruthy()
     })
 
     it('infers parsed status when a model plan is provided without telemetry', () => {
       const sel = selectAuxiliaries(
-        'bugfix_local',
+        'default_task',
         'audit the MCP routing',
         false,
         'test',
@@ -235,7 +235,7 @@ describe('auxiliaryRegistry', () => {
 
     it('threads planner fallback telemetry (error + rawOutput) through plannerInfo', () => {
       const sel = selectAuxiliaries(
-        'bugfix_local',
+        'default_task',
         'fix the retry bug',
         false,
         'context planner fallback: invalid context plan JSON',
@@ -256,7 +256,7 @@ describe('auxiliaryRegistry', () => {
 
     it('golden: design-system refactor surfaces parsed status + rejected entrypoints', () => {
       const sel = selectAuxiliaries(
-        'bugfix_local',
+        'default_task',
         'Refatora a lista de sessões com semantic tokens e data relativa.',
         false,
         'test',
@@ -303,7 +303,7 @@ describe('auxiliaryRegistry', () => {
     it('returns null when nothing is omitted', () => {
       // Manually craft a selection with no omissions.
       const sel = {
-        profile: 'bugfix_local' as const,
+        profile: 'default_task' as const,
         loaded: [],
         omitted: [],
         loadedTokens: 0,
@@ -327,7 +327,7 @@ describe('auxiliaryRegistry', () => {
     })
 
     it('lists each omitted auxiliary with its id and request_context hint', () => {
-      const sel = selectAuxiliaries('bugfix_local', 'fix the bug')
+      const sel = selectAuxiliaries('default_task', 'fix the bug')
       const index = buildOnDemandIndex(sel)
       expect(index).not.toBeNull()
       expect(index).toContain('request_context')
@@ -348,8 +348,8 @@ describe('auxiliaryRegistry', () => {
       expect(index).not.toContain('auth_database.provision')
     })
 
-    it('full delivery: bounded sections são seleccionadas inline no perfil bugfix_local', () => {
-      const sel = selectAuxiliaries('bugfix_local', 'fix the bug')
+    it('full delivery: bounded sections são seleccionadas inline no perfil default_task', () => {
+      const sel = selectAuxiliaries('default_task', 'fix the bug')
       const loadedIds = sel.loaded.map(l => l.id)
       for (const id of ['design_system.semantic_tokens', 'ui_patterns', 'project.package_map', 'agent_runtime.mcp_routing', 'vision.image_rules']) {
         expect(loadedIds).toContain(id)

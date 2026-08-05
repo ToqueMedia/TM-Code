@@ -81,7 +81,7 @@ describe('payloadInspector system-prompt analysis', () => {
   })
 
   it('separates auto-loaded sections from real request_context loads', () => {
-    const selection = selectAuxiliaries('bugfix_local', 'audit MCP routing')
+    const selection = selectAuxiliaries('default_task', 'audit MCP routing')
     selection.modelRequestedContextSections = ['project.docs_full', 'project.structure_full']
     selection.requestContextToolCalls = 2
     selection.requestContextSectionsLoaded = ['project.structure_full']

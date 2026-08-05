@@ -688,6 +688,13 @@ export interface RequestUsageEntry {
   symbolIndexEntries?: number
   symbolIndexTruncated?: boolean
   symbolIndexTokensEstimate?: number
+  /** ATENÇÃO — CUMULATIVO NA RUN, não deste pedido. A telemetria do TMS é um
+   *  singleton de módulo carimbado em cada entrada, por isso estes campos, uma
+   *  vez ligados, aparecem `true` em TODAS as entradas seguintes. Contar
+   *  entradas com `shellReadBlocked === true` NÃO conta incidentes (um post-
+   *  mortem de 05-08 leu 67 "incidentes" onde houve um). Para saber quando
+   *  aconteceu, procurar a PRIMEIRA entrada que o traz. O mesmo vale para
+   *  readBeforeWrite* e symbolIndex* acima. */
   shellReadBlocked?: boolean
   shellReadConvertedToFileTool?: boolean
   executeCommandPurpose?: 'validation' | 'file_read' | 'unknown'
@@ -802,7 +809,11 @@ export interface RequestUsageEntry {
    *  ToolsetSelector state. Lets an exported session prove the tighter
    *  toolset actually reached the provider (toolCount, toolNames) AND show
    *  the auxiliary/on-demand savings (core/auxiliary split, savings). */
-  /** Prompt profile selected by the Intent Router (bugfix_local, deploy_publish, …). */
+  /** Perfil de prompt. NÃO há Intent Router (removido) — é uma heurística
+   *  local de um bit: `vision` se houver imagem, `default_task` no resto,
+   *  `project_bootstrap` no /init. Chamava-se `bugfix_local`, herança do
+   *  router morto, e fazia qualquer leitor do log concluir que uma feature
+   *  tinha sido classificada como correcção de bug. */
   selectedPromptProfile?: string
   /** Tool profile applied by the selector (= profile; kept separate so the
    *  export can later distinguish prompt-profile from tool-profile). */

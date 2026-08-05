@@ -525,7 +525,9 @@
       "Read(//Users/ithustle/.codex/**)",
       "Bash(xargs -0 ls -lt)",
       "Bash(perl -0pi -e 's/import \\\\{ markWriteBatchDecision, writeBatchSiblings \\\\} from \".\\\\/writeBatch\";/import { markWriteBatchDecision, writeBatchSiblings } from \".\\\\/writeBatch\";\\\\nimport { markFileBeforeEdit } from \".\\\\/editDiagnostics\";/' src/services/agent/agentService.ts)",
-      "Bash(perl -0pi -e 's/import \\\\{ markFileBeforeEdit \\\\} from \".\\\\/editDiagnostics\";/import { markFileBeforeEdit, resetEditDiagnostics } from \".\\\\/editDiagnostics\";/' src/services/agent/agentService.ts)"
+      "Bash(perl -0pi -e 's/import \\\\{ markFileBeforeEdit \\\\} from \".\\\\/editDiagnostics\";/import { markFileBeforeEdit, resetEditDiagnostics } from \".\\\\/editDiagnostics\";/' src/services/agent/agentService.ts)",
+      "Bash(yarn test:webagent)",
+      "Bash(xargs sed -i '' \"s/bugfix_local/default_task/g\")"
     ]
   }
 }

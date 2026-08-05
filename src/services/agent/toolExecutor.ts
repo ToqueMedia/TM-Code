@@ -4514,7 +4514,12 @@ ${preview}
         const readState = this.readFileTimestamps.get(path)
         if (!readState) {
           this.recordReadBeforeWriteBlocked(EDIT_FILE, 'not_read')
-          return `Error: You must call ${READ_ALIAS} on "${path}" before editing it. Read the file first to see the current content, then call ${EDIT_ALIAS}.`
+          // O aviso sobre a busca não é decorativo: na sessão de 05-08 o modelo
+          // fez Grep no ficheiro, considerou-o "lido", foi bloqueado, e voltou
+          // a tentar o Edit sem ler — dois turnos perdidos no mesmo ficheiro.
+          // Resultados de busca são excertos sem carimbo de versão; só o Read
+          // regista o estado contra o qual o old_string é validado.
+          return `Error: You must call ${READ_ALIAS} on "${path}" before editing it. Search results (${GREP_ALIAS}/${GLOB_ALIAS}) do NOT count as reading — they are excerpts, not the file state. Call ${READ_ALIAS} on this exact path, then ${EDIT_ALIAS}.`
         }
         // isPartialView: if the model only saw an auto-injected partial view
         // (e.g. stripped/truncated project memory), it must do a full Read

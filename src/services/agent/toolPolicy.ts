@@ -8,7 +8,7 @@
  * por request". Essa selecção NUNCA CORREU em nenhum run real: a classe
  * `ToolsetSelector` só nascia com `enforceReadOnly`, que exige
  * `auxiliarySelection.readOnly === true`, e nada o produzia — o perfil vem de
- * `profileForSignals` (que devolve só `vision`/`bugfix_local`) e os dois
+ * `profileForSignals` (que devolve só `vision`/`default_task`) e os dois
  * produtores de `intentOverride` (/init e o preflight de TMS) passam
  * `readOnly: false`. Medido na auditoria de 2026-07-29, apagado a 07-30.
  *

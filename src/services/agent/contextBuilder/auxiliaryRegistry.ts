@@ -18,11 +18,11 @@
  *
  * Produtores actuais — se acrescentares um valor aqui, acrescenta o produtor
  * no mesmo commit:
- *   - `profileForSignals` → 'vision' (há imagem) | 'bugfix_local' (resto)
+ *   - heurística inline em contextBuilder → 'vision' (há imagem) | 'default_task' (resto)
  *   - `intentOverride` → 'project_bootstrap' (/init e o preflight de TMS)
  */
 export type PromptProfile =
-  | 'bugfix_local'
+  | 'default_task'
   | 'project_bootstrap'
   | 'vision'
 
@@ -780,7 +780,7 @@ export function fallbackContextPlanForProfile(profile: PromptProfile): ContextPl
   }
 
   return {
-    taskDomain: 'bugfix_local',
+    taskDomain: 'default_task',
     requiredCapabilities: [],
     minimumContextNeeded: 'summary',
     candidateContexts: [],

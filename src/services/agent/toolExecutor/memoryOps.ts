@@ -195,10 +195,15 @@ export function registerMemoryTools(ctx: ToolRegistrationContext): void {
       // A confirmação diz qual dos dois regimes ficou de facto gravado: com
       // `paths`, a memória só entra no prompt quando o agente tocar em
       // ficheiros que casem — dizer "todos os prompts futuros" seria falso.
+      // "todos os prompts futuros" era falso mesmo sem `paths`: o bloco de
+      // memórias é SELECIONADO POR RELEVÂNCIA (o próprio prompt diz "appears
+      // only when entries exist and are relevant"). Prometer entrega
+      // incondicional levava o agente a contar com contexto que podia não
+      // chegar — e a não usar `read_memory` quando precisava mesmo dele.
       const where = scope === 'project' ? 'project' : 'IDE installation'
       return paths.length
         ? `Memory saved: ${scope}/${filename} (${type}), CONDITIONAL on paths [${paths.join(', ')}] — it enters the prompt only in turns where accessed files match one of them.`
-        : `Memory saved: ${scope}/${filename} (${type}). It will appear in the persistent-memory section of every future prompt for this ${where}.`
+        : `Memory saved: ${scope}/${filename} (${type}) for this ${where}. It is injected into future prompts when judged relevant to the task — not unconditionally. When you need it for certain, call read_memory.`
     },
   })
 

@@ -577,9 +577,15 @@ pub async fn search_in_files(
     // restrição artificial (erro visto em produção 2026-06-12 com
     // search(release-station) sobre .../routes/users.ts). O findstr do
     // Windows trata o caso ficheiro no próprio call-site.
+    // A mensagem tem de dizer a causa REAL. Esta guarda só testa existência
+    // (ficheiro é alvo válido, ver acima), mas dizia "does not exist or is not
+    // a directory" — e o modelo, ao ler isso depois de passar um ficheiro,
+    // concluía que o problema era o TIPO do caminho e reformulava a busca em
+    // vez de corrigir o caminho errado (sessão 05-08, patients.ts inexistente).
     if !directory_path.exists() {
         return Err(format!(
-            "Directory does not exist or is not a directory: {}",
+            "Path does not exist: {}. Note: this parameter accepts a directory OR a single file — \
+             the error is the path itself, not its type. Check the path (LS/Glob) and retry.",
             directory
         ));
     }
@@ -682,10 +688,15 @@ pub async fn replace_in_files(
         return Err("Search query cannot be empty".to_string());
     }
 
+    // Aqui a exigência de diretório é real (substituição em massa varre uma
+    // árvore), por isso os dois casos separam-se para a mensagem não mentir.
     let directory_path = PathBuf::from(&directory);
-    if !directory_path.exists() || !directory_path.is_dir() {
+    if !directory_path.exists() {
+        return Err(format!("Path does not exist: {}", directory));
+    }
+    if !directory_path.is_dir() {
         return Err(format!(
-            "Directory does not exist or is not a directory: {}",
+            "Replace-in-files needs a directory, but this path is a file: {}",
             directory
         ));
     }

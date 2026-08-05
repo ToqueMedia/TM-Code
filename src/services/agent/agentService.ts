@@ -636,7 +636,7 @@ class AgentService {
     // singleton do ContextBuilder) por heurística LOCAL — não há Intent Router
     // (removido; ver a nota no contextBuilder). Lemos antes de construir o
     // selector para o construtor poder semear o
-    // active set with the profile's base toolset (bugfix_local/analysis_readonly/…).
+    // active set with the profile's base toolset (default_task/analysis_readonly/…).
     // Profiles are starters, not authorization ceilings. Sub-agents skip this
     // (they already receive a restricted tool set from the subAgentRunner).
     let auxiliarySelection: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection | null = null;
@@ -668,7 +668,7 @@ class AgentService {
     // em TODOS os runs. `enforceReadOnly` exige `auxiliarySelection.readOnly`,
     // que só ficaria true com o perfil `analysis_readonly` ou com um
     // `intentOverride.readOnly` — e o classificador local devolve apenas
-    // `vision`/`bugfix_local`, enquanto os dois únicos produtores de
+    // `vision`/`default_task`, enquanto os dois únicos produtores de
     // intentOverride (/init e o preflight de TMS) passam `readOnly: false`.
     // Não vou ressuscitar o caminho com matching de texto: foi assim que uma
     // classificação read-only errada negou create/edit num run inteiro, e a

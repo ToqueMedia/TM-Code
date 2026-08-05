@@ -112,14 +112,25 @@ export function buildRequestEfficiencyReport(log: RequestUsageEntry[] | undefine
         : undefined
   const finalReadRanges = [...log].reverse().find(e => e.readRanges)?.readRanges ?? []
   const readBeforeWriteBlockCount = Math.max(0, ...log.map(e => e.readBeforeWriteBlockCount ?? 0))
+  // A telemetria do TMS é um singleton carimbado em CADA entrada: uma vez
+  // construído o índice de símbolos, os seus números repetem-se em todas as
+  // entradas seguintes. Somá-los multiplicava-os pelo número de pedidos —
+  // um índice de 8K tokens numa run de 100 turnos era reportado como 792K,
+  // num relatório cujo propósito é justamente guiar economia de contexto.
+  // (Passou despercebido porque a sessão que o revelou tinha 0 índices.)
+  const stickyMax = (pick: (e: RequestUsageEntry) => number | undefined): number =>
+    symbolEntries.length ? Math.max(0, ...symbolEntries.map(e => pick(e) ?? 0)) : 0
 
   return {
     totalRequests: log.length,
-    symbolIndexRequests: symbolEntries.length,
-    symbolIndexTokensEstimate: symbolEntries.reduce((sum, e) => sum + (e.symbolIndexTokensEstimate ?? 0), 0),
-    symbolIndexFilesConsidered: symbolEntries.reduce((sum, e) => sum + (e.symbolIndexFilesConsidered ?? 0), 0),
-    symbolIndexFilesScanned: symbolEntries.reduce((sum, e) => sum + (e.symbolIndexFilesScanned ?? 0), 0),
-    symbolIndexEntries: symbolEntries.reduce((sum, e) => sum + (e.symbolIndexEntries ?? 0), 0),
+    // Também pegajoso: `symbolIndexRequested` fica true até ao fim da run, por
+    // isso o número de ENTRADAS com a flag não é o número de índices pedidos.
+    // Sem um contador próprio, o honesto é 0 ou 1.
+    symbolIndexRequests: symbolEntries.length > 0 ? 1 : 0,
+    symbolIndexTokensEstimate: stickyMax(e => e.symbolIndexTokensEstimate),
+    symbolIndexFilesConsidered: stickyMax(e => e.symbolIndexFilesConsidered),
+    symbolIndexFilesScanned: stickyMax(e => e.symbolIndexFilesScanned),
+    symbolIndexEntries: stickyMax(e => e.symbolIndexEntries),
     symbolIndexTruncated: symbolEntries.some(e => e.symbolIndexTruncated),
     finalReadRangeCount: finalReadRanges.length,
     finalReadRangeFileCount: new Set(finalReadRanges.map(r => r.path)).size,

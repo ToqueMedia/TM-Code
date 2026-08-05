@@ -3,7 +3,7 @@
  *
  * O selector é `null` em todos os runs reais: nasce só com `enforceReadOnly`,
  * que exige `auxiliarySelection.readOnly === true`, e nada o produz — o
- * classificador local devolve apenas `vision`/`bugfix_local` e os dois
+ * classificador local devolve apenas `vision`/`default_task` e os dois
  * produtores de `intentOverride` (/init e o preflight de TMS) passam
  * `readOnly: false`. Medido na auditoria de 2026-07-29.
  *

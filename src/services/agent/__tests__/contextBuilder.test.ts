@@ -132,12 +132,12 @@ describe('ContextBuilder', () => {
       expect(sel?.loaded.map(l => l.id)).toContain('vision.image_rules')
     })
 
-    it('sem imagem fica em bugfix_local (full delivery inclui as regras de visão)', async () => {
+    it('sem imagem fica em default_task (full delivery inclui as regras de visão)', async () => {
       await builder.buildSystemPrompt(
         '/test/project', 'web', undefined, undefined, 'corrige este bug',
       )
       const sel = builder.getLastAuxiliarySelection()
-      expect(sel?.profile).toBe('bugfix_local')
+      expect(sel?.profile).toBe('default_task')
       // Doutrina full-delivery (2026-08-03): vision.image_rules é bounded e
       // vai inline em todos os perfis — o CONTEÚDO adapta-se à capacidade do
       // modelo (getVisionSection lê supportsAttachments), não a presença.
@@ -204,7 +204,7 @@ describe('ContextBuilder', () => {
         'Rota: /billing ou /payments. Detectar NIF e abrir modal.',
         [],
         {
-          profile: 'bugfix_local',
+          profile: 'default_task',
           readOnly: false,
           source: 'model',
           confidence: 'high',
@@ -216,7 +216,7 @@ describe('ContextBuilder', () => {
       expect(prompt).toContain('# Role')
       // Planner desligado: ZERO chamadas sidecar; seleção determinística.
       expect(fetchMock).toHaveBeenCalledTimes(0)
-      expect(selection?.profile).toBe('bugfix_local')
+      expect(selection?.profile).toBe('default_task')
       // 'deterministic', não 'fallback' (2026-08-03): não há planner para
       // falhar — a selecção determinística é o desenho, e a telemetria não
       // pode auto-descrever o desenho como degradação.
@@ -395,7 +395,7 @@ describe('ContextBuilder', () => {
         'Create a new React app with auth from a screenshot',
         [],
         {
-          profile: 'bugfix_local',
+          profile: 'default_task',
           readOnly: false,
           source: 'model',
           confidence: 'high',
@@ -453,7 +453,7 @@ describe('ContextBuilder', () => {
         const { useChatStore } = await import('../../../stores/chatStore')
         useChatStore.getState().createSession('/p')
         const intentOverride = {
-          profile: 'bugfix_local' as const,
+          profile: 'default_task' as const,
           readOnly: false,
           reason: 'test',
           source: 'keyword' as const,

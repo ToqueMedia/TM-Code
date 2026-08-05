@@ -647,7 +647,7 @@ class ContextBuilder {
     // foi REMOVIDO (uma classificação "read-only" errada chegou a negar
     // create/edit num run inteiro) e o Context Planner por modelo está
     // desligado. O perfil vem de uma heurística LOCAL sem poder de negação
-    // (hasImage → vision, senão bugfix_local) e a seleção da tabela
+    // (hasImage → vision, senão default_task) e a seleção da tabela
     // determinista abaixo. Comentários que descreviam estes dois como vivos
     // foram corrigidos na auditoria de 2026-07-28 — eram um convite a
     // ressuscitá-los.
@@ -658,7 +658,7 @@ class ContextBuilder {
     // numa lista de secções. Dois passos de indirecção sobre `hasImage`, com
     // um nome que prometia inferência e convidava a ressuscitar o router.
     const auxProfile: PromptProfile = intentOverride?.profile
-      ?? (signals?.hasImage ? 'vision' : 'bugfix_local')
+      ?? (signals?.hasImage ? 'vision' : 'default_task')
     const readOnly = intentOverride?.readOnly ?? false
     // SELEÇÃO DE CONTEXTO: DETERMINISTA, sem chamar modelo nenhum.
     //
