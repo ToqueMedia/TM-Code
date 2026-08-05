@@ -18,6 +18,7 @@
  */
 
 import type { UserPlanName } from '../../stores/billingStore'
+import { getPersonaFallbackModelId } from '../../stores/activeModelStore'
 
 // ── Types ──
 
@@ -218,6 +219,10 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'glm-5': GLM_5_2,
   'qwen3.8-max': QWEN_3_8_MAX,
   'mimo-v2.5-pro-1m': MIMO_V2_5_PRO_1M,
+  // O id que a config KV/X-TM-Model reporta é 'mimo-v2.5-pro' (sem o sufixo
+  // -1m do id de catálogo) — sem este alias o lookup por persona/servido caía
+  // no default (que por acaso É o MiMo, mas por acidente, não por contrato).
+  'mimo-v2.5-pro': MIMO_V2_5_PRO_1M,
   // Grok 4.5. Via Cloudflare AI Gateway o X-TM-Model reporta 'xai/grok-4.5'
   // (sintaxe author/model do gateway); os restantes aliases cobrem ids xAI
   // directos caso a config volte a apontar lá.
@@ -260,12 +265,21 @@ export function getModelProfile(modelId: string): ModelProfile {
 }
 
 /**
- * Returns the model profile for the user's billing plan.
+ * Returns the pre-handshake / unknown-model fallback profile.
  *
- * Post-refactor: always returns the DEFAULT profile regardless of plan. The
- * data-plane (KV config) controls actual model routing; this is only the
- * pre-handshake / unknown-model fallback.
+ * PERSONA-AWARE desde 2026-08-05 (auditoria pós-personas): este é o fallback
+ * de TODOS os gates de capacidade pré-primeira-resposta — visão inline vs
+ * sidecar (usePromptBar/agentRunner/steerContent), pesquisa nativa no prompt
+ * (contextBuilder), janela do auto-compact (agentService/parallelTaskRunner)
+ * e o badge de thinking. Antes devolvia SEMPRE o default (MiMo): com a
+ * persona Master (modelo com visão nativa) selecionada, a app tratava o
+ * modelo como cego até à 1ª resposta — imagem desviada ao sidecar (custo +
+ * fidelidade) ou 503 se o sidecar não estivesse publicado. O modelo da
+ * persona SELECIONADA (mapa system/aiPersonas) é a melhor informação
+ * disponível antes do X-TM-Model chegar; o plano continua irrelevante.
  */
 export function getProfileForPlan(_plan: UserPlanName): ModelProfile {
+  const personaModel = getPersonaFallbackModelId()
+  if (personaModel && MODEL_PROFILES[personaModel]) return MODEL_PROFILES[personaModel]
   return MODEL_PROFILES[DEFAULT_MODEL_ID]
 }

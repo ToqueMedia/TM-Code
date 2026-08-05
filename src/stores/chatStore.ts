@@ -4056,7 +4056,15 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         // Restore model identity + context window so the pill renders the
         // real % immediately. Use `undefined` for absent fields so
         // setModelInfo's "leave alone" semantics kick in for thinkingMode.
-        if (snapshot && (snapshot.contextWindow != null || snapshot.modelName != null)) {
+        // Personas (auditoria 05-08): SÓ semear se o modelo da sessão for o da
+        // persona SELECIONADA — semear o de outra persona envenenava os gates
+        // de visão/janela/thinking até à 1ª resposta (a sessão antiga pode ter
+        // sido servida por outra persona). Sem mapa carregado, comportamento
+        // antigo (semear) — melhor pill do que nada.
+        const personaModelSeed = getPersonaFallbackModelId()
+        const seedMatchesPersona = snapshot?.modelName == null || personaModelSeed == null
+          || snapshot.modelName === personaModelSeed
+        if (snapshot && seedMatchesPersona && (snapshot.contextWindow != null || snapshot.modelName != null)) {
           useAgentStore.getState().setModelInfo(
             snapshot.modelName ?? null,
             null,
@@ -4164,7 +4172,15 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         // its real % from the very first paint. Identical wiring to
         // loadSessionFromDisk so both entry paths converge on the same
         // post-load shape.
-        if (bootSnapshot && (bootSnapshot.contextWindow != null || bootSnapshot.modelName != null)) {
+        // Personas (auditoria 05-08): SÓ semear se o modelo da sessão for o da
+        // persona SELECIONADA — semear o de outra persona envenenava os gates
+        // de visão/janela/thinking até à 1ª resposta (a sessão antiga pode ter
+        // sido servida por outra persona). Sem mapa carregado, comportamento
+        // antigo (semear) — melhor pill do que nada.
+        const personaModelBoot = getPersonaFallbackModelId()
+        const bootSeedMatchesPersona = bootSnapshot?.modelName == null || personaModelBoot == null
+          || bootSnapshot.modelName === personaModelBoot
+        if (bootSnapshot && bootSeedMatchesPersona && (bootSnapshot.contextWindow != null || bootSnapshot.modelName != null)) {
           useAgentStore.getState().setModelInfo(
             bootSnapshot.modelName ?? null,
             null,

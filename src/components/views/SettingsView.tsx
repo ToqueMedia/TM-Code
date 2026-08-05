@@ -2207,7 +2207,10 @@ function AdminSection() {
                 borderColor={verify.activeAIConfig.enabled ? tokens.colors.bg.cardBorder : tokens.colors.accent.orange}
               >
                 <Flex justify="space-between" align="center" mb={1}>
-                  <Text fontSize="12px" fontWeight="600" color={tokens.colors.text.primary}>Active AI Config</Text>
+                  {/* A `active` é o FALLBACK (= persona Standard desde 05-08):
+                      serve clientes sem persona e sidecars não publicados —
+                      pode não ser o modelo que serve nenhum utilizador. */}
+                  <Text fontSize="12px" fontWeight="600" color={tokens.colors.text.primary}>Config de fallback (active = Standard)</Text>
                   <Text
                     fontSize="10px"
                     color={verify.activeAIConfig.enabled ? tokens.colors.accent.green : tokens.colors.accent.orange}

@@ -386,7 +386,7 @@ class FirebaseAuthService {
       this.subscribeToPromotions()
 
       // Real-time modelo-principal listener — quando o admin troca o modelo
-      // ativo (escrito em system/aiActiveModel), o seletor de effort atualiza a
+      // da persona (escrito em system/aiPersonas), o seletor de effort atualiza a
       // lista de níveis e repõe o default, sem esperar por uma resposta.
       this.subscribeToActiveModel()
 

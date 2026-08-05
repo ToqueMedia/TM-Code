@@ -57,14 +57,18 @@ export const usePersonaStore = create<PersonaStoreState>((set) => ({
     if (!isPersona(persona)) return
     saveSelected(persona)
     set({ selected: persona })
-    // Trocar de persona invalida o "modelo servido" conhecido (X-TM-Model da
-    // última resposta pertence à persona ANTERIOR). Sem isto, o selector de
-    // effort mostrava a escala do modelo antigo até à primeira resposta da
-    // persona nova. Limpo → resolveEffortModelId cai no espelho Firestore
-    // (que segue a Standard) até o X-TM-Model real chegar. Import dinâmico
-    // para não criar ciclo estático entre stores.
+    // Trocar de persona invalida TUDO o que se sabia do modelo servido — o
+    // X-TM-Model E os headers de capacidade/janela pertencem à persona
+    // ANTERIOR. A 1ª versão só limpava name/provider (setModelInfo tem
+    // semântica undefined=não-tocar) e a auditoria 05-08 apanhou 4 bugs daí:
+    // imagem inline enviada a modelo cego (effectiveCapability(true,…) da
+    // visão do modelo antigo), auto-compact com a janela da persona anterior
+    // (estouro de contexto), prompt a anunciar pesquisa nativa inexistente, e
+    // badge de thinking com o modo errado. `null` = "o servidor não declarou"
+    // → tudo cai no perfil/fallback da persona até o X-TM-Model real chegar.
+    // Import dinâmico para não criar ciclo estático entre stores.
     void import('./agentStore').then(({ useAgentStore }) => {
-      useAgentStore.getState().setModelInfo(null, null)
+      useAgentStore.getState().setModelInfo(null, null, null, null, null, { vision: null, search: null })
     }).catch(() => {})
   },
 }))

@@ -151,10 +151,10 @@ export function resolveEffectiveEffort(
  * Modelo id usado para effort: último X-TM-Model (o que REALMENTE serviu),
  * senão Firestore real-time. O seletor e o header DEVEM usar a mesma fonte.
  *
- * INVERSÃO DE PRIORIDADE (2026-08-05, feature Personas): o Firestore
- * `system/aiActiveModel` espelha só a config ativa (= persona Standard) — com
- * personas, o modelo depende da PERSONA escolhida e o único sinal por-persona
- * é o X-TM-Model da resposta. Firestore-primeiro mostrava a escala do GLM com
+ * INVERSÃO DE PRIORIDADE (2026-08-05, feature Personas): o fallback vem do
+ * mapa por-persona (system/aiPersonas → activeModelStore.personaModels) — mas
+ * o modelo que REALMENTE serviu pode divergir (config KV vs mapa) e o
+ * X-TM-Model da resposta é a verdade final. Firestore-primeiro mostrava a escala do GLM com
  * o Standard publicado como MiMo (bug reportado pelo developer: "vejo High,
  * Max" num modelo sem esses níveis). O custo da inversão é o cenário antigo
  * (swap de modelo pelo admin com header ainda do modelo anterior) mostrar a
