@@ -41,10 +41,11 @@ const only = (() => {
   const i = process.argv.indexOf('--only')
   return i >= 0 ? process.argv[i + 1] : null
 })()
+const onlyIds = only ? only.split(',').map((s) => s.trim()).filter(Boolean) : null
 
 const cases = JSON.parse(
   readFileSync(path.join(ROOT, 'evals/cases.json'), 'utf8'),
-).filter((c) => !only || c.id === only)
+).filter((c) => !onlyIds || onlyIds.includes(c.id))
 
 if (cases.length === 0) {
   console.error(`[evals] nenhum caso${only ? ` com id "${only}"` : ''}.`)
@@ -157,7 +158,29 @@ function runCase(c) {
       const text = result.text ?? ''
       const missingText = (c.expect ?? []).filter((rx) => !new RegExp(rx, 'i').test(text))
       const missingFiles = (c.expectFiles ?? []).filter((f) => !existsSync(path.join(project, f)))
-      const ok = missingText.length === 0 && missingFiles.length === 0
+      // Asserções sobre o CONTEÚDO gerado — a única forma de medir QUALIDADE
+      // em vez de "o ficheiro existe". `expectFileContains` prova que a regra
+      // chegou (ex.: a linha de base de UI manda tratar o estado vazio);
+      // `refuteFileContains` apanha os tiques que a secção de gosto nomeia.
+      const readOut = (f) => {
+        try { return readFileSync(path.join(project, f), 'utf8') } catch { return '' }
+      }
+      const missingContent = []
+      for (const [file, patterns] of Object.entries(c.expectFileContains ?? {})) {
+        const body = readOut(file)
+        for (const rx of patterns) {
+          if (!new RegExp(rx, 'i').test(body)) missingContent.push(`${file} sem /${rx}/`)
+        }
+      }
+      const forbiddenContent = []
+      for (const [file, patterns] of Object.entries(c.refuteFileContains ?? {})) {
+        const body = readOut(file)
+        for (const rx of patterns) {
+          if (new RegExp(rx, 'i').test(body)) forbiddenContent.push(`${file} com /${rx}/`)
+        }
+      }
+      const ok = missingText.length === 0 && missingFiles.length === 0 &&
+        missingContent.length === 0 && forbiddenContent.length === 0
       // A cópia temp só é limpa em SUCESSO — num falhanço fica no disco para
       // autópsia (o path segue no reason).
       if (ok) rmSync(project, { recursive: true, force: true })
@@ -170,7 +193,7 @@ function runCase(c) {
         diag: result.diag,
         reason: ok
           ? ''
-          : `em falta: ${[...missingText.map((m) => `texto /${m}/`), ...missingFiles.map((f) => `ficheiro ${f}`)].join(' | ')} (autópsia: ${project})`,
+          : `em falta: ${[...missingText.map((m) => `texto /${m}/`), ...missingFiles.map((f) => `ficheiro ${f}`), ...missingContent, ...forbiddenContent.map((f) => `PROIBIDO ${f}`)].join(' | ')} (autópsia: ${project})`,
       })
     })
   })

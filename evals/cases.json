@@ -3,14 +3,18 @@
     "id": "read-package",
     "project": "evals/fixtures/hello-node",
     "task": "Lê o package.json deste projecto e responde APENAS com o nome exacto do pacote, nada mais.",
-    "expect": ["hello-evals-node"],
+    "expect": [
+      "hello-evals-node"
+    ],
     "timeoutSec": 180
   },
   {
     "id": "code-comprehension",
     "project": "evals/fixtures/hello-node",
     "task": "Abre o index.js e diz que número a função answer() devolve. Responde só com o número.",
-    "expect": ["42"],
+    "expect": [
+      "42"
+    ],
     "timeoutSec": 180
   },
   {
@@ -18,8 +22,58 @@
     "project": "evals/fixtures/hello-node",
     "task": "Cria um ficheiro chamado EVAL.md na raiz do projecto contendo exactamente o texto: eval ok",
     "expect": [],
-    "expectFiles": ["EVAL.md"],
-    "cleanupFiles": ["EVAL.md"],
+    "expectFiles": [
+      "EVAL.md"
+    ],
+    "cleanupFiles": [
+      "EVAL.md"
+    ],
     "timeoutSec": 240
+  },
+  {
+    "id": "ui-screen-react",
+    "project": "evals/fixtures/react-vite-plain",
+    "task": "Cria o ficheiro src/TaskList.jsx: um componente React que recebe a prop `tasks` (um array) e mostra a lista. Exporta-o por defeito. Não alteres mais nada.",
+    "expect": [],
+    "expectFiles": [
+      "src/TaskList.jsx"
+    ],
+    "expectFileContains": {
+      "src/TaskList.jsx": [
+        "length\\s*===\\s*0|!\\s*tasks|tasks\\.length\\s*(\\?|>|&&)|length\\s*<\\s*1"
+      ]
+    },
+    "refuteFileContains": {
+      "src/TaskList.jsx": [
+        "lorem ipsum"
+      ]
+    },
+    "cleanupFiles": [
+      "src/TaskList.jsx"
+    ],
+    "timeoutSec": 300
+  },
+  {
+    "id": "ui-page-no-ui-project",
+    "project": "evals/fixtures/hello-node",
+    "task": "Cria o ficheiro public/index.html: uma página que mostra a lista de tarefas de uma equipa, renderizada por JavaScript a partir de um array `tasks` declarado no próprio ficheiro. CSS incluído no ficheiro. Não alteres mais nada.",
+    "expect": [],
+    "expectFiles": [
+      "public/index.html"
+    ],
+    "expectFileContains": {
+      "public/index.html": [
+        "length\\s*===\\s*0|!\\s*tasks|tasks\\.length\\s*(\\?|>|&&)|length\\s*<\\s*1"
+      ]
+    },
+    "refuteFileContains": {
+      "public/index.html": [
+        "lorem ipsum"
+      ]
+    },
+    "cleanupFiles": [
+      "public/index.html"
+    ],
+    "timeoutSec": 300
   }
 ]

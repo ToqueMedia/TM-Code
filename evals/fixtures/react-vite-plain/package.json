@@ -1,0 +1,17 @@
+{
+  "name": "react-evals-plain",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture React+Vite SEM design system (sem Chakra, sem Tailwind, sem pasta de tema) — o portão de evidência mantém a linha de base de UI e retém as secções de tokens.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  }
+}
