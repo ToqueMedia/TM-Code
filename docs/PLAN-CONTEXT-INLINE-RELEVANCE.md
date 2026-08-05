@@ -1,5 +1,10 @@
 # #9 — Contexto auxiliar entregue inline sem relação com a tarefa
 
+> **ESTADO: fechado a 2026-08-05.** A medição obrigatória foi feita (resultado
+> na secção "Medição do conteúdo real", abaixo) e o portão de evidência do
+> projecto está implementado. O que se segue mantém-se como registo do achado;
+> a secção final descreve o que ficou em código.
+
 > **Documento de handoff.** Escrito para ser lido numa sessão NOVA, sem
 > qualquer histórico. Contém o achado, as medições, a doutrina que está em
 > vigor (e porquê), a armadilha que já matou a tentativa anterior, e os
@@ -127,6 +132,90 @@ Testes relevantes já existentes: `src/services/agent/__tests__/auxiliaryRegistr
 Medição fim-a-fim: exportar uma sessão (a exportação traz `requestUsageLog` +
 `requestEfficiencyReport`) e comparar `auxiliaryContextTokens`,
 `auxiliaryLoaded` e o cache-hit antes/depois, no MESMO tipo de projecto.
+
+## Medição do conteúdo real (2026-08-05) — o primeiro passo obrigatório
+
+A hipótese registada acima ("se os resolvers devolvem vazio num backend, o
+achado perde peso") está **falsificada**. As seis secções em causa são texto
+**estático**: não passam pelo projecto, logo não encolhem num repo sem design
+system. Medido o corpo renderizado (`ceil(chars/3)`):
+
+| secção | chars | tokens reais | `estTokens` declarado |
+|---|---|---|---|
+| `design_system.semantic_tokens` | 425 | 142 | 220 |
+| `design_system.theme_config` | 302 | 101 | 220 |
+| `design_system.brand_palette` | 203 | 68 | 160 |
+| `design_system.chakra_recipes` | 200 | 67 | 180 |
+| `design_system.component_patterns` | 2 591 | **864** | 650 |
+| `ui_patterns` | 1 242 | 414 | 350 |
+| **total** | | **1 656** | 1 780 |
+| `vision.image_rules` (sem visão nativa) | 639 | 213 | 200 |
+
+Dois efeitos secundários da medição:
+
+1. Os `estTokens` escritos à mão desviam-se do real (−25% a +33%), e eram eles
+   que alimentavam `auxiliaryContextTokens`. Uma telemetria de custo que não
+   mede o custo faz a auditoria seguinte discutir o número errado — corrigido
+   (`applyRenderedTokenCounts`).
+2. Os 4 290 tokens do achado são a soma dos `estTokens` das 14 secções, não o
+   custo real.
+
+## O que ficou em código (2026-08-05)
+
+Portão de **evidência do PROJECTO** — nunca inferência sobre a tarefa.
+`src/services/agent/contextBuilder/projectEvidence.ts` (novo) detecta três
+superfícies a partir do `package.json` e da árvore, e
+`applyEvidenceOmissions` (em `auxiliaryRegistry.ts`) retira da entrega inline
+o que a evidência não justifica:
+
+| retido quando | secções |
+|---|---|
+| sem superfície de UI (sem dep de UI, sem `.tsx/.vue/.html/.css`, sem pasta `components/pages/client/…`) | `design_system.component_patterns`, `ui_patterns` |
+| sem superfície de tema (sem ficheiro/pasta de tema, sem `tailwind.config`, sem dep de design system) | `design_system.semantic_tokens`, `.theme_config`, `.brand_palette` |
+| Chakra não é dependência | `design_system.chakra_recipes` |
+| a sessão ainda não teve imagem (pegajoso: uma imagem no turno 3 mantém as regras no turno 8) | `vision.image_rules` |
+
+**A armadilha, respondida.** Três propriedades, cada uma com teste:
+
+1. **Ausência de dados não é evidência negativa** — projecto vazio ou ilegível
+   entrega tudo, como antes. Criar uma app de raiz é onde a linha de base de
+   gosto mais vale; não pode nascer sem ela.
+2. **O portão não é pegajoso** — é reavaliado a cada build e o `fsVersion` está
+   na chave de cache, portanto no turno a seguir a escrever o primeiro `.tsx`
+   (ou a instalar Tailwind) as secções voltam sozinhas.
+3. **A omissão é visível, não silenciosa** — as secções retidas aparecem no
+   índice on-demand num grupo próprio, com a razão e um convite explícito a
+   pedi-las se a tarefa contrariar a evidência. Vão também para o export
+   (`evidenceOmittedSections` / `evidenceOmitReason` / `evidenceSignals`).
+
+Os sinais são de propósito **generosos** (basta uma pasta `client/`, `web/`,
+`templates/`): erram para o lado de entregar.
+
+### Poupança esperada, sem exagero
+
+| arquétipo | retido por pedido |
+|---|---|
+| backend/CLI/lib puro (Express+Drizzle, Go, Python sem templates) | ~1 869 tokens |
+| app React sem sistema de tokens | ~591 tokens |
+| app React + Tailwind, sem Chakra, sem imagem | ~280 tokens |
+
+Nota honesta: **a sessão que motivou o achado era full-stack** (backend Express
++ frontend React), logo teria ficado no último caso — poupança modesta. É a
+consequência aceite de depender do PROJECTO e não da TAREFA; o caso onde o
+achado tem o peso todo é o do backend puro.
+
+### Correcções vizinhas apanhadas pelo caminho
+
+- `PackageSummary.detectionDependencies` (novo): união **não truncada** de
+  deps + devDeps + deps de workspace, só para detecção. As listas renderizadas
+  vêm cortadas a 15/10 — `hasFrameworkDeps` detectava a partir delas e dava
+  falso negativo em qualquer projecto onde o framework caísse fora da janela
+  (React na posição 16 = "site sem build", e o prompt injetava-lhe as regras
+  erradas, calado).
+- `project.package_map` e `delivery.build_scripts` deixam de emitir um
+  cabeçalho seguido de `package summary: unavailable` em projectos sem
+  `package.json` — o caso "não emitir cabeçalhos de secções vazias" que o plano
+  previa.
 
 ## Contexto de fundo útil
 

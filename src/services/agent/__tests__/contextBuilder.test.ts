@@ -132,16 +132,19 @@ describe('ContextBuilder', () => {
       expect(sel?.loaded.map(l => l.id)).toContain('vision.image_rules')
     })
 
-    it('sem imagem fica em default_task (full delivery inclui as regras de visão)', async () => {
+    it('sem imagem fica em default_task e retém as regras de visão por evidência', async () => {
       await builder.buildSystemPrompt(
         '/test/project', 'web', undefined, undefined, 'corrige este bug',
       )
       const sel = builder.getLastAuxiliarySelection()
       expect(sel?.profile).toBe('default_task')
-      // Doutrina full-delivery (2026-08-03): vision.image_rules é bounded e
-      // vai inline em todos os perfis — o CONTEÚDO adapta-se à capacidade do
-      // modelo (getVisionSection lê supportsAttachments), não a presença.
-      expect(sel?.loaded.map(l => l.id)).toContain('vision.image_rules')
+      // Achado #9 (2026-08-05): a entrega inline mantém-se doutrina, mas o
+      // portão de EVIDÊNCIA retém as regras de visão até a sessão ter uma
+      // imagem. A omissão não é silenciosa — fica no índice on-demand com a
+      // razão, e volta sozinha no turno em que a imagem chega.
+      expect(sel?.loaded.map(l => l.id)).not.toContain('vision.image_rules')
+      expect(sel?.evidenceOmittedSections).toContain('vision.image_rules')
+      expect(sel?.omitted.map(o => o.id)).toContain('vision.image_rules')
     })
 
     it('returns a string', async () => {
@@ -224,9 +227,21 @@ describe('ContextBuilder', () => {
       // Determinística NÃO quer dizer VAZIA (auditoria 2026-07-28) e, desde a
       // doutrina full-delivery (2026-08-03), também não quer dizer mínima: as
       // secções BOUNDED vão todas inline (BOUNDED_INLINE_CONTEXTS) + a
-      // baseline de delivery; on-demand ficam só as unbounded.
+      // baseline de delivery; on-demand ficam só as unbounded — MENOS as que
+      // o portão de evidência do projecto reteve (achado #9, 2026-08-05).
+      // O fixture declara `react` mas não tem tema, nem Chakra, nem imagem.
+      const evidenceHeld = selection?.evidenceOmittedSections ?? []
+      expect(evidenceHeld.sort()).toEqual([
+        'design_system.brand_palette',
+        'design_system.chakra_recipes',
+        'design_system.semantic_tokens',
+        'design_system.theme_config',
+        'vision.image_rules',
+      ])
       expect([...(selection?.contextPlan.selectedContexts ?? [])].sort()).toEqual(
-        [...BOUNDED_INLINE_CONTEXTS, 'delivery.git_status', 'delivery.dev_server'].sort(),
+        [...BOUNDED_INLINE_CONTEXTS, 'delivery.git_status', 'delivery.dev_server']
+          .filter(id => !evidenceHeld.includes(id))
+          .sort(),
       )
       expect(prompt).not.toContain('__TM_SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
     })

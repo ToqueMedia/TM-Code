@@ -156,6 +156,17 @@ export interface AuxiliarySelection {
   requestContextFallbackFrom?: string[]
   requestContextFallbackTo?: string[]
   requestedButNotLoadedSections?: string[]
+  /**
+   * Secções BOUNDED que a evidência do projecto não justificou (achado #9).
+   * Distintas das omitidas por serem unbounded: estas seriam entregues inline
+   * se o projecto tivesse a superfície correspondente. Visíveis no índice
+   * on-demand com a razão, e no export.
+   */
+  evidenceOmittedSections?: string[]
+  /** Razão por id, para o índice on-demand e para o export. */
+  evidenceOmitReason?: Record<string, string>
+  /** Sinais de evidência que suportaram as decisões acima. */
+  evidenceSignals?: string[]
   readOnly: boolean
   reason: string
   routerSource: 'model' | 'fallback' | 'keyword'
@@ -731,6 +742,16 @@ function unique(ids: string[]): string[] {
  * unbounded (project.structure_full, project.docs_full, project.symbol_index)
  * e agent_runtime.memory_context (duplicaria as secções estáticas de memória
  * do prompt — ver renderAuxiliaryContent).
+ *
+ * ESTA LISTA NÃO É A ENTREGA FINAL (2026-08-05, achado #9). É o candidato
+ * máximo: depois dela corre um portão de EVIDÊNCIA DO PROJECTO que retira as
+ * secções de design system num repo sem UI/tema/Chakra e as regras de visão
+ * numa sessão sem imagens — ver `projectEvidence.ts` e `applyEvidenceOmissions`
+ * abaixo. Medido antes de mudar: as seis secções de design system são texto
+ * estático e custavam ~1 656 tokens REAIS por pedido, mesmo num backend puro.
+ * O portão depende do PROJECTO e nunca da tarefa (foi por classificar a tarefa
+ * que o Intent Router morreu), o que ele retém fica visível no índice
+ * on-demand com a razão, e um projecto vazio continua a receber tudo.
  */
 // Fora da lista, de propósito (não são meia-entrega — já chegam por outra via
 // ou duplicariam): `delivery.changed_files` (a secção recent_files entrega o
@@ -891,14 +912,118 @@ export function selectAuxiliaries(
   }
 }
 
+/**
+ * Retira da entrega inline as secções que a EVIDÊNCIA DO PROJECTO não
+ * justifica (achado #9 — ver `projectEvidence.ts` para o critério e para as
+ * duas regras que evitam a falha silenciosa).
+ *
+ * Muta a selecção no sítio, de propósito: `contextBuilder` já guardou a
+ * referência em `lastAuxiliarySelection`, e a telemetria (`payloadInspector`)
+ * lê `loaded` / `omitted` / `loadedTokens` daí. Reescrever um objecto novo aqui
+ * deixaria a telemetria a olhar para a selecção PRÉ-filtro — exactamente o modo
+ * de falha que este achado documenta (um mecanismo que parece activo e não
+ * está). A chave de cache do prompt não sofre: `dynamicCacheSig` inclui o
+ * `auxLoadedContent` e o índice on-demand, ambos já pós-filtro.
+ */
+export function applyEvidenceOmissions(
+  selection: AuxiliarySelection,
+  omissions: Array<{ id: string; reason: string }>,
+  signals: string[] = [],
+): AuxiliarySelection {
+  const byId = new Map(omissions.map(o => [resolveAuxiliaryId(o.id), o.reason]))
+  if (byId.size === 0) {
+    selection.evidenceSignals = signals
+    return selection
+  }
+
+  const kept: AuxiliaryLoadResult[] = []
+  const dropped: string[] = []
+  const reasons: Record<string, string> = {}
+
+  for (const entry of selection.loaded) {
+    const reason = byId.get(entry.id)
+    if (!reason) {
+      kept.push(entry)
+      continue
+    }
+    const meta = getAuxiliaryMeta(entry.id)
+    dropped.push(entry.id)
+    reasons[entry.id] = reason
+    selection.omitted.push({
+      id: entry.id,
+      name: entry.name,
+      description: meta?.description ?? entry.name,
+      reason: `project evidence: ${reason}`,
+      estTokens: entry.tokens,
+      domain: entry.domain,
+      capability: entry.capability,
+      scope: entry.scope,
+      costTier: entry.costTier,
+      granularity: entry.granularity,
+      whenToUse: meta?.whenToUse ?? '',
+      whenNotToUse: meta?.whenNotToUse ?? '',
+      fallbackTo: meta?.fallbackTo ?? [],
+    })
+  }
+
+  if (dropped.length === 0) {
+    selection.evidenceSignals = signals
+    return selection
+  }
+
+  selection.loaded = kept
+  selection.loadedTokens = kept.reduce((sum, l) => sum + l.tokens, 0)
+  selection.savingsTokens = selection.totalAvailableTokens - selection.loadedTokens
+  selection.autoLoadedSystemSections = kept.map(l => l.id)
+  selection.evidenceOmittedSections = dropped
+  selection.evidenceOmitReason = reasons
+  selection.evidenceSignals = signals
+  // O plano tem de contar a mesma história que a entrega: sem isto, o cabeçalho
+  // do índice on-demand anunciava "Selected inline: …" a listar secções que já
+  // não vão no prompt.
+  const droppedSet = new Set(dropped)
+  selection.contextPlan = {
+    ...selection.contextPlan,
+    selectedContexts: selection.contextPlan.selectedContexts.filter(
+      id => !droppedSet.has(resolveAuxiliaryId(id)),
+    ),
+  }
+  return selection
+}
+
+/**
+ * Substitui os `estTokens` declarados pelo custo REAL do corpo renderizado.
+ *
+ * `auxiliaryContextTokens` era a soma das estimativas escritas à mão na meta —
+ * o achado #9 foi medido com elas e desviavam-se do real (component_patterns:
+ * 650 declarados, 864 reais). Uma telemetria de custo que não mede o custo faz
+ * a próxima auditoria discutir o número errado.
+ */
+export function applyRenderedTokenCounts(
+  selection: AuxiliarySelection,
+  rendered: Record<string, string>,
+): AuxiliarySelection {
+  let total = 0
+  for (const entry of selection.loaded) {
+    const body = rendered[entry.id]
+    if (typeof body === 'string') entry.tokens = Math.ceil(body.length / 3)
+    total += entry.tokens
+  }
+  selection.loadedTokens = total
+  selection.savingsTokens = Math.max(0, selection.totalAvailableTokens - total)
+  return selection
+}
+
 export function buildOnDemandIndex(selection: AuxiliarySelection): string | null {
   const omitted = selection.omitted
   if (omitted.length === 0) return null
 
   const candidateSet = new Set(selection.contextPlanCandidateSections ?? [])
-  const candidates = omitted.filter(o => candidateSet.has(o.id))
-  const fallbackOnly = omitted.filter(o => !candidateSet.has(o.id) && (o.granularity === 'full' || o.costTier === 'high'))
-  const available = omitted.filter(o => !candidateSet.has(o.id) && !fallbackOnly.includes(o))
+  const evidenceSet = new Set(selection.evidenceOmittedSections ?? [])
+  const evidenceOmitted = omitted.filter(o => evidenceSet.has(o.id))
+  const candidates = omitted.filter(o => !evidenceSet.has(o.id) && candidateSet.has(o.id))
+  const fallbackOnly = omitted.filter(o => !evidenceSet.has(o.id) && !candidateSet.has(o.id) && (o.granularity === 'full' || o.costTier === 'high'))
+  const available = omitted.filter(o => !evidenceSet.has(o.id) && !candidateSet.has(o.id) && !fallbackOnly.includes(o))
 
   const candidateLines = candidates.map((o) =>
     `- \`${o.id}\` [candidate; ${o.granularity}; ${o.costTier}] — ${o.description}`,
@@ -939,11 +1064,24 @@ export function buildOnDemandIndex(selection: AuxiliarySelection): string | null
     // quem já soubesse usá-lo. Uma política que o modelo não vê não existe.
     // Desde a doutrina full-delivery (2026-08-03) só as secções UNBOUNDED
     // chegam aqui — o resto é entregue inline.
-    'Only unbounded contexts are omitted from the prompt (everything bounded is already inline). To load one, call the `request_context` tool with its id — the content comes back as a tool result in the same turn. This is expected use, not a failure mode: when a section below matches the task, request it BEFORE falling back to broad exploration.',
+    'Sections are omitted from the prompt when they are unbounded, or when this project shows no evidence that they apply. To load one, call the `request_context` tool with its id — the content comes back as a tool result in the same turn. This is expected use, not a failure mode: when a section below matches the task, request it BEFORE falling back to broad exploration.',
     'Typical moments: you need to locate a function/class/component/hook by name → `project.symbol_index`; broad architecture or unknown file layout → `project.structure_full`; README/PLAN/TODO content → `project.docs_full`; the task is about agent memory → `agent_runtime.memory_context`.',
     'Call once per id — content already returned does not need re-requesting.',
     ...(symbolIndexLine ? [symbolIndexLine] : []),
     '',
+    // Grupo próprio e no topo: estas seriam entregues inline e foram retidas
+    // por evidência do PROJECTO, não por serem caras. Se a tarefa contrariar a
+    // evidência (ex.: introduzir a primeira UI num backend), é aqui que o
+    // modelo vê o que lhe falta — e a razão, para poder discordar dela.
+    ...(evidenceOmitted.length
+      ? [
+          'Withheld for lack of project evidence — request any of these if the task contradicts the evidence (e.g. you are about to add the project\'s first UI):',
+          ...evidenceOmitted.map(o =>
+            `- \`${o.id}\` — ${o.description} (${(selection.evidenceOmitReason ?? {})[o.id] ?? o.reason})`,
+          ),
+          '',
+        ]
+      : []),
     ...(candidateLines.length ? ['Candidate contexts:', ...candidateLines, ''] : []),
     ...(domainLines.length ? ['Other available contexts:', ...domainLines, ''] : []),
     ...(fallbackLine ? [fallbackLine] : []),

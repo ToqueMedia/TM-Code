@@ -27,6 +27,18 @@ export interface PackageSummary {
    * "vanilla web" dava positivo em todo o monorepo React.
    */
   workspaceDependencies: string[]
+  /**
+   * União NÃO truncada de dependencies + devDependencies da raiz + as dos
+   * sub-pacotes de workspace. Existe só para DETECÇÃO (evidência do projecto:
+   * framework, superfície de UI, design system) — nunca é renderizada.
+   *
+   * `dependencies`/`devDependencies` vêm cortadas a 15/10 para o prompt; quem
+   * detectava a partir delas dava falso negativo em qualquer projecto com mais
+   * de 15 deps onde o sinal ficasse fora da janela (React na posição 16 = "não
+   * é um projecto React"). Um falso negativo de detecção não avisa: só entrega
+   * contexto errado, calado.
+   */
+  detectionDependencies: string[]
   packageManager: string
 }
 

@@ -115,6 +115,8 @@ import {
   type ContextPlanClassification,
   fallbackContextPlanForProfile,
   selectAuxiliaries,
+  applyEvidenceOmissions,
+  applyRenderedTokenCounts,
   buildOnDemandIndex,
   getAuxiliaryMeta,
   resolveAuxiliaryId,
@@ -122,6 +124,10 @@ import {
   type PromptProfile,
   type RouterDiagnostics,
 } from './contextBuilder/auxiliaryRegistry'
+import {
+  detectProjectContextEvidence,
+  evidenceOmittedAuxiliaries,
+} from './contextBuilder/projectEvidence'
 import { getTmsTurnTelemetry, markProjectSymbolIndexRequested } from './tmsContext'
 import {
   buildInstructionsDocsFullPart,
@@ -316,6 +322,11 @@ class ContextBuilder {
         return ctx?.promptCtx ? getProjectStructureIndexSection(ctx.promptCtx) : null
       case 'project.package_map':
         if (!ctx?.promptCtx) return null
+        // Sem package.json não há mapa nenhum: emitir o cabeçalho mais
+        // "package summary: unavailable" custa tokens, parece dados e não diz
+        // nada (mesmo padrão do "[object Object]" acima). O tipo de projecto e
+        // o gestor de pacotes já vão na secção de ambiente.
+        if (!ctx.promptCtx.pkgSummary) return null
         return [
           '# Project package map',
           `project type: ${ctx.promptCtx.projectType}`,
@@ -365,6 +376,8 @@ class ContextBuilder {
         return getDevServerStatusSection()
       case 'delivery.build_scripts':
         if (!ctx?.promptCtx) return null
+        // Idem: sem package.json não há scripts para descobrir.
+        if (!ctx.promptCtx.pkgSummary) return null
         return [
           '# Delivery: build scripts',
           `package manager: ${ctx.promptCtx.pmDetected}`,
@@ -763,8 +776,12 @@ class ContextBuilder {
     // raiz não declara framework nenhum. Com só a raiz, `isVanillaWeb` dava
     // true em qualquer monorepo React e o prompt injetava-lhe as regras de
     // "site sem build" — orientação errada por omissão de dados.
+    // `detectionDependencies` e não `dependencies` (2026-08-05): as listas da
+    // raiz vêm cortadas a 15/10 para o prompt, portanto detectar a partir delas
+    // dava falso negativo em qualquer projecto onde o framework caísse fora da
+    // janela — e o prompt injetava-lhe as regras de "site sem build".
     const hasFrameworkDeps = pkgSummary
-      ? [...pkgSummary.dependencies, ...pkgSummary.devDependencies, ...pkgSummary.workspaceDependencies].some(d =>
+      ? pkgSummary.detectionDependencies.some(d =>
           ['react', 'next', 'vue', 'nuxt', 'svelte', '@angular/core', 'astro', 'solid-js', 'express', 'fastify', '@nestjs/core'].includes(d)
         )
       : false
@@ -851,9 +868,19 @@ class ContextBuilder {
     // Session memory — agent-maintained notes that survive compaction.
     // Loaded from the active chat session (piggybacks on session persistence).
     let sessionMemory: string | null = null
+    // PEGAJOSO por sessão, de propósito: as regras de visão entram no turno em
+    // que chega a primeira imagem e ficam. Uma imagem do turno 3 deixa uma
+    // descrição no histórico que o modelo ainda lê no turno 8 — retirar-lhe as
+    // regras aí traz de volta o "não consigo ver imagens" sobre conteúdo que
+    // ele TEM. Não sabendo, entrega-se (o `catch` deixa isto a true).
+    let sessionHasImage = true
     try {
       const { useChatStore } = await import('../../stores/chatStore')
-      sessionMemory = useChatStore.getState().getActiveSession()?.sessionMemory ?? null
+      const activeSession = useChatStore.getState().getActiveSession()
+      sessionMemory = activeSession?.sessionMemory ?? null
+      sessionHasImage = (activeSession?.messages ?? []).some(m =>
+        m.attachments?.some(a => a.type === 'image'),
+      )
     } catch { /* non-critical */ }
 
     const ctx: PromptContext = {
@@ -913,11 +940,33 @@ class ContextBuilder {
     // that are omitted stay unloaded — their ids appear in the on-demand
     // index below, and the agent can fetch them via `request_context`.
     this.lastAuxiliaryCtx = { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb, promptCtx: ctx, loadedSkills }
+    // ── Portão de EVIDÊNCIA DO PROJECTO (achado #9, 2026-08-05) ──
+    // A entrega inline continua a ser a doutrina (a meia-entrega falhava em
+    // silêncio: 0 chamadas a request_context em 34 e em 114 pedidos medidos).
+    // O que muda é que a lista deixa de ser cega ao projecto: as secções de
+    // design system e as regras de visão só entram quando o PROJECTO (não a
+    // tarefa — foi por aí que o Intent Router morreu) mostra a superfície
+    // correspondente. Corre aqui e não junto à selecção porque precisa do
+    // pkgSummary e da árvore, que só existem depois do gather em paralelo.
+    // Ausência de dados não conta como evidência negativa e o portão não é
+    // pegajoso — ver projectEvidence.ts.
+    const projectEvidence = detectProjectContextEvidence({ pkgSummary, treeString })
+    applyEvidenceOmissions(
+      auxSelection,
+      evidenceOmittedAuxiliaries({
+        evidence: projectEvidence,
+        sessionHasImage: (signals?.hasImage ?? false) || sessionHasImage,
+      }),
+      projectEvidence.signals,
+    )
     const auxLoadedContent: Record<string, string> = {}
     for (const l of auxSelection.loaded) {
       const body = await this.renderAuxiliaryContent(l.id)
       if (body) auxLoadedContent[l.id] = body
     }
+    // Custo REAL do que foi renderizado, em vez da soma dos `estTokens`
+    // escritos à mão na meta — ver applyRenderedTokenCounts.
+    applyRenderedTokenCounts(auxSelection, auxLoadedContent)
     const onDemandIndex = buildOnDemandIndex(auxSelection)
     const dynamicCacheSig = stablePromptHash(JSON.stringify({
       userMessage: userMessage ?? '',

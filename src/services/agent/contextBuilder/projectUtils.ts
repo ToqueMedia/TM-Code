@@ -374,6 +374,8 @@ export async function extractPackageSummary(projectPath: string): Promise<Packag
       dependencyCount: deps.length,
       devDependencyCount: devDeps.length,
       workspaceDependencies: Array.from(workspaceDeps),
+      // Union NÃO truncada, só para detecção — ver a nota em PackageSummary.
+      detectionDependencies: Array.from(new Set([...deps, ...devDeps, ...workspaceDeps])),
       packageManager: pkg.packageManager || '',
     }
   } catch {
