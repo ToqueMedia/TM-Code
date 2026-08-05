@@ -581,6 +581,17 @@ function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
       if (e.loadedSystemSections?.length) lines.push(`| loaded system sections | ${e.loadedSystemSections.map(id => `\`${id}\``).join(', ')} |`)
       if (e.omittedSystemSections?.length) lines.push(`| omitted system sections | ${e.omittedSystemSections.map(id => `\`${id}\``).join(', ')} |`)
       if (e.autoLoadedSystemSections?.length) lines.push(`| auto-loaded system sections | ${e.autoLoadedSystemSections.map(id => `\`${id}\``).join(', ')} |`)
+      // A razão E os sinais, não só os ids: sem eles o export mostra que o
+      // projecto perdeu secções mas não deixa reconstruir porquê — que é a
+      // única pergunta que a auditoria seguinte vai fazer.
+      if (e.evidenceOmittedSections?.length) {
+        lines.push(`| evidence-withheld sections | ${e.evidenceOmittedSections.map(id => `\`${id}\``).join(', ')} |`)
+        const reasons = e.evidenceOmitReason ?? {}
+        for (const id of e.evidenceOmittedSections) {
+          if (reasons[id]) lines.push(`| ↳ \`${id}\` | ${reasons[id]} |`)
+        }
+      }
+      if (e.evidenceSignals?.length) lines.push(`| project evidence signals | ${e.evidenceSignals.map(s => `\`${s}\``).join(', ')} |`)
       if (e.contextPlanCandidateSections?.length) lines.push(`| context plan candidates | ${e.contextPlanCandidateSections.map(id => `\`${id}\``).join(', ')} |`)
       if (e.modelRequestedContextSections?.length) lines.push(`| model requested context sections | ${e.modelRequestedContextSections.map(id => `\`${id}\``).join(', ')} |`)
       if (e.requestContextToolCalls != null) lines.push(`| request_context tool calls | ${e.requestContextToolCalls.toLocaleString()} |`)

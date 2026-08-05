@@ -80,8 +80,15 @@ const UI_DIR = /(^|[/\s])(components?|pages|views|screens|templates|public|stati
 const THEME_SURFACE = /(tailwind\.config\.|theme\.(ts|tsx|js|json|css)|(^|[/\s])(theme|themes|styles|design-system|design_system|tokens)(\/|\s|$))/im
 
 export interface ProjectContextEvidence {
-  /** O projecto tem código (≠ pasta vazia / acabada de criar). */
-  hasSourceFiles: boolean
+  /**
+   * O projecto tem conteúdo reconhecível — ficheiro-fonte na árvore OU pelo
+   * menos uma dependência declarada. Falso = "não sei", não "não tem".
+   *
+   * Deliberadamente NÃO conta: um `package.json` sozinho (o `npm init -y` gera
+   * logo um script `test`, portanto contar scripts punha uma pasta vazia a
+   * parecer um projecto feito), nem uma árvore ilegível.
+   */
+  hasProjectContent: boolean
   /** O projecto renderiza UI (dependência de UI, ficheiro de UI ou pasta de UI). */
   hasUiSurface: boolean
   /** O projecto tem tema / design tokens (ficheiro de tema ou dep de design system). */
@@ -121,15 +128,20 @@ export function detectProjectContextEvidence(input: {
   if (uiDir) signals.push('dir:ui-like')
   if (themeFile) signals.push('file:theme-surface')
 
-  const hasSourceFiles = SOURCE_FILE_EXT.test(tree) || input.pkgSummary != null
-  if (!hasSourceFiles) signals.push('project:empty-or-unreadable')
+  // `buildFileTree` devolve este sentinela quando a leitura falha. Sem o
+  // tratar, uma falha de I/O passava por "projecto sem UI" e o portão retinha
+  // TUDO — um erro transitório a degradar o prompt, calado. Falha de leitura é
+  // ausência de dados, e ausência de dados não decide nada.
+  const treeReadable = tree.length > 0 && !tree.startsWith('(Could not read')
+  const hasProjectContent = (treeReadable && SOURCE_FILE_EXT.test(tree)) || deps.length > 0
+  if (!hasProjectContent) signals.push('project:empty-or-unreadable')
 
   // Estes campos dizem só o que foi DETECTADO. A política "ausência de dados
   // não é evidência negativa" vive no portão (evidenceOmittedAuxiliaries), num
   // sítio só — misturá-la aqui faria `hasUiSurface: true` significar duas
   // coisas diferentes conforme o projecto.
   return {
-    hasSourceFiles,
+    hasProjectContent,
     hasUiSurface: Boolean(uiDep || dsDep || uiFile || uiDir),
     hasThemeSurface: Boolean(dsDep || themeFile),
     hasChakra,
@@ -154,9 +166,10 @@ export function evidenceOmittedAuxiliaries(
   const { evidence, sessionHasImage } = input
   const out: Array<{ id: string; reason: string }> = []
 
-  // Regra 1: ausência de dados NÃO é evidência negativa. Projecto vazio ou
-  // ilegível → entrega tudo, como antes deste portão existir.
-  if (!evidence.hasSourceFiles) return out
+  // Regra 1: ausência de dados NÃO é evidência negativa. Projecto vazio,
+  // acabado de criar ou ilegível → entrega tudo, como antes deste portão
+  // existir. É também o caso em que a linha de base de gosto de UI mais vale.
+  if (!evidence.hasProjectContent) return out
 
   if (!evidence.hasUiSurface) {
     const why = 'no UI surface in this project (no UI dependency, no .tsx/.vue/.html/.css file, no components/pages/client folder)'

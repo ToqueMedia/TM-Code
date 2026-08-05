@@ -183,10 +183,18 @@ o que a evidência não justifica:
 2. **O portão não é pegajoso** — é reavaliado a cada build e o `fsVersion` está
    na chave de cache, portanto no turno a seguir a escrever o primeiro `.tsx`
    (ou a instalar Tailwind) as secções voltam sozinhas.
-3. **A omissão é visível, não silenciosa** — as secções retidas aparecem no
+3. **A omissão é auditável, não silenciosa** — as secções retidas aparecem no
    índice on-demand num grupo próprio, com a razão e um convite explícito a
-   pedi-las se a tarefa contrariar a evidência. Vão também para o export
-   (`evidenceOmittedSections` / `evidenceOmitReason` / `evidenceSignals`).
+   pedi-las, e o `request_context` lista-as (`omittedIds` vem de
+   `selection.omitted`, portanto o meta-tool aceita-as mesmo). Vão também para o
+   export: `evidenceOmittedSections` / `evidenceOmitReason` / `evidenceSignals`
+   atravessam `payloadInspector` → `RequestUsageEntry` → `sessionExport`.
+
+   **Peso honesto desta propriedade:** é uma garantia para quem AUDITA, não um
+   mecanismo de recuperação. Está medido que o modelo não pede o que lhe falta
+   (0 chamadas em 34 e em 114 pedidos) — não há razão para crer que passa a
+   pedir só porque a linha está mais bem escrita. A segurança real vem de (1) e
+   (2); esta serve para que, quando correr mal, se consiga ver porquê.
 
 Os sinais são de propósito **generosos** (basta uma pasta `client/`, `web/`,
 `templates/`): erram para o lado de entregar.
@@ -216,6 +224,60 @@ achado tem o peso todo é o do backend puro.
   cabeçalho seguido de `package summary: unavailable` em projectos sem
   `package.json` — o caso "não emitir cabeçalhos de secções vazias" que o plano
   previa.
+
+## Análise crítica da primeira versão (mesma sessão, 2026-08-05)
+
+Uma releitura da própria implementação apanhou três defeitos, todos já
+corrigidos. Ficam registados porque o padrão é mais útil do que o bug.
+
+1. **Falhava para o lado errado.** `buildFileTree` devolve
+   `(Could not read project structure)` quando a leitura falha; a primeira
+   versão lia isso como "projecto sem UI" e retinha as seis secções. Um erro
+   transitório de I/O degradava o prompt em silêncio — exactamente o modo de
+   falha que este achado existe para combater, reintroduzido pela correcção.
+2. **A regra 1 não cobria o caso real.** `hasSourceFiles` era
+   `ficheiros-fonte OU package.json existe`, portanto uma pasta acabada de
+   criar com `npm init -y` contava como projecto feito e perdia a linha de base
+   de UI no turno em que a app era gerada. **O teste da regra 1 passava** — usava
+   `pkgSummary: null`, o caso fácil. Um teste que valida a regra como foi
+   ESCRITA, e não como se COMPORTA, é pior do que nenhum: dá cobertura à
+   afirmação errada. Hoje o critério é ficheiro-fonte na árvore OU ≥1
+   dependência declarada (contar `scripts` não serve: o `npm init -y` já gera
+   um).
+3. **Uma afirmação sem implementação.** Este documento dizia que os campos de
+   evidência iam para o export; iam para o objecto de selecção e morriam aí —
+   o `payloadInspector` não os copiava. É o padrão "alegação sem implementação"
+   que a auditoria de 07-29/30 já tinha catalogado nesta casa, cometido a
+   escrever a correcção de um achado da mesma família. Agora atravessam mesmo,
+   com a razão por secção.
+
+Um quarto ponto foi corrigido por coerência: `savingsTokens` passou a somar os
+`estTokens` das omitidas em vez de `totalAvailable − loaded`. Com o carregado
+medido no corpo real e o total ainda em estimativas, a subtracção misturava as
+duas unidades — e podia ficar negativa quando o corpo real excedia a
+estimativa.
+
+### O que continua por fazer / por decidir
+
+- **Sem eval.** As três propriedades de segurança estão testadas; o efeito na
+  QUALIDADE da geração não. O teste que falta é um eval do tipo "projecto
+  backend + 'faz-me uma página de admin'" a comparar a saída com e sem as
+  secções retidas. Sem ele, o argumento de que a condicionalidade por PROJECTO
+  é segura onde a condicionalidade por TAREFA não era continua a ser um
+  raciocínio, não uma medição.
+- **Sem verificação fim-a-fim.** O detector foi sondado contra árvores
+  realistas (incluindo a deste repo, que retém apenas `vision.image_rules`),
+  mas nunca contra a saída real do `buildFileTree` numa app a correr.
+- **Dois detectores para a mesma pergunta.** `isVanillaWeb`/`hasFrameworkDeps`
+  no `contextBuilder` e `detectProjectContextEvidence` respondem ambos a "que
+  tipo de projecto é este" e podem divergir. Consolidar fica em dívida.
+- **`detectionDependencies` só foi ligado a um dos consumidores.** O tier de
+  compatibilidade em `chatSections.ts` (~l. 623) continua a detectar a partir
+  das listas truncadas a 15/10 e tem a mesma classe de falso negativo.
+- **`maxDepth: 2`.** Num monorepo cujo frontend viva abaixo do segundo nível, a
+  evidência de UI depende só das dependências (incluindo as de workspace). Os
+  sinais de pasta (`client/`, `web/`, `apps/`) cobrem o caso comum; um layout
+  invulgar pode escapar.
 
 ## Contexto de fundo útil
 

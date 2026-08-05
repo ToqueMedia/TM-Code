@@ -48,7 +48,7 @@ describe('detectProjectContextEvidence', () => {
       pkgSummary: pkg(['express', 'drizzle-orm', 'pg', 'zod']),
       treeString: BACKEND_TREE,
     })
-    expect(ev.hasSourceFiles).toBe(true)
+    expect(ev.hasProjectContent).toBe(true)
     expect(ev.hasUiSurface).toBe(false)
     expect(ev.hasThemeSurface).toBe(false)
     expect(ev.hasChakra).toBe(false)
@@ -85,9 +85,33 @@ describe('detectProjectContextEvidence', () => {
   // base de gosto mais vale — não pode nascer sem ela.
   it('projecto vazio mantém TUDO (ausência de dados ≠ evidência negativa)', () => {
     const ev = detectProjectContextEvidence({ pkgSummary: null, treeString: 'project/' })
-    expect(ev.hasSourceFiles).toBe(false)
+    expect(ev.hasProjectContent).toBe(false)
     // Os campos dizem o que foi detectado (nada); a política vive no portão.
     expect(ev.hasUiSurface).toBe(false)
+    expect(evidenceOmittedAuxiliaries({ evidence: ev, sessionHasImage: false })).toEqual([])
+  })
+
+  // A primeira versão deste portão falhava AQUI, e o teste da regra 1 acima
+  // não a apanhava porque usava `pkgSummary: null` — o caso fácil. A pasta
+  // acabada de criar no mundo real tem um `package.json` de `npm init -y`
+  // (que já traz um script `test`, portanto contar scripts também não serve).
+  it('pasta com package.json vazio ainda é "projecto por nascer" e mantém TUDO', () => {
+    const ev = detectProjectContextEvidence({
+      pkgSummary: pkg([]),
+      treeString: 'project/\n  package.json\n',
+    })
+    expect(ev.hasProjectContent).toBe(false)
+    expect(evidenceOmittedAuxiliaries({ evidence: ev, sessionHasImage: false })).toEqual([])
+  })
+
+  // Falha de I/O é ausência de dados, não "este projecto não tem UI". Sem
+  // isto, um erro transitório de leitura da árvore degradava o prompt calado.
+  it('árvore ilegível não decide nada (falha para o lado de entregar)', () => {
+    const ev = detectProjectContextEvidence({
+      pkgSummary: null,
+      treeString: '(Could not read project structure)',
+    })
+    expect(ev.hasProjectContent).toBe(false)
     expect(evidenceOmittedAuxiliaries({ evidence: ev, sessionHasImage: false })).toEqual([])
   })
 
@@ -172,6 +196,11 @@ describe('applyEvidenceOmissions', () => {
 
     expect(sel.loadedTokens).toBeLessThan(before)
     expect(sel.loadedTokens).toBe(sel.loaded.reduce((s, l) => s + l.tokens, 0))
+    // Savings = soma dos ESTIMADOS das omitidas. Enquanto o carregado é só
+    // estimativa a identidade com totalAvailable ainda se verifica; deixa de
+    // valer depois de applyRenderedTokenCounts, e é por isso que a poupança
+    // não se calcula por subtracção.
+    expect(sel.savingsTokens).toBe(sel.omitted.reduce((s, o) => s + o.estTokens, 0))
     expect(sel.savingsTokens).toBe(sel.totalAvailableTokens - sel.loadedTokens)
     // O plano tem de contar a mesma história que a entrega.
     expect(sel.contextPlan.selectedContexts).not.toContain('ui_patterns')
@@ -227,5 +256,15 @@ describe('applyRenderedTokenCounts', () => {
     const before = sel.loaded.find(l => l.id === 'ui_patterns')?.tokens
     applyRenderedTokenCounts(sel, {})
     expect(sel.loaded.find(l => l.id === 'ui_patterns')?.tokens).toBe(before)
+  })
+
+  it('não mistura unidades: a poupança fica em estimativa quando o custo passa a medido', () => {
+    const sel = selectAuxiliaries('default_task', undefined)
+    const savingsBefore = sel.savingsTokens
+    applyRenderedTokenCounts(sel, { ui_patterns: 'x'.repeat(45_000) })
+    expect(sel.loadedTokens).toBeGreaterThan(sel.totalAvailableTokens)
+    // Sem esta regra, a subtracção dava um negativo (ou um zero por clamp) e
+    // a poupança passava a depender de quanto o corpo real excedeu a estimativa.
+    expect(sel.savingsTokens).toBe(savingsBefore)
   })
 })

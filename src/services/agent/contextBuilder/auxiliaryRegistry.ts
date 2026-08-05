@@ -973,7 +973,10 @@ export function applyEvidenceOmissions(
 
   selection.loaded = kept
   selection.loadedTokens = kept.reduce((sum, l) => sum + l.tokens, 0)
-  selection.savingsTokens = selection.totalAvailableTokens - selection.loadedTokens
+  // Somatório dos ESTIMADOS das omitidas, e não `totalAvailable − loaded`: o
+  // custo carregado passa a ser medido no corpo real (applyRenderedTokenCounts)
+  // e a subtracção misturaria estimativa com medição na mesma conta.
+  selection.savingsTokens = selection.omitted.reduce((sum, o) => sum + o.estTokens, 0)
   selection.autoLoadedSystemSections = kept.map(l => l.id)
   selection.evidenceOmittedSections = dropped
   selection.evidenceOmitReason = reasons
@@ -998,6 +1001,11 @@ export function applyEvidenceOmissions(
  * o achado #9 foi medido com elas e desviavam-se do real (component_patterns:
  * 650 declarados, 864 reais). Uma telemetria de custo que não mede o custo faz
  * a próxima auditoria discutir o número errado.
+ *
+ * `savingsTokens` NÃO é tocado aqui de propósito: continua a ser a soma dos
+ * ESTIMADOS das secções omitidas (não foram renderizadas, portanto não há
+ * corpo para medir). Misturar as duas unidades na mesma subtracção daria um
+ * número que não é nem estimativa nem medição.
  */
 export function applyRenderedTokenCounts(
   selection: AuxiliarySelection,
@@ -1010,7 +1018,6 @@ export function applyRenderedTokenCounts(
     total += entry.tokens
   }
   selection.loadedTokens = total
-  selection.savingsTokens = Math.max(0, selection.totalAvailableTokens - total)
   return selection
 }
 

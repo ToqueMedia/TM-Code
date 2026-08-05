@@ -836,6 +836,17 @@ export interface RequestUsageEntry {
   omittedSystemSections?: string[]
   /** Sections loaded inline automatically by profile/trigger. */
   autoLoadedSystemSections?: string[]
+  /**
+   * Secções BOUNDED retidas pelo portão de evidência do projecto (achado #9).
+   * Ao contrário de `auxiliaryOmitted` (que junta as unbounded), estas teriam
+   * ido inline se o projecto tivesse a superfície correspondente — é este par
+   * de campos que torna auditável "porque é que este projecto perdeu as
+   * secções de design system".
+   */
+  evidenceOmittedSections?: string[]
+  evidenceOmitReason?: Record<string, string>
+  /** Sinais de evidência detectados (`dep:react`, `dir:ui-like`, …). */
+  evidenceSignals?: string[]
   /** Context planner candidate sections for this task. */
   contextPlanCandidateSections?: string[]
   /** Auxiliary ids the model requested through request_context. */
