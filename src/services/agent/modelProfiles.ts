@@ -79,21 +79,14 @@ const GLM_5_2: ModelProfile = {
 
   supportsAttachments: false,
   supportsSearch: false,
-  // Desvio observado em sessão real (cgk-doc-app, 2026-08-03 20:15, export
-  // analisado em post-mortem): com a regra JÁ no prompt, o glm-5.2 validou
-  // com `tsc --noEmit 2>&1 | head -40` — pipe sem pipefail numa validação.
-  // Counterweight = eco em PRIMAZIA. Rever após mais sessões; se deixar de
-  // derrapar, remover. (Um 2º counterweight — Verify obrigatório — existiu
-  // por umas horas e saiu a 04-08: o user removeu o próprio contrato do
-  // prompt; ver a nota histórica em chatSections, secção Doing tasks.)
-  counterweights: [
-    {
-      rule: 'Never pipe a validation command (tsc, build, tests). Run it bare so the exit code is real; if output must be trimmed, prefix `set -o pipefail;`.',
-      addedFor: 'tsc --noEmit 2>&1 | head -40 sem pipefail (sessão cgk-doc-app 2026-08-03 20:15)',
-      addedOn: '2026-08-03',
-      reviewAfter: '2026-09-01',
-    },
-  ],
+  // HISTÓRIA dos counterweights (03→05-08): o glm-5.2 derrapou no pipefail
+  // (cgk-doc-app 03-08) e ganhou um counterweight; a 05-08 o MiMo derrapou na
+  // MESMA regra (sessão recepcionista) — dois modelos ≠ a falhar uma regra
+  // que só vivia no MEIO do prompt (queda do U-curve) provou que o problema
+  // era a POSIÇÃO, não os modelos. A regra foi promovida ao FINAL CHECKPOINT
+  // do Reminder (recência) e os counterweights por-modelo saíram — remendo
+  // por-modelo para defeito estrutural do prompt é dívida disfarçada.
+  counterweights: [],
 }
 
 // ─────────────────────────────────────────────────
@@ -141,6 +134,7 @@ const MIMO_V2_5_PRO_1M: ModelProfile = {
 
   supportsAttachments: false,
   supportsSearch: false,
+  // Pipefail: ver a nota no perfil do glm-5.2 — regra promovida ao Reminder.
   counterweights: [],
 }
 
