@@ -826,6 +826,14 @@ export function usePromptBar() {
       const initialPromptEstimate = estimateTokensFromText(systemPrompt)
         + estimateTokensFromValue(history)
         + estimateTokensFromValue(userContent)
+      // Reposição por PEDIDO, igual à do agentRunner (agentRunner.ts:299). Este
+      // caminho — o do composer, que é a esmagadora maioria dos runs — não a
+      // tinha, por isso `totalTokensUsed` acumulava a sessão inteira e os três
+      // sítios que mostram tokens ao utilizador (AgentActivityIndicator, a
+      // barra do GeneratingView e o rodapé de CADA mensagem) exibiam o
+      // acumulado rotulado como consumo deste run/turno: a 5.ª mensagem
+      // mostrava o output das cinco (auditoria 05-08, ronda 2).
+      useChatStore.getState().resetTokenUsage()
       await agentService.runAgentLoop(userContent, history, {
         ...buildMainLoopCallbacks({
           surface: 'chat',

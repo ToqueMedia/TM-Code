@@ -299,9 +299,19 @@ export function decorateTmsRequestUsage<T extends RequestUsageEntry>(
     }
   }
 
+  // O reconhecimento do run de RESUMO exige `executionPhase === 'original_task'`.
+  //
+  // Sem essa condição, esta função — que é de DECORAÇÃO de telemetria —
+  // inferia o resumo a partir de dois latches acumulados (`tmsBootstrapTriggered`
+  // + `tmsCreated`) que sobrevivem ao fim do run no singleton de módulo. Um run
+  // seguinte, sem relação nenhuma com o bootstrap, tinha o seu PRIMEIRO pedido
+  // marcado como "resumo após bootstrap" e roubava o `originalTaskResumeRequestId`
+  // (auditoria 05-08, ronda 2). A fase é escrita pelo preflight no arranque de
+  // cada run, portanto é o sinal fiável de que este run é mesmo a continuação.
   if (
     currentTelemetry.tmsBootstrapTriggered &&
     currentTelemetry.tmsCreated &&
+    currentTelemetry.executionPhase === 'original_task' &&
     !currentTelemetry.originalTaskResumeRequestId
   ) {
     currentTelemetry = {

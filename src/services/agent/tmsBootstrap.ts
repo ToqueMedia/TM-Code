@@ -269,6 +269,12 @@ export async function runTmsPreflight(options: {
       tmsSectionsLoaded: [],
       tmsRequestedSections: [],
       tmsSectionsRequested: [],
+      // Este ramo reescreve ~35 campos e esquecia ESTE: era o único que
+      // sobrevivia ao reset e atravessava PROJECTOS — abrir um projecto sem
+      // TMS.md depois de um com TMS inválido exportava as secções em falta do
+      // anterior (auditoria 05-08, ronda 2). Não há TMS aqui: não há secções
+      // em falta para reportar.
+      tmsMissingSections: undefined,
       originalUserMessageDisplayed: options.originalUserMessageDisplayed,
       originalTaskResumedAfterBootstrap: false,
       originalTaskResumeRequestId: undefined,
