@@ -36,6 +36,7 @@ import { formatError } from '../../../utils/errors'
 import { useBillingStore } from '../../../stores/billingStore'
 import { useSubAgentStore } from '../../../stores/subAgentStore'
 import { maybeWakeMainAgent } from './autoWake'
+import { createSoftDeadlineNotice } from './softDeadline'
 import type { SubAgentDefinition, SubAgentParentContext } from './types'
 
 /** Options passed to the sub-agent factory. */
@@ -195,6 +196,12 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
       }
     : undefined
 
+  // Prazo suave: pede o fecho a 80% do relógio para o corte duro não decapitar
+  // o relatório. Ver softDeadline.ts para o porquê.
+  const collectSoftDeadlineNotice = createSoftDeadlineNotice({
+    maxWallClockMs: definition.maxWallClockMs,
+  })
+
   // ── Create QueryEngine ──
   const engine = new QueryEngine({
     // P1 headless: hooks de orçamento da janela — ver windowHost.
@@ -214,6 +221,7 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
       toolExecutor.isConcurrencySafe(name) ||
       toolExecutor.isConcurrencySafe(canonicalToolName(name)),
     thinkingConfig,
+    collectQueuedSteering: collectSoftDeadlineNotice,
     extraHeaders: subAgentExtraHeaders,
     maxTurns: definition.maxTurns,
     onResponseHeaders: (headers) => {

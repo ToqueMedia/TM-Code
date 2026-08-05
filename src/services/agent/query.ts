@@ -1662,6 +1662,12 @@ export async function* query(
     let authRefreshAttempts = 0;
     let credentialConfigRetries = 0;
     let rateLimitRetries = 0;
+    // Contabilidade do tempo de parede DESTE turno, para o requestUsageLog.
+    // `rateLimitWaitMs` acumula o que se dormiu na escada de 429 — sem ele,
+    // um turno de 4 minutos é indistinguível entre "o modelo pensou muito" e
+    // "levámos dois 429 seguidos" (post-mortem de 05-08).
+    const turnStartedAt = Date.now();
+    let rateLimitWaitMs = 0;
     // Modelo/provider reais servidos (X-TM-Model/X-TM-Provider) — capturados
     // nos headers da resposta e gravados no requestUsageLog deste pedido.
     let servedModel: string | null = null;
@@ -2214,6 +2220,7 @@ export async function* query(
             totalOutputTokens,
           };
         }
+        rateLimitWaitMs += delayMs;
         rateLimitRetries = nextRetry;
         continue;
       }
@@ -2507,6 +2514,10 @@ export async function* query(
           model,
           servedModel: servedModel ?? undefined,
           servedProvider: servedProvider ?? undefined,
+          requestLatencyMs: Date.now() - turnStartedAt,
+          ...(rateLimitRetries > 0
+            ? { rateLimitRetries, rateLimitWaitMs }
+            : {}),
           inputTokens: turnUsage?.prompt_tokens ?? 0,
           outputTokens: turnUsage?.completion_tokens ?? 0,
           usageAvailable: !!turnUsage,

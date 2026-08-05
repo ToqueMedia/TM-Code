@@ -622,6 +622,16 @@ export interface RequestUsageEntry {
   servedModel?: string
   /** Provider real que serviu a resposta (X-TM-Provider). */
   servedProvider?: string
+  /** Tempo de parede do pedido, do envio à última chunk — INCLUI as esperas
+   *  de retry. Sem isto, um post-mortem não distingue "modelo lento" de
+   *  "rate limited" de "ferramentas lentas": na sessão de 05-08 (turno de 49
+   *  min) 46 min eram intervalos ENTRE tool calls e não havia como saber
+   *  quanto era geração e quanto era escada de 429. */
+  requestLatencyMs?: number
+  /** Quantos 429 do provider este turno apanhou (0 = nenhum). */
+  rateLimitRetries?: number
+  /** Tempo total dormido na escada de 429 deste turno, em ms. */
+  rateLimitWaitMs?: number
   /** Real input tokens from the provider's usage chunk. */
   inputTokens: number
   /** Real output tokens from the provider's usage chunk. */
