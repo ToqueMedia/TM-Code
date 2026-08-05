@@ -2290,7 +2290,12 @@ function SidecarsPanel() {
       const next: Record<string, string> = {}
       for (const slot of SIDECAR_SLOTS) {
         const cur = d.current[`sidecar:${slot.type}`]
-        const match = cur ? d.catalog.find(m => m.activeConfig.model === cur.model) : undefined
+        // Mesmo fix do PersonasPanel: match por modelo+provider (presets podem
+        // partilhar o mesmo model id em providers diferentes).
+        const match = cur
+          ? d.catalog.find(m =>
+              m.activeConfig.model === cur.model && m.activeConfig.provider === cur.provider)
+          : undefined
         next[slot.type] = match?.id ?? ''
       }
       setSel(next)
@@ -2333,8 +2338,13 @@ function SidecarsPanel() {
             const published = !!cur && cur.enabled
             const eligible = (data?.catalog ?? []).filter(m => m.roles.includes(slot.type))
             const selModel = (data?.catalog ?? []).find(m => m.id === sel[slot.type])
-            const isCurrent = published && !!selModel && selModel.activeConfig.model === cur!.model
-            const canPublish = !!sel[slot.type] && !isCurrent && busy !== slot.type
+            const isCurrent = published && !!selModel
+              && selModel.activeConfig.model === cur!.model
+              && selModel.activeConfig.provider === cur!.provider
+            // busy !== null (e não só !== slot.type): dois publishes em paralelo
+            // faziam o segundo reescrever o doc aiPersonas com o valor ANTIGO do
+            // primeiro (KV eventualmente consistente — ronda-2 #5).
+            const canPublish = !!sel[slot.type] && !isCurrent && busy === null
             return (
               <Box
                 key={slot.type}
@@ -2491,7 +2501,16 @@ function PersonasPanel({ onPublished }: { onPublished?: () => void }) {
       const nextCtx: Record<string, string> = {}
       for (const slot of PERSONA_SLOTS) {
         const cur = d.current[`persona:${slot.type}`]
-        const match = cur ? d.catalog.find(m => m.activeConfig.model === cur.model) : undefined
+        // Match por modelo+provider+baseUrl (bug 05-08: dois presets partilham
+        // model 'glm-5.2' — DashScope e z.AI — e o match só por model fixava
+        // SEMPRE o primeiro; publicar z.AI re-mapeava para DashScope no reload
+        // e o publish seguinte trocava o provider em silêncio).
+        const match = cur
+          ? d.catalog.find(m =>
+              m.activeConfig.model === cur.model
+              && m.activeConfig.provider === cur.provider
+              && m.activeConfig.baseUrl === cur.baseUrl)
+          : undefined
         nextSel[slot.type] = match?.id ?? ''
         nextMult[slot.type] = cur?.costMultiplier != null ? String(cur.costMultiplier) : '1'
         nextCtx[slot.type] = String(cur?.contextWindow ?? match?.activeConfig.contextWindow ?? DEFAULT_CONTEXT_WINDOW)
@@ -2555,10 +2574,15 @@ function PersonasPanel({ onPublished }: { onPublished?: () => void }) {
             const cur = data?.current[`persona:${slot.type}`] ?? null
             const published = !!cur && cur.enabled
             const selModel = (data?.catalog ?? []).find(m => m.id === sel[slot.type])
-            const isCurrent = published && !!selModel && selModel.activeConfig.model === cur!.model
+            const isCurrent = published && !!selModel
+              && selModel.activeConfig.model === cur!.model
+              && selModel.activeConfig.provider === cur!.provider
               && String(cur!.costMultiplier ?? 1) === (mult[slot.type] || '1')
               && String(cur!.contextWindow ?? '') === (ctxWin[slot.type] || '')
-            const canPublish = !!sel[slot.type] && !isCurrent && busy !== slot.type
+            // busy !== null (e não só !== slot.type): dois publishes em paralelo
+            // faziam o segundo reescrever o doc aiPersonas com o valor ANTIGO do
+            // primeiro (KV eventualmente consistente — ronda-2 #5).
+            const canPublish = !!sel[slot.type] && !isCurrent && busy === null
             return (
               <Box
                 key={slot.type}

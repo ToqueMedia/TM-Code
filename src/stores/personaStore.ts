@@ -51,6 +51,18 @@ interface PersonaStoreState {
   setSelected: (persona: Persona) => void
 }
 
+// Sync cross-JANELA (ronda-2 #16): o localStorage é partilhado entre janelas
+// Tauri mas cada webview tem o seu zustand — sem isto, trocar de persona na
+// janela A não mudava a B até ao restart.
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (e) => {
+    if (e.key !== STORAGE_KEY) return
+    if (isPersona(e.newValue) && e.newValue !== usePersonaStore.getState().selected) {
+      usePersonaStore.setState({ selected: e.newValue })
+    }
+  })
+}
+
 export const usePersonaStore = create<PersonaStoreState>((set) => ({
   selected: loadSelected(),
   setSelected: (persona) => {

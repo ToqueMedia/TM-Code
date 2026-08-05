@@ -58,6 +58,7 @@ import { consumeTaskStopRequest, consumeProjectAgentStop } from './taskStopReque
 import { useAgentStore } from '../../../stores/agentStore'
 import { getProfileForPlan, MODEL_PROFILES } from '../modelProfiles'
 import { getPersonaFallbackContextWindow } from '../../../stores/activeModelStore'
+import { usePersonaStore } from '../../../stores/personaStore'
 import { pumpParallelTasks } from './parallelTaskManager'
 import { t } from '../../../i18n'
 import { logger } from '../../../utils/logger'
@@ -578,10 +579,13 @@ export async function runParallelTask(runId: string): Promise<void> {
       const live = useParallelTaskStore.getState().runs.get(runId)
       return live?.planOverride?.systemPrompt ?? systemPrompt
     },
+    // Ronda-2 #3: tarefas paralelas HERDAM a persona (ver subAgentRunner) —
+    // alinha modelo servido, janela usada no cliente e billing.
     getExtraHeaders: () => {
       const live = useParallelTaskStore.getState().runs.get(runId)
-      if (live?.planOverride) return { 'X-Request-Type': 'plan' }
-      return undefined
+      const persona = { 'X-TM-Persona': usePersonaStore.getState().selected }
+      if (live?.planOverride) return { 'X-Request-Type': 'plan', ...persona }
+      return persona
     },
     getContextLimits: contextLimits,
     // O prompt das tarefas é o do main + adenda de tarefa — o reminder crítico

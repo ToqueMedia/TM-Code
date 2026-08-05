@@ -649,6 +649,7 @@ async function handleChatCompletions(
     providerKey,
     configSource: active.source,
     configKey: active.key,
+    costMultiplier: typeof config.costMultiplier === 'number' && config.costMultiplier > 0 ? config.costMultiplier : 1,
     teamByok,
     upstreamHost,
   })
@@ -690,6 +691,7 @@ async function handleChatCompletions(
       teamByok,
       configSource: active.source,
       configKey: active.key,
+    costMultiplier: typeof config.costMultiplier === 'number' && config.costMultiplier > 0 ? config.costMultiplier : 1,
       // Janela de contexto real do modelo ativo (quando declarada na config) —
       // emitida em X-Model-Context-Window para a IDE alinhar a pressão de
       // contexto e o auto-compact com a janela verdadeira do modelo.

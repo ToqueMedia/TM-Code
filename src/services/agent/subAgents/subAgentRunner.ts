@@ -27,6 +27,7 @@ import {
 } from '../byokRouting'
 import { useParallelTaskStore } from '../../../stores/parallelTaskStore'
 import { useChatStore } from '../../../stores/chatStore'
+import { usePersonaStore } from '../../../stores/personaStore'
 import { QueryEngine } from '../queryEngine'
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from '../query'
 import ToolExecutor from '../toolExecutor'
@@ -183,8 +184,16 @@ export async function runSubAgent(options: SubAgentRunOptions): Promise<string> 
   // ── Build system prompt ──
   const systemPrompt = definition.getSystemPrompt(parentCtx)
 
-  const subAgentExtraHeaders =
-    !byokActive && requestType ? { 'X-Request-Type': requestType } : undefined
+  // Ronda-2 #3: sub-agentes HERDAM a persona do run — sem o header eram
+  // servidos pela `active` (modelo da Standard) mas com a janela da persona
+  // resolvida no cliente: divergência que nunca se auto-corrigia (compact a
+  // ~950K num modelo de 200K) e billing fora da escolha do user.
+  const subAgentExtraHeaders = !byokActive
+    ? {
+        ...(requestType ? { 'X-Request-Type': requestType } : {}),
+        'X-TM-Persona': usePersonaStore.getState().selected,
+      }
+    : undefined
 
   // ── Create QueryEngine ──
   const engine = new QueryEngine({

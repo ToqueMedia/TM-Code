@@ -6,6 +6,7 @@ import { useBillingStore } from '../../stores/billingStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useByokStore } from '../../stores/byokStore'
+import { useAgentStore } from '../../stores/agentStore'
 import { useCheckpointStore } from '../../stores/checkpointStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
@@ -123,6 +124,10 @@ function PromptActions({
     ? byokSnapshotImages
     : (byokResolvedActive?.imagesSupported ?? null)
   const byokInUse = byokSnapshot !== null || byokResolvedActive !== null
+  // Ronda-2 #6: sob Team BYOK a persona é ignorada pelo worker (a equipa paga
+  // o provedor dela) e o effort segue o modelo da equipa — mostrar os
+  // selectores era a UI a mentir. X-TM-Team-Byok → agentStore.teamByokActive.
+  const teamByokActive = useAgentStore(s => s.teamByokActive)
   const isExplorer = billingPlan === 'explorer'
   const devServerButtonTitle = isDevServerActive
     ? t('prompt.stopDevServer')
@@ -203,14 +208,14 @@ function PromptActions({
             quando o modelo ativo não expõe effort. */}
         {/* Bloqueado durante o run: o effort é carimbado por turno, portanto
             uma troca a meio não se aplica ao turno em voo (ver EffortSelector). */}
-        {!byokInUse && <EffortSelector disabled={isAgentBusy} />}
+        {!byokInUse && !teamByokActive && <EffortSelector disabled={isAgentBusy} />}
 
         {/* Persona (Escolha do Modelo) — Standard/Expert/Master, SEM revelar
             os modelos (white-labeling; a atribuição modelo+multiplicador é do
             admin). Só no caminho gerido: em BYOK o modelo é a escolha do
             próprio user e o header X-TM-Persona não teria efeito. Bloqueado
             durante o run pela mesma razão do effort. */}
-        {!byokInUse && <PersonaSelector disabled={isAgentBusy} />}
+        {!byokInUse && !teamByokActive && <PersonaSelector disabled={isAgentBusy} />}
 
         {/* Editor toggle — bloqueado durante o run pela mesma razão que o
             effort: o editor mostra ficheiros que o agente está a reescrever,

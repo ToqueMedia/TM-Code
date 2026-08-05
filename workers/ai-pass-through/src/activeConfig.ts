@@ -5,9 +5,14 @@ import type { ActiveAIConfig, Env, ResolvedActiveAIConfig } from './types'
 const CONFIG_CACHE_MS = 5_000
 
 let configCache = new Map<string, { value: ResolvedActiveAIConfig; expiresAt: number }>()
+// Negative-cache das auxiliares (ronda-2 #13): persona/sidecar NÃO publicado é
+// o estado normal do rollout — sem isto cada pedido pagava uma leitura KV
+// extra da chave ausente. Mesmo TTL da cache positiva.
+let missingConfigCache = new Map<string, number>()
 
 export function clearActiveConfigCache(): void {
   configCache = new Map()
+  missingConfigCache = new Map()
 }
 
 // ── Sidecars ──────────────────────────────────────────────────────────────
@@ -239,14 +244,22 @@ async function resolveAuxConfig(
 ): Promise<ResolvedActiveAIConfig | null> {
   const cached = configCache.get(key)
   if (cached && cached.expiresAt > now) return cached.value
+  const missing = missingConfigCache.get(key)
+  if (missing !== undefined && missing > now) return null
 
   const kvRaw = env.ACTIVE_AI_CONFIG ? await env.ACTIVE_AI_CONFIG.get(key) : null
   const envRaw = envVar && typeof env[envVar] === 'string' ? (env[envVar] as string) : null
   const raw = kvRaw || envRaw
-  if (!raw) return null
+  if (!raw) {
+    missingConfigCache.set(key, now + CONFIG_CACHE_MS)
+    return null
+  }
   try {
     const config = parseActiveConfig(raw)
-    if (!config.enabled) return null
+    if (!config.enabled) {
+      missingConfigCache.set(key, now + CONFIG_CACHE_MS)
+      return null
+    }
     // Valores de CONSUMO só vêm da UI→KV (decisão 2026-08-05): uma config
     // vinda do fallback de ENV (dev local) nunca traz multiplicador — um
     // secret não pode mudar a fatura. Env serve routing/modelo, sempre 1×.

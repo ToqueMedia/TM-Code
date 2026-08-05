@@ -77,6 +77,12 @@ export async function maybeStartHeadlessRunner(): Promise<boolean> {
 async function runJob(job: RunnerJob): Promise<void> {
   // ANTES de qualquer run: o hospedeiro headless responde por política.
   setAgentHost(createHeadlessAgentHost({ yolo: job.yolo }))
+  // Persona determinística (ronda-2 #11): sem isto o runner herdava do
+  // localStorage a última persona escolhida na GUI — um eval era servido e
+  // faturado conforme o humor da janela. Headless corre SEMPRE na standard
+  // (a base do sistema); quando fizer falta por-job, o RunnerJob ganha campo.
+  const { usePersonaStore } = await import('../../../stores/personaStore')
+  usePersonaStore.getState().setSelected('standard')
   // Com --yolo, liga TAMBÉM o YOLO do permissionStore: é o interruptor que
   // faz o createDiffApprovalPromise APLICAR os diffs ao disco pelo caminho
   // provado da janela (DiffService.acceptDiff, com a honestidade de escrita

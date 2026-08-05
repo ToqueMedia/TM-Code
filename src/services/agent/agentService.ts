@@ -2275,8 +2275,13 @@ class AgentService {
       .filter((m) => m.content.length > 0);
 
     try {
-      const extraHeaders: Record<string, string> | undefined =
-        this.requestType ? { "X-Request-Type": this.requestType } : undefined;
+      // Compact na PERSONA do run (ronda-2 #12): alinha modelo, janela e
+      // billing — na `active` (ex.: 200K) uma conversa dimensionada p/ 1M
+      // dava 400 upstream e "Conversa comprimida (0K → 0K)".
+      const extraHeaders: Record<string, string> = {
+        ...(this.requestType ? { "X-Request-Type": this.requestType } : {}),
+        "X-TM-Persona": usePersonaStore.getState().selected,
+      };
       const response = await client.chat.completions.create(
         {
           model,

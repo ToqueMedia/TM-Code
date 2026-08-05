@@ -61,6 +61,7 @@ export function buildCorsHeaders(request: Request): Headers {
     'X-TM-Upstream-Status',
     'X-TM-Config-Source',
     'X-TM-Config-Key',
+    'X-TM-Cost-Multiplier',
     // Team BYOK: a equipa serviu pelo seu próprio provedor/chave — a IDE mostra
     // o indicador "Team BYOK" e sabe que não há metering da TM neste pedido.
     'X-TM-Team-Byok',
@@ -196,6 +197,7 @@ export interface BudgetHeaderMeta {
 }
 
 export function buildResponseHeaders(upstream: Response, meta: {
+  costMultiplier?: number
   requestId: string
   provider: string
   model: string
@@ -242,6 +244,11 @@ export function buildResponseHeaders(upstream: Response, meta: {
   headers.set('x-tm-upstream-status', String(upstream.status))
   headers.set('x-tm-config-source', meta.configSource)
   headers.set('x-tm-config-key', meta.configKey)
+  // Multiplicador de custo aplicado a ESTE pedido (ronda-2 #8): sem isto a
+  // UI de budget não conseguia explicar porque é que 40k tokens andaram 120k
+  // na barra — o suporte não tinha nenhum campo para mostrar. 1 quando não
+  // há persona/multiplicador.
+  headers.set('x-tm-cost-multiplier', String(meta.costMultiplier ?? 1))
   // Always emitted (true/false) so the IDE can clear a stale flag when a later
   // turn is served by the managed path again.
   headers.set('x-tm-team-byok', meta.teamByok ? 'true' : 'false')

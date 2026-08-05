@@ -599,6 +599,17 @@ class FirebaseAuthService {
         void import('../../stores/activeModelStore').then(({ useActiveModelStore }) => {
           useActiveModelStore.getState().setPersonaModels(map)
         })
+        // Ronda-2 #9: persona SELECIONADA desativada/removida pelo admin
+        // (mapa não-vazio sem ela) → reverter para standard; senão o composer
+        // mostrava "EXPERT" enquanto a `active` servia por baixo, sem sinal.
+        if (Object.keys(map).length > 0) {
+          void import('../../stores/personaStore').then(({ usePersonaStore }) => {
+            const selected = usePersonaStore.getState().selected
+            if (!(selected in map) && 'standard' in map) {
+              usePersonaStore.getState().setSelected('standard')
+            }
+          })
+        }
       },
       (err) => {
         console.warn('[aiPersonas] listener error:', err)
