@@ -135,11 +135,17 @@ fn drain_utf8(pending: &mut Vec<u8>, bytes: &[u8]) -> String {
             *pending = tail;
             out
         }
-        Err(_) => {
-            // Byte genuinamente inválido a meio — lossy e segue (um stray byte
-            // não deve derrubar a ligação nem prender o buffer).
-            let out = String::from_utf8_lossy(pending).into_owned();
-            pending.clear();
+        Err(e) => {
+            // Byte genuinamente inválido a meio. Faz-se lossy SÓ até ao fim da
+            // sequência inválida e RETÉM-SE o resto: descartar o buffer todo
+            // levava à frente um prefixo válido do codepoint seguinte, que no
+            // chunk seguinte ficava órfão — um stray byte corrompia DOIS
+            // caracteres em vez de um (auditoria 05-08).
+            let bad_end = e.valid_up_to() + e.error_len().unwrap_or(1);
+            let cut = bad_end.min(pending.len());
+            let out = String::from_utf8_lossy(&pending[..cut]).into_owned();
+            let tail = pending.split_off(cut);
+            *pending = tail;
             out
         }
     }
@@ -378,6 +384,14 @@ pub struct LocalChatStreamInput {
     pub body: String,
 }
 
+/// SEM CHAMADOR NO FRONTEND (verificado 2026-08-05): `byokTransport.ts` invoca
+/// apenas `byok_chat_stream`/`byok_chat_abort`, e o caminho local passa pelo
+/// mesmo comando (o guard de egress já permite localhost). Fica registado no
+/// `lib.rs` e na allow-list, portanto continua invocável — mas note-se que,
+/// ao contrário do `byok_chat_stream`, este NÃO tem entrada no
+/// `ByokStreamRegistry` nem `tokio::select!` de abort: um upstream local
+/// pendurado prende a task até ao timeout total. Antes de lhe dar um
+/// chamador, dar-lhe primeiro o registry.
 #[tauri::command]
 pub async fn byok_local_chat_stream(
     app: AppHandle,

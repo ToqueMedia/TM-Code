@@ -955,6 +955,10 @@ export interface SessionTurnSnapshot {
   promptTokens: number
   /** Last turn's output tokens — tooltip breakdown only. */
   responseTokens: number
+  /** Maior prompt da sessão. Persistido para a linha "Pico da sessão" do
+   *  tooltip não desaparecer ao reabrir a sessão. Ausente em sessões
+   *  gravadas antes de 2026-08-05. */
+  peakPromptTokens?: number
   /** Server-reported model context window (X-Model-Context-Window) at the
    *  last turn. Null when the session was saved before any turn ran. */
   contextWindow: number | null

@@ -1672,12 +1672,24 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     // renascia no fallback de 200K (sessão katondo, 29-07).
     const active = c.activeSessionId ? c.sessions.get(c.activeSessionId) : null
     const persisted = (active as (ChatSession & { lastTurnSnapshot?: import('../types/chat').SessionTurnSnapshot }) | null)?.lastTurnSnapshot ?? null
-    if (c.currentPromptTokens === 0 && c.currentResponseTokens === 0 && a.modelContextWindow == null) {
+    // A ocupação vem de `lastPromptTokens` (o último turno de primeiro plano),
+    // NÃO de `currentPromptTokens`. O contador vivo é um máximo que, no
+    // caminho do Chat, nunca é reposto — persisti-lo fazia com que reabrir a
+    // sessão devolvesse o PICO e ressuscitasse a barra congelada, mesmo em
+    // sessões criadas depois do fix (auditoria 05-08).
+    const livePrompt = active?.lastPromptTokens || c.currentPromptTokens
+    const liveResponse = active?.lastResponseTokens || c.currentResponseTokens
+    if (livePrompt === 0 && liveResponse === 0 && a.modelContextWindow == null) {
       return persisted
     }
     return {
-      promptTokens: c.currentPromptTokens || persisted?.promptTokens || 0,
-      responseTokens: c.currentResponseTokens || persisted?.responseTokens || 0,
+      promptTokens: livePrompt || persisted?.promptTokens || 0,
+      responseTokens: liveResponse || persisted?.responseTokens || 0,
+      // Só quando existe: um `peakPromptTokens: 0` em cada snapshot é ruído no
+      // ficheiro, e a ausência já significa "sem pico" para o tooltip.
+      ...(active?.peakPromptTokens || persisted?.peakPromptTokens
+        ? { peakPromptTokens: active?.peakPromptTokens || persisted?.peakPromptTokens }
+        : {}),
       // O header vivo manda; sem ele, a última janela conhecida vale mais do
       // que null — null aqui é o que faz o restore cair no fallback.
       contextWindow: a.modelContextWindow ?? persisted?.contextWindow ?? null,
@@ -2507,16 +2519,15 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const updatedSession: ChatSession = {
           ...session,
           messages: newMessages,
-          // Compaction is the ONLY legitimate path that drops the session
-          // peak. `addTokenUsage` now takes Math.max(previousPeak, newPrompt)
-          // so the pill never decreases on its own (microcompaction shrinks
-          // the wire prompt but the user's mental model is conversation-
-          // scoped — see the comment in addTokenUsage). The explicit reset
-          // here tells the pill the conversation footprint has genuinely
-          // shrunk; without it the ctx indicator would stay pinned at the
-          // pre-compaction peak forever.
+          // A compactação é o único ponto em que a conversa encolhe de facto,
+          // por isso é aqui que a ocupação E o pico voltam a zero. O pico
+          // faltava (só o `resetTokenCounters` das compactações MANUAIS o
+          // repunha): depois de uma auto-compactação a barra ia a 0% e o
+          // tooltip continuava a anunciar "Pico da sessão 400K" de uma
+          // conversa que já não existe (auditoria 05-08).
           lastPromptTokens: 0,
           lastResponseTokens: 0,
+          peakPromptTokens: 0,
           updatedAt: Date.now(),
         }
 
@@ -3672,22 +3683,28 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             ? Math.max(state.currentResponseTokens, Math.ceil(outputTokens))
             : state.currentResponseTokens
 
-        // Mesmo contrato do addTokenUsage: `lastPromptTokens` é a ocupação
-        // corrente (não um pico de sessão) e só o primeiro plano a escreve —
-        // este caminho não tinha guarda nenhuma, por isso um run de fundo
-        // mexia no pill. `nextPrompt` já é o acumulado desta estimativa, que
-        // cresce dentro do pedido; entre pedidos passa a poder descer.
+        // ATENÇÃO: persiste-se a estimativa DESTE run (`inputTokens`, que o
+        // mainDispatch já acumula por run), NUNCA o `nextPrompt`.
+        //
+        // `nextPrompt` é `Math.max(currentPromptTokens, …)` e o
+        // `currentPromptTokens` só é reposto por `resetTokenUsage`, que tem UM
+        // único chamador (agentRunner) — o caminho do composer/Chat não passa
+        // por lá. Em Chat, portanto, o contador vivo é um máximo monótono de
+        // TODA a sessão, e escrevê-lo aqui ressuscitava o pico a cada tool
+        // result: a barra descia e voltava a 49% (auditoria 05-08, exactamente
+        // o bug que este ficheiro diz ter corrigido).
+        const estimateForSession = inputTokens > 0 ? Math.ceil(inputTokens) : 0
         let nextSessions = state.sessions
-        if (isForeground && state.activeSessionId && (nextPrompt > 0 || nextResponse > 0)) {
+        if (isForeground && state.activeSessionId && (estimateForSession > 0 || nextResponse > 0)) {
           const active = state.sessions.get(state.activeSessionId)
           if (active) {
             nextSessions = new Map(state.sessions)
             nextSessions.set(state.activeSessionId, {
               ...active,
-              ...(nextPrompt > 0
+              ...(estimateForSession > 0
                 ? {
-                    lastPromptTokens: nextPrompt,
-                    peakPromptTokens: Math.max(active.peakPromptTokens ?? 0, nextPrompt),
+                    lastPromptTokens: estimateForSession,
+                    peakPromptTokens: Math.max(active.peakPromptTokens ?? 0, estimateForSession),
                   }
                 : {}),
               lastResponseTokens: nextResponse,
@@ -4055,6 +4072,10 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
                 ...session,
                 lastPromptTokens: snapshot.promptTokens,
                 lastResponseTokens: snapshot.responseTokens,
+                // Sessões gravadas antes de 2026-08-05 não têm pico: o campo
+                // fica indefinido e a linha do tooltip apenas não aparece —
+                // preferível a inventar um pico a partir da ocupação.
+                peakPromptTokens: snapshot.peakPromptTokens,
               }
             : session
 

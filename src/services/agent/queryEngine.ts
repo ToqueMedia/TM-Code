@@ -86,7 +86,9 @@ export interface QueryEngineOptions {
   /** Inter-turn attachment collector — see QueryParams.collectInterTurnContext. */
   collectInterTurnContext?: () => Promise<string>
   /** Queued-message steering collector — see QueryParams.collectQueuedSteering. */
-  collectQueuedSteering?: () => Promise<QueuedSteeringContent | null>
+  collectQueuedSteering?: (
+    boundary: 'post_tool' | 'stop',
+  ) => Promise<QueuedSteeringContent | null>
   /** Live active-model limits for auto-compact — see QueryParams.getContextLimits. */
   getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null }
   /** Arquivo do transcript pré-compactação — ver QueryParams.archivePreCompact. */

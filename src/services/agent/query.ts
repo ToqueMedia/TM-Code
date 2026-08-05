@@ -423,8 +423,18 @@ export interface QueryParams {
    * (finalize the in-flight assistant bubble, show the user's message, open
    * a fresh bubble) as a side effect, so the run stays continuous with no
    * idle flicker. Must never throw.
+   *
+   * O argumento diz QUAL das duas fronteiras está a chamar, porque as
+   * consequências são diferentes: em `'post_tool'` o loop ia continuar de
+   * qualquer forma (a injecção é grátis), enquanto em `'stop'` um retorno
+   * não-nulo MANTÉM o loop vivo — custa um pedido completo e, se o turno for
+   * o último antes do tecto de `maxTurns`, faz um relatório COMPLETO ser
+   * embrulhado como "resultado parcial" (auditoria 05-08). Colectores que
+   * não são steering genuíno do utilizador devem responder só a `'post_tool'`.
    */
-  collectQueuedSteering?: () => Promise<QueuedSteeringContent | null>;
+  collectQueuedSteering?: (
+    boundary: 'post_tool' | 'stop',
+  ) => Promise<QueuedSteeringContent | null>;
   /**
    * Live active-model limits for the auto-compact decision. Called fresh each
    * loop iteration because the active model (and thus its context window) is
@@ -2158,6 +2168,12 @@ export async function* query(
       if (
         !outputStarted &&
         isCredentialOrConfigError(error) &&
+        // BYOK directo NÃO faz esta escada: a chave está cozida no cliente
+        // (lida da keychain uma vez) e nunca é relida, portanto as 3
+        // tentativas de 30s são identicamente inúteis com uma chave revogada
+        // — 90 segundos de espera morta antes de o user ver a mensagem certa
+        // (auditoria 05-08). Sem retry, a mensagem accionável é imediata.
+        !params.byokDirect &&
         credentialConfigRetries < CREDENTIAL_CONFIG_MAX_RETRIES
       ) {
         const nextRetry = credentialConfigRetries + 1;
@@ -2856,7 +2872,7 @@ export async function* query(
       if (params.collectQueuedSteering) {
         let steered: QueuedSteeringContent | null = null;
         try {
-          steered = await params.collectQueuedSteering();
+          steered = await params.collectQueuedSteering('stop');
         } catch {
           // Best-effort — never let steering break the stop path.
         }
@@ -3387,7 +3403,7 @@ export async function* query(
     const steeringMessages: QueryMessage[] = [];
     if (params.collectQueuedSteering) {
       try {
-        const steered = await params.collectQueuedSteering();
+        const steered = await params.collectQueuedSteering('post_tool');
         if (steered) {
           steeringMessages.push(steeringContentToUserMessage(steered));
         }

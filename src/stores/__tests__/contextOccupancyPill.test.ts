@@ -123,4 +123,48 @@ describe('ocupação de contexto (pill)', () => {
     useChatStore.getState().addEstimatedTokenUsage(5_000, 50, false)
     expect(activeSession().lastPromptTokens).toBe(90_000)
   })
+
+  // ── Regressões provadas pela auditoria de 05-08 ────────────────────────────
+
+  it('a estimativa NÃO ressuscita o pico através do contador vivo', () => {
+    // O caminho do Chat nunca repõe `currentPromptTokens` (só o agentRunner
+    // chama resetTokenUsage), por isso o contador vivo é um máximo de toda a
+    // sessão. Escrever esse máximo na sessão fazia a barra descer e voltar ao
+    // pico no primeiro tool result — o bug original, de volta pela porta do
+    // lado.
+    seedSession()
+    useChatStore.getState().addTokenUsage(500_000, 1_000, true)
+    useChatStore.getState().addTokenUsage(120_000, 800, true)
+    expect(activeSession().lastPromptTokens).toBe(120_000)
+
+    // Estimativa do run em curso (bem menor que o pico vivo de 500K).
+    useChatStore.getState().addEstimatedTokenUsage(130_000, 200, true)
+    expect(activeSession().lastPromptTokens).toBe(130_000)
+    expect(useChatStore.getState().currentPromptTokens).toBe(500_000) // vivo continua máximo
+  })
+
+  it('um run sem histórico do chat (/review) não sequestra a ocupação', () => {
+    seedSession()
+    useChatStore.getState().addTokenUsage(400_000, 2_000, true)
+    // O /review passa isForeground=false — sem isso, a conversa de 400K
+    // aparecia com a ocupação do sub-agente (~12K) e ficava assim.
+    useChatStore.getState().addTokenUsage(12_000, 500, false)
+
+    const session = activeSession()
+    expect(session.lastPromptTokens).toBe(400_000)
+    expect(session.peakPromptTokens).toBe(400_000)
+  })
+
+  it('a auto-compactação limpa o pico, não só a ocupação', () => {
+    seedSession()
+    useChatStore.getState().addTokenUsage(400_000, 1_000, true)
+    // Caminho da auto-compactação in-loop (o manual usa resetTokenCounters).
+    useChatStore.getState().addCompactBoundaryMessage(400_000, 'auto', 12, 'resumo')
+
+    const session = activeSession()
+    expect(session.lastPromptTokens).toBe(0)
+    // Sem isto: barra a 0% e tooltip a anunciar "Pico da sessão 400K" de uma
+    // conversa que já não existe.
+    expect(session.peakPromptTokens).toBe(0)
+  })
 })

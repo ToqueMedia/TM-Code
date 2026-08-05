@@ -287,7 +287,12 @@ export async function executeReview(
         agentStore.setError(error.message)
       },
       onUsageUpdate: (inputTokens, outputTokens) => {
-        chatStore.addTokenUsage(inputTokens, outputTokens)
+        // isForeground=false: o /review corre um agente FRESCO, sem o histórico
+        // do chat, por isso o prompt dele não tem relação com a ocupação da
+        // conversa. Enquanto o pill guardava um máximo, isto só inflacionava;
+        // desde que passou a guardar a ocupação corrente, SUBSTITUÍA — uma
+        // conversa com 400K caía para ~1,5% e ficava lá (auditoria 05-08).
+        chatStore.addTokenUsage(inputTokens, outputTokens, false)
       },
     })
   } catch (err) {

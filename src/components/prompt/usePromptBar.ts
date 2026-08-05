@@ -124,12 +124,29 @@ export function usePromptBar() {
   // Only disable during permission or credential dialogs (user must respond first).
   const isDisabled = hasPendingPermission || hasPendingCredential
   // Blocking limit: when context is nearly full, block input until compaction runs.
-  const currentPromptTokens = useChatStore(s => s.currentPromptTokens)
-  const currentResponseTokens = useChatStore(s => s.currentResponseTokens)
+  //
+  // Tem de ler a MESMA grandeza que o pill (`ContextWindowIndicator`), senão o
+  // utilizador vê "56% — há espaço" e o composer recusa o envio sem explicação.
+  // Lia `currentPromptTokens`, que no caminho do Chat nunca é reposto (só o
+  // `agentRunner` chama `resetTokenUsage`) e é por isso um máximo de toda a
+  // sessão: depois de uma micro-compactação o envio ficava bloqueado com o
+  // contexto já folgado. `maxOutputTokens` também faltava, pelo que os dois
+  // usavam denominadores diferentes (auditoria 05-08).
+  const currentPromptTokens = useChatStore(s => {
+    if (!s.activeSessionId) return s.currentPromptTokens
+    const persisted = s.sessions.get(s.activeSessionId)?.lastPromptTokens ?? 0
+    return persisted > 0 ? persisted : s.currentPromptTokens
+  })
+  const currentResponseTokens = useChatStore(s => {
+    if (!s.activeSessionId) return s.currentResponseTokens
+    const persisted = s.sessions.get(s.activeSessionId)?.lastResponseTokens ?? 0
+    return persisted > 0 ? persisted : s.currentResponseTokens
+  })
   const headerContextWindow = useAgentStore(s => s.modelContextWindow)
+  const modelMaxOutputTokens = useAgentStore(s => s.modelMaxOutputTokens)
   const currentContextTokens = totalContextTokens(currentPromptTokens, currentResponseTokens)
   const isContextBlocked = currentContextTokens > 0 && (headerContextWindow ?? 0) > 0
-    && isAtBlockingLimit(currentContextTokens, headerContextWindow ?? 0)
+    && isAtBlockingLimit(currentContextTokens, headerContextWindow ?? 0, modelMaxOutputTokens)
   // Send is blocked during scaffolding or when context is at the blocking limit.
   const isSendBlocked = isScaffolding || isContextBlocked
   // Preview button is ALWAYS visible when a project is open.

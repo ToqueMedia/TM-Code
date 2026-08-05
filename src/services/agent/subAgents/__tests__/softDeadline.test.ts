@@ -48,6 +48,20 @@ describe('prazo suave do sub-agente', () => {
     expect(await collect()).toBeNull()
   })
 
+  it('NUNCA fala na fronteira de paragem — só na pós-tool', async () => {
+    // Na fronteira de paragem um retorno não-nulo mantém o loop vivo: custa um
+    // pedido inteiro e, no último turno antes do tecto de maxTurns, faz o
+    // runner embrulhar um relatório COMPLETO como "resultado parcial".
+    let clock = 0
+    const collect = createSoftDeadlineNotice({ maxWallClockMs: FIFTEEN_MIN, now: () => clock })
+    clock = FIFTEEN_MIN
+
+    expect(await collect('stop')).toBeNull()
+    expect(await collect('stop')).toBeNull()
+    // E o aviso continua por entregar — a paragem não o consome.
+    expect(await collect('post_tool')).not.toBeNull()
+  })
+
   it('arredonda para pelo menos 1 minuto em relógios curtos', async () => {
     let clock = 0
     const collect = createSoftDeadlineNotice({ maxWallClockMs: 30_000, now: () => clock })

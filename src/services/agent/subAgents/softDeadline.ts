@@ -34,12 +34,19 @@ export interface SoftDeadlineOptions {
  */
 export function createSoftDeadlineNotice(
   options: SoftDeadlineOptions,
-): () => Promise<string | null> {
+): (boundary?: 'post_tool' | 'stop') => Promise<string | null> {
   const now = options.now ?? Date.now
   const deadlineAt = now() + Math.floor(options.maxWallClockMs * SOFT_DEADLINE_FRACTION)
   let delivered = false
 
-  return async () => {
+  return async (boundary = 'post_tool') => {
+    // SÓ na fronteira pós-tool. Na fronteira de PARAGEM, devolver não-nulo
+    // mantém o loop vivo: custa um pedido inteiro (~1,4M de input num Explore
+    // já longo) e, se o turno for o último antes do tecto de `maxTurns`, o
+    // runner embrulha um relatório COMPLETO como "resultado parcial" — o
+    // oposto do que este mecanismo existe para evitar (auditoria 05-08).
+    // Pós-tool o loop já ia continuar, portanto a injecção é grátis.
+    if (boundary !== 'post_tool') return null
     if (delivered || now() < deadlineAt) return null
     delivered = true
     const remainingMin = Math.max(
