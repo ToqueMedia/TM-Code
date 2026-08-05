@@ -8,7 +8,7 @@ import { useCheckpointStore } from './checkpointStore'
 import { useAgentStore } from './agentStore'
 import { usePermissionStore } from './permissionStore'
 import { useToastStore } from './toastStore'
-import { useActiveModelStore } from './activeModelStore'
+import { getPersonaFallbackModelId } from './activeModelStore'
 import { useReasoningEffortStore } from './reasoningEffortStore'
 import { resolveEffortModelId, resolveEffortTurnStamp } from '../services/agent/reasoningEffortModels'
 import { clearCommandQueue as clearMessageQueue } from '../services/agent/messageQueue'
@@ -1883,7 +1883,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       const messageId = generateId('msg')
       const stamp = resolveEffortTurnStamp(
         resolveEffortModelId(
-          useActiveModelStore.getState().activeModelId,
+          getPersonaFallbackModelId(),
           useAgentStore.getState().modelName,
         ),
         useReasoningEffortStore.getState().selected,

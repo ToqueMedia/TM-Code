@@ -1,36 +1,44 @@
-import { useActiveModelStore } from '@/stores/activeModelStore'
+import { useActiveModelStore, getPersonaFallbackModelId } from '@/stores/activeModelStore'
+import { usePersonaStore, DEFAULT_PERSONA } from '@/stores/personaStore'
 import { useReasoningEffortStore } from '@/stores/reasoningEffortStore'
 
 /**
- * O activeModelStore rastreia o modelo ativo (para lógica de effort) SEM
- * side-effects — o antigo reset-on-change (que apagava a preferência e tinha
- * race Firestore↔header) foi removido. A regra "na troca pega o default" é
- * resolvida por resolveEffectiveEffort, não por estado a repor.
+ * Desde 2026-08-05 o store guarda o mapa persona→modelo (system/aiPersonas —
+ * substituiu o doc de modelo único, sem compatibilidade) e o fallback do
+ * effort resolve-se PELA persona selecionada. Continua SEM side-effects — a
+ * regra "na troca pega o default" é resolvida por resolveEffectiveEffort no
+ * ponto de uso, não por estado a repor.
  */
-describe('activeModelStore', () => {
+describe('activeModelStore (mapa por persona)', () => {
   beforeEach(() => {
-    useActiveModelStore.setState({ activeModelId: null })
+    useActiveModelStore.setState({ personaModels: {} })
+    usePersonaStore.setState({ selected: DEFAULT_PERSONA })
     useReasoningEffortStore.setState({ selected: 'max' })
   })
 
-  it('setActiveModelId define o id', () => {
-    useActiveModelStore.getState().setActiveModelId('grok-4.5')
-    expect(useActiveModelStore.getState().activeModelId).toBe('grok-4.5')
+  it('setPersonaModels define o mapa e o fallback segue a persona selecionada', () => {
+    useActiveModelStore.getState().setPersonaModels({
+      standard: 'mimo-v2.5-pro',
+      expert: 'glm-5.2',
+      master: 'qwen3.8-max',
+    })
+    expect(getPersonaFallbackModelId()).toBe('mimo-v2.5-pro')
+
+    // Trocar de persona muda o fallback IMEDIATAMENTE — era o bug reportado:
+    // "a troca de persona não muda nada".
+    usePersonaStore.setState({ selected: 'master' })
+    expect(getPersonaFallbackModelId()).toBe('qwen3.8-max')
   })
 
-  it('trocar de modelo NÃO mexe na preferência de effort (sem reset-on-change)', () => {
-    useActiveModelStore.getState().setActiveModelId('glm-5.2')
-    useActiveModelStore.getState().setActiveModelId('grok-4.5')
-    // A preferência 'max' fica intocada — a reconciliação é no ponto de uso.
+  it('persona não publicada → fallback null (selector cai no servido/GLM)', () => {
+    useActiveModelStore.getState().setPersonaModels({ standard: 'glm-5.2' })
+    usePersonaStore.setState({ selected: 'expert' })
+    expect(getPersonaFallbackModelId()).toBeNull()
+  })
+
+  it('actualizar o mapa NÃO mexe na preferência de effort (sem reset-on-change)', () => {
+    useActiveModelStore.getState().setPersonaModels({ standard: 'glm-5.2' })
+    useActiveModelStore.getState().setPersonaModels({ standard: 'grok-4.5' })
     expect(useReasoningEffortStore.getState().selected).toBe('max')
-  })
-
-  it('mesmo id → no-op', () => {
-    useActiveModelStore.getState().setActiveModelId('glm-5.2')
-    let calls = 0
-    const unsub = useActiveModelStore.subscribe(() => { calls++ })
-    useActiveModelStore.getState().setActiveModelId('glm-5.2')
-    unsub()
-    expect(calls).toBe(0)
   })
 })

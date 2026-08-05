@@ -108,12 +108,16 @@ jest.mock('../../../stores/reasoningEffortStore', () => ({
   },
 }))
 
+// Desde 05-08 o fallback é POR PERSONA (getPersonaFallbackModelId) — o mock
+// devolve o mesmo mockActiveModelId, que nos testes representa "o modelo da
+// persona selecionada".
 jest.mock('../../../stores/activeModelStore', () => ({
   useActiveModelStore: {
     getState: () => ({
-      activeModelId: mockActiveModelId,
+      personaModels: { standard: mockActiveModelId },
     }),
   },
+  getPersonaFallbackModelId: () => mockActiveModelId,
 }))
 
 let mockAgentModelName: string | null = null

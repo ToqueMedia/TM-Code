@@ -27,7 +27,7 @@ import { markProjectEdited, startDiagnosticsBaseline } from "./editDiagnostics";
 import { getProjectStateDir } from "../projectStatePaths";
 import { useBillingStore } from "../../stores/billingStore";
 import { useAgentStore } from "../../stores/agentStore";
-import { useActiveModelStore } from "../../stores/activeModelStore";
+import { getPersonaFallbackModelId } from "../../stores/activeModelStore";
 import {
   resolveEffectiveEffort,
   resolveEffortModelId,
@@ -227,7 +227,7 @@ class AgentService {
       //  caíamos num fallback que podia esconder reasoning legítimo.)
       if (!this.byokActive) {
         const modelId = resolveEffortModelId(
-          useActiveModelStore.getState().activeModelId,
+          getPersonaFallbackModelId(),
           useAgentStore.getState().modelName,
         );
         if (shouldSendEffort(modelId)) {
@@ -242,7 +242,7 @@ class AgentService {
 
       const plan = useBillingStore.getState().plan;
       const modelName = resolveEffortModelId(
-        useActiveModelStore.getState().activeModelId,
+        getPersonaFallbackModelId(),
         useAgentStore.getState().modelName,
       );
       const profile =
@@ -263,7 +263,7 @@ class AgentService {
     if (this.byokActive) return null;
     try {
       const modelId = resolveEffortModelId(
-        useActiveModelStore.getState().activeModelId,
+        getPersonaFallbackModelId(),
         useAgentStore.getState().modelName,
       );
       const selected = useReasoningEffortStore.getState().selected;
@@ -1379,10 +1379,9 @@ class AgentService {
             ? { vision: declaredCapabilities.vision, search: declaredCapabilities.search }
             : undefined,
         );
-        // Alimenta o activeModelStore com o modelo SERVIDO (fallback ao Firestore
-        // real-time). O EffortSelector usa-o p/ a lista de efforts; a troca de
-        // modelo repõe o effort no default (activeModelStore).
-        if (modelName) useActiveModelStore.getState().setActiveModelId(modelName);
+        // O modelo SERVIDO vive só no agentStore.modelName (setModelInfo acima)
+        // — desde 05-08 é ele que manda no resolveEffortModelId (served-first);
+        // o activeModelStore passou a guardar o mapa persona→modelo do admin.
         if (contextWindow && contextWindow > 0) {
           this.sessionState.setContextWindowSize(contextWindow);
         }
@@ -1430,7 +1429,7 @@ class AgentService {
     // modelos não-mapeados.
     if (!this.lightweightOptions) {
       const modelId = resolveEffortModelId(
-        useActiveModelStore.getState().activeModelId,
+        getPersonaFallbackModelId(),
         useAgentStore.getState().modelName,
       );
       if (shouldSendEffort(modelId)) {

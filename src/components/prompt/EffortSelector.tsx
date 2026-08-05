@@ -5,6 +5,7 @@ import { FiBarChart2, FiCheck } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { useAgentStore } from '../../stores/agentStore'
 import { useActiveModelStore } from '../../stores/activeModelStore'
+import { usePersonaStore } from '../../stores/personaStore'
 import { useReasoningEffortStore } from '../../stores/reasoningEffortStore'
 import {
   getEffortOptionsForModel,
@@ -44,7 +45,11 @@ function labelFor(value: string): string {
 export function EffortSelector({ disabled = false }: { disabled?: boolean }) {
   // Modelo ativo: MESMA resolução que buildExtraHeaders / carimbo da mensagem
   // (Firestore → fallback X-TM-Model). Sem isto o seletor e o header divergem.
-  const fsModel = useActiveModelStore((s) => s.activeModelId)
+  // Fallback POR PERSONA (05-08): o mapa vem de system/aiPersonas e a escala
+  // muda no instante em que o user troca de persona (as duas subscrições
+  // re-renderizam este componente).
+  const persona = usePersonaStore((s) => s.selected)
+  const fsModel = useActiveModelStore((s) => s.personaModels[persona] ?? null)
   const headerModel = useAgentStore((s) => s.modelName)
   const modelId = resolveEffortModelId(fsModel, headerModel)
   const options = getEffortOptionsForModel(modelId)

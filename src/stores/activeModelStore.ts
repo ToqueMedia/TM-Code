@@ -1,32 +1,42 @@
 import { create } from 'zustand'
+import { usePersonaStore, type Persona } from './personaStore'
 
 /**
- * Modelo PRINCIPAL ativo, definido pelo ADMIN. Fonte real-time: um documento
- * Firestore (`system/aiActiveModel`) lido UMA vez com onSnapshot no
- * firebaseAuth (fora de qualquer componente que re-renderize). Também é
- * alimentado pelo header X-TM-Model de cada resposta (agentService), como
- * fallback quando o doc ainda não existe.
+ * Modelos atribuídos às PERSONAS pelo admin. Fonte real-time: o documento
+ * Firestore `system/aiPersonas` (uma entrada por persona publicada), lido UMA
+ * vez com onSnapshot no firebaseAuth (fora de qualquer componente).
  *
- * ATT (produto): o modelo NUNCA é revelado ao user — este id serve SÓ de lógica
- * (que lista de efforts mostrar, ver reasoningEffortModels.ts). Nenhuma UI o
- * exibe.
+ * SUBSTITUI o antigo `activeModelId` de modelo único (doc
+ * `system/aiActiveModel`, abandonado 2026-08-05 SEM compatibilidade — decisão
+ * do developer: com 3 personas um doc de modelo único não representa nada, e
+ * era ele que fazia o selector de effort mostrar a escala do modelo errado).
  *
- * NÃO tem side-effects. O antigo "reset-on-change" (repor o effort no default ao
- * trocar de modelo) foi REMOVIDO: causava race Firestore↔header (flip-flop) e
- * apagava a preferência do user. A regra "na troca pega o default, a menos que
- * já haja preferência" é agora resolvida SEM estado, por `resolveEffectiveEffort`
- * (preferência-se-válida senão default) no ponto de uso.
+ * O fallback do selector/header de effort é o modelo DA PERSONA SELECIONADA —
+ * trocar de persona muda a escala imediatamente, sem esperar pela primeira
+ * resposta. O X-TM-Model servido (agentStore.modelName) continua a ter
+ * prioridade quando existe (resolveEffortModelId, served-first desde 05-08).
+ *
+ * ATT (produto): os ids NUNCA são revelados ao user — servem só de lógica.
+ *
+ * NÃO tem side-effects (o "reset-on-change" antigo causava flip-flop e apagava
+ * a preferência do user; `resolveEffectiveEffort` resolve sem estado).
  */
 interface ActiveModelState {
-  activeModelId: string | null
-  /** Define o modelo ativo (idempotente). Sem side-effects. */
-  setActiveModelId: (id: string | null) => void
+  /** `{ standard: 'mimo-v2.5-pro', expert: 'glm-5.2', ... }` — só personas publicadas. */
+  personaModels: Partial<Record<Persona, string>>
+  setPersonaModels: (map: Partial<Record<Persona, string>>) => void
 }
 
-export const useActiveModelStore = create<ActiveModelState>((set, get) => ({
-  activeModelId: null,
-  setActiveModelId: (id) => {
-    if (id === get().activeModelId) return
-    set({ activeModelId: id })
-  },
+export const useActiveModelStore = create<ActiveModelState>((set) => ({
+  personaModels: {},
+  setPersonaModels: (map) => set({ personaModels: map }),
 }))
+
+/**
+ * Modelo de fallback para a persona SELECIONADA (uso fora de React —
+ * buildExtraHeaders, carimbos). Componentes devem subscrever os dois stores.
+ */
+export function getPersonaFallbackModelId(): string | null {
+  const persona = usePersonaStore.getState().selected
+  return useActiveModelStore.getState().personaModels[persona] ?? null
+}

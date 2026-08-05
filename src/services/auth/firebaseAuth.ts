@@ -568,28 +568,34 @@ class FirebaseAuthService {
   }
 
   /**
-   * Attach an onSnapshot listener to `system/aiActiveModel` — o modelo PRINCIPAL
-   * definido pelo admin. Uma subscrição só (não polling), fora de qualquer
-   * componente. Real-time: quando o admin troca o modelo, o activeModelStore
-   * atualiza e o EffortSelector muda a lista de níveis + repõe o default. O
-   * mesmo doc é lido pela Web. Doc ausente → activeModelStore fica no fallback
-   * do header/GLM. Requer regra Firestore de leitura para utilizadores autenticados.
+   * Attach an onSnapshot listener to `system/aiPersonas` — o mapa
+   * persona→modelo escrito pelo control-plane a cada publish/disable de
+   * persona (substitui o doc de modelo único `system/aiActiveModel`,
+   * abandonado 2026-08-05 sem compatibilidade). Uma subscrição só, fora de
+   * qualquer componente. Real-time: trocar a atribuição de uma persona (ou o
+   * user trocar de persona) muda a escala do EffortSelector imediatamente.
+   * Doc ausente → mapa vazio e o selector cai no modelo servido/GLM.
    */
   private subscribeToActiveModel(): void {
     this.unsubscribeActiveModelListener()
 
     const expectedGen = this.authGeneration
     this.unsubscribeActiveModel = onSnapshot(
-      doc(getFirebaseDb(), 'system', 'aiActiveModel'),
+      doc(getFirebaseDb(), 'system', 'aiPersonas'),
       (snap) => {
         if (expectedGen !== this.authGeneration) return
-        const modelId = snap.exists() ? (snap.data()?.modelId as string | undefined) ?? null : null
+        const data = snap.exists() ? snap.data() : null
+        const map: Record<string, string> = {}
+        for (const persona of ['standard', 'expert', 'master'] as const) {
+          const entry = data?.[persona] as { modelId?: string; enabled?: boolean } | undefined
+          if (entry?.modelId && entry.enabled !== false) map[persona] = entry.modelId
+        }
         void import('../../stores/activeModelStore').then(({ useActiveModelStore }) => {
-          useActiveModelStore.getState().setActiveModelId(modelId)
+          useActiveModelStore.getState().setPersonaModels(map)
         })
       },
       (err) => {
-        console.warn('[activeModel] listener error:', err)
+        console.warn('[aiPersonas] listener error:', err)
       },
     )
   }
