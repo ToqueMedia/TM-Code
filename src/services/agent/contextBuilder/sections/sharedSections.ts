@@ -193,7 +193,6 @@ export function sharedMcpIndexBlock(mcpTools: MCPToolSummary[]): string | null {
     `Connected MCP servers/tools: ${servers}.`,
     `Examples: ${examples}${mcpTools.length > 8 ? `, +${mcpTools.length - 8} more` : ''}.`,
     'MCP tool schemas are DEFERRED — before calling one, fetch its definition with `ToolSearch` (`{ query: "select:mcp__server__tool" }`, comma-separated for several; fetch everything you expect to need in one call).',
-    'Use `request_context({ auxiliary: "agent_runtime.mcp_routing" })` when the task explicitly involves MCPs, live external state, external side effects, or API/docs that should be read from an MCP.',
   ].join('\n')
 }
 

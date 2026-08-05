@@ -822,8 +822,6 @@ export interface RequestUsageEntry {
   coreContextTokens?: number
   /** Alias for coreContextTokens in newer exports. */
   coreSystemTokens?: number
-  /** Tokens spent on the on-demand index itself. */
-  onDemandIndexTokens?: number
   /** System-prompt tokens attributed to the on-demand auxiliaries loaded inline. */
   auxiliaryContextTokens?: number
   /** Auxiliary ids LOADED inline in the system prompt. */
@@ -849,26 +847,6 @@ export interface RequestUsageEntry {
   evidenceSignals?: string[]
   /** Context planner candidate sections for this task. */
   contextPlanCandidateSections?: string[]
-  /** Auxiliary ids the model requested through request_context. */
-  modelRequestedContextSections?: string[]
-  /** Number of request_context tool calls intercepted in this run. */
-  requestContextToolCalls?: number
-  /** Auxiliary ids that request_context returned with content. */
-  requestContextSectionsLoaded?: string[]
-  /** request_context selection reasons keyed by auxiliary id. */
-  requestContextSelectionReason?: Record<string, string>
-  /** request_context cost tiers keyed by auxiliary id. */
-  requestContextCostTier?: Record<string, string>
-  /** Whether request_context loaded a broader fallback context. */
-  requestContextFallbackUsed?: boolean
-  /** Contexts the fallback moved away from. */
-  requestContextFallbackFrom?: string[]
-  /** Contexts loaded as fallback. */
-  requestContextFallbackTo?: string[]
-  /** Auxiliary ids requested but not loaded (unknown/already inline/no content). */
-  requestedButNotLoadedSections?: string[]
-  /** Legacy alias: auxiliary ids actually fetched during this run through request_context. */
-  requestedContextSections?: string[]
   /** Tokens saved by omitting the auxiliaries (vs loading everything). */
   auxiliarySavingsTokens?: number
   /** Alias for auxiliarySavingsTokens in newer exports. */

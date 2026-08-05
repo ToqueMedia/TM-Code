@@ -147,23 +147,15 @@ export interface AuxiliarySelection {
   savingsTokens: number
   autoLoadedSystemSections?: string[]
   contextPlanCandidateSections?: string[]
-  modelRequestedContextSections?: string[]
-  requestContextToolCalls?: number
-  requestContextSectionsLoaded?: string[]
-  requestContextSelectionReason?: Record<string, string>
-  requestContextCostTier?: Record<string, ContextCostTier>
-  requestContextFallbackUsed?: boolean
-  requestContextFallbackFrom?: string[]
-  requestContextFallbackTo?: string[]
-  requestedButNotLoadedSections?: string[]
   /**
    * Secções BOUNDED que a evidência do projecto não justificou (achado #9).
-   * Distintas das omitidas por serem unbounded: estas seriam entregues inline
-   * se o projecto tivesse a superfície correspondente. Visíveis no índice
-   * on-demand com a razão, e no export.
+   * Ficam FORA do prompt e não há forma de as pedir — o modelo descobre o que
+   * precisa com as ferramentas normais, como no cli-vaz. Estes campos existem
+   * para o export: são a única forma de responder a "porque é que este
+   * projecto não recebeu as secções de design system".
    */
   evidenceOmittedSections?: string[]
-  /** Razão por id, para o índice on-demand e para o export. */
+  /** Razão por id, para o export. */
   evidenceOmitReason?: Record<string, string>
   /** Sinais de evidência que suportaram as decisões acima. */
   evidenceSignals?: string[]
@@ -212,28 +204,6 @@ const cx = (meta: AuxiliaryMeta): AuxiliaryMeta => meta
 
 export const AUXILIARY_METAS: AuxiliaryMeta[] = [
   cx({
-    id: 'design_system.index',
-    domain: 'design_system',
-    capability: 'index',
-    name: 'Design system index',
-    description: 'Compact design-system map: theme files, tokens, recipes, and component pattern locations.',
-    scope: 'domain',
-    costTier: 'low',
-    granularity: 'index',
-    whenToUse: 'Use first when the task is visual/theme related but the exact design-system file is unknown.',
-    whenNotToUse: 'Do not use for MCP, git, dev-server, backend, or already-localized edits.',
-    dependencies: [],
-    fallbackTo: ['project.structure_overview'],
-    sourceResolver: 'static_expected_files',
-    freshnessPolicy: 'stable guidance plus expected file locations',
-    expectedFiles: ['src/theme/**', 'src/themes/**', 'src/components/**'],
-    summaryAvailable: true,
-    fullAvailable: false,
-    estTokens: 160,
-    type: 'static',
-    phase: 1,
-  }),
-  cx({
     id: 'design_system.semantic_tokens',
     domain: 'design_system',
     capability: 'semantic_tokens',
@@ -245,7 +215,7 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     whenToUse: 'Use for semantic tokens, theme token names, state tokens, palette aliases, or Chakra semantic token work.',
     whenNotToUse: 'Do not use for routing, MCP, git, dev server, or broad architecture discovery.',
     dependencies: ['design_system.theme_config'],
-    fallbackTo: ['design_system.index', 'project.structure_overview'],
+    fallbackTo: [],
     sourceResolver: 'design_system_semantic_tokens',
     freshnessPolicy: 'read expected token/theme files before editing',
     expectedFiles: ['src/theme/**/semantic*', 'src/theme/**/tokens*', 'src/themes/**', 'src/theme/index.ts'],
@@ -267,7 +237,7 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     whenToUse: 'Use for theme configuration, Chakra theme setup, semantic token wiring, or provider-level theme changes.',
     whenNotToUse: 'Do not use for ordinary component edits that do not touch theme configuration.',
     dependencies: [],
-    fallbackTo: ['design_system.index', 'project.structure_overview'],
+    fallbackTo: [],
     sourceResolver: 'design_system_theme_config',
     freshnessPolicy: 'read theme entrypoint before editing',
     expectedFiles: ['src/theme/index.ts', 'src/theme/**', 'src/themes/**', 'src/components/ui/provider.tsx'],
@@ -333,7 +303,7 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     whenToUse: 'Use for explicit UI/design/layout/visual polish/component styling work.',
     whenNotToUse: 'Do not use just because a file is .tsx or under screens/account.',
     dependencies: ['design_system.semantic_tokens'],
-    fallbackTo: ['project.structure_overview'],
+    fallbackTo: [],
     sourceResolver: 'shared_ui_baseline_core',
     freshnessPolicy: 'stable design guidance',
     expectedFiles: ['src/components/**', 'src/screens/**', 'src/theme/**'],
@@ -368,28 +338,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     phase: 1,
   }),
   cx({
-    id: 'project.structure_overview',
-    domain: 'project',
-    capability: 'structure_overview',
-    name: 'Project structure overview',
-    description: 'Compact project/file-tree index, not the full tree.',
-    scope: 'project',
-    costTier: 'low',
-    granularity: 'index',
-    whenToUse: 'Use when broad architecture or locating an unknown file is required.',
-    whenNotToUse: 'Do not use for semantic tokens, localized theme edits, MCP routing, git, or dev-server status.',
-    dependencies: [],
-    fallbackTo: ['project.structure_full'],
-    sourceResolver: 'project_structure_index',
-    freshnessPolicy: 'snapshot at turn start',
-    expectedFiles: [],
-    summaryAvailable: true,
-    fullAvailable: true,
-    estTokens: 300,
-    type: 'dynamic',
-    phase: 1,
-  }),
-  cx({
     id: 'project.package_map',
     domain: 'project',
     capability: 'package_map',
@@ -401,7 +349,7 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     whenToUse: 'Use for package scripts, dependency map, build command discovery, or project package shape.',
     whenNotToUse: 'Do not use when git/dev-server/theme-specific context is sufficient.',
     dependencies: [],
-    fallbackTo: ['project.structure_overview'],
+    fallbackTo: [],
     sourceResolver: 'package_summary',
     freshnessPolicy: 'snapshot at turn start',
     expectedFiles: ['package.json', 'vite.config.*', 'tsconfig.json'],
@@ -422,8 +370,8 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     granularity: 'summary',
     whenToUse: 'Use for architecture mapping or when the task needs app entrypoints.',
     whenNotToUse: 'Do not use for already-localized file edits.',
-    dependencies: ['project.structure_overview'],
-    fallbackTo: ['project.structure_full'],
+    dependencies: [],
+    fallbackTo: [],
     sourceResolver: 'project_entrypoints',
     freshnessPolicy: 'snapshot at turn start',
     expectedFiles: ['src/main.tsx', 'src/App.tsx', 'src/index.ts', 'src/routes/**'],
@@ -431,52 +379,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: false,
     estTokens: 220,
     type: 'dynamic',
-    phase: 1,
-  }),
-  cx({
-    id: 'project.symbol_index',
-    domain: 'project',
-    capability: 'symbol_index',
-    name: 'Project symbol index',
-    description: 'Lightweight file/symbol map with line numbers for targeted Read calls.',
-    scope: 'project',
-    costTier: 'low',
-    granularity: 'index',
-    whenToUse: 'Use when you need to locate functions, classes, hooks, components, handlers, or services before reading code.',
-    whenNotToUse: 'Do not use as source code or as permission to edit; confirm the exact range with Read before mutating files.',
-    dependencies: [],
-    fallbackTo: ['project.structure_overview'],
-    sourceResolver: 'project_symbol_index',
-    freshnessPolicy: 'generated on demand from current files',
-    expectedFiles: ['src/**/*.{ts,tsx,js,jsx}', 'src-tauri/src/**/*.rs', '**/*.{go,py,php,rb,java,kt,swift,cs}'],
-    summaryAvailable: true,
-    fullAvailable: false,
-    estTokens: 900,
-    type: 'dynamic',
-    aliases: ['project_symbol_index', 'symbol_index', 'code_map'],
-    phase: 1,
-  }),
-  cx({
-    id: 'project.structure_full',
-    domain: 'project',
-    capability: 'structure_full',
-    name: 'Project structure full',
-    description: 'Full file-tree + package summary. Fallback only.',
-    scope: 'project',
-    costTier: 'high',
-    granularity: 'full',
-    whenToUse: 'Use only when specific contexts fail, files are unknown, architecture is broad, multiple modules are involved, or dependency mapping spans areas.',
-    whenNotToUse: 'Do not use for semantic tokens, localized theme edits, MCP routing, git status, dev-server status, or UI polish with design-system context.',
-    dependencies: ['project.structure_overview'],
-    fallbackTo: [],
-    sourceResolver: 'project_structure_full',
-    freshnessPolicy: 'snapshot at turn start',
-    expectedFiles: [],
-    summaryAvailable: true,
-    fullAvailable: true,
-    estTokens: 1500,
-    type: 'dynamic',
-    aliases: ['project_structure_full'],
     phase: 1,
   }),
   cx({
@@ -491,7 +393,7 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     whenToUse: 'Use for MCP audits, MCP tool routing, external state/side effects, or connector questions.',
     whenNotToUse: 'Do not use for design tokens, git, dev server, or project architecture unless MCP files must be located.',
     dependencies: [],
-    fallbackTo: ['project.structure_overview'],
+    fallbackTo: [],
     sourceResolver: 'mcp_routing_detail',
     freshnessPolicy: 'snapshot of connected tools at turn start',
     expectedFiles: ['src/services/mcp/**', 'src/services/agent/toolPolicy.ts'],
@@ -527,28 +429,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     fullAvailable: false,
     estTokens: 180,
     type: 'static',
-    phase: 1,
-  }),
-  cx({
-    id: 'agent_runtime.memory_context',
-    domain: 'agent_runtime',
-    capability: 'memory_context',
-    name: 'Memory context',
-    description: 'Memory indexes and stale-memory policy.',
-    scope: 'runtime',
-    costTier: 'medium',
-    granularity: 'summary',
-    whenToUse: 'Use when the task is about agent memory, memories, or project/user memory indexes.',
-    whenNotToUse: 'Do not use for project docs unless memory is explicitly involved.',
-    dependencies: [],
-    fallbackTo: ['project.docs_full'],
-    sourceResolver: 'memory_context',
-    freshnessPolicy: 'snapshot at turn start',
-    expectedFiles: ['MEMORY.md', '.codex/**', '.agents/**'],
-    summaryAvailable: true,
-    fullAvailable: true,
-    estTokens: 500,
-    type: 'dynamic',
     phase: 1,
   }),
   cx({
@@ -608,7 +488,7 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     whenToUse: 'Use for git, commit, branch, pull, push, diff, merge, tag, or rebase tasks.',
     whenNotToUse: 'Do not use for dev server, design system, MCP, or backend bugfixes unless git is requested.',
     dependencies: [],
-    fallbackTo: ['delivery.changed_files'],
+    fallbackTo: [],
     sourceResolver: 'git_status_detail',
     freshnessPolicy: 'snapshot at turn start',
     expectedFiles: ['.git'],
@@ -617,28 +497,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     estTokens: 520,
     type: 'dynamic',
     aliases: ['git_status_detail'],
-    phase: 1,
-  }),
-  cx({
-    id: 'delivery.changed_files',
-    domain: 'delivery/git',
-    capability: 'changed_files',
-    name: 'Changed files',
-    description: 'Recently modified/changed-file working set.',
-    scope: 'git',
-    costTier: 'low',
-    granularity: 'index',
-    whenToUse: 'Use with git tasks or when the current changed-file set matters.',
-    whenNotToUse: 'Do not use as project structure discovery.',
-    dependencies: ['delivery.git_status'],
-    fallbackTo: ['project.structure_overview'],
-    sourceResolver: 'changed_files',
-    freshnessPolicy: 'snapshot at turn start',
-    expectedFiles: [],
-    summaryAvailable: true,
-    fullAvailable: false,
-    estTokens: 160,
-    type: 'dynamic',
     phase: 1,
   }),
   cx({
@@ -685,32 +543,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     estTokens: 200,
     type: 'static',
     aliases: ['vision_rules'],
-    phase: 1,
-  }),
-  cx({
-    id: 'project.docs_full',
-    domain: 'project',
-    capability: 'project_docs',
-    name: 'Project docs',
-    description:
-      'README + PLAN + TODO. When TMS.md exists, foreign AGENTS/CLAUDE may also appear (dual-case). TMS itself is already in the static system prompt — not repeated here.',
-    scope: 'project-doc',
-    costTier: 'high',
-    granularity: 'full',
-    whenToUse:
-      'Use when README, PLAN.md, or TODO.md content is needed (or dual-case foreign instructions not already in the system prompt).',
-    whenNotToUse:
-      'Do not use only to re-read TMS.md or sole AGENTS/CLAUDE (already in system prompt). Do not use as general project orientation when structure/git is enough.',
-    dependencies: [],
-    fallbackTo: ['project.structure_overview'],
-    sourceResolver: 'project_docs_full',
-    freshnessPolicy: 'snapshot at turn start',
-    expectedFiles: ['README.md', 'TMS.md', 'AGENTS.md', 'CLAUDE.md', 'PLAN.md', 'TODO.md'],
-    summaryAvailable: true,
-    fullAvailable: true,
-    estTokens: 2000,
-    type: 'project-doc',
-    aliases: ['project_docs_full'],
     phase: 1,
   }),
 ]
@@ -880,15 +712,6 @@ export function selectAuxiliaries(
     savingsTokens: totalAvailableTokens - loadedTokens,
     autoLoadedSystemSections: loaded.map((l) => l.id),
     contextPlanCandidateSections: candidateIds,
-    modelRequestedContextSections: [],
-    requestContextToolCalls: 0,
-    requestContextSectionsLoaded: [],
-    requestContextSelectionReason: {},
-    requestContextCostTier: {},
-    requestContextFallbackUsed: false,
-    requestContextFallbackFrom: [],
-    requestContextFallbackTo: [],
-    requestedButNotLoadedSections: [],
     readOnly: readOnlyHint === true,
     reason: reason ?? `context planner (taskDomain=${contextPlan.taskDomain})`,
     routerSource: routerInfo?.source ?? 'keyword',
@@ -1019,78 +842,4 @@ export function applyRenderedTokenCounts(
   }
   selection.loadedTokens = total
   return selection
-}
-
-export function buildOnDemandIndex(selection: AuxiliarySelection): string | null {
-  const omitted = selection.omitted
-  if (omitted.length === 0) return null
-
-  const candidateSet = new Set(selection.contextPlanCandidateSections ?? [])
-  const evidenceSet = new Set(selection.evidenceOmittedSections ?? [])
-  const evidenceOmitted = omitted.filter(o => evidenceSet.has(o.id))
-  const candidates = omitted.filter(o => !evidenceSet.has(o.id) && candidateSet.has(o.id))
-  const fallbackOnly = omitted.filter(o => !evidenceSet.has(o.id) && !candidateSet.has(o.id) && (o.granularity === 'full' || o.costTier === 'high'))
-  const available = omitted.filter(o => !evidenceSet.has(o.id) && !candidateSet.has(o.id) && !fallbackOnly.includes(o))
-
-  const candidateLines = candidates.map((o) =>
-    `- \`${o.id}\` [candidate; ${o.granularity}; ${o.costTier}] — ${o.description}`,
-  )
-
-  // Uma linha POR SECÇÃO, com a descrição da meta. A versão anterior listava
-  // só ids agrupados por domínio ("- design_system: `a`, `b`, `c`") — medido
-  // na sessão momenu-fact de 02-08: 0 chamadas a request_context em 34
-  // pedidos. Ids nus não dão ao modelo matéria para DECIDIR; a descrição de
-  // uma linha custa ~200 tokens no total e é o que torna o índice utilizável.
-  const byDomain = new Map<string, string[]>()
-  for (const o of available) {
-    const lines = byDomain.get(o.domain) ?? []
-    lines.push(`  - \`${o.id}\` — ${o.description}`)
-    byDomain.set(o.domain, lines)
-  }
-  const domainLines = Array.from(byDomain.entries()).flatMap(
-    ([domain, lines]) => [`- ${domain}:`, ...lines],
-  )
-
-  const fallbackLine = fallbackOnly.length
-    ? `Fallback-only broad/high-cost contexts: ${fallbackOnly.map(o => `\`${o.id}\``).join(', ')}.`
-    : null
-  const hasSymbolIndex = omitted.some(o => o.id === 'project.symbol_index')
-  const symbolIndexLine = hasSymbolIndex
-    ? 'Navigation shortcut: request `project.symbol_index` when you need to locate functions/classes/components/hooks/handlers/services before choosing a Read range. It is an index only; verify source with Read before editing.'
-    : null
-
-  return [
-    '# Auxiliary context (on-demand)',
-    '',
-    `Context plan: ${selection.contextPlan.taskDomain}; required: ${selection.contextPlan.requiredCapabilities.join(', ') || 'none'}; minimum: ${selection.contextPlan.minimumContextNeeded}; fallback risk: ${selection.contextPlan.fallbackRisk}.`,
-    `Selected inline: ${selection.contextPlan.selectedContexts.length ? selection.contextPlan.selectedContexts.map(id => `\`${resolveAuxiliaryId(id)}\``).join(', ') : 'none'}.`,
-    '',
-    // A política de uso vive AQUI, no cabeçalho do índice — não numa secção
-    // on-demand. A `agent_runtime.request_context_policy` (removida) era
-    // circular: as instruções de quando usar o request_context só chegavam a
-    // quem já soubesse usá-lo. Uma política que o modelo não vê não existe.
-    // Desde a doutrina full-delivery (2026-08-03) só as secções UNBOUNDED
-    // chegam aqui — o resto é entregue inline.
-    'Sections are omitted from the prompt when they are unbounded, or when this project shows no evidence that they apply. To load one, call the `request_context` tool with its id — the content comes back as a tool result in the same turn. This is expected use, not a failure mode: when a section below matches the task, request it BEFORE falling back to broad exploration.',
-    'Typical moments: you need to locate a function/class/component/hook by name → `project.symbol_index`; broad architecture or unknown file layout → `project.structure_full`; README/PLAN/TODO content → `project.docs_full`; the task is about agent memory → `agent_runtime.memory_context`.',
-    'Call once per id — content already returned does not need re-requesting.',
-    ...(symbolIndexLine ? [symbolIndexLine] : []),
-    '',
-    // Grupo próprio e no topo: estas seriam entregues inline e foram retidas
-    // por evidência do PROJECTO, não por serem caras. Se a tarefa contrariar a
-    // evidência (ex.: introduzir a primeira UI num backend), é aqui que o
-    // modelo vê o que lhe falta — e a razão, para poder discordar dela.
-    ...(evidenceOmitted.length
-      ? [
-          'Withheld for lack of project evidence — request any of these if the task contradicts the evidence (e.g. you are about to add the project\'s first UI):',
-          ...evidenceOmitted.map(o =>
-            `- \`${o.id}\` — ${o.description} (${(selection.evidenceOmitReason ?? {})[o.id] ?? o.reason})`,
-          ),
-          '',
-        ]
-      : []),
-    ...(candidateLines.length ? ['Candidate contexts:', ...candidateLines, ''] : []),
-    ...(domainLines.length ? ['Other available contexts:', ...domainLines, ''] : []),
-    ...(fallbackLine ? [fallbackLine] : []),
-  ].join('\n')
 }

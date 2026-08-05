@@ -56,49 +56,6 @@ export const DESTRUCTIVE_TOOLS = new Set<string>([
   EDIT_FILE, WRITE_FILE, CREATE_FILE, CREATE_DIRECTORY, DELETE_FILE, RENAME_FILE,
 ])
 
-// ── Meta-tool: request_context ───────────────────────────────────────────
-//
-// Quando o selector de contexto omite secções auxiliares do system prompt,
-// este meta-tool deixa o agente ir buscá-las a pedido. O bridge do
-// agentService intercepta o nome e devolve o texto da auxiliar como
-// tool_result; o toolExecutor nunca o vê. Só é injectado quando há omissões.
-//
-// AO CONTRÁRIO do `request_tools`, este está VIVO: é injectado directamente
-// no agentService (e no parallelTaskRunner), sem passar por classe nenhuma.
-// Foi uma regressão apanhada a 2026-07-18 — o índice on-demand prometia uma
-// tool inexistente e as secções omitidas ficavam inalcançáveis.
-export const REQUEST_CONTEXT_NAME = 'request_context'
-
-export function requestContextDefinition(omittedIds: string[]): OpenAI.ChatCompletionTool {
-  return {
-    type: 'function',
-    function: {
-      name: REQUEST_CONTEXT_NAME,
-      description:
-        'Request a domain/capability context that was OMITTED from the system prompt to keep it lean. ' +
-        'Use the smallest specific context first (for example design_system.semantic_tokens, agent_runtime.mcp_routing, delivery.dev_server, delivery.git_status, project.docs_full for README/PLAN/TODO). ' +
-        'TMS.md is already in the system prompt when the project has one — do not re-request it. ' +
-        'Use broad project/full contexts only when specific contexts are insufficient. ' +
-        'The content is returned as a tool result for you to use this turn. ' +
-        'Call ONCE per auxiliary; do not re-request one already returned.',
-      parameters: {
-        type: 'object',
-        properties: {
-          auxiliary: {
-            type: 'string',
-            description:
-              'Auxiliary id to load. Available on-demand: ' +
-              (omittedIds.length > 0
-                ? omittedIds.join(', ')
-                : '(none — all context is already loaded)'),
-          },
-        },
-        required: ['auxiliary'],
-      },
-    },
-  }
-}
-
 // ── Meta-tool: ToolSearch ────────────────────────────────────────────────
 //
 // Sucessor do `request_tools` com produtor real (ver o cabeçalho). Os defs

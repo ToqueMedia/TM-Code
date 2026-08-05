@@ -153,8 +153,6 @@ export interface PayloadReport {
   coreContextTokens: number
   /** Alias/export field for core system prompt tokens. */
   coreSystemTokens: number
-  /** Tokens spent on the rendered on-demand index. */
-  onDemandIndexTokens: number
   /** On-demand context architecture: estimated tokens of auxiliaries loaded inline. */
   auxiliaryContextTokens: number
   /** On-demand context architecture: auxiliaries loaded inline (id + name + reason). */
@@ -179,26 +177,6 @@ export interface PayloadReport {
   evidenceSignals: string[]
   /** Context planner candidate sections for this task. */
   contextPlanCandidateSections: string[]
-  /** Auxiliary ids the model requested through request_context. */
-  modelRequestedContextSections: string[]
-  /** Number of request_context tool calls intercepted in this run. */
-  requestContextToolCalls: number
-  /** Auxiliary ids that request_context returned with content. */
-  requestContextSectionsLoaded: string[]
-  /** request_context selection reasons keyed by auxiliary id. */
-  requestContextSelectionReason: Record<string, string>
-  /** request_context cost tiers keyed by auxiliary id. */
-  requestContextCostTier: Record<string, string>
-  /** Whether request_context loaded a broader fallback context. */
-  requestContextFallbackUsed: boolean
-  /** Contexts the fallback moved away from. */
-  requestContextFallbackFrom: string[]
-  /** Contexts loaded as fallback. */
-  requestContextFallbackTo: string[]
-  /** Auxiliary ids requested but not loaded (unknown/already inline/no content). */
-  requestedButNotLoadedSections: string[]
-  /** Legacy alias: auxiliary sections actually fetched through request_context in this run. */
-  requestedContextSections: string[]
   /** On-demand context architecture: estimated savings vs loading all phase-1 auxiliaries. */
   auxiliarySavingsTokens: number
   /** Alias/export field for system prompt savings. */
@@ -756,12 +734,6 @@ export function inspectPayload(
   const auxiliaryContextTokens = auxiliarySelection?.loadedTokens ?? 0
   const auxiliarySavingsTokens = auxiliarySelection?.savingsTokens ?? 0
   const coreContextTokens = Math.max(0, systemPromptTokens - auxiliaryContextTokens)
-  const onDemandIndexMatch = systemPrompt?.match(
-    /# Auxiliary context \(on-demand\)[\s\S]*?(?=\n# |\n__TM_SYSTEM_PROMPT_DYNAMIC_BOUNDARY__|$)/,
-  )
-  const onDemandIndexTokens = onDemandIndexMatch
-    ? roughTokenEstimate(onDemandIndexMatch[0])
-    : 0
   const loadedSystemSections = auxiliaryLoaded.map((a) => a.id)
   const omittedSystemSections = auxiliaryOmitted.map((a) => a.id)
   const autoLoadedSystemSections = auxiliarySelection?.autoLoadedSystemSections ?? loadedSystemSections
@@ -769,16 +741,6 @@ export function inspectPayload(
   const evidenceOmitReason = auxiliarySelection?.evidenceOmitReason ?? {}
   const evidenceSignals = auxiliarySelection?.evidenceSignals ?? []
   const contextPlanCandidateSections = auxiliarySelection?.contextPlanCandidateSections ?? []
-  const modelRequestedContextSections = auxiliarySelection?.modelRequestedContextSections ?? []
-  const requestContextToolCalls = auxiliarySelection?.requestContextToolCalls ?? 0
-  const requestContextSectionsLoaded = auxiliarySelection?.requestContextSectionsLoaded ?? []
-  const requestContextSelectionReason = auxiliarySelection?.requestContextSelectionReason ?? {}
-  const requestContextCostTier = auxiliarySelection?.requestContextCostTier ?? {}
-  const requestContextFallbackUsed = auxiliarySelection?.requestContextFallbackUsed ?? false
-  const requestContextFallbackFrom = auxiliarySelection?.requestContextFallbackFrom ?? []
-  const requestContextFallbackTo = auxiliarySelection?.requestContextFallbackTo ?? []
-  const requestedButNotLoadedSections = auxiliarySelection?.requestedButNotLoadedSections ?? []
-  const requestedContextSections = requestContextSectionsLoaded
 
   const report: PayloadReport = {
     timestamp: Date.now(),
@@ -799,7 +761,6 @@ export function inspectPayload(
     continuationReason,
     coreContextTokens,
     coreSystemTokens: coreContextTokens,
-    onDemandIndexTokens,
     auxiliaryContextTokens,
     auxiliaryLoaded,
     loadedSystemSections,
@@ -810,16 +771,6 @@ export function inspectPayload(
     evidenceOmitReason,
     evidenceSignals,
     contextPlanCandidateSections,
-    modelRequestedContextSections,
-    requestContextToolCalls,
-    requestContextSectionsLoaded,
-    requestContextSelectionReason,
-    requestContextCostTier,
-    requestContextFallbackUsed,
-    requestContextFallbackFrom,
-    requestContextFallbackTo,
-    requestedButNotLoadedSections,
-    requestedContextSections,
     auxiliarySavingsTokens,
     systemPromptSavingsTokens: auxiliarySavingsTokens,
     systemPromptProfileReason: auxiliarySelection?.reason,

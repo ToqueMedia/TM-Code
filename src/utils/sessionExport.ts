@@ -572,7 +572,6 @@ function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
       }
       if (e.coreContextTokens != null) lines.push(`| core context tokens | ${e.coreContextTokens.toLocaleString()} |`)
       if (e.coreSystemTokens != null) lines.push(`| core system tokens | ${e.coreSystemTokens.toLocaleString()} |`)
-      if (e.onDemandIndexTokens != null) lines.push(`| on-demand index tokens | ${e.onDemandIndexTokens.toLocaleString()} |`)
       if (e.auxiliaryContextTokens != null) lines.push(`| auxiliary context tokens | ${e.auxiliaryContextTokens.toLocaleString()} |`)
       if (e.auxiliarySavingsTokens != null) lines.push(`| auxiliary savings tokens | ${e.auxiliarySavingsTokens.toLocaleString()} |`)
       if (e.systemPromptSavingsTokens != null) lines.push(`| system prompt savings tokens | ${e.systemPromptSavingsTokens.toLocaleString()} |`)
@@ -593,15 +592,6 @@ function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
       }
       if (e.evidenceSignals?.length) lines.push(`| project evidence signals | ${e.evidenceSignals.map(s => `\`${s}\``).join(', ')} |`)
       if (e.contextPlanCandidateSections?.length) lines.push(`| context plan candidates | ${e.contextPlanCandidateSections.map(id => `\`${id}\``).join(', ')} |`)
-      if (e.modelRequestedContextSections?.length) lines.push(`| model requested context sections | ${e.modelRequestedContextSections.map(id => `\`${id}\``).join(', ')} |`)
-      if (e.requestContextToolCalls != null) lines.push(`| request_context tool calls | ${e.requestContextToolCalls.toLocaleString()} |`)
-      if (e.requestContextSectionsLoaded?.length) lines.push(`| request_context sections loaded | ${e.requestContextSectionsLoaded.map(id => `\`${id}\``).join(', ')} |`)
-      if (e.requestContextSelectionReason && Object.keys(e.requestContextSelectionReason).length) lines.push(`| request_context selection reason | ${Object.entries(e.requestContextSelectionReason).map(([id, reason]) => `\`${id}\`: ${escapeTableCell(String(reason))}`).join('<br>')} |`)
-      if (e.requestContextCostTier && Object.keys(e.requestContextCostTier).length) lines.push(`| request_context cost tier | ${Object.entries(e.requestContextCostTier).map(([id, tier]) => `\`${id}\`: ${tier}`).join(', ')} |`)
-      if (e.requestContextFallbackUsed != null) lines.push(`| request_context fallback used | ${e.requestContextFallbackUsed ? 'true' : 'false'} |`)
-      if (e.requestContextFallbackFrom?.length) lines.push(`| request_context fallback from | ${e.requestContextFallbackFrom.map(id => `\`${id}\``).join(', ')} |`)
-      if (e.requestContextFallbackTo?.length) lines.push(`| request_context fallback to | ${e.requestContextFallbackTo.map(id => `\`${id}\``).join(', ')} |`)
-      if (e.requestedButNotLoadedSections?.length) lines.push(`| requested but not loaded sections | ${e.requestedButNotLoadedSections.map(id => `\`${id}\``).join(', ')} |`)
       if (e.expandedToolNames?.length) lines.push(`| expanded via request_tools | ${e.expandedToolNames.map(name => `\`${name}\``).join(', ')} |`)
       if (e.deniedToolNames?.length) lines.push(`| DENIED by profile bound | ${e.deniedToolNames.map(name => `\`${name}\``).join(', ')} |`)
       if (e.contextPlannerStatus) lines.push(`| context planner status | ${e.contextPlannerStatus} |`)

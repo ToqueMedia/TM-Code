@@ -57,7 +57,7 @@ import { buildByokClientFromSnapshot, buildByokThinkingConfig, resolveByokSnapsh
 import { getActiveContextWindow } from "./activeContextWindow";
 import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
-import { REQUEST_CONTEXT_NAME, requestContextDefinition, TOOL_SEARCH_NAME, toolSearchDefinition, searchDeferredTools } from "./toolPolicy";
+import { TOOL_SEARCH_NAME, toolSearchDefinition, searchDeferredTools } from "./toolPolicy";
 import { emitAgentStopRequested } from "./host/hostBus";
 import { windowBudgetHooks } from "./host/windowHost";
 import { getAgentHost } from "./host/agentHost";
@@ -78,7 +78,6 @@ import {
   markShellReadBlocked,
   markTmsBootstrapFailed,
   markTmsCreated,
-  markTmsFullContextSent,
   markTmsWriteAttempt,
   setTmsTurnTelemetry,
 } from "./tmsContext";
@@ -698,19 +697,13 @@ class AgentService {
     // COMPLETO desde o turno 1. Garantiam acesso a ferramentas que já lá
     // estão.
 
-    // REGRESSÃO APANHADA NA RONDA CRÍTICA (2026-07-18): o schema do
-    // request_context era injetado pelo ToolsetSelector — que, sem
-    // classificador, nunca mais é criado. Sem isto o índice on-demand
-    // (513 tokens no prompt) prometia uma tool INEXISTENTE e as secções
-    // omitidas (design system, project.docs_full, …) ficavam inalcançáveis. A lista de
-    // omitidos é fixa no build do prompt → o def é estável o run inteiro
-    // (prefixo de cache intacto). A intercepção já existia (REQUEST_CONTEXT_NAME
-    // no bridge) e funciona com selector null.
+    // O meta-tool `request_context` e o índice on-demand que o alimentava foram
+    // REMOVIDOS a 2026-08-05. Medido: 0 chamadas em 34 e em 114 pedidos, e o
+    // índice que as anunciava custava 786-1247 tokens POR PEDIDO — mais do que
+    // as secções que retinha. A referência é o cli-vaz: não há catálogo de
+    // contexto a pedir; o que o projecto justifica vai inline, o resto o modelo
+    // descobre com as ferramentas normais (ler, procurar, listar, LSP).
     if (!this.lightweightOptions) {
-      const omittedIds = auxiliarySelection?.omitted.map((o) => o.id) ?? [];
-      if (omittedIds.length > 0) {
-        openaiTools.push(requestContextDefinition(omittedIds));
-      }
 
       // Defs MCP DIFERIDOS (2026-08-03): getToolDefinitions() já não os
       // inclui — o modelo procura/carrega os schemas de que precisa via
@@ -1504,35 +1497,6 @@ class AgentService {
       toolUseId: string,
       signal?: AbortSignal,
     ): Promise<{ content: string; isError: boolean }> => {
-      // Intercept the request_tools meta-tool — it's not in the toolExecutor
-      // registry. The agent calls it to ask for capabilities that aren't in the
-      // current active toolset; we expand the selector so they're available on
-      // the next turn. Never reaches the toolExecutor.
-      if (toolName === REQUEST_CONTEXT_NAME) {
-        const auxiliaryId = typeof toolInput.auxiliary === 'string' ? toolInput.auxiliary : '';
-        if (!auxiliaryId) {
-          return { content: 'No auxiliary id provided. Call request_context with an auxiliary id from the on-demand index.', isError: false };
-        }
-        const ContextBuilder = (await import('./contextBuilder')).default;
-        const { content, name } = await ContextBuilder.getInstance().loadAuxiliaryOnDemand(auxiliaryId);
-        if (content === null) {
-          const sel = ContextBuilder.getInstance().getLastAuxiliarySelection();
-          const available = sel ? sel.omitted.map(o => o.id).join(', ') : '(none)';
-          return {
-            content: `Auxiliary "${auxiliaryId}" is not available on-demand. It may already be loaded inline, or be a phase-2 entry without a loader yet. Available: ${available}.`,
-            isError: false,
-          };
-        }
-        // project.docs_full may still include TMS (plus README/PLAN/TODO); mark
-        // for telemetry. Per-section tms.* request_context was removed.
-        if (auxiliaryId === 'project.docs_full' || auxiliaryId === 'project_docs_full') {
-          markTmsFullContextSent(auxiliaryId);
-        }
-        return {
-          content: `# Auxiliary context: ${name}\n\n${content}`,
-          isError: false,
-        };
-      }
 
       // Intercepta o meta-tool ToolSearch (contrato de treino do cli-vaz) —
       // o modelo procura/seleciona tools MCP diferidas; o bridge devolve os

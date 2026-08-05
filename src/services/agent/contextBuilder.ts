@@ -58,8 +58,6 @@ import {
   readTemplateManifest,
   safeReadFile,
 } from './contextBuilder/projectUtils'
-import { buildProjectSymbolIndexSection } from './contextBuilder/projectSymbolIndex'
-// tms.* per-section request_context removed — TMS full lives in static system prompt.
 import {
   sharedContextPreservation,
   sharedIdentity,
@@ -97,7 +95,6 @@ import {
   getPendingMemoryProposalsSection,
   getPreviewCompatibilitySection,
   getProjectMemorySection,
-  getProjectStructureSection,
   getProjectStructureIndexSection,
   getReadmeSection,
   getReminderSection,
@@ -117,8 +114,6 @@ import {
   selectAuxiliaries,
   applyEvidenceOmissions,
   applyRenderedTokenCounts,
-  buildOnDemandIndex,
-  getAuxiliaryMeta,
   resolveAuxiliaryId,
   type AuxiliarySelection,
   type PromptProfile,
@@ -128,12 +123,7 @@ import {
   detectProjectContextEvidence,
   evidenceOmittedAuxiliaries,
 } from './contextBuilder/projectEvidence'
-import { getTmsTurnTelemetry, markProjectSymbolIndexRequested } from './tmsContext'
-import {
-  buildInstructionsDocsFullPart,
-  loadProjectInstructions,
-  type InstructionSource,
-} from './projectInstructions'
+import { loadProjectInstructions } from './projectInstructions'
 
 type IntentOverride = {
   profile: PromptProfile
@@ -227,50 +217,6 @@ class ContextBuilder {
     return this.lastAuxiliarySelection
   }
 
-  private recordRequestContextAttempt(id: string, loaded: boolean): void {
-    const sel = this.lastAuxiliarySelection
-    if (!sel) return
-    const resolvedId = resolveAuxiliaryId(id)
-    const meta = getAuxiliaryMeta(resolvedId)
-
-    sel.requestContextToolCalls = (sel.requestContextToolCalls ?? 0) + 1
-    sel.modelRequestedContextSections ??= []
-    if (!sel.modelRequestedContextSections.includes(resolvedId)) {
-      sel.modelRequestedContextSections.push(resolvedId)
-    }
-
-    const target = loaded ? 'requestContextSectionsLoaded' : 'requestedButNotLoadedSections'
-    sel[target] ??= []
-    if (!sel[target]!.includes(resolvedId)) {
-      sel[target]!.push(resolvedId)
-    }
-
-    sel.requestContextSelectionReason ??= {}
-    sel.requestContextSelectionReason[resolvedId] = meta
-      ? `${loaded ? 'loaded' : 'not loaded'} ${meta.domain}/${meta.capability}; ${meta.whenToUse}`
-      : `${loaded ? 'loaded' : 'not loaded'} unknown context`
-    sel.requestContextCostTier ??= {}
-    if (meta) sel.requestContextCostTier[resolvedId] = meta.costTier
-
-    const selected = new Set(sel.contextPlan.selectedContexts.map(resolveAuxiliaryId))
-    const isFallback = Boolean(meta && !selected.has(resolvedId) && (
-      meta.granularity === 'full' ||
-      meta.costTier === 'high' ||
-      meta.id === 'project.structure_overview' ||
-      meta.id === 'project.structure_full'
-    ))
-    if (loaded && isFallback) {
-      sel.requestContextFallbackUsed = true
-      sel.requestContextFallbackFrom ??= []
-      sel.requestContextFallbackTo ??= []
-      const from = sel.contextPlan.selectedContexts.map(resolveAuxiliaryId)
-      for (const source of from) {
-        if (!sel.requestContextFallbackFrom.includes(source)) sel.requestContextFallbackFrom.push(source)
-      }
-      if (!sel.requestContextFallbackTo.includes(resolvedId)) sel.requestContextFallbackTo.push(resolvedId)
-    }
-  }
-
   private async renderAuxiliaryContent(id: string): Promise<string | null> {
     const ctx = this.lastAuxiliaryCtx
     const resolvedId = resolveAuxiliaryId(id)
@@ -286,7 +232,7 @@ class ContextBuilder {
           '# Design system: semantic tokens',
           'Use for token/theme work only. Start by locating existing semantic token/theme files before editing.',
           'Expected files: src/theme/**/semantic*, src/theme/**/tokens*, src/themes/**, src/theme/index.ts.',
-          'Prefer adding the smallest semantic alias that matches existing naming. Do not load project.structure_full for token work unless the expected files cannot be located with search/list/read tools.',
+          'Prefer adding the smallest semantic alias that matches existing naming. Locate the expected files with the search/list/read tools before editing.',
         ].join('\n')
       case 'design_system.theme_config':
         return [
@@ -318,8 +264,6 @@ class ContextBuilder {
       // project.entrypoints e delivery.build_scripts — entregavam isso ao
       // modelo como se fosse contexto. Pior do que não ter a secção: ocupa
       // tokens, parece dados e não diz nada.
-      case 'project.structure_overview':
-        return ctx?.promptCtx ? getProjectStructureIndexSection(ctx.promptCtx) : null
       case 'project.package_map':
         if (!ctx?.promptCtx) return null
         // Sem package.json não há mapa nenhum: emitir o cabeçalho mais
@@ -342,17 +286,8 @@ class ContextBuilder {
           renderPathAliasLines(ctx.promptCtx.pathAliases),
           'Use search/list/read tools to confirm the exact entrypoint before editing.',
         ].filter(Boolean).join('\n')
-      case 'project.symbol_index':
-        if (!ctx?.promptCtx) return null
-        return buildProjectSymbolIndexSection(ctx.promptCtx.projectPath)
-      case 'project.structure_full':
-        return ctx?.promptCtx ? getProjectStructureSection(ctx.promptCtx) : null
       case 'agent_runtime.mcp_routing':
         return ctx?.promptCtx ? sharedMcpBlock(ctx.promptCtx.mcpTools, 'developer') : null
-      // O case `agent_runtime.request_context_policy` foi removido (2026-08-03)
-      // com a meta correspondente: a política vive inline no cabeçalho do
-      // índice on-demand (buildOnDemandIndex) — ver a nota lá sobre a
-      // circularidade que isto corrige.
       case 'agent_runtime.tool_profiles':
         return [
           '# Agent runtime: tool loading',
@@ -360,15 +295,6 @@ class ContextBuilder {
           'MCP tool definitions are DEFERRED: the MCP section of the system prompt lists their names, and full schemas are only sent after you fetch them with `ToolSearch` (query "select:name" or keywords). One fetch is a single cache break at the moment of need — cheaper than shipping every MCP schema on every request.',
           'Expected files: src/services/agent/toolPolicy.ts (meta-tool definitions), src/services/agent/toolExecutor.ts (registry + deferral).',
         ].join('\n')
-      case 'agent_runtime.memory_context':
-        if (!ctx?.promptCtx) return null
-        // Intentionally omit getProjectMemorySection — TMS/foreign already
-        // live in the static system prompt; re-including them here doubles cost.
-        return [
-          getMemorySection(ctx.promptCtx),
-          getSessionMemorySection(ctx.promptCtx),
-          getMemoryToolsGuidanceSection(),
-        ].filter(Boolean).join('\n\n') || null
       case 'delivery.dev_server':
         // Só o ESTADO. As regras de autoria mudaram-se para o bloco estático
         // (getDevServerAuthoringRulesSection) — ver a nota lá sobre o custo de
@@ -386,69 +312,9 @@ class ContextBuilder {
         ].join('\n')
       case 'delivery.git_status':
         return ctx?.promptCtx ? getGitStatusSection(ctx.promptCtx) : null
-      case 'delivery.changed_files':
-        return ctx?.promptCtx ? getRecentFilesSection(ctx.promptCtx) : null
-      case 'project.docs_full':
-        if (ctx?.promptCtx) {
-          // TMS (and sole-foreign AGENTS/CLAUDE) are already in the static
-          // system prompt — omit them here. Dual-case still appends foreign.
-          const tmsSrc: InstructionSource | null = ctx.promptCtx.tmsContent
-            ? {
-                kind: 'tms',
-                path: `${ctx.promptCtx.normalizedProjectPath}/TMS.md`,
-                relPath: 'TMS.md',
-                content: ctx.promptCtx.tmsContent,
-              }
-            : null
-          const foreignSrc: InstructionSource | null = ctx.promptCtx.foreignInstructions
-            ? {
-                kind: ctx.promptCtx.foreignInstructions.kind,
-                path: ctx.promptCtx.foreignInstructions.path,
-                relPath: ctx.promptCtx.foreignInstructions.relPath,
-                content: ctx.promptCtx.foreignInstructions.content,
-              }
-            : null
-          const instructionsPart = buildInstructionsDocsFullPart(tmsSrc, foreignSrc, {
-            omitTmsAlreadyInSystem: true,
-            omitForeignAlreadyInSystem: true,
-          })
-          const parts = [
-            ctx.promptCtx.readme ? `# README.md\n${ctx.promptCtx.readme}` : null,
-            instructionsPart,
-            ctx.promptCtx.planContent ? `# PLAN.md\n${ctx.promptCtx.planContent}` : null,
-            ctx.promptCtx.todoContent ? `# TODO.md\n${ctx.promptCtx.todoContent}` : null,
-          ].filter(Boolean) as string[]
-          return parts.length ? parts.join('\n\n') : null
-        }
-        return null
       default:
         return null
     }
-  }
-
-  /**
-   * Load an omitted auxiliary's full content on demand. Called by the
-   * `request_context` tool handler when the agent asks for a section that was
-   * omitted from the system prompt. Returns null for unknown ids or
-   * already-loaded auxiliaries (no-op — the content is already inline).
-   */
-  async loadAuxiliaryOnDemand(id: string): Promise<{ content: string | null; name: string }> {
-    const sel = this.lastAuxiliarySelection
-    if (!sel) return { content: null, name: id }
-    const resolvedId = resolveAuxiliaryId(id)
-    // Already loaded inline → nothing to fetch.
-    if (sel.loaded.some((l) => l.id === resolvedId)) {
-      this.recordRequestContextAttempt(resolvedId, false)
-      return { content: null, name: resolvedId }
-    }
-    const content = await this.renderAuxiliaryContent(resolvedId)
-    const meta = sel.omitted.find((o) => o.id === resolvedId) ?? getAuxiliaryMeta(resolvedId)
-    if (content) {
-      this.recordRequestContextAttempt(resolvedId, true)
-    } else {
-      this.recordRequestContextAttempt(resolvedId, false)
-    }
-    return { content, name: meta?.name ?? resolvedId }
   }
 
   /**
@@ -771,21 +637,16 @@ class ContextBuilder {
 
     const pmDetected = pkgSummary?.packageManager || await detectPackageManager(projectPath)
     const isTemplateProject = templateManifest !== null
-    // `workspaceDependencies` incluído de propósito (auditoria 2026-07-29):
-    // as listas da raiz vêm TRUNCADAS a 15/10 para o prompt, e num monorepo a
-    // raiz não declara framework nenhum. Com só a raiz, `isVanillaWeb` dava
-    // true em qualquer monorepo React e o prompt injetava-lhe as regras de
-    // "site sem build" — orientação errada por omissão de dados.
-    // `detectionDependencies` e não `dependencies` (2026-08-05): as listas da
-    // raiz vêm cortadas a 15/10 para o prompt, portanto detectar a partir delas
-    // dava falso negativo em qualquer projecto onde o framework caísse fora da
-    // janela — e o prompt injetava-lhe as regras de "site sem build".
-    const hasFrameworkDeps = pkgSummary
-      ? pkgSummary.detectionDependencies.some(d =>
-          ['react', 'next', 'vue', 'nuxt', 'svelte', '@angular/core', 'astro', 'solid-js', 'express', 'fastify', '@nestjs/core'].includes(d)
-        )
-      : false
-    const isVanillaWeb = !isTemplateProject && !hasFrameworkDeps
+    // ── FONTE ÚNICA de "que tipo de projecto é este" ──
+    // Havia aqui uma segunda detecção, à mão, com a sua própria lista de
+    // frameworks — a viver ao lado do portão de evidência e a poder discordar
+    // dele. Duas respostas para a mesma pergunta é como um perfil morto
+    // continua a parecer vivo: nenhuma das duas é obviamente a errada quando
+    // divergem. `workspaceDependencies` entra na união (num monorepo a raiz não
+    // declara framework nenhum) e a união é NÃO truncada (as listas do prompt
+    // vêm cortadas a 15/10; detectar a partir delas dava falso negativo calado).
+    const projectEvidence = detectProjectContextEvidence({ pkgSummary, treeString })
+    const isVanillaWeb = !isTemplateProject && !projectEvidence.hasFrameworkDeps
 
     // Language
     const langInstruction = await getLangInstruction()
@@ -949,8 +810,8 @@ class ContextBuilder {
     // correspondente. Corre aqui e não junto à selecção porque precisa do
     // pkgSummary e da árvore, que só existem depois do gather em paralelo.
     // Ausência de dados não conta como evidência negativa e o portão não é
-    // pegajoso — ver projectEvidence.ts.
-    const projectEvidence = detectProjectContextEvidence({ pkgSummary, treeString })
+    // pegajoso — ver projectEvidence.ts. A evidência é a MESMA que decidiu
+    // `isVanillaWeb` acima (fonte única), calculada uma vez por build.
     applyEvidenceOmissions(
       auxSelection,
       evidenceOmittedAuxiliaries({
@@ -967,7 +828,6 @@ class ContextBuilder {
     // Custo REAL do que foi renderizado, em vez da soma dos `estTokens`
     // escritos à mão na meta — ver applyRenderedTokenCounts.
     applyRenderedTokenCounts(auxSelection, auxLoadedContent)
-    const onDemandIndex = buildOnDemandIndex(auxSelection)
     const dynamicCacheSig = stablePromptHash(JSON.stringify({
       userMessage: userMessage ?? '',
       accessedPaths: accessedPaths ?? [],
@@ -1006,7 +866,6 @@ class ContextBuilder {
       teamSection,
       bgCommandsSection,
       auxLoadedContent,
-      onDemandIndex,
     }))
     const cacheKey = `${cacheKeyBase}|dyn${dynamicCacheSig}`
     const cached = this.promptCache.get(cacheKey)
@@ -1024,9 +883,6 @@ class ContextBuilder {
         mcpToolCount: (mcpTools ?? []).length,
         loadedSkillNames: ctx.loadedSkillNames,
       })
-      if (cached.symbolIndexTelemetry) {
-        markProjectSymbolIndexRequested(cached.symbolIndexTelemetry)
-      }
       this.lastVolatileContext = cached.volatile ?? null
       return cached.prompt
     }
@@ -1073,11 +929,12 @@ class ContextBuilder {
       // invalidates the cache tail after this section.
       getProjectMemorySection(ctx),
       getMemoryGuidanceSection(ctx),
-      // On-demand auxiliary index — lists context blocks omitted from this
-      // prompt so the agent can fetch them via `request_context`. Null when
-      // nothing is omitted (no index rendered). Stable per-intent-profile
-      // so it's safe in the cacheable static block.
-      onDemandIndex ?? '',
+      // Havia aqui o ÍNDICE ON-DEMAND — a lista das secções omitidas para o
+      // modelo as pedir com `request_context`. Removido a 2026-08-05: custava
+      // 786-1247 tokens POR PEDIDO (mais do que as secções que retinha) e
+      // media-se 0 chamadas em 34 e em 114 pedidos. Referência cli-vaz: não há
+      // catálogo — o que o projecto justifica vai inline, o resto descobre-se
+      // com as ferramentas de ler/procurar/listar.
       // ── Boundary: everything below varies per session / per turn ──
       SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
       // Persistent memory — placed first in the dynamic block because it's
@@ -1146,23 +1003,16 @@ class ContextBuilder {
       // and pre-empts a reflexive `git status` / `git diff` tool call.
       dynamicSection('git_status', () => auxLoadedContent['delivery.git_status'] ?? null,
         'branch + working-tree changes shift every turn — null when not a git repo'),
-      dynamicSection('project_structure', () => auxLoadedContent['project.structure_full'] ?? auxLoadedContent['project.structure_overview'] ?? getProjectStructureIndexSection(ctx),
+      dynamicSection('project_structure', () => getProjectStructureIndexSection(ctx),
         'file tree shifts on every write — fsVersion drives cache key'),
       dynamicSection('project_package_map', () => auxLoadedContent['project.package_map'] ?? null,
         'package summary loaded only for package/build/project planning tasks'),
       dynamicSection('project_entrypoints', () => auxLoadedContent['project.entrypoints'] ?? null,
         'entrypoint summary loaded only for architecture/routing tasks'),
-      dynamicSection('agent_runtime_policy', () => [
-        auxLoadedContent['agent_runtime.tool_profiles'] ?? '',
-        auxLoadedContent['agent_runtime.memory_context'] ?? '',
-      ].filter(Boolean).join('\n\n') || null,
-        'agent runtime context loaded only for tool/context/memory tasks'),
+      dynamicSection('agent_runtime_policy', () => auxLoadedContent['agent_runtime.tool_profiles'] ?? null,
+        'tool-loading policy; inline while the toolset stays deferred'),
       dynamicSection('delivery_build_scripts', () => auxLoadedContent['delivery.build_scripts'] ?? null,
         'build scripts loaded only for build/test/runtime tasks'),
-      dynamicSection('delivery_changed_files', () => auxLoadedContent['delivery.changed_files'] ?? null,
-        'changed-file context loaded only for git/changed-file tasks'),
-      dynamicSection('project_docs', () => auxLoadedContent['project.docs_full'] ?? null,
-        'full project documents loaded only when explicitly requested'),
       // Recently-modified files AFTER the tree: the tree says what exists, this
       // says what was touched last — the likely working set.
       dynamicSection('recent_files', () => getRecentFilesSection(ctx),
@@ -1212,17 +1062,7 @@ class ContextBuilder {
     this.lastVolatileContext = boundaryIdx >= 0
       ? (sections.slice(boundaryIdx + 1).join('\n\n') || null)
       : null
-    const telemetryAfterRender = getTmsTurnTelemetry()
-    const symbolIndexTelemetry = telemetryAfterRender.symbolIndexRequested
-      ? {
-          filesConsidered: telemetryAfterRender.symbolIndexFilesConsidered,
-          filesScanned: telemetryAfterRender.symbolIndexFilesScanned,
-          entries: telemetryAfterRender.symbolIndexEntries,
-          truncated: telemetryAfterRender.symbolIndexTruncated,
-          tokensEstimate: telemetryAfterRender.symbolIndexTokensEstimate,
-        }
-      : undefined
-    this.promptCache.set(cacheKey, { key: cacheKey, prompt: staticPrompt, volatile: this.lastVolatileContext, expiresAt: now + PROMPT_CACHE_TTL_MS, symbolIndexTelemetry, auxiliaryCtx: { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb, promptCtx: ctx, loadedSkills } })
+    this.promptCache.set(cacheKey, { key: cacheKey, prompt: staticPrompt, volatile: this.lastVolatileContext, expiresAt: now + PROMPT_CACHE_TTL_MS, auxiliaryCtx: { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb, promptCtx: ctx, loadedSkills } })
     // Cache-miss telemetry — includes the boundary split bytes so we can
     // see the prompt shape over time (regressions in cache discipline
     // surface as the static byte share shrinking).

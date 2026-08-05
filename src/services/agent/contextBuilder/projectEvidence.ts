@@ -58,6 +58,16 @@ const DESIGN_SYSTEM_DEPS = new Set([
   '@stitches/react', 'stylex', '@shopify/polaris', 'primereact', 'sass', 'less',
 ])
 
+/**
+ * Frameworks que provam que o projecto TEM build/servidor próprio — inclui os
+ * de backend, ao contrário de `UI_DEPS`. Consumido por `isVanillaWeb`, que
+ * decide se o prompt injeta as regras de "site sem build".
+ */
+const FRAMEWORK_DEPS = new Set([
+  'react', 'next', 'vue', 'nuxt', 'svelte', '@angular/core', 'astro',
+  'solid-js', 'express', 'fastify', '@nestjs/core',
+])
+
 /** Extensões de ficheiro que só existem quando há UI. */
 const UI_FILE_EXT = /\.(tsx|jsx|vue|svelte|astro|html|htm|css|scss|sass|less|styl)\b/i
 
@@ -95,6 +105,12 @@ export interface ProjectContextEvidence {
   hasThemeSurface: boolean
   /** Chakra UI está declarado nas dependências. */
   hasChakra: boolean
+  /**
+   * O projecto declara um framework com build/servidor próprio (front OU
+   * back). Consumido por `isVanillaWeb` no contextBuilder — a negação disto é
+   * que faz o prompt injetar as regras de "site sem build".
+   */
+  hasFrameworkDeps: boolean
   /** Sinais legíveis que suportaram a decisão (telemetria/export). */
   signals: string[]
 }
@@ -145,6 +161,7 @@ export function detectProjectContextEvidence(input: {
     hasUiSurface: Boolean(uiDep || dsDep || uiFile || uiDir),
     hasThemeSurface: Boolean(dsDep || themeFile),
     hasChakra,
+    hasFrameworkDeps: deps.some(d => FRAMEWORK_DEPS.has(d)),
     signals,
   }
 }

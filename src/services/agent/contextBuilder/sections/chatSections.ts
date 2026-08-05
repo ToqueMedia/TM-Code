@@ -618,11 +618,12 @@ export function getPreviewCompatibilitySection(ctx: PromptContext): string | nul
   }
 
   const rawPt = ctx.projectType
-  // Inclui os workspaces: sem eles, um monorepo Express caía no tier "node
-  // genérico sem dev script" em vez de "backend-only".
-  const deps = ctx.pkgSummary
-    ? [...ctx.pkgSummary.dependencies, ...ctx.pkgSummary.devDependencies, ...ctx.pkgSummary.workspaceDependencies]
-    : []
+  // `detectionDependencies` = raiz + devDeps + workspaces, sem truncagem
+  // (2026-08-05). Sem os workspaces, um monorepo Express caía no tier "node
+  // genérico sem dev script"; e com as listas cortadas a 15/10 (que é como
+  // chegam ao prompt) o mesmo acontecia a qualquer projecto cujo framework
+  // caísse fora da janela. Detecção nunca lê as listas de RENDER.
+  const deps = ctx.pkgSummary?.detectionDependencies ?? []
   const scripts = ctx.pkgSummary?.scripts ?? []
 
   // Extract real type from synthetic tokens (Go/Python/Rust without package.json)
@@ -834,7 +835,7 @@ export function getProjectStructureIndexSection(ctx: PromptContext): string | nu
     '(Snapshot at turn start. Full tree omitted from core to save tokens.)',
     top + more,
     '',
-    `Use \`${GLOB_ALIAS}\`, \`${LS_ALIAS}\`, \`${GREP_ALIAS}\`, or \`request_context({ auxiliary: "project.structure_full" })\` only if you need the full tree.`,
+    `Need more than this index? Expand it with \`${GLOB_ALIAS}\`, \`${LS_ALIAS}\` or \`${GREP_ALIAS}\` — they answer a precise question about the tree instead of shipping all of it.`,
   ].join('\n')
 }
 

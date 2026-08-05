@@ -6,8 +6,8 @@
  */
 import {
   selectAuxiliaries,
-  buildOnDemandIndex,
   AUXILIARY_METAS,
+  BOUNDED_INLINE_CONTEXTS,
   type ContextPlan,
 } from '../contextBuilder/auxiliaryRegistry'
 
@@ -39,7 +39,6 @@ describe('auxiliaryRegistry', () => {
       expect(sel.loaded.length).toBeGreaterThan(0)
       const omittedIds = sel.omitted.map((o) => o.id)
       expect(omittedIds).toContain('scaffold.workflow')
-      expect(omittedIds).toContain('project.structure_full')
       expect(omittedIds).not.toContain('vision.image_rules')
       // MANAGED-PLATFORM cut (2026-07): 'delivery.deploy' and
       // 'auth_database.provision' no longer exist in the registry at all.
@@ -124,9 +123,6 @@ describe('auxiliaryRegistry', () => {
       expect(sel.contextPlan.requiredCapabilities).toEqual(['semantic_tokens', 'theme_config'])
       expect(loadedIds).toContain('design_system.semantic_tokens')
       expect(loadedIds).toContain('design_system.theme_config')
-      expect(loadedIds).not.toContain('project.structure_full')
-      expect(loadedIds).not.toContain('project_structure_full')
-      expect(sel.requestContextFallbackUsed).toBe(false)
     })
 
     it('golden: MCP audit chooses agent runtime routing only', () => {
@@ -179,15 +175,14 @@ describe('auxiliaryRegistry', () => {
     it('golden: git commit chooses git delivery context only', () => {
       const sel = selectAuxiliaries('default_task', 'Faz commit das alterações.', false, 'test', undefined, plan({
         taskDomain: 'delivery/git',
-        requiredCapabilities: ['git_status', 'changed_files'],
-        candidateContexts: ['delivery.git_status', 'delivery.changed_files'],
-        selectedContexts: ['delivery.git_status', 'delivery.changed_files'],
+        requiredCapabilities: ['git_status'],
+        candidateContexts: ['delivery.git_status'],
+        selectedContexts: ['delivery.git_status'],
       }))
       const loadedIds = sel.loaded.map((l) => l.id)
 
       expect(sel.contextPlan.taskDomain).toBe('delivery/git')
       expect(loadedIds).toContain('delivery.git_status')
-      expect(loadedIds).toContain('delivery.changed_files')
       expect(loadedIds).not.toContain('delivery.dev_server')
       expect(loadedIds).not.toContain('design_system.semantic_tokens')
     })
@@ -298,67 +293,39 @@ describe('auxiliaryRegistry', () => {
     })
   })
 
-  // ── buildOnDemandIndex ────────────────────────────────────────
-  describe('buildOnDemandIndex', () => {
-    it('returns null when nothing is omitted', () => {
-      // Manually craft a selection with no omissions.
-      const sel = {
-        profile: 'default_task' as const,
-        loaded: [],
-        omitted: [],
-        loadedTokens: 0,
-        totalAvailableTokens: 0,
-        savingsTokens: 0,
-        contextPlan: {
-          taskDomain: 'test',
-          requiredCapabilities: [],
-          minimumContextNeeded: 'index' as const,
-          candidateContexts: [],
-          selectedContexts: [],
-          fallbackRisk: 'low' as const,
-          reason: 'test',
-        },
-        readOnly: false,
-        reason: 'test',
-        routerSource: 'keyword' as const,
-        routerConfidence: 'none' as const,
+  // ── Sem catálogo on-demand ────────────────────────────────────
+  describe('sem índice on-demand (removido 2026-08-05)', () => {
+    // O índice e o `request_context` foram removidos: custavam 786-1247
+    // tokens POR PEDIDO e mediram-se 0 chamadas em 34 e em 114. Referência
+    // cli-vaz — não há catálogo de contexto a pedir. O registry só descreve
+    // o que vai INLINE; `omitted` existe para a telemetria, não para o modelo.
+    it('o registry só contém secções que podem ser entregues inline', () => {
+      const ids = AUXILIARY_METAS.map(m => m.id)
+      for (const dead of [
+        'project.structure_full',
+        'project.docs_full',
+        'project.symbol_index',
+        'agent_runtime.memory_context',
+        'project.structure_overview',
+        'delivery.changed_files',
+        'design_system.index',
+      ]) {
+        expect(ids).not.toContain(dead)
       }
-      expect(buildOnDemandIndex(sel)).toBeNull()
     })
 
-    it('lists each omitted auxiliary with its id and request_context hint', () => {
-      const sel = selectAuxiliaries('default_task', 'fix the bug')
-      const index = buildOnDemandIndex(sel)
-      expect(index).not.toBeNull()
-      expect(index).toContain('request_context')
-      expect(index).toContain('scaffold.workflow')
-      expect(index).toContain('project.symbol_index')
-      expect(index).toContain('locate functions/classes/components/hooks/handlers/services')
-      expect(index).toContain('verify source with Read before editing')
-      // Full-delivery (2026-08-03): secções bounded vão INLINE — aparecem na
-      // linha "Selected inline:" do cabeçalho, mas NUNCA no corpo de
-      // omitidas ("Other available contexts").
-      const body = (index as string).slice((index as string).indexOf('Other available contexts'))
-      expect(body).not.toContain('vision.image_rules')
-      expect(body).not.toContain('design_system.semantic_tokens')
-      expect(body).not.toContain('ui_patterns')
-      // MANAGED-PLATFORM cut (2026-07): the managed auxiliaries must not be
-      // advertised to the agent anymore.
-      expect(index).not.toContain('delivery.deploy')
-      expect(index).not.toContain('auth_database.provision')
-    })
-
-    it('full delivery: bounded sections são seleccionadas inline no perfil default_task', () => {
+    it('tudo o que sobra é inline por defeito ou pertence a um perfil', () => {
       const sel = selectAuxiliaries('default_task', 'fix the bug')
       const loadedIds = sel.loaded.map(l => l.id)
-      for (const id of ['design_system.semantic_tokens', 'ui_patterns', 'project.package_map', 'agent_runtime.mcp_routing', 'vision.image_rules']) {
-        expect(loadedIds).toContain(id)
-      }
-      // As unbounded ficam on-demand — nunca inline por defeito.
-      for (const id of ['project.structure_full', 'project.docs_full', 'project.symbol_index', 'agent_runtime.memory_context']) {
-        expect(loadedIds).not.toContain(id)
-        expect(sel.omitted.map(o => o.id)).toContain(id)
-      }
+      for (const id of BOUNDED_INLINE_CONTEXTS) expect(loadedIds).toContain(id)
+      // Sobram: scaffold.workflow (perfil de bootstrap) e a baseline de
+      // delivery, que o contextBuilder acrescenta ao plano em todos os runs
+      // não-bootstrap. Nada mais fica de fora — não há catálogo.
+      expect(sel.omitted.map(o => o.id).sort()).toEqual([
+        'delivery.dev_server',
+        'delivery.git_status',
+        'scaffold.workflow',
+      ])
     })
   })
 
@@ -374,7 +341,6 @@ describe('auxiliaryRegistry', () => {
     it('does not register redundant tms.* section auxiliaries (TMS is static full)', () => {
       const tmsSectionIds = AUXILIARY_METAS.filter((m) => m.id.startsWith('tms.'))
       expect(tmsSectionIds).toEqual([])
-      expect(AUXILIARY_METAS.some((m) => m.id === 'project.docs_full')).toBe(true)
     })
   })
 })

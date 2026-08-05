@@ -5,7 +5,6 @@ import {
 import {
   applyEvidenceOmissions,
   applyRenderedTokenCounts,
-  buildOnDemandIndex,
   selectAuxiliaries,
   BOUNDED_INLINE_CONTEXTS,
 } from '../contextBuilder/auxiliaryRegistry'
@@ -209,17 +208,16 @@ describe('applyEvidenceOmissions', () => {
     expect(sel.omitted.filter(o => loadedIds.includes(o.id))).toEqual([])
   })
 
-  it('a omissão fica VISÍVEL no índice on-demand, com a razão e o convite a pedir', () => {
+  it('a razão da omissão fica registada para o EXPORT (não para o modelo)', () => {
+    // Não há índice on-demand nem `request_context` (removidos 2026-08-05,
+    // referência cli-vaz). O que o portão retém não é anunciado ao modelo —
+    // fica na telemetria, que é a única forma de auditar a decisão depois.
     const sel = selectAuxiliaries('default_task', undefined)
     const ev = backendEvidence()
     applyEvidenceOmissions(sel, evidenceOmittedAuxiliaries({ evidence: ev, sessionHasImage: false }), ev.signals)
-    const index = buildOnDemandIndex(sel) ?? ''
 
-    expect(index).toContain('Withheld for lack of project evidence')
-    expect(index).toContain('`ui_patterns`')
-    expect(index).toContain('no UI surface in this project')
-    // Uma secção só pode aparecer numa lista.
-    expect(index.match(/`ui_patterns`/g)).toHaveLength(1)
+    expect(sel.evidenceOmitReason?.['ui_patterns']).toContain('no UI surface in this project')
+    expect(sel.omitted.find(o => o.id === 'ui_patterns')?.reason).toMatch(/^project evidence:/)
   })
 
   it('sem omissões só carimba os sinais', () => {

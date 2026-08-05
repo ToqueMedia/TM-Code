@@ -40,7 +40,7 @@ import {
   canonicalToolName,
   WRITE_FILE, EDIT_FILE, CREATE_FILE, DELETE_FILE, RENAME_FILE, CREATE_DIRECTORY,
 } from '../toolNames'
-import { REQUEST_CONTEXT_NAME, requestContextDefinition, TOOL_SEARCH_NAME, toolSearchDefinition, searchDeferredTools } from '../toolPolicy'
+import { TOOL_SEARCH_NAME, toolSearchDefinition, searchDeferredTools } from '../toolPolicy'
 import { notifyHost } from '../host/hostBus'
 import { windowBudgetHooks } from '../host/windowHost'
 import type ContextBuilderT from '../contextBuilder'
@@ -350,7 +350,7 @@ export async function runParallelTask(runId: string): Promise<void> {
       },
     }))
 
-  // Builder EFÉMERO desta tarefa — resolve request_context do prompt construído.
+  // Builder EFÉMERO desta tarefa (estado próprio: promptCache, selecção).
   let taskBuilder: ContextBuilderT | null = null
 
   /** Apply mid-run `/plan` to THIS task's isolated executor (not the singleton). */
@@ -370,29 +370,8 @@ export async function runParallelTask(runId: string): Promise<void> {
     // Mid-run `/plan` may arrive after this child was created — sync lease.
     syncLivePlanToChild()
     // Meta-tool do prompt construído (fusão 4b) — nunca chega ao toolExecutor.
-    // request_context: secções auxiliares omitidas pelo planner, resolvidas na
-    // instância EFÉMERA desta tarefa.
-    //
-    // A intercepção irmã de `request_tools` saiu a 2026-07-30 com o
-    // ToolsetSelector: era a única coisa que injectava aquele meta-tool, logo
-    // o modelo nunca o via e esta resposta nunca podia ser alcançada.
-    if (toolName === REQUEST_CONTEXT_NAME) {
-      const auxiliaryId = typeof toolInput.auxiliary === 'string' ? toolInput.auxiliary : ''
-      if (!auxiliaryId || !taskBuilder) {
-        return { content: 'No auxiliary id provided. Call request_context with an auxiliary id from the on-demand index.', isError: false }
-      }
-      try {
-        const { content, name } = await taskBuilder.loadAuxiliaryOnDemand(auxiliaryId)
-        if (content === null) {
-          const sel = taskBuilder.getLastAuxiliarySelection()
-          const available = sel ? sel.omitted.map(o => o.id).join(', ') : '(none)'
-          return { content: `Auxiliary "${auxiliaryId}" is not available on-demand. It may already be loaded inline. Available: ${available}.`, isError: false }
-        }
-        return { content: `# Auxiliary context: ${name}\n\n${content}`, isError: false }
-      } catch (err) {
-        return { content: `Error loading auxiliary context: ${formatError(err)}`, isError: true }
-      }
-    }
+    // `request_context` saiu a 2026-08-05 (ver agentService): não há catálogo
+    // de contexto a pedir, como no cli-vaz.
     // ToolSearch: procura/carrega defs MCP diferidos, empurrados para o
     // openaiTools DESTA tarefa (mesma referência que o engine dela envia por
     // pedido). Espelho do bridge do agentService — ver toolPolicy.ts.
@@ -498,11 +477,6 @@ export async function runParallelTask(runId: string): Promise<void> {
       coreToolCountOverride: openaiTools.length,
     })
     taskBuilder = builder
-    // Secções omitidas pelo planner ficam alcançáveis: injeta o meta-tool
-    // request_context (interceptado no executeTool, resolvido no builder
-    // efémero). Sem omissões, nada a injetar.
-    const omittedIds = builder.getLastAuxiliarySelection()?.omitted.map(o => o.id) ?? []
-    if (omittedIds.length > 0) openaiTools.push(requestContextDefinition(omittedIds))
     // Espelho do main: defs MCP diferidos + meta-tool ToolSearch. O bridge
     // desta tarefa empurra os defs carregados para ESTE openaiTools (array
     // vivo do engine da tarefa), não para o do singleton.
