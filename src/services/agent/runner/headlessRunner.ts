@@ -321,10 +321,36 @@ async function runJob(job: RunnerJob): Promise<void> {
         const lastX = last as
           | (typeof last & { reasoningContent?: string; isStreaming?: boolean })
           | undefined
+        // CUSTO do run, do `requestUsageLog` da sessão (tokens REAIS do
+        // provider, não estimativas). Sem isto o eval só sabe dizer "partiu ou
+        // não partiu" — e a pergunta que interessa quando se mexe no prompt é
+        // "ganhou ou perdeu". `auxiliaryContextTokens` entra à parte porque é
+        // o número que a doutrina de contexto discute.
+        // TODAS as sessões do processo, não a do run: o `addRequestUsage`
+        // escreve na sessão ACTIVA e esta já sabe (ver runSessionId acima) que
+        // a activa não é a do run — o boot cria uma, o despacho da fila usa
+        // outra. Ler só a do run devolvia zeros com o custo todo ao lado.
+        // Um processo headless = um caso, portanto somar tudo é honesto.
+        const usage = [...chat.sessions.values()].flatMap(s => s.requestUsageLog ?? [])
+        const sum = (pick: (e: (typeof usage)[number]) => number | undefined): number =>
+          usage.reduce((acc, e) => acc + (pick(e) ?? 0), 0)
+        const cost = {
+          requests: usage.length,
+          inputTokens: sum(e => e.inputTokens),
+          outputTokens: sum(e => e.outputTokens),
+          cacheReadInputTokens: sum(e => e.cacheReadInputTokens),
+          // Por PEDIDO (o custo do prompt não se soma: repete-se). O máximo é
+          // o que o prompt pesa quando está todo montado.
+          auxiliaryContextTokensMax: usage.reduce(
+            (max, e) => Math.max(max, e.auxiliaryContextTokens ?? 0), 0,
+          ),
+          usageAvailable: usage.some(e => e.usageAvailable === true),
+        }
         finish(0, {
           type: 'result',
           subtype: 'success',
           text,
+          cost,
           diag: {
             runSessionId,
             sessionId: (session as { id?: string } | undefined)?.id ?? null,

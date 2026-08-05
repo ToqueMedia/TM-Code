@@ -22,7 +22,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -166,6 +166,7 @@ function runCase(c) {
         ok,
         durationMs,
         text,
+        cost: result.cost ?? null,
         diag: result.diag,
         reason: ok
           ? ''
@@ -184,7 +185,8 @@ try {
     results.push(r)
     console.log(
       r.ok
-        ? `[evals] ✅ ${c.id} em ${(r.durationMs / 1000).toFixed(1)}s — "${(r.text ?? '').slice(0, 100)}"`
+        ? `[evals] ✅ ${c.id} em ${(r.durationMs / 1000).toFixed(1)}s — "${(r.text ?? '').slice(0, 100)}"` +
+          (r.cost ? `\n         custo: ${r.cost.requests} pedidos, in ${r.cost.inputTokens} (cache ${r.cost.cacheReadInputTokens}), out ${r.cost.outputTokens}, aux/pedido ${r.cost.auxiliaryContextTokensMax}` : '')
         : `[evals] ❌ ${c.id} em ${(r.durationMs / 1000).toFixed(1)}s — ${r.reason}\n` +
           `         text: "${(r.text ?? '').slice(0, 300)}"\n` +
           `         diag: ${JSON.stringify(r.diag ?? null)}`,
@@ -198,5 +200,27 @@ const passed = results.filter((r) => r.ok).length
 console.log(`\n[evals] ─── ${passed}/${results.length} casos verdes ───`)
 for (const r of results) {
   console.log(`  ${r.ok ? '✅' : '❌'} ${r.c.id.padEnd(20)} ${(r.durationMs / 1000).toFixed(1)}s${r.ok ? '' : `  ${r.reason}`}`)
+}
+// TOTAIS de custo — a régua do "ganhou ou perdeu" quando se mexe no prompt.
+// Verde sem isto só diz que não partiu. `--json <ficheiro>` grava para poder
+// comparar duas corridas (baseline vs mudança) sem depender do olho.
+const totals = results.reduce((acc, r) => {
+  if (!r.cost) return acc
+  acc.requests += r.cost.requests
+  acc.inputTokens += r.cost.inputTokens
+  acc.outputTokens += r.cost.outputTokens
+  acc.cacheReadInputTokens += r.cost.cacheReadInputTokens
+  acc.auxPerRequestMax = Math.max(acc.auxPerRequestMax, r.cost.auxiliaryContextTokensMax)
+  return acc
+}, { requests: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, auxPerRequestMax: 0 })
+console.log(
+  `  ── custo: ${totals.requests} pedidos | in ${totals.inputTokens.toLocaleString()} ` +
+  `(cache ${totals.cacheReadInputTokens.toLocaleString()}) | out ${totals.outputTokens.toLocaleString()} ` +
+  `| aux/pedido ${totals.auxPerRequestMax}`,
+)
+const jsonIdx = process.argv.indexOf('--json')
+if (jsonIdx >= 0 && process.argv[jsonIdx + 1]) {
+  writeFileSync(process.argv[jsonIdx + 1], JSON.stringify({ totals, cases: results.map(r => ({ id: r.c.id, ok: r.ok, durationMs: r.durationMs, cost: r.cost })) }, null, 2))
+  console.log(`  ── gravado em ${process.argv[jsonIdx + 1]}`)
 }
 process.exit(passed === results.length ? 0 : 1)
