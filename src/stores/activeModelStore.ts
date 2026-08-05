@@ -2,29 +2,24 @@ import { create } from 'zustand'
 import { usePersonaStore, type Persona } from './personaStore'
 
 /**
- * Modelos atribuídos às PERSONAS pelo admin. Fonte real-time: o documento
- * Firestore `system/aiPersonas` (uma entrada por persona publicada), lido UMA
- * vez com onSnapshot no firebaseAuth (fora de qualquer componente).
+ * Atribuições das PERSONAS pelo admin — modelId E janela de contexto por
+ * persona. Fonte real-time: `system/aiPersonas` (onSnapshot no firebaseAuth).
+ * Substituiu o doc de modelo único (05-08, sem compat); a janela entrou no
+ * doc na mesma data (bug: "a janela das personas não é respeitada" — só o
+ * modelId viajava e os clientes caíam na janela do perfil).
  *
- * SUBSTITUI o antigo `activeModelId` de modelo único (doc
- * `system/aiActiveModel`, abandonado 2026-08-05 SEM compatibilidade — decisão
- * do developer: com 3 personas um doc de modelo único não representa nada, e
- * era ele que fazia o selector de effort mostrar a escala do modelo errado).
- *
- * O fallback do selector/header de effort é o modelo DA PERSONA SELECIONADA —
- * trocar de persona muda a escala imediatamente, sem esperar pela primeira
- * resposta. O X-TM-Model servido (agentStore.modelName) continua a ter
- * prioridade quando existe (resolveEffortModelId, served-first desde 05-08).
- *
- * ATT (produto): os ids NUNCA são revelados ao user — servem só de lógica.
- *
- * NÃO tem side-effects (o "reset-on-change" antigo causava flip-flop e apagava
- * a preferência do user; `resolveEffectiveEffort` resolve sem estado).
+ * Resolução: X-TM-Model/X-Model-Context-Window servidos MANDAM; estas
+ * entradas são o fallback pré-primeira-resposta pela persona SELECIONADA.
+ * ATT: ids nunca aparecem na UI. Sem side-effects.
  */
+export interface PersonaModelEntry {
+  modelId: string
+  contextWindow?: number
+}
+
 interface ActiveModelState {
-  /** `{ standard: 'mimo-v2.5-pro', expert: 'glm-5.2', ... }` — só personas publicadas. */
-  personaModels: Partial<Record<Persona, string>>
-  setPersonaModels: (map: Partial<Record<Persona, string>>) => void
+  personaModels: Partial<Record<Persona, PersonaModelEntry>>
+  setPersonaModels: (map: Partial<Record<Persona, PersonaModelEntry>>) => void
 }
 
 export const useActiveModelStore = create<ActiveModelState>((set) => ({
@@ -32,11 +27,14 @@ export const useActiveModelStore = create<ActiveModelState>((set) => ({
   setPersonaModels: (map) => set({ personaModels: map }),
 }))
 
-/**
- * Modelo de fallback para a persona SELECIONADA (uso fora de React —
- * buildExtraHeaders, carimbos). Componentes devem subscrever os dois stores.
- */
+/** Modelo de fallback da persona SELECIONADA (uso fora de React). */
 export function getPersonaFallbackModelId(): string | null {
   const persona = usePersonaStore.getState().selected
-  return useActiveModelStore.getState().personaModels[persona] ?? null
+  return useActiveModelStore.getState().personaModels[persona]?.modelId ?? null
+}
+
+/** Janela de contexto escolhida pelo admin para a persona SELECIONADA. */
+export function getPersonaFallbackContextWindow(): number | null {
+  const persona = usePersonaStore.getState().selected
+  return useActiveModelStore.getState().personaModels[persona]?.contextWindow ?? null
 }

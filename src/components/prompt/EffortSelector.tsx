@@ -49,7 +49,7 @@ export function EffortSelector({ disabled = false }: { disabled?: boolean }) {
   // muda no instante em que o user troca de persona (as duas subscrições
   // re-renderizam este componente).
   const persona = usePersonaStore((s) => s.selected)
-  const fsModel = useActiveModelStore((s) => s.personaModels[persona] ?? null)
+  const fsModel = useActiveModelStore((s) => s.personaModels[persona]?.modelId ?? null)
   const headerModel = useAgentStore((s) => s.modelName)
   const modelId = resolveEffortModelId(fsModel, headerModel)
   const options = getEffortOptionsForModel(modelId)

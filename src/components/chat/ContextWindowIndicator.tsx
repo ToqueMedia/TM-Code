@@ -3,6 +3,8 @@ import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiAlertOctagon, FiAlertTriangle, FiArchive } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
 import { useAgentStore } from '../../stores/agentStore'
+import { usePersonaStore } from '../../stores/personaStore'
+import { useActiveModelStore } from '../../stores/activeModelStore'
 import { MODEL_PROFILES } from '../../services/agent/modelProfiles'
 import {
   FALLBACK_CONTEXT_WINDOW,
@@ -77,6 +79,8 @@ function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIn
     return Math.max(live, persisted)
   })
   const headerContextWindow = useAgentStore((s) => s.modelContextWindow)
+  const selectedPersona = usePersonaStore((s) => s.selected)
+  const personaWindow = useActiveModelStore((s) => s.personaModels[selectedPersona]?.contextWindow)
   const modelName = useAgentStore((s) => s.modelName)
   const sessionByokContextWindow = useChatStore((s) => {
     if (!s.activeSessionId) return undefined
@@ -102,6 +106,9 @@ function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIn
   const rawContextWindow =
     sessionByokContextWindow ??
     headerContextWindow ??
+    // Janela POR PERSONA (05-08): a escolha do admin no painel vale antes da
+    // 1ª resposta — sem isto o pill mostrava a janela do perfil do modelo.
+    personaWindow ??
     (profileModelName ? MODEL_PROFILES[profileModelName]?.contextWindow : undefined) ??
     FALLBACK_CONTEXT_WINDOW
 

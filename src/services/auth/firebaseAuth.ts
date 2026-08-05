@@ -585,10 +585,16 @@ class FirebaseAuthService {
       (snap) => {
         if (expectedGen !== this.authGeneration) return
         const data = snap.exists() ? snap.data() : null
-        const map: Record<string, string> = {}
+        const map: Record<string, { modelId: string; contextWindow?: number }> = {}
         for (const persona of ['standard', 'expert', 'master'] as const) {
-          const entry = data?.[persona] as { modelId?: string; enabled?: boolean } | undefined
-          if (entry?.modelId && entry.enabled !== false) map[persona] = entry.modelId
+          const entry = data?.[persona] as { modelId?: string; enabled?: boolean; contextWindow?: number } | undefined
+          if (entry?.modelId && entry.enabled !== false) {
+            const w = Number(entry.contextWindow)
+            map[persona] = {
+              modelId: entry.modelId,
+              ...(Number.isFinite(w) && w > 0 ? { contextWindow: w } : {}),
+            }
+          }
         }
         void import('../../stores/activeModelStore').then(({ useActiveModelStore }) => {
           useActiveModelStore.getState().setPersonaModels(map)

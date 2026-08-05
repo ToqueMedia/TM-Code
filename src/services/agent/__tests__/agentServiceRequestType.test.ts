@@ -114,10 +114,11 @@ jest.mock('../../../stores/reasoningEffortStore', () => ({
 jest.mock('../../../stores/activeModelStore', () => ({
   useActiveModelStore: {
     getState: () => ({
-      personaModels: { standard: mockActiveModelId },
+      personaModels: { standard: { modelId: mockActiveModelId } },
     }),
   },
   getPersonaFallbackModelId: () => mockActiveModelId,
+  getPersonaFallbackContextWindow: () => null,
 }))
 
 let mockAgentModelName: string | null = null

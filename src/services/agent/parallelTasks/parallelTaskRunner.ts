@@ -57,6 +57,7 @@ import { releaseOwnerClaims } from '../fileClaims'
 import { consumeTaskStopRequest, consumeProjectAgentStop } from './taskStopRequestService'
 import { useAgentStore } from '../../../stores/agentStore'
 import { getProfileForPlan, MODEL_PROFILES } from '../modelProfiles'
+import { getPersonaFallbackContextWindow } from '../../../stores/activeModelStore'
 import { pumpParallelTasks } from './parallelTaskManager'
 import { t } from '../../../i18n'
 import { logger } from '../../../utils/logger'
@@ -555,7 +556,7 @@ export async function runParallelTask(runId: string): Promise<void> {
       : (modelName ? MODEL_PROFILES[modelName] : undefined)
     const profile = knownProfile ?? getProfileForPlan(useBillingStore.getState().plan)
     return {
-      contextWindow: (byokActive ? null : modelContextWindow) ?? knownProfile?.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
+      contextWindow: (byokActive ? null : (modelContextWindow ?? getPersonaFallbackContextWindow())) ?? knownProfile?.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
       // `modelMaxOutputTokens` primeiro, como no main: um modelo publicado só
       // no KV herdava o teto do fallback e calava-se aí, e esse mesmo valor é
       // o teto da escalada anti-truncagem no query.ts — o efeito era duplo.

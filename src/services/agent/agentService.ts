@@ -27,7 +27,7 @@ import { markProjectEdited, startDiagnosticsBaseline } from "./editDiagnostics";
 import { getProjectStateDir } from "../projectStatePaths";
 import { useBillingStore } from "../../stores/billingStore";
 import { useAgentStore } from "../../stores/agentStore";
-import { getPersonaFallbackModelId } from "../../stores/activeModelStore";
+import { getPersonaFallbackModelId, getPersonaFallbackContextWindow } from "../../stores/activeModelStore";
 import {
   resolveEffectiveEffort,
   resolveEffortModelId,
@@ -866,7 +866,9 @@ class AgentService {
         // read this in query.ts). Never capped here — a 1M model compacts at ~1M,
         // a 256K model at ~256K. The admin tunes it in Settings → Admin.
         return {
-          contextWindow: modelContextWindow ?? knownProfile?.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
+          // Janela POR PERSONA entre o header e o perfil (05-08): a escolha
+          // do admin no painel vale antes da 1ª resposta.
+          contextWindow: modelContextWindow ?? getPersonaFallbackContextWindow() ?? knownProfile?.contextWindow ?? FALLBACK_CONTEXT_WINDOW,
           // O header manda sobre o perfil, tal como na janela: um modelo novo
           // publicado só no KV herdava o teto do fallback (MiMo, 32K) e ficava
           // calado aí mesmo sendo capaz de gerar 128K+ — e esse valor é também
@@ -1899,7 +1901,7 @@ class AgentService {
       useAgentStore.getState();
     const known = modelName ? MODEL_PROFILES[modelName] : undefined;
     const window =
-      modelContextWindow ?? known?.contextWindow ?? FALLBACK_CONTEXT_WINDOW;
+      modelContextWindow ?? getPersonaFallbackContextWindow() ?? known?.contextWindow ?? FALLBACK_CONTEXT_WINDOW;
     return getPostCompactRecoveryMaxChars(
       window,
       modelMaxOutputTokens ?? known?.maxOutputTokens ?? null,

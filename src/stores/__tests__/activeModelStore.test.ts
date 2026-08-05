@@ -1,4 +1,4 @@
-import { useActiveModelStore, getPersonaFallbackModelId } from '@/stores/activeModelStore'
+import { useActiveModelStore, getPersonaFallbackModelId, getPersonaFallbackContextWindow } from '@/stores/activeModelStore'
 import { usePersonaStore, DEFAULT_PERSONA } from '@/stores/personaStore'
 import { useReasoningEffortStore } from '@/stores/reasoningEffortStore'
 
@@ -18,9 +18,9 @@ describe('activeModelStore (mapa por persona)', () => {
 
   it('setPersonaModels define o mapa e o fallback segue a persona selecionada', () => {
     useActiveModelStore.getState().setPersonaModels({
-      standard: 'mimo-v2.5-pro',
-      expert: 'glm-5.2',
-      master: 'qwen3.8-max',
+      standard: { modelId: 'mimo-v2.5-pro', contextWindow: 1_000_000 },
+      expert: { modelId: 'glm-5.2' },
+      master: { modelId: 'qwen3.8-max', contextWindow: 500_000 },
     })
     expect(getPersonaFallbackModelId()).toBe('mimo-v2.5-pro')
 
@@ -28,17 +28,23 @@ describe('activeModelStore (mapa por persona)', () => {
     // "a troca de persona não muda nada".
     usePersonaStore.setState({ selected: 'master' })
     expect(getPersonaFallbackModelId()).toBe('qwen3.8-max')
+
+    // Janela POR PERSONA (bug 05-08): a escolha do admin viaja no doc e
+    // resolve pela persona selecionada.
+    expect(getPersonaFallbackContextWindow()).toBe(500_000)
+    usePersonaStore.setState({ selected: 'expert' })
+    expect(getPersonaFallbackContextWindow()).toBeNull()
   })
 
   it('persona não publicada → fallback null (selector cai no servido/GLM)', () => {
-    useActiveModelStore.getState().setPersonaModels({ standard: 'glm-5.2' })
+    useActiveModelStore.getState().setPersonaModels({ standard: { modelId: 'glm-5.2' } })
     usePersonaStore.setState({ selected: 'expert' })
     expect(getPersonaFallbackModelId()).toBeNull()
   })
 
   it('actualizar o mapa NÃO mexe na preferência de effort (sem reset-on-change)', () => {
-    useActiveModelStore.getState().setPersonaModels({ standard: 'glm-5.2' })
-    useActiveModelStore.getState().setPersonaModels({ standard: 'grok-4.5' })
+    useActiveModelStore.getState().setPersonaModels({ standard: { modelId: 'glm-5.2' } })
+    useActiveModelStore.getState().setPersonaModels({ standard: { modelId: 'grok-4.5' } })
     expect(useReasoningEffortStore.getState().selected).toBe('max')
   })
 })
