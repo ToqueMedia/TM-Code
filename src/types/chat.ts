@@ -478,6 +478,18 @@ export interface ChatSession {
    *  a char-based estimate from the message history. */
   lastPromptTokens?: number
   lastResponseTokens?: number
+  /** Maior prompt já visto nesta sessão. Existe SÓ como informação secundária
+   *  no tooltip do pill — nunca como o valor que desenha a barra.
+   *
+   *  HISTÓRIA (2026-08-05): `lastPromptTokens` era ele próprio um pico de
+   *  sessão (`Math.max`), o que congelava o indicador: um turno de 500K punha
+   *  o pill em 49% e nenhum turno seguinte, por mais pequeno, o movia — só uma
+   *  compactação completa. O utilizador via a percentagem parada e não
+   *  conseguia distinguir "o contexto estagnou" de "o indicador avariou". Pior,
+   *  divergia do runtime: o autoCompact decide pela ocupação REAL do turno
+   *  anterior, que sobe e desce. Agora `lastPromptTokens` guarda essa mesma
+   *  ocupação real e o pico mudou-se para aqui. */
+  peakPromptTokens?: number
   /** Session-scoped memory notes maintained by the agent via
    *  `update_session_memory`. Survives context compaction but resets on
    *  new session creation. The agent uses these to track in-progress work,

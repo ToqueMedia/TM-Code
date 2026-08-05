@@ -267,7 +267,11 @@ export function buildMainLoopCallbacks(
     if (inputDelta > 0) estimatedPromptTokens += inputDelta
     if (outputDelta > 0) estimatedOutputTokens += outputDelta
     if (inputDelta > 0 || outputDelta > 0) {
-      useChatStore.getState().addEstimatedTokenUsage(estimatedPromptTokens, estimatedOutputTokens)
+      useChatStore.getState().addEstimatedTokenUsage(
+        estimatedPromptTokens,
+        estimatedOutputTokens,
+        !isBackgroundRun,
+      )
     }
   }
   const finalizeOnce = () => {

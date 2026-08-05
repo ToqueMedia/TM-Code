@@ -250,7 +250,7 @@ interface ChatActions {
   /** Reset token counters to zero (used after compaction). */
   resetTokenCounters: () => void
   /** Optimistic live estimate used when a pass-through provider streams no usage chunks. */
-  addEstimatedTokenUsage: (inputTokens: number, outputTokens: number) => void
+  addEstimatedTokenUsage: (inputTokens: number, outputTokens: number, isForeground?: boolean) => void
   // Streaming actions
   appendTextDelta: (delta: string) => void
   /** Append transcript-visible app/status text that must not be re-sent as model output. */
@@ -3634,7 +3634,15 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         if (sessionId) {
           const session = sessions.get(sessionId)
           if (session) {
-            sessions.set(sessionId, { ...session, lastPromptTokens: 0, lastResponseTokens: 0 })
+            // O pico também é da conversa ANTERIOR: mantê-lo depois de uma
+            // compactação deixava o tooltip a anunciar um máximo que já não
+            // existe em contexto nenhum.
+            sessions.set(sessionId, {
+              ...session,
+              lastPromptTokens: 0,
+              lastResponseTokens: 0,
+              peakPromptTokens: 0,
+            })
           }
         }
         return {
@@ -3646,7 +3654,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
     },
 
-    addEstimatedTokenUsage: (inputTokens: number, outputTokens: number) => {
+    addEstimatedTokenUsage: (inputTokens: number, outputTokens: number, isForeground = true) => {
       if (
         (!Number.isFinite(inputTokens) || inputTokens <= 0) &&
         (!Number.isFinite(outputTokens) || outputTokens <= 0)
@@ -3664,14 +3672,24 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             ? Math.max(state.currentResponseTokens, Math.ceil(outputTokens))
             : state.currentResponseTokens
 
+        // Mesmo contrato do addTokenUsage: `lastPromptTokens` é a ocupação
+        // corrente (não um pico de sessão) e só o primeiro plano a escreve —
+        // este caminho não tinha guarda nenhuma, por isso um run de fundo
+        // mexia no pill. `nextPrompt` já é o acumulado desta estimativa, que
+        // cresce dentro do pedido; entre pedidos passa a poder descer.
         let nextSessions = state.sessions
-        if (state.activeSessionId && (nextPrompt > 0 || nextResponse > 0)) {
+        if (isForeground && state.activeSessionId && (nextPrompt > 0 || nextResponse > 0)) {
           const active = state.sessions.get(state.activeSessionId)
           if (active) {
             nextSessions = new Map(state.sessions)
             nextSessions.set(state.activeSessionId, {
               ...active,
-              lastPromptTokens: Math.max(active.lastPromptTokens ?? 0, nextPrompt),
+              ...(nextPrompt > 0
+                ? {
+                    lastPromptTokens: nextPrompt,
+                    peakPromptTokens: Math.max(active.peakPromptTokens ?? 0, nextPrompt),
+                  }
+                : {}),
               lastResponseTokens: nextResponse,
               updatedAt: Date.now(),
             })
@@ -3767,26 +3785,27 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         // The ctx pill reads `lastPromptTokens`/`lastResponseTokens` and
         // compares them with live counters, so these must hold a STABLE,
         // foreground-only snapshot of the real context size:
-        //   - SESSION PEAK, via Math.max — NOT this turn's raw wire prompt.
-        //     addTokenUsage fires once per INTERNAL agent-loop turn, and a
-        //     turn's prompt_tokens is non-monotonic: a landing tool result grows
-        //     it, then the next turn's micro-compaction / tool-result-budget snip
-        //     shrinks it again (see query.ts per-turn pipeline). Writing the raw
-        //     per-turn value made the pill sawtooth every single turn
-        //     ("34 % → 7 % → 33 %" / "sobe e desce sem razão aparente"), which
-        //     reads to the user as the context silently overflowing/degrading.
-        //     The peak rises in steps and only ever decreases at a REAL boundary
-        //     (the reset below) — monotonic growth, not noise. A peak that's
-        //     briefly stale across a micro-compaction is a far smaller lie than
-        //     per-turn oscillation.
+        //   - OCUPAÇÃO REAL do último turno — o mesmo sinal em que o autoCompact
+        //     se ancora (`prompt_tokens` do turno anterior). Sobe E DESCE: uma
+        //     micro-compactação ou um snip do tool-result budget encolhem mesmo
+        //     o prompt, e isso tem de ser visível.
+        //
+        //     ISTO JÁ FOI UM PICO DE SESSÃO (`Math.max`) e estava errado: o
+        //     valor nunca descia fora de uma compactação completa, por isso um
+        //     único turno grande CONGELAVA o pill (reportado 2026-08-05: "vi a
+        //     janela travar nos 49% e daí nunca andou"). O pico passou para
+        //     `peakPromptTokens`, que o tooltip mostra como linha secundária —
+        //     a informação não se perdeu, deixou é de mandar na barra.
+        //
+        //     O serrote que a monotonia curava ("34 % → 7 % → 33 %") vinha de
+        //     pedidos que NÃO são o loop principal em primeiro plano; quem o
+        //     trava são os dois guardas abaixo, não o Math.max.
         //   - written ONLY by foreground runs. Invisible background / auto-wake
         //     runs pass isForeground=false and must NOT move the pill (sub-agents
         //     are already isolated to subAgentStore) — otherwise a small
-        //     background prompt would drag the peak around between foreground turns.
+        //     background prompt would drag the value around between foreground turns.
         //   - input>0 guard: partial-usage BYOK adapters that omit prompt_tokens
         //     must not clobber a known-good value with 0.
-        // Reset to 0 ONLY by the compaction path (resetTokenCounters) — the one
-        // place a genuine context shrink is reflected.
         let nextSessions = state.sessions
         if (isForeground && state.activeSessionId) {
           const active = state.sessions.get(state.activeSessionId)
@@ -3795,7 +3814,10 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             nextSessions.set(state.activeSessionId, {
               ...active,
               ...(input > 0
-                ? { lastPromptTokens: Math.max(active.lastPromptTokens ?? 0, input) }
+                ? {
+                    lastPromptTokens: input,
+                    peakPromptTokens: Math.max(active.peakPromptTokens ?? 0, input),
+                  }
                 : {}),
               lastResponseTokens: nextResponse,
               updatedAt: Date.now(),

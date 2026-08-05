@@ -62,23 +62,39 @@ interface ContextWindowIndicatorProps {
 
 function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIndicatorProps) {
   const t = useTranslation()
-  // Stable foreground context size: use the active session's persisted peak,
-  // but prefer live counters while a foreground turn is streaming. That keeps
-  // BYOK runs visible before the final usage event lands, while Math.max avoids
-  // the old sawtooth from smaller mid-loop usage reports.
+  // Ocupação CORRENTE do contexto — a mesma grandeza em que o autoCompact se
+  // ancora (ocupação real do turno anterior), não um pico de sessão.
+  //
+  // O `Math.max(live, persisted)` que aqui estava, combinado com um
+  // `lastPromptTokens` que era ele próprio um máximo, tornava o número
+  // IRREVERSÍVEL: um turno grande fixava a barra e nenhum turno posterior a
+  // baixava (reportado 2026-08-05 — "travou nos 49% e daí nunca andou"), o que
+  // também escondia por completo o efeito da micro-compactação.
+  //
+  // `persisted` é escrito a cada turno de PRIMEIRO PLANO (guardas em
+  // chatStore.addTokenUsage), por isso nunca é mais velho que `live`; `live`
+  // fica como recurso para o intervalo antes do primeiro evento de usage de
+  // uma sessão ainda sem valor persistido.
   const inputTokens = useChatStore((s) => {
     const live = s.currentPromptTokens
     if (!s.activeSessionId) return 0
     const persisted = s.sessions.get(s.activeSessionId)?.lastPromptTokens ?? 0
-    return Math.max(live, persisted)
+    return persisted > 0 ? persisted : live
   })
   const outputTokens = useChatStore((s) => {
     const live = s.currentResponseTokens
     if (!s.activeSessionId) return 0
     const persisted = s.sessions.get(s.activeSessionId)?.lastResponseTokens ?? 0
-    return Math.max(live, persisted)
+    return persisted > 0 ? persisted : live
+  })
+  // Pico da sessão: informação secundária no tooltip (mostrado só quando está
+  // materialmente acima da ocupação corrente — senão é ruído duplicado).
+  const peakPromptTokens = useChatStore((s) => {
+    if (!s.activeSessionId) return 0
+    return s.sessions.get(s.activeSessionId)?.peakPromptTokens ?? 0
   })
   const headerContextWindow = useAgentStore((s) => s.modelContextWindow)
+  const modelMaxOutputTokens = useAgentStore((s) => s.modelMaxOutputTokens)
   const selectedPersona = usePersonaStore((s) => s.selected)
   const personaWindow = useActiveModelStore((s) => s.personaModels[selectedPersona]?.contextWindow)
   const modelName = useAgentStore((s) => s.modelName)
@@ -118,21 +134,24 @@ function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIn
   // pre-handshake before any model identity is established.
   if (rawContextWindow <= 0) return null
 
-  const effectiveWindow = getEffectiveContextWindowSize(rawContextWindow)
-  const compactThreshold = getAutoCompactThreshold(rawContextWindow)
-  const warnThreshold = getWarningThreshold(rawContextWindow)
+  // O tecto de output do modelo servido entra na conta: é o que o runtime
+  // reserva. Sem o passar (era o caso), a UI assumia sempre o default de 20K e
+  // anunciava um "auto-compact at" que não era aquele por que o agente
+  // compactava — e divergia do `/context`, que já passava este argumento.
+  const effectiveWindow = getEffectiveContextWindowSize(rawContextWindow, modelMaxOutputTokens)
+  const compactThreshold = getAutoCompactThreshold(rawContextWindow, modelMaxOutputTokens)
+  const warnThreshold = getWarningThreshold(rawContextWindow, modelMaxOutputTokens)
 
   // Context occupancy = the prompt actually on the wire (input side), which
   // already includes ALL prior history (past user messages, prior assistant
   // outputs, tool results). claude-vaz parity (utils/context.ts:130-136): the
   // pressure numerator is INPUT-ONLY — the current turn's output is NOT added.
   //
-  // Adding output (the previous behaviour) reintroduced the per-turn sawtooth
-  // the prompt-peak was designed to kill: `lastResponseTokens` is OVERWRITTEN
-  // every internal agent-loop turn (chatStore.addTokenUsage), so a new message's
-  // small first turn dragged the bar 5%→4%→5% "sem razão aparente". `inputTokens`
-  // is a monotonic session peak → the bar only rises (until a real compaction
-  // reset). Output is still shown separately in the tooltip ("last response").
+  // Adding output (the previous behaviour) produced a per-turn sawtooth:
+  // `lastResponseTokens` is OVERWRITTEN every internal agent-loop turn
+  // (chatStore.addTokenUsage), so a new message's small first turn dragged the
+  // bar 5%→4%→5% "sem razão aparente". Output continua visível à parte no
+  // tooltip ("última resposta").
   const pressureTokens = inputTokens
   const rawPct = effectiveWindow > 0 ? (pressureTokens / effectiveWindow) * 100 : 0
   const pct = Math.min(100, rawPct)
@@ -258,10 +277,10 @@ function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIn
         >
           <Flex direction="column" gap="4px">
             <Text fontSize="9px" color={tokens.colors.text.disabled} letterSpacing="0.05em" textTransform="uppercase">
-              Per-turn context
+              {t('contextInfo.perTurnHeader')}
             </Text>
             <Flex justify="space-between" gap="12px">
-              <Text fontSize="10px" color={tokens.colors.text.muted}>Prompt (input)</Text>
+              <Text fontSize="10px" color={tokens.colors.text.muted}>{t('contextInfo.promptInput')}</Text>
               <Text fontSize="10px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono}>
                 {formatTokens(inputTokens)}
               </Text>
@@ -297,13 +316,24 @@ function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIn
               </Text>
             </Flex>
             <Flex justify="space-between" gap="12px">
-              <Text fontSize="10px" color={tokens.colors.text.muted}>Auto-compact at</Text>
+              <Text fontSize="10px" color={tokens.colors.text.muted}>{t('contextInfo.autoCompactAt')}</Text>
               <Text fontSize="10px" color={tokens.colors.text.secondary} fontFamily={tokens.fontFamily.mono}>
                 {formatTokens(compactThreshold)}
               </Text>
             </Flex>
+            {/* Pico só quando conta uma história diferente da ocupação actual
+                (>5% acima) — a barra segue o valor corrente, o pico fica como
+                referência de quão longe a conversa já esteve. */}
+            {peakPromptTokens > pressureTokens * 1.05 && (
+              <Flex justify="space-between" gap="12px">
+                <Text fontSize="10px" color={tokens.colors.text.muted}>{t('contextInfo.sessionPeak')}</Text>
+                <Text fontSize="10px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
+                  {formatTokens(peakPromptTokens)}
+                </Text>
+              </Flex>
+            )}
             <Text fontSize="9px" color={tokens.colors.text.disabled} lineHeight="1.4" mt="2px">
-              Different metric from the plan-consumption pill, which sums cost across the billing cycle.
+              {t('contextInfo.differentMetric')}
             </Text>
             {overrun ? (
               <Box

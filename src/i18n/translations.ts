@@ -1469,10 +1469,15 @@ const en = {
   'suggestions.explainPrompt': 'Explain how this codebase works',
 
   // ── Context Window Indicator ──────────────────────
+  'contextInfo.perTurnHeader': 'Per-turn context',
+  'contextInfo.promptInput': 'Prompt (input)',
   'contextInfo.lastResponse': 'Last response',
   'contextInfo.effectiveWindow': 'Effective window',
   'contextInfo.rawWindow': 'Raw window',
   'contextInfo.pressure': 'Pressure',
+  'contextInfo.autoCompactAt': 'Auto-compact at',
+  'contextInfo.sessionPeak': 'Session peak',
+  'contextInfo.differentMetric': 'Different metric from the plan-consumption pill, which sums cost across the billing cycle.',
 
   // ── Compact Survey ────────────────────────────────
   'compactSurvey.howWasIt': 'How was the compaction?',
@@ -3359,10 +3364,15 @@ const pt: Record<keyof typeof en, string> = {
   'suggestions.explainPrompt': 'Explicar como este código funciona',
 
   // ── Context Window Indicator ──────────────────────
+  'contextInfo.perTurnHeader': 'Contexto por turno',
+  'contextInfo.promptInput': 'Prompt (entrada)',
   'contextInfo.lastResponse': 'Última resposta',
   'contextInfo.effectiveWindow': 'Janela efetiva',
   'contextInfo.rawWindow': 'Janela bruta',
   'contextInfo.pressure': 'Pressão',
+  'contextInfo.autoCompactAt': 'Compacta automaticamente aos',
+  'contextInfo.sessionPeak': 'Pico da sessão',
+  'contextInfo.differentMetric': 'Métrica diferente da do consumo do plano, que soma o custo ao longo do ciclo de faturação.',
 
   // ── Compact Survey ────────────────────────────────
   'compactSurvey.howWasIt': 'Como foi a compactação?',
