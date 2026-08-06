@@ -48,20 +48,17 @@ describe('detectProjectContextEvidence', () => {
       treeString: BACKEND_TREE,
     })
     expect(ev.hasProjectContent).toBe(true)
-    expect(ev.hasUiSurface).toBe(false)
-    expect(ev.hasThemeSurface).toBe(false)
     expect(ev.hasChakra).toBe(false)
   })
 
-  it('app React com um index.css solto: UI sim, superfície de tema não', () => {
+  it('app React com um index.css solto: sem superfície de tema', () => {
     const ev = detectProjectContextEvidence({
       pkgSummary: pkg(['react', 'react-dom']),
       treeString: FRONTEND_TREE,
     })
-    expect(ev.hasUiSurface).toBe(true)
     // Um `.css` solto não é um sistema de tokens — ver a nota em THEME_SURFACE.
     expect(ev.hasThemeSurface).toBe(false)
-    expect(ev.signals).toContain('dep:react')
+    expect(ev.signals).toEqual([])
   })
 
   it('Tailwind ou uma pasta de tema contam como superfície de tema', () => {
@@ -85,8 +82,6 @@ describe('detectProjectContextEvidence', () => {
   it('projecto vazio mantém TUDO (ausência de dados ≠ evidência negativa)', () => {
     const ev = detectProjectContextEvidence({ pkgSummary: null, treeString: 'project/' })
     expect(ev.hasProjectContent).toBe(false)
-    // Os campos dizem o que foi detectado (nada); a política vive no portão.
-    expect(ev.hasUiSurface).toBe(false)
     expect(evidenceOmittedAuxiliaries({ evidence: ev, sessionHasImage: false })).toEqual([])
   })
 
@@ -117,21 +112,22 @@ describe('detectProjectContextEvidence', () => {
   // A detecção usa `detectionDependencies` (união NÃO truncada) — as listas
   // renderizadas vêm cortadas a 15/10 e um framework fora dessa janela dava
   // falso negativo calado.
-  it('detecta React declarado FORA da janela de truncagem do prompt', () => {
+  it('detecta um design system declarado FORA da janela de truncagem do prompt', () => {
     const filler = Array.from({ length: 20 }, (_, i) => `pkg-${i}`)
     const ev = detectProjectContextEvidence({
-      pkgSummary: pkg([...filler, 'react'], filler.slice(0, 15)),
+      pkgSummary: pkg([...filler, 'tailwindcss'], filler.slice(0, 15)),
       treeString: BACKEND_TREE,
     })
-    expect(ev.hasUiSurface).toBe(true)
+    expect(ev.hasThemeSurface).toBe(true)
   })
 
-  it('monorepo: a pasta client/ chega como sinal mesmo sem deps de UI na raiz', () => {
+  it('monorepo: um design system num sub-pacote chega pela união de deps', () => {
     const ev = detectProjectContextEvidence({
-      pkgSummary: pkg(['express']),
+      pkgSummary: pkg(['express', '@chakra-ui/react']),
       treeString: 'project/\n  server/\n  client/\n  package.json',
     })
-    expect(ev.hasUiSurface).toBe(true)
+    expect(ev.hasChakra).toBe(true)
+    expect(ev.hasThemeSurface).toBe(true)
   })
 
   it('Chakra gera o sinal e desbloqueia as receitas', () => {
@@ -146,21 +142,23 @@ describe('detectProjectContextEvidence', () => {
 })
 
 describe('evidenceOmittedAuxiliaries', () => {
-  it('num backend puro retém as 6 secções de design system e as de visão', () => {
+  it('num backend puro retém o trio de tokens, Chakra e visão — NUNCA a doutrina de geração', () => {
     const ev = detectProjectContextEvidence({
       pkgSummary: pkg(['express', 'drizzle-orm']),
       treeString: BACKEND_TREE,
     })
     const held = evidenceOmittedAuxiliaries({ evidence: ev, sessionHasImage: false }).map(o => o.id)
+    // component_patterns e ui_patterns NÃO estão aqui, e é medido: retê-las
+    // custou 2 falhas em 15 no caso adversarial (ver projectEvidence.ts).
     expect(held.sort()).toEqual([
       'design_system.brand_palette',
       'design_system.chakra_recipes',
-      'design_system.component_patterns',
       'design_system.semantic_tokens',
       'design_system.theme_config',
-      'ui_patterns',
       'vision.image_rules',
     ])
+    expect(held).not.toContain('ui_patterns')
+    expect(held).not.toContain('design_system.component_patterns')
   })
 
   it('uma imagem na sessão devolve as regras de visão', () => {
@@ -187,9 +185,11 @@ describe('applyEvidenceOmissions', () => {
     applyEvidenceOmissions(sel, evidenceOmittedAuxiliaries({ evidence: ev, sessionHasImage: false }), ev.signals)
 
     const loadedIds = sel.loaded.map(l => l.id)
-    expect(loadedIds).not.toContain('ui_patterns')
-    expect(loadedIds).not.toContain('design_system.component_patterns')
-    // Continua a entregar o que o projecto justifica.
+    expect(loadedIds).not.toContain('design_system.semantic_tokens')
+    expect(loadedIds).not.toContain('design_system.chakra_recipes')
+    // A doutrina de geração NUNCA sai, e o resto que o projecto justifica fica.
+    expect(loadedIds).toContain('ui_patterns')
+    expect(loadedIds).toContain('design_system.component_patterns')
     expect(loadedIds).toContain('project.package_map')
     expect(loadedIds).toContain('agent_runtime.mcp_routing')
 
@@ -202,7 +202,7 @@ describe('applyEvidenceOmissions', () => {
     expect(sel.savingsTokens).toBe(sel.omitted.reduce((s, o) => s + o.estTokens, 0))
     expect(sel.savingsTokens).toBe(sel.totalAvailableTokens - sel.loadedTokens)
     // O plano tem de contar a mesma história que a entrega.
-    expect(sel.contextPlan.selectedContexts).not.toContain('ui_patterns')
+    expect(sel.contextPlan.selectedContexts).not.toContain('design_system.semantic_tokens')
     expect(sel.autoLoadedSystemSections).toEqual(loadedIds)
     // Não há duplicados entre loaded e omitted.
     expect(sel.omitted.filter(o => loadedIds.includes(o.id))).toEqual([])
@@ -216,8 +216,8 @@ describe('applyEvidenceOmissions', () => {
     const ev = backendEvidence()
     applyEvidenceOmissions(sel, evidenceOmittedAuxiliaries({ evidence: ev, sessionHasImage: false }), ev.signals)
 
-    expect(sel.evidenceOmitReason?.['ui_patterns']).toContain('no UI surface in this project')
-    expect(sel.omitted.find(o => o.id === 'ui_patterns')?.reason).toMatch(/^project evidence:/)
+    expect(sel.evidenceOmitReason?.['design_system.semantic_tokens']).toContain('no theme/design-token surface')
+    expect(sel.omitted.find(o => o.id === 'design_system.semantic_tokens')?.reason).toMatch(/^project evidence:/)
   })
 
   it('sem omissões só carimba os sinais', () => {

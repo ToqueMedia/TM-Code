@@ -147,6 +147,43 @@ describe('ContextBuilder', () => {
       expect(sel?.omitted.map(o => o.id)).toContain('vision.image_rules')
     })
 
+    // O portão de evidência (achado #9) retém as secções LONGAS de UI num
+    // projecto sem superfície de UI. A linha de base CURTA vive no lembrete
+    // final e é incondicional — é ela que impede que reter as longas custe
+    // qualidade. Este teste trava essa promessa: sem ele, a rede de segurança
+    // podia desaparecer numa poda do lembrete sem ninguém dar por isso.
+    it('num projecto SEM UI: doutrina de geração inline + linha curta na recência', async () => {
+      mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'build_file_tree') {
+          return {
+            name: 'project', is_directory: true,
+            children: [
+              { name: 'index.js', is_directory: false },
+              { name: 'package.json', is_directory: false },
+            ],
+          }
+        }
+        if (cmd === 'read_file') {
+          const path = (args as Record<string, unknown>)?.path as string
+          if (path?.endsWith('package.json')) return JSON.stringify({ name: 'no-ui', scripts: { start: 'node index.js' } })
+          throw new Error('File not found')
+        }
+        if (cmd === 'path_exists') return false
+        return null
+      })
+      const prompt = await fullPrompt('/test/no-ui', 'node')
+      const sel = builder.getLastAuxiliarySelection()
+      // A doutrina de GERAÇÃO nunca é retida (medido: retê-la custou 2 falhas
+      // em 15 no caso adversarial) — vai inline mesmo sem superfície de UI…
+      expect(sel?.loaded.map(l => l.id)).toContain('ui_patterns')
+      expect(sel?.loaded.map(l => l.id)).toContain('design_system.component_patterns')
+      // …e os PONTEIROS para ficheiros de tema, que aqui não existem, saem.
+      expect(sel?.evidenceOmittedSections).toContain('design_system.semantic_tokens')
+      // A versão curta chega na mesma, na janela de recência.
+      expect(prompt).toContain('state-first')
+      expect(prompt).toContain('Empty states GUIDE')
+    })
+
     it('returns a string', async () => {
       const prompt = await builder.buildSystemPrompt('/test/project', 'web')
       expect(typeof prompt).toBe('string')

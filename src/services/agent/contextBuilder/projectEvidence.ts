@@ -40,13 +40,6 @@
 
 import type { PackageSummary } from './types'
 
-/** Dependências que provam que o projecto RENDERIZA UI. */
-const UI_DEPS = new Set([
-  'react', 'react-dom', 'preact', 'vue', 'svelte', '@sveltejs/kit', 'next',
-  'nuxt', 'astro', 'solid-js', '@angular/core', 'lit', '@builder.io/qwik',
-  'react-native', 'expo', '@ionic/react', 'ember-source', 'alpinejs', 'htmx.org',
-])
-
 /**
  * Dependências que provam um SISTEMA DE DESIGN (tokens, tema, receitas).
  * Subconjunto de evidência de UI: quem tem isto tem UI.
@@ -68,15 +61,9 @@ const FRAMEWORK_DEPS = new Set([
   'solid-js', 'express', 'fastify', '@nestjs/core',
 ])
 
-/** Extensões de ficheiro que só existem quando há UI. */
-const UI_FILE_EXT = /\.(tsx|jsx|vue|svelte|astro|html|htm|css|scss|sass|less|styl)\b/i
-
 /** Extensões que provam que o projecto TEM código (não está vazio). */
 const SOURCE_FILE_EXT =
   /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|rb|php|java|kt|swift|cs|ex|exs|dart|c|cc|cpp|h|hpp|vue|svelte|astro|html|css|scss)\b/i
-
-/** Nomes de pasta que indiciam superfície de UI (depth ≤ 2 da árvore). */
-const UI_DIR = /(^|[/\s])(components?|pages|views|screens|templates|public|static|styles|css|theme|themes|ui|frontend|front-end|client|web|www|app|apps)(\/|\s|$)/im
 
 /**
  * Ficheiros/pastas que indiciam superfície de TEMA / design tokens.
@@ -99,8 +86,6 @@ export interface ProjectContextEvidence {
    * parecer um projecto feito), nem uma árvore ilegível.
    */
   hasProjectContent: boolean
-  /** O projecto renderiza UI (dependência de UI, ficheiro de UI ou pasta de UI). */
-  hasUiSurface: boolean
   /** O projecto tem tema / design tokens (ficheiro de tema ou dep de design system). */
   hasThemeSurface: boolean
   /** Chakra UI está declarado nas dependências. */
@@ -130,18 +115,12 @@ export function detectProjectContextEvidence(input: {
   const deps = input.pkgSummary?.detectionDependencies ?? []
   const signals: string[] = []
 
-  const uiDep = deps.find(d => UI_DEPS.has(d))
   const dsDep = deps.find(d => DESIGN_SYSTEM_DEPS.has(d))
   const hasChakra = deps.some(d => d.startsWith('@chakra-ui/'))
-  const uiFile = UI_FILE_EXT.test(tree)
-  const uiDir = UI_DIR.test(tree)
   const themeFile = THEME_SURFACE.test(tree)
 
-  if (uiDep) signals.push(`dep:${uiDep}`)
   if (dsDep) signals.push(`dep:${dsDep}`)
   if (hasChakra) signals.push('dep:@chakra-ui')
-  if (uiFile) signals.push('file:ui-extension')
-  if (uiDir) signals.push('dir:ui-like')
   if (themeFile) signals.push('file:theme-surface')
 
   // `buildFileTree` devolve este sentinela quando a leitura falha. Sem o
@@ -158,7 +137,6 @@ export function detectProjectContextEvidence(input: {
   // coisas diferentes conforme o projecto.
   return {
     hasProjectContent,
-    hasUiSurface: Boolean(uiDep || dsDep || uiFile || uiDir),
     hasThemeSurface: Boolean(dsDep || themeFile),
     hasChakra,
     hasFrameworkDeps: deps.some(d => FRAMEWORK_DEPS.has(d)),
@@ -188,11 +166,18 @@ export function evidenceOmittedAuxiliaries(
   // existir. É também o caso em que a linha de base de gosto de UI mais vale.
   if (!evidence.hasProjectContent) return out
 
-  if (!evidence.hasUiSurface) {
-    const why = 'no UI surface in this project (no UI dependency, no .tsx/.vue/.html/.css file, no components/pages/client folder)'
-    out.push({ id: 'design_system.component_patterns', reason: why })
-    out.push({ id: 'ui_patterns', reason: why })
-  }
+  // `design_system.component_patterns` e `ui_patterns` NÃO são retidas por
+  // evidência (2026-08-06). Foram, e mediu-se o preço: no caso adversarial
+  // (projecto sem UI a quem se pede UI), 2 falhas em 15 corridas contra 0 em
+  // 10 no braço que as tinha — sempre o mesmo modo, página sem ramo de lista
+  // vazia. A versão CURTA da linha de base vai no lembrete final e está
+  // provada presente (teste em contextBuilder.test.ts); não chegou.
+  //
+  // A diferença face às secções abaixo é o que elas SÃO. Estas carregam a
+  // doutrina de GERAÇÃO, que se aplica no momento em que a UI nasce — e um
+  // projecto sem UI é precisamente o que está a um pedido de ter a primeira.
+  // As de baixo são PONTEIROS para ficheiros ("localiza src/theme/**"): num
+  // projecto sem tema apontam para o vazio, e aí reter é ganho puro.
   if (!evidence.hasThemeSurface) {
     const why = 'no theme/design-token surface in this project (no theme file, no tailwind config, no design-system dependency)'
     out.push({ id: 'design_system.semantic_tokens', reason: why })
