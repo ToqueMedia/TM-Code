@@ -2172,7 +2172,8 @@ export async function* query(
         // (lida da keychain uma vez) e nunca é relida, portanto as 3
         // tentativas de 30s são identicamente inúteis com uma chave revogada
         // — 90 segundos de espera morta antes de o user ver a mensagem certa
-        // (auditoria 05-08). Sem retry, a mensagem accionável é imediata.
+        // (auditoria 05-08). Sem retry, o erro é imediato; a parte ACCIONÁVEL
+        // é acrescentada no yield terminal lá em baixo (byokAuthFailure).
         !params.byokDirect &&
         credentialConfigRetries < CREDENTIAL_CONFIG_MAX_RETRIES
       ) {
@@ -2430,7 +2431,20 @@ export async function* query(
         continue queryLoop;
       }
 
-      yield { type: "error", message: errMsg };
+      // Chave BYOK rejeitada: sem isto o utilizador via o texto CRU do
+      // provedor ("401 Incorrect API key provided: sk-***") e nada lhe dizia
+      // onde o corrigir — a IDE não tem ramo nenhum para credenciais BYOK
+      // desde que o retry inútil de 90s foi removido. O comentário desse fix
+      // prometia "mensagem accionável"; era metade verdade (auditoria 06-08).
+      const byokAuthFailure =
+        params.byokDirect &&
+        (errorStatus(error) === 401 || errorStatus(error) === 403);
+      yield {
+        type: "error",
+        message: byokAuthFailure
+          ? `${errMsg}\n\nA tua chave BYOK foi recusada pelo provedor. Abre Definições → Chaves de API, confirma a chave do provedor activo e usa "Testar" antes de voltar a enviar.`
+          : errMsg,
+      };
 
       // If we have tool calls from a partial stream, yield error results
       for (const tc of collectedToolCalls) {

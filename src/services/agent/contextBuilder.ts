@@ -567,7 +567,7 @@ class ContextBuilder {
         candidateContexts: Array.from(new Set([...basePlan.candidateContexts, ...deliveryBaseline])),
         selectedContexts: Array.from(new Set([...basePlan.selectedContexts, ...deliveryBaseline])),
         rejectedContexts: [],
-        reason: 'Full delivery: bounded sections inline + always-on delivery baseline; only unbounded contexts on-demand via request_context.',
+        reason: 'Evidence-gated delivery: bounded sections inline when project evidence justifies them, plus the always-on delivery baseline. Withheld sections are NOT requestable — there is no on-demand catalog.',
       },
       source: 'deterministic',
       confidence: 'none',

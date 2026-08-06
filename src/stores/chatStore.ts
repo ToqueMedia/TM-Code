@@ -1677,19 +1677,28 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     // caminho do Chat, nunca é reposto — persisti-lo fazia com que reabrir a
     // sessão devolvesse o PICO e ressuscitasse a barra congelada, mesmo em
     // sessões criadas depois do fix (auditoria 05-08).
-    const livePrompt = active?.lastPromptTokens || c.currentPromptTokens
-    const liveResponse = active?.lastResponseTokens || c.currentResponseTokens
+    // `??` e não `||`: depois de uma compactação a ocupação e o pico são 0
+    // LEGITIMAMENTE. Com `||`, o zero era lido como "sem valor", o getter caía
+    // no snapshot anterior e regravava no disco a ocupação e o pico
+    // PRÉ-compactação — reabrir a sessão devolvia o pico de uma conversa que
+    // já não existe, que é o sintoma que addCompactBoundaryMessage corrigiu em
+    // memória (auditoria 06-08, a entrar pela porta da persistência).
+    const livePrompt = active?.lastPromptTokens ?? c.currentPromptTokens
+    const liveResponse = active?.lastResponseTokens ?? c.currentResponseTokens
     if (livePrompt === 0 && liveResponse === 0 && a.modelContextWindow == null) {
       return persisted
     }
     return {
-      promptTokens: livePrompt || persisted?.promptTokens || 0,
-      responseTokens: liveResponse || persisted?.responseTokens || 0,
+      promptTokens: livePrompt ?? persisted?.promptTokens ?? 0,
+      responseTokens: liveResponse ?? persisted?.responseTokens ?? 0,
       // Só quando existe: um `peakPromptTokens: 0` em cada snapshot é ruído no
       // ficheiro, e a ausência já significa "sem pico" para o tooltip.
-      ...(active?.peakPromptTokens || persisted?.peakPromptTokens
-        ? { peakPromptTokens: active?.peakPromptTokens || persisted?.peakPromptTokens }
-        : {}),
+      ...(() => {
+        const peak = active?.peakPromptTokens ?? persisted?.peakPromptTokens
+        // Só se omite quando é DESCONHECIDO; um pico de 0 (pós-compactação)
+        // tem de ser gravado, senão o valor velho sobrevive no ficheiro.
+        return peak === undefined ? {} : { peakPromptTokens: peak }
+      })(),
       // O header vivo manda; sem ele, a última janela conhecida vale mais do
       // que null — null aqui é o que faz o restore cair no fallback.
       contextWindow: a.modelContextWindow ?? persisted?.contextWindow ?? null,
@@ -3694,19 +3703,18 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         // result: a barra descia e voltava a 49% (auditoria 05-08, exactamente
         // o bug que este ficheiro diz ter corrigido).
         const estimateForSession = inputTokens > 0 ? Math.ceil(inputTokens) : 0
+        const targetSessionId = state.streamingSessionId ?? state.activeSessionId
         let nextSessions = state.sessions
-        if (isForeground && state.activeSessionId && (estimateForSession > 0 || nextResponse > 0)) {
-          const active = state.sessions.get(state.activeSessionId)
+        if (isForeground && targetSessionId && (estimateForSession > 0 || nextResponse > 0)) {
+          const active = state.sessions.get(targetSessionId)
           if (active) {
             nextSessions = new Map(state.sessions)
-            nextSessions.set(state.activeSessionId, {
+            nextSessions.set(targetSessionId, {
               ...active,
-              ...(estimateForSession > 0
-                ? {
-                    lastPromptTokens: estimateForSession,
-                    peakPromptTokens: Math.max(active.peakPromptTokens ?? 0, estimateForSession),
-                  }
-                : {}),
+              // O pico NÃO se mexe por estimativa: é irreversível até à
+              // próxima compactação, e uma estimativa alta fixava um pico que
+              // nunca existiu. Só usage REAL o move (auditoria 06-08).
+              ...(estimateForSession > 0 ? { lastPromptTokens: estimateForSession } : {}),
               lastResponseTokens: nextResponse,
               updatedAt: Date.now(),
             })
@@ -3823,12 +3831,17 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         //     background prompt would drag the value around between foreground turns.
         //   - input>0 guard: partial-usage BYOK adapters that omit prompt_tokens
         //     must not clobber a known-good value with 0.
+        // Sessão do RUN, não a activa: o utilizador pode trocar de sessão a
+        // meio de um run foreground, e a ocupação/pico deste run ficavam
+        // carimbados na sessão errada (auditoria 06-08). É o mesmo alvo que o
+        // addCompactBoundaryMessage já usava.
+        const targetSessionId = state.streamingSessionId ?? state.activeSessionId
         let nextSessions = state.sessions
-        if (isForeground && state.activeSessionId) {
-          const active = state.sessions.get(state.activeSessionId)
+        if (isForeground && targetSessionId) {
+          const active = state.sessions.get(targetSessionId)
           if (active) {
             nextSessions = new Map(state.sessions)
-            nextSessions.set(state.activeSessionId, {
+            nextSessions.set(targetSessionId, {
               ...active,
               ...(input > 0
                 ? {
@@ -4187,6 +4200,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
                 ...session,
                 lastPromptTokens: bootSnapshot.promptTokens,
                 lastResponseTokens: bootSnapshot.responseTokens,
+                // Faltava — e o caminho de ARRANQUE é este, não o
+                // loadSessionFromDisk. Sem isto o pico ficava `undefined` a
+                // cada reinício, o primeiro addTokenUsage punha-o igual à
+                // ocupação, e o getter regravava esse valor: o pico da sessão
+                // perdia-se em silêncio sempre que a app reiniciava
+                // (auditoria 06-08).
+                peakPromptTokens: bootSnapshot.peakPromptTokens,
               }
             : session
 

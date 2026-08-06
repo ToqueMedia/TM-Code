@@ -127,6 +127,14 @@ function ContextWindowIndicator({ popoverPlacement = 'bottom' }: ContextWindowIn
       ? MODEL_PROFILES[profileModelName]?.contextWindow
       : undefined,
     headerMaxOutputTokens: modelMaxOutputTokens,
+    // Faltava aqui e existia no adaptador: sem header de output (1º turno,
+    // sessão restaurada, BYOK) estes dois ficavam com `null` e o `/context` com
+    // o do perfil. Hoje é inócuo porque todos os perfis vivos têm tecto >= 20K
+    // e o Math.min achata; um perfil com tecto menor reabria a divergência que
+    // 4abcd63 fechou (auditoria 06-08).
+    profileMaxOutputTokens: profileModelName
+      ? MODEL_PROFILES[profileModelName]?.maxOutputTokens
+      : undefined,
   })
   const rawContextWindow = resolvedWindow.contextWindow
 

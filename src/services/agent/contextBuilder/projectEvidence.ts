@@ -86,6 +86,13 @@ export interface ProjectContextEvidence {
    * parecer um projecto feito), nem uma árvore ilegível.
    */
   hasProjectContent: boolean
+  /**
+   * A lista de dependências é DESCONHECIDA — não vazia. Sem `package.json`,
+   * com JSON inválido, ou com a pasta aberta um nível abaixo do manifesto do
+   * monorepo. Distinguir isto de "não tem dependências" é o que impede o
+   * portão de reter por falta de dados (ver o gate).
+   */
+  depsUnknown: boolean
   /** O projecto tem tema / design tokens (ficheiro de tema ou dep de design system). */
   hasThemeSurface: boolean
   /** Chakra UI está declarado nas dependências. */
@@ -131,12 +138,25 @@ export function detectProjectContextEvidence(input: {
   const hasProjectContent = (treeReadable && SOURCE_FILE_EXT.test(tree)) || deps.length > 0
   if (!hasProjectContent) signals.push('project:empty-or-unreadable')
 
+  // `pkgSummary` é null quando não há `package.json` OU quando ele não faz
+  // parse (extractPackageSummary devolve null nos dois casos). Isso NÃO
+  // significa "projecto sem dependências": significa que não sabemos.
+  //
+  // A distinção é o que faltava. `hasProjectContent` é um OR entre árvore e
+  // deps, portanto bastava a ÁRVORE ser legível para o portão ficar activo com
+  // `deps = []` — e um `package.json` a meio de uma edição, um projecto Deno,
+  // ou uma pasta aberta abaixo do manifesto do monorepo retinham quatro
+  // secções num projecto de UI a sério, em silêncio (auditoria 06-08).
+  const depsUnknown = !input.pkgSummary
+  if (depsUnknown) signals.push('deps:unknown')
+
   // Estes campos dizem só o que foi DETECTADO. A política "ausência de dados
   // não é evidência negativa" vive no portão (evidenceOmittedAuxiliaries), num
   // sítio só — misturá-la aqui faria `hasUiSurface: true` significar duas
   // coisas diferentes conforme o projecto.
   return {
     hasProjectContent,
+    depsUnknown,
     hasThemeSurface: Boolean(dsDep || themeFile),
     hasChakra,
     hasFrameworkDeps: deps.some(d => FRAMEWORK_DEPS.has(d)),
@@ -178,13 +198,20 @@ export function evidenceOmittedAuxiliaries(
   // projecto sem UI é precisamente o que está a um pedido de ter a primeira.
   // As de baixo são PONTEIROS para ficheiros ("localiza src/theme/**"): num
   // projecto sem tema apontam para o vazio, e aí reter é ganho puro.
-  if (!evidence.hasThemeSurface) {
+  // Regra 1 aplicada POR SINAL, não só ao projecto. Sem lista de dependências
+  // (sem `package.json`, JSON inválido a meio de uma edição, Deno/Fresh, ou a
+  // pasta aberta abaixo do manifesto do monorepo) os sinais que dependem dela
+  // não dizem "não tem" — dizem "não sei". Reter com base em "não sei" era
+  // exactamente a degradação silenciosa que este portão promete não fazer
+  // (auditoria 06-08): um projecto React+Chakra a sério ficava sem as quatro
+  // secções por causa de uma vírgula a mais no `package.json`.
+  if (!evidence.hasThemeSurface && !evidence.depsUnknown) {
     const why = 'no theme/design-token surface in this project (no theme file, no tailwind config, no design-system dependency)'
     out.push({ id: 'design_system.semantic_tokens', reason: why })
     out.push({ id: 'design_system.theme_config', reason: why })
     out.push({ id: 'design_system.brand_palette', reason: why })
   }
-  if (!evidence.hasChakra) {
+  if (!evidence.hasChakra && !evidence.depsUnknown) {
     out.push({
       id: 'design_system.chakra_recipes',
       reason: 'Chakra UI is not a dependency of this project',
