@@ -257,48 +257,71 @@ medido no corpo real e o total ainda em estimativas, a subtracção misturava as
 duas unidades — e podia ficar negativa quando o corpo real excedia a
 estimativa.
 
-## Evals: ganho medido (2026-08-06)
+## Evals: o que a régua mostrou (2026-08-06)
 
 Dois braços, mesmo instrumento (o custo foi instrumentado e depois
 cherry-picked para a baseline), mesma persona — o runner headless força
 `standard`. Baseline = `badefac`.
 
-**Casos determinísticos** (ler package, compreender código, escrever ficheiro),
-médias dos casos com cache quente nos dois braços:
+### Custo — ganho confirmado
+
+Casos determinísticos, médias dos casos com cache quente nos dois braços:
 
 | | baseline | agora | delta |
 |---|---|---|---|
 | verdes | 3/3 | 3/3 | — |
 | input / pedido | 56 426 | 52 732 | **−3 693 (−6,5%)** |
 | input não-cache (preço cheio) | 7 850 | 6 012 | **−1 837 (−23,4%)** |
-| contexto auxiliar / pedido | 4 290 | 1 836 | **−2 454 (−57,2%)** |
 | output | 236 | 236 | idêntico |
 
-Previsto pelo modelo de custo: −2 454 (portão) −1 250 (índice removido) =
-**−3 704**. Medido: **−3 693**. O ganho vem de onde a tese dizia.
+O nº de pedidos por corrida é ruidoso (2-6 nos DOIS braços). Com n=10 por
+braço no caso adversarial: 2,9 vs 3,1 pedidos — indistinguível — e o input
+total fica em +0,5%. A régua estável é o input/PEDIDO, e esse desce 6,6%.
 
-**Caso de risco** `ui-page-no-ui-project` — pede-se UI a um projecto sem
-superfície de UI, ou seja o braço novo gera a página SEM
-`design_system.component_patterns` nem `ui_patterns`:
+### Qualidade — o portão custou, e mediu-se
 
-- **Qualidade: 10/10 corridas verdes** nos dois braços (n=6 baseline, n=4
-  novo). A asserção é sobre o CONTEÚDO gerado — tratamento do estado vazio —
-  com enunciado neutro que não o pede. A linha de base sobrevive ao portão
-  porque `sharedUiBaselineReminder()` vai no lembrete final, incondicional, e
-  a versão longa é que é retida.
-- **Custo por pedido: −5,7%**, consistente com os casos determinísticos.
-- **Custo total: +20,1%, e este número NÃO está resolvido.** O nº de pedidos
-  variou 2-5 na baseline e 2-6 no braço novo (médias 3,2 vs 4,0); as
-  amplitudes sobrepõem-se e as amostras são pequenas. Contra a hipótese de
-  degradação: o output do braço novo é MENOR (1 863 vs 2 339 tokens de média),
-  o que não é o que se vê quando um agente itera para corrigir. A favor de a
-  levar a sério: o ponto estimado é pior e não há amostra que o feche.
+O caso `ui-page-no-ui-project` pede UI a um projecto sem UI nenhuma. Foi
+desenhado como o caso de risco do portão, e foi exactamente onde ele partiu:
+
+| versão do portão | verdes | modo de falha |
+|---|---|---|
+| baseline (sem portão) | 9/10 | 1× ficheiro não criado (não é qualidade) |
+| portão a reter `component_patterns` + `ui_patterns` | **13/15** | 2× página sem ramo de lista vazia |
+| portão sem as reter (actual) | **15/15** | — |
+
+As duas falhas são o mesmo modo: `tasks.forEach(...)` sem tratamento de lista
+vazia, ou seja página em branco quando o array vem vazio. É literalmente a
+regra que essas duas secções carregam.
+
+**A rede de segurança não chegou.** `sharedUiBaselineReminder()` vai no
+lembrete final, incondicional, e contém "state-first" e "Empty states GUIDE"
+— há um teste em `contextBuilder.test.ts` que prova que chega ao prompt num
+projecto sem UI. Chegou, e falhou na mesma 2 em 15. A versão curta é um
+resumo escrito para acompanhar a longa; não substitui a longa.
+
+**A correcção, e o critério que dela saiu:** o portão distingue agora o que as
+secções SÃO.
+
+- **Doutrina de GERAÇÃO** (`component_patterns`, `ui_patterns`) — aplica-se no
+  instante em que a UI nasce, e um projecto sem UI é precisamente o que está a
+  um pedido de ter a primeira. **Nunca é retida.**
+- **PONTEIROS para ficheiros** (`semantic_tokens`, `theme_config`,
+  `brand_palette`: "localiza `src/theme/**`") — num projecto sem tema apontam
+  para o vazio. Retidos sem custo.
+- **Situacionais** (`chakra_recipes` sem Chakra, `vision.image_rules` sem
+  imagem na sessão) — retidos sem custo.
+
+Preço da correcção: o portão poupa ~591 tokens/pedido num backend em vez de
+~2 454. Com o índice on-demand removido, o ganho fica em **~1 840/pedido** em
+vez dos ~3 700 anunciados. Metade — mas a outra metade estava a ser paga em
+qualidade, e sem a régua isso teria ido para produção sem ninguém saber.
 
 ### O que continua por fazer / por decidir
 
-- **Fechar o nº de pedidos do caso de risco.** ~10 corridas por braço decidem
-  se os 4,0 vs 3,2 são variância da tarefa ou perda real. Até lá, o ganho
-  confirmado é POR PEDIDO; o total nesse cenário adversarial fica em aberto.
+- **A régua de qualidade tem UM caso.** `ui-page-no-ui-project` cobre o estado
+  vazio. As outras regras da linha de base (grupos de controlo inteiros,
+  hierarquia, decoração ancorada) não têm caso nenhum — uma degradação nessas
+  passaria despercebida como esta quase passou.
 - **Sem verificação na app.** O detector foi sondado contra árvores realistas
   (incluindo a deste repo, que retém apenas `vision.image_rules`) e os evals
   correm o binário a sério, mas ninguém abriu a janela e olhou.
