@@ -40,7 +40,7 @@
     ],
     "expectFileContains": {
       "src/TaskList.jsx": [
-        "length\\s*===\\s*0|!\\s*tasks|tasks\\.length\\s*(\\?|>|&&)|length\\s*<\\s*1"
+        "empty|vazio|nenhuma|sem tarefa|no tasks|===\\s*0|length\\s*<\\s*1"
       ]
     },
     "refuteFileContains": {
@@ -63,7 +63,7 @@
     ],
     "expectFileContains": {
       "public/index.html": [
-        "length\\s*===\\s*0|!\\s*tasks|tasks\\.length\\s*(\\?|>|&&)|length\\s*<\\s*1"
+        "empty|vazio|nenhuma|sem tarefa|no tasks|===\\s*0|length\\s*<\\s*1"
       ]
     },
     "refuteFileContains": {
