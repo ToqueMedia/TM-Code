@@ -3,7 +3,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -572,14 +572,36 @@ fn build_host_command(command: &str, cwd: &PathBuf) -> Command {
 }
 
 /// Spawn a command, stream its output into buffers, and wait with a timeout.
-/// Returns `CommandResult` on completion or timeout.
-async fn run_command_with_timeout(
+/// Escreve `stdin_data` no stdin do filho e fecha-o quando presente: é o
+/// contrato dos HOOKS (porte do cli-vaz) — o payload do evento viaja em JSON no
+/// stdin, e é isso que faz um hook escrito para o Claude Code correr aqui sem
+/// alterações. Escreve-se ANTES de esperar pela saída; um hook que leia stdin
+/// até EOF ficaria bloqueado para sempre de outra forma.
+///
+/// (Havia um wrapper `run_command_with_timeout` que só chamava isto com
+/// `None`. Ficou sem chamadores quando os hooks migraram todos para esta
+/// versão, e o clippy do CI — que corre com `-D warnings` — acusava-o como
+/// código morto. Passar `None` aqui é igualmente legível.)
+async fn run_command_with_timeout_stdin(
     mut cmd: Command,
     timeout: Duration,
+    stdin_data: Option<String>,
 ) -> Result<CommandResult, String> {
+    if stdin_data.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to execute command: {}", e))?;
+
+    if let Some(data) = stdin_data {
+        if let Some(mut pipe) = child.stdin.take() {
+            // EPIPE benigno: o hook pode sair sem ler o stdin todo.
+            let _ = pipe.write_all(data.as_bytes());
+            let _ = pipe.write_all(b"\n");
+        }
+        // `pipe` sai de escopo aqui e fecha, sinalizando EOF ao filho.
+    }
 
     let child_pid = child.id();
 
@@ -791,6 +813,10 @@ pub async fn execute_command(
     command: String,
     cwd: Option<String>,
     timeout_secs: Option<u64>,
+    // `stdin`: JSON do evento, escrito no stdin do processo. Usado pelos HOOKS
+    // (ver `run_command_with_timeout_stdin`). `None` para todos os outros
+    // chamadores, que não passam o campo.
+    stdin: Option<String>,
     active_project: State<'_, ActiveProjectState>,
 ) -> Result<CommandResult, String> {
     if command.trim().is_empty() {
@@ -808,7 +834,7 @@ pub async fn execute_command(
             None => PathBuf::from(registry.default_cwd().unwrap_or_default()),
         };
         let cmd = build_sandboxed_host_command(&command, &working_dir);
-        return run_command_with_timeout(cmd, timeout).await;
+        return run_command_with_timeout_stdin(cmd, timeout, stdin).await;
     }
 
     // No open project: unrestricted host execution
@@ -819,7 +845,7 @@ pub async fn execute_command(
         }
     };
     let cmd = build_host_command(&command, &working_dir);
-    run_command_with_timeout(cmd, timeout).await
+    run_command_with_timeout_stdin(cmd, timeout, stdin).await
 }
 
 #[derive(Clone, Serialize)]

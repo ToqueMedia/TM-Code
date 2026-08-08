@@ -130,7 +130,9 @@ fn guard_ssrf(raw_url: &str) -> Result<(), String> {
         Ok(u) => u,
         Err(_) => return Ok(()),
     };
-    let Some(host) = url.host_str() else { return Ok(()) };
+    let Some(host) = url.host_str() else {
+        return Ok(());
+    };
     // Block link-local metadata (AWS/GCP/Azure)
     if host == "169.254.169.254" || host == "metadata.google.internal" {
         return Err("Blocked: cloud metadata endpoint".to_string());
@@ -202,7 +204,9 @@ pub async fn fetch_pdf_text(url: String, timeout_secs: Option<u64>) -> Result<St
         .map_err(|e| format!("PDF task failed: {e}"))?
         .map_err(|e| format!("Could not extract text: {e}"))?;
     if text.trim().is_empty() {
-        return Err("This PDF has no extractable text layer (likely scanned or image-only).".to_string());
+        return Err(
+            "This PDF has no extractable text layer (likely scanned or image-only).".to_string(),
+        );
     }
     Ok(text)
 }

@@ -1261,6 +1261,34 @@ ${pipeline}
  * existir servidor nenhum. É por isso que não são condicionais ao servidor
  * estar a correr: seriam entregues tarde demais para o caso que evitam.
  */
+/**
+ * Verificação para projectos publicados pelo GoLive. `null` — e portanto zero
+ * tokens — em qualquer projecto sem `golive.json`.
+ *
+ * PORQUÊ: num projecto GoLive real (toquemedia-novo-site, 2026-08-06) o agente
+ * fechou a tarefa com `npx tsc --noEmit` verde e o developer encontrou um erro
+ * de compilação a seguir. O `tsc` valida os TIPOS; não valida o que o bundler
+ * do GoLive faz com o import, o alias, o asset ou a env — e é aí que estes
+ * projectos partem. O dev server é a única coisa que exercita esse caminho.
+ *
+ * Forma `string | null` (a mesma da secção MCP): a instrução não é uma regra
+ * universal disfarçada de condicional — é sobre a stack DESTE projecto, e num
+ * repo que não use GoLive seria ruído a pagar tokens em todos os pedidos.
+ */
+export function getGoLiveVerificationSection(ctx: PromptContext): string | null {
+  if (!ctx.goliveConfig) return null
+  return `## Verificação (projecto GoLive)
+
+Este projecto é publicado pelo **GoLive** (tem \`golive.json\`). O \`tsc --noEmit\` valida os TIPOS; o build valida o que o bundler faz com imports, aliases, assets e variáveis de ambiente — que é onde estes projectos partem.
+
+ - No FINAL CHECKPOINT, **CORRE** \`golive dev --check\` — este comando e não outro. Ele conhece a configuração do GoLive (base, envs, adaptador) que um \`npm run build\` cru não aplica, e é o build que a publicação vai mesmo correr. Corre o build do projecto (npm/yarn/pnpm), sai com código ≠ 0 quando há erros e mostra os diagnósticos por ficheiro.
+ - O fallback existe SÓ para uma CLI que devolva \`unknown option --check\`: nesse caso, e só depois de veres esse erro, corre o build do projecto directamente.
+ - **LÊ** a saída e **CORRIGE** o que ela apontar — erros de React e de compilação aparecem aí, e um deles é uma falha da tarefa mesmo com o \`tsc\` verde.
+ - **REPETE** até sair limpo. Só então a tarefa está fechada.
+
+Um comando, sai sozinho: não é preciso arrancar nem desligar dev server nenhum para verificar.`
+}
+
 export function getDevServerAuthoringRulesSection(): string {
   return `## Dev servers — project setup rules
  - **PICK** framework default ports (Vite=5173, Next=3000, Express=whatever your scripts bind). Do NOT prescribe custom ports — the IDE detects URLs from log output and classifies them by HTTP content-type (HTML → iframe preview; JSON/other → HTTP Client).
@@ -1340,11 +1368,11 @@ export function getReminderSection(ctx: PromptContext): string {
   // saiu nenhum que nomeasse uma falha própria. Antes de acrescentar aqui:
   // isto é a janela de recência, não um índice do prompt.
   const mcpReminder = ctx.mcpTools.length > 0
-    ? `\n13. **MCP available**: ${ctx.mcpTools.map(t => `\`mcp__${t.serverName}__${t.name}\``).slice(0, 8).join(', ')}${ctx.mcpTools.length > 8 ? `, +${ctx.mcpTools.length - 8} more` : ''}. Before writing code against a library/service covered by an MCP, or when the task needs live external data or a side-effect in an external system, call the matching MCP — your training data is stale and these tools are the authoritative path.`
+    ? `\n14. **MCP available**: ${ctx.mcpTools.map(t => `\`mcp__${t.serverName}__${t.name}\``).slice(0, 8).join(', ')}${ctx.mcpTools.length > 8 ? `, +${ctx.mcpTools.length - 8} more` : ''}. Before writing code against a library/service covered by an MCP, or when the task needs live external data or a side-effect in an external system, call the matching MCP — your training data is stale and these tools are the authoritative path.`
     : ''
   // Skills bullet is 13 when no MCP, 14 when the MCP block is present.
   // Numbering stays sequential so the model reads it as a list, not a digest.
-  const skillIndex = ctx.mcpTools.length > 0 ? 14 : 13
+  const skillIndex = ctx.mcpTools.length > 0 ? 15 : 14
   const skillReminder = ctx.loadedSkillNames.length > 0
     ? `\n${skillIndex}. Skills loaded: ${ctx.loadedSkillNames.map(n => `\`${n}\``).join(', ')}. Read each skill's \`## CRITICAL:\` blocks before writing code in its domain. Improvising violates the invariants the CRITICAL blocks describe.`
     : ''
@@ -1361,7 +1389,8 @@ export function getReminderSection(ctx: PromptContext): string {
 9. **SHORT MESSAGES** are context-dependent. If you just proposed a fix/action and the developer replies briefly, that's approval — execute it. If you just asked a question, the brief reply answers it. Read your own previous turn, not the word itself.
 10. ${sharedThinkingEfficiencyReminder()}
 11. **DIAGNOSIS DISCIPLINE**: your first hypothesis is unproven — name the observation that would FALSIFY it and run that check first (the cheapest decisive test), instead of accumulating evidence that merely fits. When the evidence shows a CATEGORY mismatch (this runtime/tool/platform does not support that dependency or approach), CLOSE that architecture decision explicitly — do not patch around it with config/bundler tweaks that hide the mismatch. Loaded context sections, skills and profiles describe CAPABILITIES available to you; they are NOT evidence about the current problem's cause — never let them steer the diagnosis.
-12. **OTHER AGENTS' SESSIONS**: when the developer asks you to continue/resume another coding agent's unfinished work (Claude Code, Codex, Cursor, Aider, …), its session store lives under the user profile using that tool's convention — unix/macOS: \`~/.<tool>/\`, \`~/.config/<tool>/\`, \`~/Library/Application Support/<tool>/\`; Windows: \`%USERPROFILE%\` / \`%APPDATA%\` / \`%LOCALAPPDATA%\`. Locate THIS project's entry (often the project path encoded in the folder name), read the most recent transcript, summarize the prior goal + current state to the developer, then continue the work here. Reading outside the project asks permission once — expected. Never read these unprompted.${mcpReminder}${skillReminder}`
+12. **SESSÕES ANTERIORES — as TUAS por defeito.** "a sessão anterior", "a última corrida", "o que fizeste antes" referem-se SEMPRE ao histórico do TM Code${ctx.ownSessionsDir ? `, em \`${ctx.ownSessionsDir}\` (um \`session_*.json\` por sessão, o mais recente por mtime)` : ''}. Só vais ao histórico de OUTRO agente quando o developer o NOMEAR (Claude Code, Codex, Cursor, Aider, …).
+13. **OUTRO agente, quando nomeado**: when the developer asks you to continue/resume another coding agent's unfinished work (Claude Code, Codex, Cursor, Aider, …), its session store lives under the user profile using that tool's convention — unix/macOS: \`~/.<tool>/\`, \`~/.config/<tool>/\`, \`~/Library/Application Support/<tool>/\`; Windows: \`%USERPROFILE%\` / \`%APPDATA%\` / \`%LOCALAPPDATA%\`. Locate THIS project's entry (often the project path encoded in the folder name), read the most recent transcript, summarize the prior goal + current state to the developer, then continue the work here. Reading outside the project asks permission once — expected. Never read these unprompted.${mcpReminder}${skillReminder}`
 }
 
 // ── 15a. Critical reminder (mid-conversation re-injection) ─────────────────

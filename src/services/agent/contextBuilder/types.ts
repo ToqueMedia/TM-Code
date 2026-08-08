@@ -128,6 +128,20 @@ export interface PromptContext {
   foreignInstructions: import('../projectInstructions').ForeignInstructionSource | null
   planContent: string | null
   todoContent: string | null
+  /**
+   * Conteúdo do `golive.json` da raiz — o marcador de que o projecto é
+   * publicado pelo GoLive. `null` na esmagadora maioria dos projectos, e é
+   * isso que mantém a secção de verificação do GoLive fora do prompt deles
+   * (forma `string | null`, como a secção MCP).
+   */
+  goliveConfig: string | null
+  /**
+   * Pasta onde o TM Code guarda as SUAS PRÓPRIAS sessões deste projecto.
+   * Sem ela no prompt, "analisa a sessão anterior" não tinha resposta possível:
+   * a única coisa que o prompt dizia sobre sessões era onde estão as dos OUTROS
+   * agentes, e o modelo foi lá — correctamente, dado o que lhe tinha sido dito.
+   */
+  ownSessionsDir: string | null
   templateManifest: TemplateManifest | null
   projectManifest: ProjectManifest | null
   // Runtime config

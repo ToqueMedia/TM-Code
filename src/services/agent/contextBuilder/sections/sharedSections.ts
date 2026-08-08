@@ -56,12 +56,45 @@ import {
  *     call-to-action" created <EmptyState message="..." action="..." />.
  *     The positive framing produces a better default.
  *   H3 ("Taste defaults" section — restraint-over-decoration guard):
- *     0/3 → 3/3. Without this section, models default to rainbow
- *     gradients and oversized heroes 70% of the time (training bias
- *     from tutorial repos). The "auto-generated giveaways" list is
- *     negative-space that specifically names what to avoid — but it
- *     lives INSIDE a positive framing ("restraint over decoration").
+ *     0/3 → 3/3 EM 2026-05-23. **CADUCADO — não reproduz.** Reavaliado a
+ *     2026-08-06 no modelo servido hoje, com o eval headless: com a secção a
+ *     devolver string vazia, gradientes/emoji/lorem 5/5 verde e stack por
+ *     defeito 5/5 verde. A secção foi APAGADA (ver a nota abaixo). H1 e H2
+ *     continuam de pé e estão remedidos: sem o corpo desta secção, 8 falhas
+ *     em 10 no estado vazio.
+ *
+ * REGRA para quem mexer aqui: um eval citado num comentário é uma medição com
+ * data, não uma verdade. Remede antes de o invocar — este durou 75 dias.
  */
+// MEDIÇÃO que decidiu manter estas duas (2026-08-06). Foram apagadas na
+// tentativa de igualar o cli-vaz, que não tem nada disto — e o eval respondeu
+// em dez corridas: **8 falhas em 10** no caso `ui-screen-react`, componente a
+// renderizar `tasks.map(...)` cru, sem ramo de lista vazia. Antes: 2/2 verde.
+//
+// A linha curta de `sharedUiBaselineReminder()` NÃO carrega esta regra: está
+// no prompt (há teste que o prova) e mesmo assim 80% falha. O controlo negativo
+// tinha mostrado que a parte de RESTRIÇÃO (gradientes, emoji, stack por
+// defeito) é vácua no modelo de hoje; a parte STATE-FIRST não é.
+//
+// `sharedTasteDefaults()` — 414 tokens SÓ de restrição — foi apagada a
+// 2026-08-06. Duas experiências independentes e nenhum observável que ela
+// mova: controlo negativo (restrição 5/5 e stack 5/5 verdes sem ela) e
+// experiência de uma variável (fora ela, tudo o resto igual: 6/6 em
+// `ui-page-no-ui-project`, 20 verdes em 23 em `ui-screen-react`).
+//
+// Os 3 falhados em 23 NÃO se atribuem a ela: o texto não fala de estados, e
+// a mesma propriedade falha ~13% das vezes COM ela presente — separar 0/10 de
+// 3/23 precisava de ~50 corridas por braço. É ruído de fundo da tarefa, não
+// efeito da secção.
+//
+// A leitura que interessa: **o estado vazio falha ~13% mesmo na melhor
+// configuração**. Esse é o número a atacar, e não se ataca com tokens — as
+// duas experiências mostram que mais texto de restrição não o move.
+//
+// Ou seja: a forma do cli-vaz aplica-se (sem portão, sem catálogo, sempre
+// inline), o conteúdo não. Antes de voltar a cortar aqui, corre
+// `yarn evals:agent --only ui-screen-react` dez vezes.
+
 export function sharedUiBaselineCore(): string {
   return `# UI baseline (when generating frontend or visual artifacts)
 

@@ -6,8 +6,11 @@ import {
 } from '../modelProfiles'
 
 // Swap de catálogo 2026-08-04: DeepSeek V4 Pro, MiMo V2.5 base e Qwen 3.7 Max
-// saíram (o MiMo V2.5 PRO mantém-se, e continua o default); entrou qwen3.8-max;
-// Grok 4.5 e Kimi K3 ganharam aliases author/model do Cloudflare AI Gateway.
+// saíram; entrou qwen3.8-max; Grok 4.5 e Kimi K3 ganharam aliases author/model
+// do Cloudflare AI Gateway.
+// Swap 2026-08-07: o MiMo V2.5 Pro (que sobreviveu ao anterior e era o default)
+// saiu de vez; entrou o qwen3.7-plus como modelo de código; o default passou ao
+// glm-5.2 — a config ATIVA em produção e o perfil mais conservador do catálogo.
 describe('modelProfiles', () => {
   describe('MODEL_PROFILES registry', () => {
     it('contains the expected model + alias keys', () => {
@@ -18,6 +21,7 @@ describe('modelProfiles', () => {
       expect(ids).toContain('glm-5')
       expect(MODEL_PROFILES['glm-5']).toBe(MODEL_PROFILES['glm-5.2'])
       expect(ids).toContain('qwen3.8-max')
+      expect(ids).toContain('qwen3.7-plus')
       // Grok 4.5 + aliases (incl. o id author/model do Cloudflare AI Gateway).
       expect(ids).toContain('grok-4.5')
       expect(MODEL_PROFILES['xai/grok-4.5']).toBe(MODEL_PROFILES['grok-4.5'])
@@ -28,22 +32,30 @@ describe('modelProfiles', () => {
       expect(MODEL_PROFILES['moonshotai/kimi-k3']).toBe(MODEL_PROFILES['kimi-k3'])
     })
 
-    it('removed models (swap 2026-08-04) are gone from the registry', () => {
+    it('removed models are gone from the registry', () => {
       const ids = Object.keys(MODEL_PROFILES)
       expect(ids).not.toContain('deepseek-v4-pro')
       expect(ids).not.toContain('qwen3.7-max-2026-06-08')
       expect(ids).not.toContain('qwen3.7-max')
       expect(ids).not.toContain('mimo-v2.5-1m')
-      // O Pro fica.
-      expect(ids).toContain('mimo-v2.5-pro-1m')
+      // MiMo V2.5 Pro removido de vez a 2026-08-07 — id de catálogo E o id que
+      // o X-TM-Model reportava (o alias sem sufixo -1m).
+      expect(ids).not.toContain('mimo-v2.5-pro-1m')
+      expect(ids).not.toContain('mimo-v2.5-pro')
     })
 
-    it('mimo-v2.5-pro-1m has correct specs', () => {
-      const mimo = MODEL_PROFILES['mimo-v2.5-pro-1m']
-      expect(mimo.thinkingMode).toBe('toggleable')
-      expect(mimo.supportsThinking).toBe(true)
-      expect(mimo.contextWindow).toBe(1_048_576)
-      expect(mimo.maxOutputTokens).toBe(32_768)
+    it('qwen3.7-plus has native vision and search, boolean-hybrid thinking', () => {
+      const qwen = MODEL_PROFILES['qwen3.7-plus']
+      expect(qwen.modelId).toBe('qwen3.7-plus')
+      expect(qwen.contextWindow).toBe(1_000_000)
+      // 131 072 dito pelo próprio endpoint (sondagem 2026-08-08). A primeira
+      // versão deste teste afirmava 32 768, inferido da família — capava o
+      // modelo a um quarto do que ele faz.
+      expect(qwen.maxOutputTokens).toBe(131_072)
+      expect(qwen.thinkingMode).toBe('toggleable')
+      expect(qwen.thinkingMandatory).toBe(false)
+      expect(qwen.supportsAttachments).toBe(true)
+      expect(qwen.supportsSearch).toBe(true)
     })
 
     it('glm-5.2 has 1M context, 128K output, toggleable thinking, no native vision', () => {
@@ -93,8 +105,8 @@ describe('modelProfiles', () => {
       expect(profile.id).toBe(DEFAULT_MODEL_ID)
     })
 
-    it('default continua a ser o MiMo V2.5 Pro (mantido no swap 2026-08-04)', () => {
-      expect(DEFAULT_MODEL_ID).toBe('mimo-v2.5-pro-1m')
+    it('default passou ao GLM-5.2 com a saída do MiMo (2026-08-07)', () => {
+      expect(DEFAULT_MODEL_ID).toBe('glm-5.2')
     })
   })
 
@@ -111,7 +123,16 @@ describe('modelProfiles', () => {
       const profile = getProfileForPlan('pro')
       expect(profile.thinkingMode).toBe('toggleable')
       expect(profile.supportsThinking).toBe(true)
-      expect(profile.contextWindow).toBe(1_048_576)
+      expect(profile.contextWindow).toBe(1_000_000)
+    })
+
+    // O fallback é o gate de capacidade pré-primeira-resposta: se ele
+    // declarasse visão/pesquisa nativas, um modelo desconhecido receberia
+    // imagens que talvez não leia e um prompt a anunciar pesquisa que não tem.
+    it('o fallback é conservador — sem visão nem pesquisa nativas', () => {
+      const profile = getProfileForPlan('pro')
+      expect(profile.supportsAttachments).toBe(false)
+      expect(profile.supportsSearch).toBe(false)
     })
   })
 })

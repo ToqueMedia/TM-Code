@@ -59,7 +59,6 @@ import { useBillingStore } from '../../stores/billingStore'
 import { useProblemsStore } from '../../stores/problemsStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useLayoutStore, selectIsPreviewServerRunning } from '../../stores/layoutStore'
-import { triggerGoalCelebration } from '../../stores/celebrationStore'
 import { t } from '../../i18n/useTranslation'
 import {
   buildAugmentedPrompt,
@@ -440,9 +439,6 @@ export function buildMainLoopCallbacks(
         // para clicar em Preview quando quiser inspecionar.
         const layout = useLayoutStore.getState()
         if (selectIsPreviewServerRunning(layout)) layout.reloadPreview()
-        // Floreado sazonal (World Cup 2026) — só trabalho pedido pelo user e
-        // só em sucesso; o helper no-opa quando a época está desligada.
-        if (!agentService.isAborted()) triggerGoalCelebration('agent_run_complete')
       }
     },
     onError: (error) => {
@@ -481,6 +477,14 @@ export function buildMainLoopCallbacks(
       useChatStore.getState().addTokenUsage(inTok, outTok, !isBackgroundRun)
       // Display-only ("último pedido"); a cobrança real vive no worker.
       useBillingStore.getState().addLastRequestTokens(inTok + outTok)
+    },
+    // Marco do orçamento de tool results: fica no histórico/export, não no
+    // chat (forma cli-vaz — ver addContextBudgetMarker).
+    onContextBudgetApplied: ({ tokensBefore, tokensAfter, clearedCount }) => {
+      if (isBackgroundRun) return
+      try {
+        useChatStore.getState().addContextBudgetMarker(tokensBefore, tokensAfter, clearedCount)
+      } catch { /* observability never blocks */ }
     },
     onRequestUsage: (entry) => {
       // Log por-pedido na sessão ativa (export) — best-effort, nunca bloqueia.

@@ -164,6 +164,65 @@ test('MiMo: effort "on" liga thinking:{type:enabled}', () => {
   assert.equal('reasoning_effort' in body, false)
 })
 
+// Qwen 3.7 como modelo PRINCIPAL (2026-08-07). Híbrido por boolean: o toggle
+// vira `enable_thinking` e `reasoning_effort` é apagado — a escala graded é do
+// 3.8-max e esta família não a documenta.
+test('Qwen 3.7 Plus: default liga enable_thinking e NÃO envia reasoning_effort', () => {
+  const body: Record<string, unknown> = { reasoning_effort: 'max' }
+  applyReasoningEffort(body, '', {
+    provider: 'dashscope',
+    baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+    model: 'qwen3.7-plus',
+  })
+  assert.equal(body.enable_thinking, true)
+  assert.equal('reasoning_effort' in body, false)
+  // preserve_thinking: documentado para qwen3.7-*; faz par com o round-trip de
+  // reasoning_content da IDE (sem ele o servidor descarta o que já pagámos).
+  assert.equal(body.preserve_thinking, true)
+})
+
+test('Qwen 3.7 Plus: effort "off" desliga o thinking e o preserve_thinking', () => {
+  const body: Record<string, unknown> = { preserve_thinking: true }
+  applyReasoningEffort(body, 'off', {
+    provider: 'dashscope',
+    baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+    model: 'qwen3.7-plus',
+  })
+  assert.equal(body.enable_thinking, false)
+  assert.equal('reasoning_effort' in body, false)
+  assert.equal('preserve_thinking' in body, false)
+})
+
+// A regressão que este teste tranca: o sidecar:utility É um qwen3.7-flash com
+// enable_thinking:false publicado de propósito. Um pedido auxiliar que leve o
+// header de effort do modelo PRINCIPAL ('max' do GLM) não pode ligar-lhe o
+// thinking — valor fora das options desta família é ignorado.
+test('Qwen 3.7 Flash (sidecar utility): effort de OUTRA escala não toca no body', () => {
+  const body: Record<string, unknown> = { enable_thinking: false }
+  applyReasoningEffort(body, 'max', {
+    provider: 'dashscope',
+    baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+    model: 'qwen3.7-flash',
+  })
+  assert.equal(body.enable_thinking, false)
+  assert.equal('reasoning_effort' in body, false)
+  assert.equal('preserve_thinking' in body, false)
+})
+
+// O GLM na MESMA DashScope continua no seu ramo: reasoning_effort mantém-se e
+// preserve_thinking NÃO entra (a doc não o lista para o GLM).
+test('GLM na DashScope não é apanhado pelo ramo do Qwen 3.7', () => {
+  const body: Record<string, unknown> = {}
+  applyReasoningEffort(body, 'max', {
+    provider: 'dashscope',
+    baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+    model: 'glm-5.2',
+  })
+  assert.equal(body.reasoning_effort, 'max')
+  assert.equal(body.enable_thinking, true)
+  assert.equal('preserve_thinking' in body, false)
+})
+
 // Cloudflare AI Gateway (swap 2026-08-04): provider 'cloudflare' + model em
 // sintaxe author/model. As regras por-modelo TÊM de continuar a disparar —
 // era exatamente o buraco do startsWith() sem bareModel.

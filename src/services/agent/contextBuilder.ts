@@ -49,6 +49,7 @@ import {
   detectProjectType,
   detectProjectTypeFromFiles,
   extractPackageSummary,
+  hasFrameworkDependency,
   gatherGitContext,
   gatherRecentFiles,
   getLangInstruction,
@@ -66,7 +67,6 @@ import {
   sharedOutputEfficiency,
   sharedShellExecutionLoop,
   sharedToneAndStyle,
-  sharedTasteDefaults,
   sharedUiBaselineCore,
 } from './contextBuilder/sections/sharedSections'
 import {
@@ -83,6 +83,7 @@ import {
   getScaffoldingInstallSection,
   getVisionSection,
   getDevServerAuthoringRulesSection,
+  getGoLiveVerificationSection,
   getDevServerStatusSection,
   getEnvironmentSection,
   getExecutingActionsSection,
@@ -111,18 +112,14 @@ import {
 import {
   type ContextPlanClassification,
   fallbackContextPlanForProfile,
+  inlineContextsForSession,
   selectAuxiliaries,
-  applyEvidenceOmissions,
   applyRenderedTokenCounts,
   resolveAuxiliaryId,
   type AuxiliarySelection,
   type PromptProfile,
   type RouterDiagnostics,
 } from './contextBuilder/auxiliaryRegistry'
-import {
-  detectProjectContextEvidence,
-  evidenceOmittedAuxiliaries,
-} from './contextBuilder/projectEvidence'
 import { loadProjectInstructions } from './projectInstructions'
 
 type IntentOverride = {
@@ -227,43 +224,8 @@ class ContextBuilder {
         // Capacidade RESOLVIDA (declarada pelo worker × perfil local), a mesma
         // que decide se o sidecar de visão sequer corre — ver getVisionSection.
         return getVisionSection(ctx?.promptCtx?.modelProfile?.supportsAttachments === true)
-      case 'design_system.semantic_tokens':
-        return [
-          '# Design system: semantic tokens',
-          'Use for token/theme work only. Start by locating existing semantic token/theme files before editing.',
-          'Expected files: src/theme/**/semantic*, src/theme/**/tokens*, src/themes/**, src/theme/index.ts.',
-          'Prefer adding the smallest semantic alias that matches existing naming. Locate the expected files with the search/list/read tools before editing.',
-        ].join('\n')
-      case 'design_system.theme_config':
-        return [
-          '# Design system: theme configuration',
-          'Use for theme entrypoints, Chakra/System config, provider wiring, and semantic token registration.',
-          'Expected files: src/theme/index.ts, src/theme/**, src/themes/**, src/components/ui/provider.tsx.',
-          'Read the theme entrypoint and the specific token file before editing.',
-        ].join('\n')
-      case 'design_system.brand_palette':
-        return [
-          '# Design system: brand palette',
-          'Use for palette/color token naming, semantic color aliases, and contrast-aware palette decisions.',
-          'Expected files: src/theme/**/colors*, src/theme/**/tokens*, src/themes/**.',
-        ].join('\n')
-      case 'design_system.chakra_recipes':
-        return [
-          '# Design system: Chakra recipes',
-          'Use for Chakra recipes, slot recipes, variants, and reusable component styling.',
-          'Expected files: src/theme/**/recipes*, src/theme/**/slot-recipes*, src/components/ui/**.',
-        ].join('\n')
       case 'design_system.component_patterns':
         return sharedUiBaselineCore()
-      case 'ui_patterns':
-        return sharedTasteDefaults()
-      // Estas secções interpolavam OBJECTOS em template strings (auditoria
-      // 2026-07-29): `${pkgSummary}` rendia "[object Object]" e
-      // `pathAliases.map(a => \`- ${a}\`)` rendia uma lista de
-      // "[object Object]". Três auxiliares — project.package_map,
-      // project.entrypoints e delivery.build_scripts — entregavam isso ao
-      // modelo como se fosse contexto. Pior do que não ter a secção: ocupa
-      // tokens, parece dados e não diz nada.
       case 'project.package_map':
         if (!ctx?.promptCtx) return null
         // Sem package.json não há mapa nenhum: emitir o cabeçalho mais
@@ -556,7 +518,23 @@ class ContextBuilder {
     // segundo servidor"), visão, scaffold — enquanto o gatherGitContext()
     // continuava a correr e a ser deitado fora. project_bootstrap fica
     // deliberadamente lean (inspeção focada + escrita de TMS.md).
-    const basePlan = fallbackContextPlanForProfile(auxProfile)
+    // PEGAJOSO por sessão, de propósito: as regras de visão entram no turno em
+    // que chega a primeira imagem e ficam. Uma imagem do turno 3 deixa uma
+    // descrição no histórico que o modelo ainda lê no turno 8 — retirar-lhe as
+    // regras aí traz de volta o "não consigo ver imagens" sobre conteúdo que
+    // ele TEM. Não sabendo, entrega-se (o `catch` deixa isto a true).
+    let sessionHasImage = signals?.hasImage === true
+    try {
+      const { useChatStore } = await import('../../stores/chatStore')
+      sessionHasImage = sessionHasImage || (useChatStore.getState().getActiveSession()?.messages ?? [])
+        .some(m => m.attachments?.some(a => a.type === 'image'))
+    } catch { sessionHasImage = true }
+    const basePlan = {
+      ...fallbackContextPlanForProfile(auxProfile),
+      selectedContexts: auxProfile === 'project_bootstrap'
+        ? fallbackContextPlanForProfile(auxProfile).selectedContexts
+        : inlineContextsForSession(sessionHasImage),
+    }
     const deliveryBaseline = auxProfile === 'project_bootstrap'
       ? []
       : ['delivery.git_status', 'delivery.dev_server']
@@ -614,7 +592,7 @@ class ContextBuilder {
     // Gather context in parallel for speed. Project instructions (TMS + foreign
     // AGENTS/CLAUDE) go through loadProjectInstructions so compat repos without
     // TMS.md still surface developer rules at runtime.
-    const [treeString, pkgSummary, readme, projectManifest, templateManifest, instructions, planContent, todoContent, toquemediaIdRaw, gitContext, recentFiles, pathAliases, generatedPaths] = await Promise.all([
+    const [treeString, pkgSummary, readme, projectManifest, templateManifest, instructions, planContent, todoContent, goliveConfig, ownSessionsDir, toquemediaIdRaw, gitContext, recentFiles, pathAliases, generatedPaths] = await Promise.all([
       buildFileTree(projectPath),
       extractPackageSummary(projectPath),
       safeReadFile(`${projectPath}/README.md`),
@@ -623,6 +601,11 @@ class ContextBuilder {
       loadProjectInstructions(projectPath),
       safeReadFile(`${projectPath}/PLAN.md`),
       safeReadFile(`${projectPath}/TODO.md`),
+      safeReadFile(`${projectPath}/golive.json`),
+      // Em cache no projectStatePaths — um IPC no primeiro build do projecto.
+      import('../projectStatePaths')
+        .then(m => m.getProjectSessionsDir(projectPath))
+        .catch(() => null),
       safeReadFile(`${projectPath}/.toquemedia-id`),
       gatherGitContext(projectPath),
       gatherRecentFiles(projectPath),
@@ -637,16 +620,10 @@ class ContextBuilder {
 
     const pmDetected = pkgSummary?.packageManager || await detectPackageManager(projectPath)
     const isTemplateProject = templateManifest !== null
-    // ── FONTE ÚNICA de "que tipo de projecto é este" ──
-    // Havia aqui uma segunda detecção, à mão, com a sua própria lista de
-    // frameworks — a viver ao lado do portão de evidência e a poder discordar
-    // dele. Duas respostas para a mesma pergunta é como um perfil morto
-    // continua a parecer vivo: nenhuma das duas é obviamente a errada quando
-    // divergem. `workspaceDependencies` entra na união (num monorepo a raiz não
-    // declara framework nenhum) e a união é NÃO truncada (as listas do prompt
-    // vêm cortadas a 15/10; detectar a partir delas dava falso negativo calado).
-    const projectEvidence = detectProjectContextEvidence({ pkgSummary, treeString })
-    const isVanillaWeb = !isTemplateProject && !projectEvidence.hasFrameworkDeps
+    // `hasFrameworkDependency` lê a união NÃO truncada das dependências — ver
+    // a nota lá. Era detecção sobre as listas de render, e dava falso negativo
+    // calado em qualquer projecto com o framework fora da janela de 15/10.
+    const isVanillaWeb = !isTemplateProject && !hasFrameworkDependency(pkgSummary)
 
     // Language
     const langInstruction = await getLangInstruction()
@@ -729,19 +706,10 @@ class ContextBuilder {
     // Session memory — agent-maintained notes that survive compaction.
     // Loaded from the active chat session (piggybacks on session persistence).
     let sessionMemory: string | null = null
-    // PEGAJOSO por sessão, de propósito: as regras de visão entram no turno em
-    // que chega a primeira imagem e ficam. Uma imagem do turno 3 deixa uma
-    // descrição no histórico que o modelo ainda lê no turno 8 — retirar-lhe as
-    // regras aí traz de volta o "não consigo ver imagens" sobre conteúdo que
-    // ele TEM. Não sabendo, entrega-se (o `catch` deixa isto a true).
-    let sessionHasImage = true
-    try {
+        try {
       const { useChatStore } = await import('../../stores/chatStore')
       const activeSession = useChatStore.getState().getActiveSession()
       sessionMemory = activeSession?.sessionMemory ?? null
-      sessionHasImage = (activeSession?.messages ?? []).some(m =>
-        m.attachments?.some(a => a.type === 'image'),
-      )
     } catch { /* non-critical */ }
 
     const ctx: PromptContext = {
@@ -762,6 +730,8 @@ class ContextBuilder {
       foreignInstructions,
       planContent,
       todoContent,
+      goliveConfig,
+      ownSessionsDir,
       projectManifest,
       templateManifest,
       langInstruction,
@@ -801,25 +771,6 @@ class ContextBuilder {
     // that are omitted stay unloaded — their ids appear in the on-demand
     // index below, and the agent can fetch them via `request_context`.
     this.lastAuxiliaryCtx = { pmDetected: ctx.pmDetected, isVanillaWeb: ctx.isVanillaWeb, promptCtx: ctx, loadedSkills }
-    // ── Portão de EVIDÊNCIA DO PROJECTO (achado #9, 2026-08-05) ──
-    // A entrega inline continua a ser a doutrina (a meia-entrega falhava em
-    // silêncio: 0 chamadas a request_context em 34 e em 114 pedidos medidos).
-    // O que muda é que a lista deixa de ser cega ao projecto: as secções de
-    // design system e as regras de visão só entram quando o PROJECTO (não a
-    // tarefa — foi por aí que o Intent Router morreu) mostra a superfície
-    // correspondente. Corre aqui e não junto à selecção porque precisa do
-    // pkgSummary e da árvore, que só existem depois do gather em paralelo.
-    // Ausência de dados não conta como evidência negativa e o portão não é
-    // pegajoso — ver projectEvidence.ts. A evidência é a MESMA que decidiu
-    // `isVanillaWeb` acima (fonte única), calculada uma vez por build.
-    applyEvidenceOmissions(
-      auxSelection,
-      evidenceOmittedAuxiliaries({
-        evidence: projectEvidence,
-        sessionHasImage: (signals?.hasImage ?? false) || sessionHasImage,
-      }),
-      projectEvidence.signals,
-    )
     const auxLoadedContent: Record<string, string> = {}
     for (const l of auxSelection.loaded) {
       const body = await this.renderAuxiliaryContent(l.id)
@@ -912,6 +863,7 @@ class ContextBuilder {
       // demais. Estavam abaixo da fronteira, coladas ao estado volátil do
       // servidor (2026-07-30).
       getDevServerAuthoringRulesSection(),
+      getGoLiveVerificationSection(ctx),
       getConstraintsSection(ctx),
       sharedToneAndStyle(),
       sharedOutputEfficiency(),
@@ -949,18 +901,8 @@ class ContextBuilder {
       // inteiro no prompt.
       dynamicSection('additional_constraints', () => auxLoadedContent['vision.image_rules'] ?? null,
         'vision-rules auxiliary is selected only when the message carries images'),
-      dynamicSection('design_system_semantic_tokens', () => auxLoadedContent['design_system.semantic_tokens'] ?? null,
-        'design-system auxiliary is selected per intent/project and may be absent'),
-      dynamicSection('design_system_theme_config', () => auxLoadedContent['design_system.theme_config'] ?? null,
-        'theme auxiliary is selected per intent/project and may be absent'),
-      dynamicSection('design_system_brand_palette', () => auxLoadedContent['design_system.brand_palette'] ?? null,
-        'brand palette auxiliary is selected per intent/project and may be absent'),
-      dynamicSection('design_system_chakra_recipes', () => auxLoadedContent['design_system.chakra_recipes'] ?? null,
-        'Chakra recipe auxiliary is selected per intent/project and may be absent'),
       dynamicSection('design_system_component_patterns', () => auxLoadedContent['design_system.component_patterns'] ?? null,
-        'component pattern auxiliary is selected per intent/project and may be absent'),
-      dynamicSection('ui_patterns', () => auxLoadedContent['ui_patterns'] ?? null,
-        'UI pattern auxiliary is selected per intent/project and may be absent'),
+        'UI generation doctrine — medido load-bearing (8 falhas em 10 sem ela)'),
       dynamicSection('memory', () => getMemorySection(ctx),
         'MEMORY.md indexes mutate as save_memory / forget_memory run'),
       // Pending auto-extracted proposals — surfaced AFTER the existing

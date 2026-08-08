@@ -147,18 +147,6 @@ export interface AuxiliarySelection {
   savingsTokens: number
   autoLoadedSystemSections?: string[]
   contextPlanCandidateSections?: string[]
-  /**
-   * Secções BOUNDED que a evidência do projecto não justificou (achado #9).
-   * Ficam FORA do prompt e não há forma de as pedir — o modelo descobre o que
-   * precisa com as ferramentas normais, como no cli-vaz. Estes campos existem
-   * para o export: são a única forma de responder a "porque é que este
-   * projecto não recebeu as secções de design system".
-   */
-  evidenceOmittedSections?: string[]
-  /** Razão por id, para o export. */
-  evidenceOmitReason?: Record<string, string>
-  /** Sinais de evidência que suportaram as decisões acima. */
-  evidenceSignals?: string[]
   readOnly: boolean
   reason: string
   routerSource: 'model' | 'fallback' | 'keyword'
@@ -204,94 +192,6 @@ const cx = (meta: AuxiliaryMeta): AuxiliaryMeta => meta
 
 export const AUXILIARY_METAS: AuxiliaryMeta[] = [
   cx({
-    id: 'design_system.semantic_tokens',
-    domain: 'design_system',
-    capability: 'semantic_tokens',
-    name: 'Semantic tokens',
-    description: 'How to add or update semantic tokens without loading the whole project tree.',
-    scope: 'capability',
-    costTier: 'low',
-    granularity: 'summary',
-    whenToUse: 'Use for semantic tokens, theme token names, state tokens, palette aliases, or Chakra semantic token work.',
-    whenNotToUse: 'Do not use for routing, MCP, git, dev server, or broad architecture discovery.',
-    dependencies: ['design_system.theme_config'],
-    fallbackTo: [],
-    sourceResolver: 'design_system_semantic_tokens',
-    freshnessPolicy: 'read expected token/theme files before editing',
-    expectedFiles: ['src/theme/**/semantic*', 'src/theme/**/tokens*', 'src/themes/**', 'src/theme/index.ts'],
-    summaryAvailable: true,
-    fullAvailable: true,
-    estTokens: 220,
-    type: 'static',
-    phase: 1,
-  }),
-  cx({
-    id: 'design_system.theme_config',
-    domain: 'design_system',
-    capability: 'theme_config',
-    name: 'Theme configuration',
-    description: 'Theme entrypoints, provider/config expectations, and token wiring guidance.',
-    scope: 'capability',
-    costTier: 'low',
-    granularity: 'summary',
-    whenToUse: 'Use for theme configuration, Chakra theme setup, semantic token wiring, or provider-level theme changes.',
-    whenNotToUse: 'Do not use for ordinary component edits that do not touch theme configuration.',
-    dependencies: [],
-    fallbackTo: [],
-    sourceResolver: 'design_system_theme_config',
-    freshnessPolicy: 'read theme entrypoint before editing',
-    expectedFiles: ['src/theme/index.ts', 'src/theme/**', 'src/themes/**', 'src/components/ui/provider.tsx'],
-    summaryAvailable: true,
-    fullAvailable: true,
-    estTokens: 220,
-    type: 'static',
-    phase: 1,
-  }),
-  cx({
-    id: 'design_system.brand_palette',
-    domain: 'design_system',
-    capability: 'brand_palette',
-    name: 'Brand palette',
-    description: 'Brand color/palette guidance and likely files.',
-    scope: 'capability',
-    costTier: 'low',
-    granularity: 'summary',
-    whenToUse: 'Use for palette, color, brand color, contrast color, or semantic color naming tasks.',
-    whenNotToUse: 'Do not use when the task is not visual or token-related.',
-    dependencies: ['design_system.semantic_tokens'],
-    fallbackTo: ['design_system.theme_config'],
-    sourceResolver: 'design_system_brand_palette',
-    freshnessPolicy: 'read palette/token files before editing',
-    expectedFiles: ['src/theme/**/colors*', 'src/theme/**/tokens*', 'src/themes/**'],
-    summaryAvailable: true,
-    fullAvailable: true,
-    estTokens: 160,
-    type: 'static',
-    phase: 1,
-  }),
-  cx({
-    id: 'design_system.chakra_recipes',
-    domain: 'design_system',
-    capability: 'chakra_recipes',
-    name: 'Chakra recipes',
-    description: 'Chakra recipe/slot recipe guidance and likely files.',
-    scope: 'capability',
-    costTier: 'low',
-    granularity: 'summary',
-    whenToUse: 'Use for Chakra recipes, slot recipes, component recipes, variants, or reusable component styling.',
-    whenNotToUse: 'Do not use for unrelated React logic or backend changes.',
-    dependencies: ['design_system.theme_config'],
-    fallbackTo: ['design_system.component_patterns'],
-    sourceResolver: 'design_system_chakra_recipes',
-    freshnessPolicy: 'read recipe/theme files before editing',
-    expectedFiles: ['src/theme/**/recipes*', 'src/theme/**/slot-recipes*', 'src/components/ui/**'],
-    summaryAvailable: true,
-    fullAvailable: true,
-    estTokens: 180,
-    type: 'static',
-    phase: 1,
-  }),
-  cx({
     id: 'design_system.component_patterns',
     domain: 'design_system',
     capability: 'component_patterns',
@@ -312,29 +212,6 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     estTokens: 650,
     type: 'static',
     aliases: ['ui_baseline_full'],
-    phase: 1,
-  }),
-  cx({
-    id: 'ui_patterns',
-    domain: 'design_system/ui',
-    capability: 'spacing_typography',
-    name: 'UI patterns',
-    description: 'Taste defaults, spacing, typography, density, and visual restraint guidance.',
-    scope: 'domain',
-    costTier: 'low',
-    granularity: 'summary',
-    whenToUse: 'Use for visual polish, spacing, typography, density, and UI refinement.',
-    whenNotToUse: 'Do not use for MCP audits, git, dev server, backend, or pure config tasks.',
-    dependencies: ['design_system.semantic_tokens'],
-    fallbackTo: ['design_system.component_patterns'],
-    sourceResolver: 'shared_taste_defaults',
-    freshnessPolicy: 'stable design guidance',
-    expectedFiles: ['src/components/**', 'src/screens/**', 'src/theme/**'],
-    summaryAvailable: true,
-    fullAvailable: true,
-    estTokens: 350,
-    type: 'static',
-    aliases: ['taste_defaults'],
     phase: 1,
   }),
   cx({
@@ -534,7 +411,7 @@ export const AUXILIARY_METAS: AuxiliaryMeta[] = [
     whenToUse: 'Use when images, screenshots, mockups, or diagrams are part of the task.',
     whenNotToUse: 'Do not use for text-only tasks.',
     dependencies: [],
-    fallbackTo: ['design_system.component_patterns'],
+    fallbackTo: [],
     sourceResolver: 'vision_rules',
     freshnessPolicy: 'stable policy',
     expectedFiles: [],
@@ -593,19 +470,28 @@ function unique(ids: string[]): string[] {
 // bootstrap), `agent_runtime.memory_context` (duplicaria as secções estáticas
 // de memória).
 export const BOUNDED_INLINE_CONTEXTS: string[] = [
-  'design_system.semantic_tokens',
-  'design_system.theme_config',
-  'design_system.brand_palette',
-  'design_system.chakra_recipes',
   'design_system.component_patterns',
-  'ui_patterns',
   'project.package_map',
   'project.entrypoints',
   'delivery.build_scripts',
   'agent_runtime.mcp_routing',
   'agent_runtime.tool_profiles',
-  'vision.image_rules',
 ]
+
+/**
+ * As regras de visão só entram quando há (ou houve) uma imagem na sessão —
+ * a forma `string | null` do cli-vaz, que devolve null para a secção MCP
+ * quando não há servidores MCP. Sem imagem, o texto não tem referente.
+ *
+ * PEGAJOSO por sessão de propósito: uma imagem do turno 3 deixa uma descrição
+ * no histórico que o modelo ainda lê no turno 8 — retirar-lhe as regras aí
+ * traz de volta o "não consigo ver imagens" sobre conteúdo que ele TEM.
+ */
+export function inlineContextsForSession(sessionHasImage: boolean): string[] {
+  return sessionHasImage
+    ? [...BOUNDED_INLINE_CONTEXTS, 'vision.image_rules']
+    : BOUNDED_INLINE_CONTEXTS
+}
 
 export function fallbackContextPlanForProfile(profile: PromptProfile): ContextPlan {
   if (profile === 'project_bootstrap') {
@@ -733,88 +619,6 @@ export function selectAuxiliaries(
     contextPlannerRejectedContexts: candidateIds.filter((id) => !selectedIds.has(id)),
     contextPlannerSelectionReason: plannerInfo?.selectionReason ?? contextPlan.reason,
   }
-}
-
-/**
- * Retira da entrega inline as secções que a EVIDÊNCIA DO PROJECTO não
- * justifica (achado #9 — ver `projectEvidence.ts` para o critério e para as
- * duas regras que evitam a falha silenciosa).
- *
- * Muta a selecção no sítio, de propósito: `contextBuilder` já guardou a
- * referência em `lastAuxiliarySelection`, e a telemetria (`payloadInspector`)
- * lê `loaded` / `omitted` / `loadedTokens` daí. Reescrever um objecto novo aqui
- * deixaria a telemetria a olhar para a selecção PRÉ-filtro — exactamente o modo
- * de falha que este achado documenta (um mecanismo que parece activo e não
- * está). A chave de cache do prompt não sofre: `dynamicCacheSig` inclui o
- * `auxLoadedContent` e o índice on-demand, ambos já pós-filtro.
- */
-export function applyEvidenceOmissions(
-  selection: AuxiliarySelection,
-  omissions: Array<{ id: string; reason: string }>,
-  signals: string[] = [],
-): AuxiliarySelection {
-  const byId = new Map(omissions.map(o => [resolveAuxiliaryId(o.id), o.reason]))
-  if (byId.size === 0) {
-    selection.evidenceSignals = signals
-    return selection
-  }
-
-  const kept: AuxiliaryLoadResult[] = []
-  const dropped: string[] = []
-  const reasons: Record<string, string> = {}
-
-  for (const entry of selection.loaded) {
-    const reason = byId.get(entry.id)
-    if (!reason) {
-      kept.push(entry)
-      continue
-    }
-    const meta = getAuxiliaryMeta(entry.id)
-    dropped.push(entry.id)
-    reasons[entry.id] = reason
-    selection.omitted.push({
-      id: entry.id,
-      name: entry.name,
-      description: meta?.description ?? entry.name,
-      reason: `project evidence: ${reason}`,
-      estTokens: entry.tokens,
-      domain: entry.domain,
-      capability: entry.capability,
-      scope: entry.scope,
-      costTier: entry.costTier,
-      granularity: entry.granularity,
-      whenToUse: meta?.whenToUse ?? '',
-      whenNotToUse: meta?.whenNotToUse ?? '',
-      fallbackTo: meta?.fallbackTo ?? [],
-    })
-  }
-
-  if (dropped.length === 0) {
-    selection.evidenceSignals = signals
-    return selection
-  }
-
-  selection.loaded = kept
-  selection.loadedTokens = kept.reduce((sum, l) => sum + l.tokens, 0)
-  // Somatório dos ESTIMADOS das omitidas, e não `totalAvailable − loaded`: o
-  // custo carregado passa a ser medido no corpo real (applyRenderedTokenCounts)
-  // e a subtracção misturaria estimativa com medição na mesma conta.
-  selection.savingsTokens = selection.omitted.reduce((sum, o) => sum + o.estTokens, 0)
-  selection.autoLoadedSystemSections = kept.map(l => l.id)
-  selection.evidenceOmittedSections = dropped
-  selection.evidenceOmitReason = reasons
-  selection.evidenceSignals = signals
-  // O plano tem de contar a mesma história que a entrega: sem isto, o cabeçalho
-  // do índice on-demand anunciava "Selected inline: …" a listar secções que já
-  // não vão no prompt.
-  const droppedSet = new Set(dropped)
-  selection.contextPlan = {
-    ...selection.contextPlan,
-    selectedContexts: selection.contextPlan.selectedContexts.filter(
-      id => !droppedSet.has(resolveAuxiliaryId(id)),
-    ),
-  }
-  return selection
 }
 
 /**

@@ -179,38 +179,44 @@ function AgentActivityIndicator() {
             {formatCompactElapsed(compaction.elapsedMs)}
           </Text>
         </Flex>
-        <Flex align="center" gap="10px">
+        {/* Barra INDETERMINADA (2026-08-06). Havia aqui uma percentagem, e era
+            inventada: uma ease exponencial sobre o relógio, com TAU de 45s. Numa
+            compactação real de ~15s ia a ~28% e desaparecia — o developer leu
+            isso como "correu ou fingiu", quando na verdade tinha libertado 63%
+            da janela.
+
+            Substituir a curva por marcos ('sumarizou' = 90%) seria trocar uma
+            invenção por outra: os marcos existem, mas a fracção de TEMPO que
+            cada um ocupa não se sabe. A referência resolve isto não tendo
+            percentagem — o cli-vaz mostra `setSpinnerMessage('Compacting
+            conversation')` e limpa-a no fim (screens/REPL.tsx).
+
+            O que fica é honesto: uma barra em movimento (há trabalho a
+            decorrer) e o tempo DECORRIDO, que é medido e não previsto. */}
+        <Box
+          h="5px"
+          borderRadius="full"
+          bg="rgba(255, 255, 255, 0.07)"
+          overflow="hidden"
+          position="relative"
+        >
           <Box
-            flex="1"
-            h="5px"
+            position="absolute"
+            top={0}
+            bottom={0}
+            width="35%"
             borderRadius="full"
-            bg="rgba(255, 255, 255, 0.07)"
-            overflow="hidden"
-            position="relative"
-          >
-            <Box
-              position="absolute"
-              left={0}
-              top={0}
-              bottom={0}
-              borderRadius="full"
-              width={`${compaction.percent}%`}
-              bg={`linear-gradient(90deg, ${tokens.colors.accent.purple} 0%, ${tokens.colors.accent.primary} 100%)`}
-              boxShadow={`0 0 8px ${tokens.colors.accent.primaryGlow}`}
-              transition="width 0.25s ease-out"
-            />
-          </Box>
-          <Text
-            fontSize="11px"
-            color={tokens.colors.text.muted}
-            fontFamily={tokens.fontFamily.mono}
-            minW="34px"
-            textAlign="right"
-            css={{ fontVariantNumeric: "tabular-nums" }}
-          >
-            {compaction.percent}%
-          </Text>
-        </Flex>
+            bg={`linear-gradient(90deg, transparent 0%, ${tokens.colors.accent.purple} 50%, ${tokens.colors.accent.primary} 100%)`}
+            boxShadow={`0 0 8px ${tokens.colors.accent.primaryGlow}`}
+            css={{
+              animation: 'tmCompactSweep 1.2s ease-in-out infinite',
+              '@keyframes tmCompactSweep': {
+                '0%': { left: '-35%' },
+                '100%': { left: '100%' },
+              },
+            }}
+          />
+        </Box>
       </Flex>
     );
   }

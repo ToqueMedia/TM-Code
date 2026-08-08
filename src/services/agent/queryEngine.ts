@@ -53,6 +53,10 @@ export interface QueryEngineOptions {
   tools: OpenAI.ChatCompletionTool[]
   /** Tool execution function. */
   executeTool: ToolExecutorFn
+  /** Ver a nota em QueryParams.onCompactionPhaseStart (query.ts). */
+  onCompactionPhaseStart?: (beforeTokens: number) => void
+  /** Orçamento de tool results aplicado — marco para o histórico/export. */
+  onContextBudgetApplied?: (info: { tokensBefore: number; tokensAfter: number; clearedCount: number }) => void
   /** Streaming-execution predicate — see QueryParams.isStreamSafeTool. */
   isStreamSafeTool?: (toolName: string) => boolean
   /** Write-tool predicate (batching de diffs) — ver QueryParams.isWriteTool. */
@@ -207,6 +211,8 @@ export class QueryEngine {
       model: this.options.model ?? DEFAULT_MODEL,
       tools: this.options.tools,
       executeTool: this.options.executeTool,
+      onCompactionPhaseStart: this.options.onCompactionPhaseStart,
+      onContextBudgetApplied: this.options.onContextBudgetApplied,
       isStreamSafeTool: this.options.isStreamSafeTool,
       isWriteTool: this.options.isWriteTool,
       reinjectCriticalReminder: this.options.reinjectCriticalReminder,

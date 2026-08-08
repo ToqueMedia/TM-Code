@@ -37,6 +37,7 @@ import {
 import { useTmSpeedStore } from "../../stores/tmSpeedStore";
 import { usePersonaStore } from "../../stores/personaStore";
 import { useReasoningEffortStore } from "../../stores/reasoningEffortStore";
+import { runHooks, appendHookContext, takeHookContext } from "./hooks";
 import { invoke } from "@/utils/invokeMetrics";
 import { logger } from "../../utils/logger";
 import {
@@ -547,6 +548,31 @@ class AgentService {
   // QueryEngine loop — replaces the old imperative loop
   // ══════════════════════════════════════════════════════════════
 
+  /**
+   * Contexto comum aos hooks. Devolve null quando não há projecto aberto —
+   * sem projecto não há `.toquemedia/hooks.json` para ler, e correr comandos
+   * do developer fora de um projecto seria executar config de ninguém.
+   */
+  private async hookContext(): Promise<
+    { projectPath: string; sessionId: string; fsVersion: number } | null
+  > {
+    try {
+      const { useProjectStore } = await import("../../stores/projectStore");
+      const projectPath = useProjectStore.getState().currentProject?.path;
+      if (!projectPath) return null;
+      const { useChatStore } = await import("../../stores/chatStore");
+      const chat = useChatStore.getState();
+      const { getFsVersion } = await import("../fsVersion");
+      return {
+        projectPath,
+        sessionId: chat.streamingSessionId ?? chat.activeSessionId ?? "",
+        fsVersion: getFsVersion(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
   private async runQueryEngineLoop(
     userMessage: string | ContentPart[],
     conversationHistory: Array<{
@@ -781,6 +807,16 @@ class AgentService {
       systemPrompt: this.systemPrompt,
       tools: openaiTools,
       executeTool,
+      // Liga o status 'compressing' no momento da DECISÃO, não no fim do
+      // trabalho — é o que faz a barra de progresso aparecer durante a espera.
+      // Marco do orçamento de tool results — atravessa até ao chatStore.
+      onContextBudgetApplied: callbacks.onContextBudgetApplied,
+      onCompactionPhaseStart: () => {
+        try {
+          useAgentStore.getState().setCompactPhase("compressing");
+          useAgentStore.getState().setStatus("compressing");
+        } catch { /* observability never blocks */ }
+      },
       // Execução em streaming (query.ts): só tools concurrencySafe (read-only
       // por definição do flag) podem começar durante o SSE. Canonicaliza
       // porque o modelo chama aliases (Read/Grep/...) e o registry pode ter
@@ -1042,7 +1078,10 @@ class AgentService {
             type: "compact_end",
             beforeTokens: event.beforeTokens,
             trigger: "auto",
-            messagesSummarized: 0,
+            // Vem do autoCompact (`older.length`). Era a constante 0, e o marco
+            // anunciava "0 mensagens sumarizadas" numa compactação que libertou
+            // 65% do contexto — telemetria que ensina a desconfiar do marco.
+            messagesSummarized: event.messagesSummarized ?? 0,
             summary: event.summary,
             recovery: event.recovery,
           });
@@ -1621,6 +1660,30 @@ class AgentService {
       callbacks.onToolCallPending(toolUseId, effectiveToolName);
       callbacks.onToolCallStart(toolUseId, effectiveToolName, effectiveToolInput);
 
+      // ── HOOKS do developer (porte cli-vaz) ────────────────────────────
+      // O NOME passado ao matcher é o que o MODELO vê (`Write`, `Bash`), não o
+      // id canónico: é assim no cli-vaz, e é o que faz um hook escrito para o
+      // Claude Code casar aqui sem reescrita.
+      const hookCtx = await this.hookContext();
+      if (hookCtx) {
+        const pre = await runHooks("PreToolUse", {
+          toolName,
+          toolInput: effectiveToolInput,
+          ...hookCtx,
+        });
+        if (pre.blocked) {
+          // Bloqueio entra como RESULTADO da tool, com a razão: é o único
+          // canal que o modelo lê no mesmo turno e no qual pode agir.
+          return {
+            content: `Blocked by a PreToolUse hook: ${pre.blockReason ?? "(no reason given)"}`,
+            isError: true,
+          };
+        }
+        if (pre.additionalContext) {
+          appendHookContext(toolUseId, pre.additionalContext);
+        }
+      }
+
       try {
         const raw = await this.toolExecutor.execute(
           effectiveToolName,
@@ -1629,7 +1692,45 @@ class AgentService {
           signal ?? undefined,
           this.agentType,
         );
-        const content = raw;
+        let content = raw;
+
+        // PostToolUse: o `additionalContext` vai colado ao resultado da tool.
+        // Não usa o canal inter-turno do editDiagnostics de propósito — este
+        // feedback é sobre ESTA escrita, e chegar um turno depois já era tarde.
+        if (hookCtx) {
+          const post = await runHooks("PostToolUse", {
+            toolName,
+            toolInput: effectiveToolInput,
+            toolResponse: raw,
+            ...hookCtx,
+          });
+          // Exit 2 no PostToolUse é IMPOSIÇÃO, não conselho. A escrita já
+          // aconteceu (o Post corre depois), portanto não se pode desfazer —
+          // mas o resultado vai como ERRO, e um erro o modelo tem de tratar.
+          // Medido a 2026-08-06: `additionalContext` sozinho não muda
+          // comportamento (5/10, igual a não haver hook).
+          //
+          // Este ramo faltava: o `blocked` era calculado e deitado fora, ou
+          // seja um hook de Post com exit 2 não fazia NADA. Mecanismo que
+          // parece vivo e não está — o padrão que esta casa já catalogou.
+          if (post.blocked) {
+            takeHookContext(toolUseId); // não deixar contexto órfão no buffer
+            return {
+              content:
+                `The tool ran and its result was REJECTED by a PostToolUse hook: ` +
+                `${post.blockReason ?? "(no reason given)"}\n\n` +
+                `The change is already on disk. Fix it — do not repeat the same write.`,
+              isError: true,
+            };
+          }
+          if (post.additionalContext) {
+            appendHookContext(toolUseId, post.additionalContext);
+          }
+        }
+        const pendingHookContext = takeHookContext(toolUseId);
+        if (pendingHookContext) {
+          content = `${content}\n\n<system-reminder>\n${pendingHookContext}\n</system-reminder>`;
+        }
 
         // Track file access
         this.sessionState.trackFileAccess(effectiveToolName, effectiveToolInput);

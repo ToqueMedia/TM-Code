@@ -97,7 +97,8 @@ const GLM_5_2: ModelProfile = {
 // Thinking HÍBRIDO (enable_thinking) com reasoning_effort low|medium|xhigh
 // (default xhigh, docs qwencloud 2026-08); a forma vem da config gerida.
 // (Swap 2026-08-04: substitui DeepSeek V4 Pro, MiMo V2.5 base e Qwen 3.7 Max,
-// removidos do catálogo — histórico no git. O MiMo V2.5 Pro mantém-se.)
+// removidos do catálogo — histórico no git. O MiMo V2.5 Pro, que sobreviveu a
+// esse swap, saiu por sua vez a 2026-08-07.)
 // ─────────────────────────────────────────────────
 
 const QWEN_3_8_MAX: ModelProfile = {
@@ -117,24 +118,41 @@ const QWEN_3_8_MAX: ModelProfile = {
 }
 
 // ─────────────────────────────────────────────────
-// MiMo V2.5 Pro 1M — Xiaomi. 1M contexto, thinking toggleable.
-// MANTIDO no swap 2026-08-04 (só o V2.5 base saiu; o Pro continua gerido).
+// Qwen 3.7 Plus — Alibaba US (DashScope)
+//
+// Já servia os sidecars `vision` e `web_search`; desde 2026-08-07 é TAMBÉM
+// modelo de código elegível para uma persona (o admin atribui-o em
+// Settings → Personas). Vision-language NATIVO e web search built-in via
+// `enable_search` — dispensa os sidecars quando é o modelo principal.
+// Thinking HÍBRIDO da série 3.7: boolean `enable_thinking` (NÃO tem a escala
+// graded de reasoning_effort do 3.8-max), por isso o seletor de effort mostra
+// off/on. É a família que a DashScope documenta para `preserve_thinking` — o
+// data-plane liga-o quando o thinking está ON (ver applyReasoningEffort.ts).
 // ─────────────────────────────────────────────────
 
-const MIMO_V2_5_PRO_1M: ModelProfile = {
-  id: 'mimo-v2.5-pro-1m',
-  name: 'MiMo V2.5 Pro 1M',
-  modelId: 'mimo-v2.5-pro',
-  contextWindow: 1_048_576,
-  maxOutputTokens: 32_768,
+// VERIFICAÇÃO (2026-08-08), depois de estes números terem sido INFERIDOS da
+// família na primeira versão:
+//  - maxOutputTokens: 131 072, dito pelo PRÓPRIO endpoint. Um pedido com
+//    max_tokens acima disso responde "Range of max_tokens should be
+//    [1, 131072]". O valor anterior (32 768) estava 4× abaixo e teria capado
+//    o modelo — e com ele o tecto da escalada anti-truncagem do loop.
+//  - contextWindow: 1M, corroborado pela ficha oficial do modelo e por
+//    terceiros, mas NÃO sondado (sondá-lo custaria 1M de tokens). É o valor
+//    que mais importa acertar: alimenta o gatilho de auto-compactação, e um
+//    valor grande demais faz o run rebentar em vez de compactar.
+const QWEN_3_7_PLUS: ModelProfile = {
+  id: 'qwen3.7-plus',
+  name: 'Qwen 3.7 Plus',
+  modelId: 'qwen3.7-plus',
+  contextWindow: 1_000_000,
+  maxOutputTokens: 131_072,
 
   thinkingMode: 'toggleable',
   supportsThinking: true,
   thinkingMandatory: false,
 
-  supportsAttachments: false,
-  supportsSearch: false,
-  // Pipefail: ver a nota no perfil do glm-5.2 — regra promovida ao Reminder.
+  supportsAttachments: true,
+  supportsSearch: true,
   counterweights: [],
 }
 
@@ -212,11 +230,7 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   // X-TM-Model — alias para o MESMO perfil, senão o lookup cairia no default.
   'glm-5': GLM_5_2,
   'qwen3.8-max': QWEN_3_8_MAX,
-  'mimo-v2.5-pro-1m': MIMO_V2_5_PRO_1M,
-  // O id que a config KV/X-TM-Model reporta é 'mimo-v2.5-pro' (sem o sufixo
-  // -1m do id de catálogo) — sem este alias o lookup por persona/servido caía
-  // no default (que por acaso É o MiMo, mas por acidente, não por contrato).
-  'mimo-v2.5-pro': MIMO_V2_5_PRO_1M,
+  'qwen3.7-plus': QWEN_3_7_PLUS,
   // Grok 4.5. Via Cloudflare AI Gateway o X-TM-Model reporta 'xai/grok-4.5'
   // (sintaxe author/model do gateway); os restantes aliases cobrem ids xAI
   // directos caso a config volte a apontar lá.
@@ -230,7 +244,12 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   'moonshotai/kimi-k3': KIMI_K3,
 }
 
-export const DEFAULT_MODEL_ID = 'mimo-v2.5-pro-1m'
+// Fallback de modelo desconhecido / pré-handshake. Passou de 'mimo-v2.5-pro-1m'
+// para o GLM-5.2 a 2026-08-07 (o MiMo saiu do catálogo gerido): o GLM é a
+// config ATIVA em produção e o perfil mais conservador do catálogo — sem visão
+// e sem pesquisa nativas, portanto um modelo novo que caia aqui degrada para os
+// sidecars em vez de receber imagens que talvez não leia.
+export const DEFAULT_MODEL_ID = 'glm-5.2'
 
 /**
  * Capacidade EFECTIVA de um modelo: o que o servidor declarou vence o que a
@@ -240,7 +259,7 @@ export const DEFAULT_MODEL_ID = 'mimo-v2.5-pro-1m'
  * sistema é config-driven — "adicionar um modelo é editar a KV, não o código".
  * Quando o nome não estava na tabela, o código caía em `getProfileForPlan()` e
  * o modelo novo HERDAVA as flags de outro: a visão, o pensamento e a pesquisa
- * do MiMo. O efeito prático era enviar imagens a um modelo que não as lê, e
+ * do perfil de fallback. O efeito prático era enviar imagens a um modelo que não as lê, e
  * anunciar-lhe no prompt uma pesquisa nativa que ele não tem.
  *
  * `declared === null` significa "o servidor não declarou" — e aí o perfil local
@@ -265,7 +284,7 @@ export function getModelProfile(modelId: string): ModelProfile {
  * de TODOS os gates de capacidade pré-primeira-resposta — visão inline vs
  * sidecar (usePromptBar/agentRunner/steerContent), pesquisa nativa no prompt
  * (contextBuilder), janela do auto-compact (agentService/parallelTaskRunner)
- * e o badge de thinking. Antes devolvia SEMPRE o default (MiMo): com a
+ * e o badge de thinking. Antes devolvia SEMPRE o default: com a
  * persona Master (modelo com visão nativa) selecionada, a app tratava o
  * modelo como cego até à 1ª resposta — imagem desviada ao sidecar (custo +
  * fidelidade) ou 503 se o sidecar não estivesse publicado. O modelo da

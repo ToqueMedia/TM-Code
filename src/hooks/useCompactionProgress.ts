@@ -1,45 +1,35 @@
-// useCompactionProgress — a reassuring progress estimate for context compaction.
-//
-// Compaction is a single LLM summarization call: the agent loop emits only
-// `compact_start` / `compact_end` (see agentRunner onContextCompression), so
-// there is NO real percentage to report. Rather than an indeterminate spinner,
-// this hook synthesizes a monotonic, time-eased estimate from how long the
-// compaction has been running — an asymptotic curve that climbs quickly at
-// first and slows as it approaches a ceiling, never stalling and never
-// claiming to have measured the summary. It resets when compaction ends (the
-// consumer unmounts), so the bar simply disappears on completion.
-//
-// Active === agentStore.status 'compressing' (set on compact_start, cleared to
-// 'awaiting_response' on compact_end).
-
+/**
+ * Estado da compactação para a UI: está a decorrer, e há quanto tempo.
+ *
+ * NÃO devolve percentagem, e é essa a decisão (2026-08-06). Havia aqui uma:
+ * uma ease exponencial sobre o relógio, com TAU de 45s e teto em 95%, com um
+ * comentário honesto a dizer "não há sinal real de conclusão". Numa
+ * compactação real de ~15s a barra ia a ~28% e desaparecia — o developer leu
+ * "correu ou fingiu, nem chegou ao meio", quando aquela compactação tinha
+ * libertado 63% da janela.
+ *
+ * Trocar a curva por marcos ('sumarizou' = 90%) seria trocar uma invenção por
+ * outra: os marcos existem, mas a fracção de TEMPO que cada um ocupa não se
+ * sabe — a sumarização é uma chamada ao modelo de duração desconhecida.
+ *
+ * A referência resolve-o não tendo percentagem: o cli-vaz faz
+ * `setSpinnerMessage('Compacting conversation')` no `compact_start` e limpa no
+ * `compact_end` (screens/REPL.tsx). Aqui fica o equivalente — barra
+ * indeterminada em movimento (há trabalho) mais o tempo DECORRIDO, que é
+ * medido e não previsto.
+ */
 import { useEffect, useRef, useState } from 'react'
 import { useAgentStore } from '../stores/agentStore'
 
-// Tuning — purely cosmetic. CEILING caps the synthetic bar below 100% (we never
-// fake completion; the bar vanishes when the real compaction ends). TAU_MS is
-// the time-constant of the ease: ~63% of the way to the ceiling after one TAU.
-const CEILING = 0.95
-const TAU_MS = 45_000
+/** Cadência de re-render enquanto a compactação decorre. */
 const TICK_MS = 250
 
 export interface CompactionProgress {
   active: boolean
-  /** 0–95 while active, integer. */
-  percent: number
-  /** Milliseconds since this compaction started. */
+  /** Milissegundos desde o início desta compactação. Medido, não previsto. */
   elapsedMs: number
 }
 
-/**
- * Pure synthetic progress: an asymptotic ease from elapsed time to an integer
- * percent in [1, 95]. Monotonic increasing, never reaches 100 (compaction has
- * no real completion signal — the bar disappears when it actually ends).
- * Extracted for testability.
- */
-export function compactionPercentForElapsed(elapsedMs: number): number {
-  const eased = CEILING * (1 - Math.exp(-Math.max(0, elapsedMs) / TAU_MS))
-  return Math.max(1, Math.min(Math.round(CEILING * 100), Math.round(eased * 100)))
-}
 
 export function useCompactionProgress(): CompactionProgress {
   const status = useAgentStore(s => s.status)
@@ -60,11 +50,11 @@ export function useCompactionProgress(): CompactionProgress {
   }, [active])
 
   if (!active || startRef.current === 0) {
-    return { active: false, percent: 0, elapsedMs: 0 }
+    return { active: false, elapsedMs: 0 }
   }
 
   const elapsedMs = Date.now() - startRef.current
-  return { active: true, percent: compactionPercentForElapsed(elapsedMs), elapsedMs }
+  return { active: true, elapsedMs }
 }
 
 export function formatCompactElapsed(ms: number): string {

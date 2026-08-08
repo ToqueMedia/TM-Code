@@ -1,0 +1,29 @@
+#!/bin/sh
+# PreToolUse: recusa um componente que renderiza uma COLECÇÃO EXTERNA sem
+# tratar o caso de ela vir vazia.
+#
+# "Externa" é o que evita o ruído: mapear uma constante literal declarada no
+# próprio ficheiro (uns separadores, uns tamanhos) NUNCA precisa de estado
+# vazio, e bloquear isso ensinava a ignorar o canal — foi assim que a primeira
+# versão do editDiagnostics morreu.
+#
+# NOTA: duas substituições em vez de `\(map\|forEach\)` — a alternância em BRE
+# é extensão GNU e o macOS traz BSD sed, onde não corta nada E não dá erro.
+PAYLOAD=$(cat)
+FILE=$(printf '%s' "$PAYLOAD" | sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+case "$FILE" in *.jsx|*.tsx|*.js|*.html) ;; *) exit 0 ;; esac
+
+# Já trata o vazio de alguma forma → silêncio.
+printf '%s' "$PAYLOAD" | grep -qiE 'length[^a-z]*(===?|<|>|\?|&&)|empty|vazio|nenhum' && exit 0
+
+# Identificadores iterados.
+IDS=$(printf '%s' "$PAYLOAD" | grep -oE '[A-Za-z_$][A-Za-z0-9_$]*\.(map|forEach)\(' | sed 's/\.map(//; s/\.forEach(//' | sort -u)
+[ -n "$IDS" ] || exit 0
+
+for ID in $IDS; do
+  # Declarado como literal no próprio ficheiro → colecção estática, ignora.
+  printf '%s' "$PAYLOAD" | grep -qE "(const|let|var)[[:space:]]+$ID[[:space:]]*=[[:space:]]*[[]" && continue
+  echo "Recusado: $ID pode vir vazio e este ficheiro mapeia-o sem tratar esse caso. Renderiza um estado vazio com uma mensagem de uma linha e a accao seguinte antes de mapear." >&2
+  exit 2
+done
+exit 0

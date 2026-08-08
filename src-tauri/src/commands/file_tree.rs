@@ -1275,6 +1275,174 @@ pub async fn write_file(path: String, content: String) -> Result<()> {
     }
 }
 
+/// Máximo que um download pode escrever em disco (50 MB). Uma imagem 2K anda
+/// pelos 2 MB; o tecto existe para uma URL enganada não encher o disco.
+const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Descarrega uma URL e escreve os bytes num ficheiro, tudo do lado do Rust.
+///
+/// PORQUÊ EM RUST, e não com `fetch` no renderer: em produção o WebView corre
+/// em `http://localhost:14300` e um fetch para um host externo está sujeito a
+/// CORS — o bucket que serve as imagens geradas não tem obrigação nenhuma de
+/// mandar `Access-Control-Allow-Origin` para nós. É a mesma razão pela qual o
+/// control-plane inteiro passa pelo `tauriFetch`/`http_client_request`. A
+/// primeira versão desta funcionalidade fazia o download no browser e teria
+/// falhado na primeira execução real, com toda a suite de testes verde.
+///
+/// Escrever aqui em vez de devolver os bytes ao JS evita também a viagem de
+/// base64 pelo IPC (+33% de tamanho num PNG de megabytes) e o round-trip
+/// extra: um comando, um ficheiro.
+///
+/// Partilha com `write_file` o que interessa: `validate_path_safe` (o mesmo
+/// clamp de caminhos que protege todas as escritas do agente) e a escrita
+/// atómica via ficheiro temporário + rename. O destino é validado ANTES de a
+/// rede ser tocada — um caminho recusado não gasta o download.
+/// Reescreve os bytes de uma imagem para o formato do destino, opcionalmente
+/// reduzindo-a até `max_width`.
+///
+/// Existe porque o provider devolve PNGs de 2K (~2 MB) e um asset desses não
+/// se põe numa página. Antes disto, a tool LIMITAVA-SE A ACONSELHAR "comprime
+/// antes de publicar" — a um agente que não tinha com quê. O formato vem da
+/// extensão do destino: `.jpg`/`.jpeg` recodifica com qualidade 82 (a maior
+/// poupança num hero fotográfico), `.png` mantém PNG.
+///
+/// Devolve `None` quando não há nada a fazer (já cabe em `max_width` e o
+/// destino é PNG) — nesse caso escrevem-se os bytes originais, sem o custo e
+/// a perda de uma recodificação.
+fn reencode_image(bytes: &[u8], path: &Path, max_width: Option<u32>) -> Option<Vec<u8>> {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let wants_jpeg = ext == "jpg" || ext == "jpeg";
+
+    let img = image::load_from_memory(bytes).ok()?;
+    let needs_resize = max_width.is_some_and(|w| img.width() > w);
+    if !needs_resize && !wants_jpeg {
+        return None;
+    }
+
+    let img = if needs_resize {
+        let target = max_width.unwrap();
+        // Altura proporcional; Lanczos3 é o filtro de qualidade do crate.
+        let height =
+            ((img.height() as f64) * (target as f64) / (img.width() as f64)).round() as u32;
+        img.resize(target, height.max(1), image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+
+    let mut out = std::io::Cursor::new(Vec::new());
+    let result = if wants_jpeg {
+        // JPEG não tem canal alfa — descartá-lo explicitamente evita o erro
+        // "unsupported color type" em PNGs com transparência.
+        image::DynamicImage::ImageRgb8(img.to_rgb8()).write_with_encoder(
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 82),
+        )
+    } else {
+        img.write_to(&mut out, image::ImageFormat::Png)
+    };
+    result.ok().map(|()| out.into_inner())
+}
+
+#[tauri::command]
+pub async fn download_to_file(
+    url: String,
+    path: String,
+    timeout_secs: Option<u64>,
+    max_width: Option<u32>,
+) -> Result<u64> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err(FileTreeError::InvalidOperation(format!(
+            "download_to_file only accepts http(s) URLs, got: {url}"
+        )));
+    }
+
+    let file_path = Path::new(&path);
+    let canonical = validate_path_safe(file_path)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs.unwrap_or(60)))
+        .build()
+        .map_err(|e| FileTreeError::InvalidOperation(format!("HTTP client error: {e}")))?;
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| FileTreeError::InvalidOperation(format!("Download failed: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(FileTreeError::InvalidOperation(format!(
+            "Download failed with HTTP {}",
+            response.status()
+        )));
+    }
+
+    // Content-Length é uma dica, não uma garantia — o corte real é feito sobre
+    // os bytes recebidos abaixo. Serve para desistir cedo do que já se sabe
+    // grande demais.
+    if let Some(len) = response.content_length() {
+        if len > MAX_DOWNLOAD_BYTES {
+            return Err(FileTreeError::InvalidOperation(format!(
+                "Download is {len} bytes, over the {MAX_DOWNLOAD_BYTES} byte limit"
+            )));
+        }
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| FileTreeError::InvalidOperation(format!("Download body failed: {e}")))?;
+
+    if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
+        return Err(FileTreeError::InvalidOperation(format!(
+            "Download is {} bytes, over the {MAX_DOWNLOAD_BYTES} byte limit",
+            bytes.len()
+        )));
+    }
+
+    // Redimensionar/recodificar é BEST-EFFORT: se falhar (formato que o crate
+    // não decodifica, imagem corrompida), grava-se o original. Perder o asset
+    // por causa da optimização seria pior do que gravá-lo pesado.
+    let bytes: Vec<u8> = tokio::task::spawn_blocking({
+        let raw = bytes.to_vec();
+        let dest = canonical.clone();
+        move || reencode_image(&raw, &dest, max_width).unwrap_or(raw)
+    })
+    .await
+    .map_err(|e| FileTreeError::Io(format!("image task failed: {e}")))?;
+
+    if let Some(parent) = canonical.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let file_name = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let tmp = canonical.with_file_name(format!(".{}.tm-write-{}", file_name, std::process::id()));
+
+    if let Err(e) = tokio::fs::write(&tmp, &bytes).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(FileTreeError::from(e));
+    }
+
+    let written = bytes.len() as u64;
+    match tokio::fs::rename(&tmp, &canonical).await {
+        Ok(()) => Ok(written),
+        Err(_) => {
+            // Mesmo fallback do write_file: FS que rejeitam rename (mounts de
+            // rede, FUSE exóticos) não podem fazer a escrita falhar de todo.
+            let _ = tokio::fs::remove_file(&tmp).await;
+            tokio::fs::write(&canonical, &bytes)
+                .await
+                .map(|()| written)
+                .map_err(FileTreeError::from)
+        }
+    }
+}
+
 // Append to a file (creates parent dirs and the file if needed). Used for
 // JSONL operation logs (e.g. queue operations) where each call writes one
 // line and we never want to read+write the whole file.

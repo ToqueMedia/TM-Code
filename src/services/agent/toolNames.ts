@@ -79,6 +79,10 @@ export const WEB_SEARCH = 'web_search'
 export const WEB_FETCH = 'web_fetch'
 /** Navigate + screenshot a URL and return a vision design handoff. */
 export const CAPTURE_URL_DESIGN = 'capture_url_design'
+/** Gera uma imagem e escreve-a como PNG no projecto (assets reais das apps
+ *  que o agente constrói: hero, og:image, favicon, empty states). Par
+ *  simétrico do capture_url_design, que LÊ imagens em vez de as criar. */
+export const GENERATE_IMAGE = 'generate_image'
 // send_agent_message — REMOVIDA (2026-08-03): desde a F3 estava registada só
 // para errar, e o def viajava em todos os pedidos. A doutrina "um agente por
 // projecto" vive em parallelTasks/policy.ts e no prompt das tarefas.
@@ -133,7 +137,7 @@ export const TOOL_NAMES = [
   EXECUTE_COMMAND, EXECUTE_COMMAND_BACKGROUND, CHECK_BACKGROUND_COMMANDS,
   AGENT_SHELL_START, AGENT_SHELL_WRITE, AGENT_SHELL_READ, AGENT_SHELL_STOP,
   START_DEV_SERVER, STOP_DEV_SERVER,
-  WEB_SEARCH, WEB_FETCH, CAPTURE_URL_DESIGN,
+  WEB_SEARCH, WEB_FETCH, CAPTURE_URL_DESIGN, GENERATE_IMAGE,
   DELEGATE, COLLECT_RESULTS,
   ENTER_WORKTREE, EXIT_WORKTREE,
   UPDATE_TASKS, GET_PROJECT_STATE_DIR,

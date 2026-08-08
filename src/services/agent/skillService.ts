@@ -653,6 +653,14 @@ ${lines.join('\n')}`
     // general-coding is always relevant — cross-cutting hygiene.
     if (skillName === 'general-coding') return true
 
+    // `hooks` sempre indexada: é uma CAPACIDADE, não um padrão de código, e o
+    // developer não a pode descobrir de outra forma — não há UI nem docs, e o
+    // caminho `.toquemedia/hooks.json` só existe dentro do `hooks.ts`. Uma
+    // capacidade que ninguém sabe pedir é o mesmo que não existir (o defeito
+    // que a remoção do `request_context` documentou, ao contrário). Custa
+    // ~150B no índice; o corpo só carrega com `read_skill`.
+    if (skillName === 'hooks') return true
+
     // Rich-artifact skills (PDF, Word, Excel, PPT, HTML) require direct disk
     // writes and the full local tool surface. This is a real capabilities gate,
     // not a relevance heuristic.

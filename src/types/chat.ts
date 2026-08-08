@@ -274,7 +274,7 @@ export interface ChatMessage {
   /** For role === 'system': semantic level used for colour-coding in the terminal UI */
   level?: SystemMessageLevel
   /** For role === 'system': discriminator for special rendering (e.g., compact boundary). */
-  kind?: SystemMessageKind
+  kind?: 'context_budget' | SystemMessageKind
   /** Optional pre-compression token count, set on compact_boundary messages. */
   compactBeforeTokens?: number
   /** Richer metadata for compact_boundary messages (trigger, token count, messages summarized). */
@@ -288,6 +288,8 @@ export interface ChatMessage {
    * skipped; only a boundary WITH this field re-emits.
    */
   compactSummary?: string
+  /** Marco do orçamento de tool results — registado, não renderizado. */
+  contextBudget?: { tokensBefore: number; tokensAfter: number; clearedCount: number }
   /**
    * Estado de TRABALHO recuperado na compactação — conteúdo dos ficheiros
    * recentes, texto das skills invocadas, log de operações (ver
@@ -622,6 +624,35 @@ export interface RequestUsageEntry {
   servedModel?: string
   /** Provider real que serviu a resposta (X-TM-Provider). */
   servedProvider?: string
+  /**
+   * Config que o data-plane usou (X-TM-Config-Key) — `persona:expert`,
+   * `active`, `sidecar:vision`, … A persona escolhida viaja no pedido, mas
+   * uma persona NÃO PUBLICADA degrada em silêncio para a config ativa
+   * (activeConfig.ts). Sem este campo não há forma de distinguir "o Expert
+   * serviu" de "o Expert não existe e caiu na ativa" — e o modelo servido não
+   * chega, porque as duas configs podem apontar ao mesmo modelo.
+   */
+  servedConfigKey?: string
+  /**
+   * Multiplicador de custo aplicado a ESTE pedido (X-TM-Cost-Multiplier).
+   * 1 quando não há persona com `costMultiplier`. É o que explica porque é que
+   * 40k tokens andaram 120k na barra do orçamento — o worker já o emitia e o
+   * IDE deitava-o fora no console.
+   *
+   * NÃO inclui o desconto de cache (0.5×), que é aplicado ANTES, ao total
+   * faturável: fatura = (não-cache + cache×0.5 + output) × costMultiplier.
+   */
+  costMultiplier?: number
+  /**
+   * Janela de contexto declarada pelo data-plane (X-Model-Context-Window).
+   *
+   * NÃO é o denominador da barra: a barra divide pela janela EFECTIVA (esta
+   * menos a reserva de output, ver `getEffectiveContextWindowSize`). Guardar a
+   * crua é o que permite reconstruir a percentagem que o developer VIU — sem
+   * ela, 88.714 tokens tanto são 69% (de 128k) como 98% (de 90k), e um
+   * post-mortem sobre a barra vira adivinhação. Aconteceu a 2026-08-06.
+   */
+  modelContextWindow?: number
   /** Tempo de parede do pedido, do envio à última chunk — INCLUI as esperas
    *  de retry. Sem isto, um post-mortem não distingue "modelo lento" de
    *  "rate limited" de "ferramentas lentas": na sessão de 05-08 (turno de 49
@@ -834,17 +865,6 @@ export interface RequestUsageEntry {
   omittedSystemSections?: string[]
   /** Sections loaded inline automatically by profile/trigger. */
   autoLoadedSystemSections?: string[]
-  /**
-   * Secções BOUNDED retidas pelo portão de evidência do projecto (achado #9).
-   * Ao contrário de `auxiliaryOmitted` (que junta as unbounded), estas teriam
-   * ido inline se o projecto tivesse a superfície correspondente — é este par
-   * de campos que torna auditável "porque é que este projecto perdeu as
-   * secções de design system".
-   */
-  evidenceOmittedSections?: string[]
-  evidenceOmitReason?: Record<string, string>
-  /** Sinais de evidência detectados (`dep:react`, `dir:ui-like`, …). */
-  evidenceSignals?: string[]
   /** Context planner candidate sections for this task. */
   contextPlanCandidateSections?: string[]
   /** Tokens saved by omitting the auxiliaries (vs loading everything). */

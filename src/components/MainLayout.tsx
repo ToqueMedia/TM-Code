@@ -37,7 +37,6 @@ import { ScreenShareViewer } from './collab/ScreenShareViewer'
 import { logger } from '../utils/logger'
 import { tokens } from '@/theme/tokens'
 import { isAgentBusyNow } from '../utils/agentBusy'
-import { GoalCelebration } from './celebration/GoalCelebration'
 import MonacoBridge from '../utils/monacoBridge'
 
 interface MainLayoutProps {
@@ -376,7 +375,6 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
         fontFamily={tokens.fontFamily.ui}
         position="relative"
       >
-        <GoalCelebration />
         <ChatView />
       </Flex>
     )
@@ -394,7 +392,6 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
       fontFamily={tokens.fontFamily.ui}
       position="relative"
     >
-      <GoalCelebration />
       {!embedded && <MinimalTitleBar />}
 
       {/* Main area below title bar */}

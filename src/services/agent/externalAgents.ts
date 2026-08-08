@@ -159,9 +159,10 @@ export function buildExternalAgentSessionsSection(
 
   return `# Other AI agents' sessions (this project)
 
-Another coding agent has local session history for THIS project. You can READ those
-transcripts to CONTINUE its work — but ONLY when the user asks you to pick up / resume
-prior work, or when it's clearly relevant. Do not read them unprompted.
+Another coding agent has local session history for THIS project. Estas NÃO são as tuas
+sessões: "a sessão anterior" / "a última corrida" sem nomear ninguém refere-se sempre ao
+histórico do TM CODE (ver o bullet 12 do Reminder). Só lês daqui quando o developer
+NOMEAR o outro agente. Do not read them unprompted.
 
 To resume: use list_directory on the folder, pick the most recently modified file,
 read_file it, then briefly summarize the prior goal + current state before acting.

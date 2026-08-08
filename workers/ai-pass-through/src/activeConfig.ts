@@ -35,6 +35,16 @@ const REQUEST_TYPE_TO_SIDECAR_KEY: Record<string, string> = {
   'web_search': 'sidecar:web_search',
   'vision': 'sidecar:vision',
   'fim': 'sidecar:fim',
+  // 'image' = GERAÇÃO de imagens (não confundir com 'vision', que LÊ imagens).
+  // Enviado pela tool `generate_image` do agente, nunca automaticamente.
+  //
+  // O corpo NÃO é de chat: a DashScope não serve geração de imagens no modo
+  // OpenAI-compatible (404 verificado ao vivo 2026-08-08) — é a API nativa,
+  // com `{model, input.messages[].content[{text|image}], parameters}`. O
+  // worker continua agnóstico porque o endpoint vem do `chatCompletionsPath`
+  // da config e o corpo passa intacto (o caminho de chat só mexe em
+  // `body.messages` e em `stream`, que aqui não existem).
+  'image': 'sidecar:image',
   'memory-extractor': 'sidecar:utility',
   'memory-selector': 'sidecar:utility',
   'memory-distiller': 'sidecar:utility',
@@ -55,6 +65,7 @@ const SIDECAR_ENV_FALLBACK: Record<string, keyof Env> = {
   'sidecar:vision': 'SIDECAR_VISION_CONFIG_JSON',
   'sidecar:web_search': 'SIDECAR_WEB_SEARCH_CONFIG_JSON',
   'sidecar:fim': 'SIDECAR_FIM_CONFIG_JSON',
+  'sidecar:image': 'SIDECAR_IMAGE_CONFIG_JSON',
 }
 
 // ── Personas (Escolha do Modelo, 2026-08-04) ──────────────────────────────
@@ -158,6 +169,27 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     ? obj.costMultiplier
     : undefined
 
+  // Preço por imagem em USD, por escalão (config `sidecar:image`). Existe
+  // porque a geração de imagens NÃO devolve tokens: o `usage` dela é
+  // {output_image_count, output_image_type, …}. Sem isto o observador cai na
+  // estimativa por bytes e cobra ~150 tokens por uma imagem — quase de graça.
+  // Campos inválidos são descartados um a um: o rate card embutido cobre o
+  // resto, portanto um typo nunca transforma uma imagem em algo gratuito.
+  const imagePricing = (() => {
+    const raw = obj.imagePricing
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+    const src = raw as Record<string, unknown>
+    const pick = (k: string): number | undefined => {
+      const v = src[k]
+      // Tecto de $100/imagem: sanidade contra um typo com zeros a mais.
+      return typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 100 ? v : undefined
+    }
+    const parsed = { output1k: pick('output1k'), output2k: pick('output2k'), input: pick('input') }
+    return parsed.output1k === undefined && parsed.output2k === undefined && parsed.input === undefined
+      ? undefined
+      : parsed
+  })()
+
   // Capacidades do modelo, emitidas em X-Model-Capabilities.
   //
   // PORQUÊ (auditoria 2026-07-29): a IDE tem uma tabela MODEL_PROFILES cozida
@@ -200,6 +232,7 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     contextWindow,
     maxOutputTokens,
     costMultiplier,
+    imagePricing,
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
   }
 }

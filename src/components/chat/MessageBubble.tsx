@@ -456,6 +456,13 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
 
     // Compact boundary — renders via CompactSummary component which shows
     // phased progress, trigger info, token savings, and expandable summary.
+    // Marco do orçamento de tool results: registado, NÃO renderizado — é
+    // exactamente o que o cli-vaz faz (Message.tsx:246, `if (subtype ===
+    // "microcompact_boundary") return null`). Fica no export e no histórico
+    // para se poder auditar de onde vieram os tokens libertados; no chat seria
+    // ruído a cada punhado de turnos.
+    if (message.kind === 'context_budget') return null
+
     if (message.kind === 'compact_boundary') {
       // `compactSummary` é o resumo A SÉRIO (o que o modelo recebe); `content`
       // é só a linha de estatísticas. O cartão mostrava a linha e chamava-lhe

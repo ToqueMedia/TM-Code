@@ -1,7 +1,14 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { ChatSession, ChatMessage, PersistedSession, SessionSummary, ToolCallDisplay, ByokSessionSnapshot, SessionTurnSnapshot } from '../../types/chat'
 import { logger } from '../../utils/logger'
-import { hashProjectPath, encryptSession, decryptSession } from '../../utils/crypto'
+// ENCRIPTAÇÃO REMOVIDA (2026-08-06, a pedido do developer). `decryptSession`
+// fica importado porque as sessões ESCRITAS ANTES continuam encriptadas em
+// disco e têm de abrir — remover a leitura tornava o histórico existente
+// ilegível. A ESCRITA passa a ser JSON simples: as sessões são um artefacto de
+// depuração que o developer lê, exporta e partilha, e cifrá-las com uma chave
+// derivada do caminho do projecto protegia contra nada (a chave está no mesmo
+// disco) enquanto tornava o ficheiro inútil para quem o quisesse inspeccionar.
+import { hashProjectPath, decryptSession } from '../../utils/crypto'
 import { useByokStore } from '../../stores/byokStore'
 import { getProjectSessionsDir } from '../projectStatePaths'
 import { READ_ALIAS } from './toolNames'
@@ -302,12 +309,11 @@ class SessionService {
       const filePath = await this.getSessionFilePath(projectPath, sessionId)
       const raw = await invoke<string>('read_file', { path: filePath })
 
-      // Try decrypting first; fall back to plain JSON for legacy unencrypted sessions
+      // Escrita é JSON simples desde 2026-08-06. A leitura continua a tentar
+      // desencriptar primeiro para as sessões antigas continuarem a abrir —
+      // quando a desencriptação falha (ficheiro já em claro), usa-se o cru.
       let json = await decryptSession(raw, projectPath)
-      if (json === null) {
-        // Not encrypted (legacy) or decryption failed — try parsing as plain JSON
-        json = raw
-      }
+      if (json === null) json = raw
       const persisted: PersistedSession = JSON.parse(json)
 
       // Truncate tool results that may have been saved with full content
@@ -400,12 +406,11 @@ class SessionService {
       }
 
       const json = JSON.stringify(persisted, null, 2)
-      const encrypted = await encryptSession(json, session.projectPath)
       // Re-check the kill switch right before the actual write. Between the
       // start of this method and now, JSON encoding + crypto have run; the
       // user may have triggered deletion in that window.
       if (this.deletingProjectPath === session.projectPath) return
-      await invoke('write_file', { path: filePath, content: encrypted })
+      await invoke('write_file', { path: filePath, content: json })
       // Restrict file permissions to owner-only (600) to protect sensitive session data
       try {
         const safePath = filePath.replace(/'/g, "'\\''")

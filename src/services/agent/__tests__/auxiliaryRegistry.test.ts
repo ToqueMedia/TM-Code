@@ -39,7 +39,6 @@ describe('auxiliaryRegistry', () => {
       expect(sel.loaded.length).toBeGreaterThan(0)
       const omittedIds = sel.omitted.map((o) => o.id)
       expect(omittedIds).toContain('scaffold.workflow')
-      expect(omittedIds).not.toContain('vision.image_rules')
       // MANAGED-PLATFORM cut (2026-07): 'delivery.deploy' and
       // 'auth_database.provision' no longer exist in the registry at all.
       expect(omittedIds).not.toContain('delivery.deploy')
@@ -50,14 +49,6 @@ describe('auxiliaryRegistry', () => {
 
   
   
-    it('loads only vision.image_rules for the vision profile', () => {
-      const sel = selectAuxiliaries('vision', 'look at this screenshot')
-      const loadedIds = sel.loaded.map((l) => l.id)
-      expect(loadedIds).toContain('vision.image_rules')
-      expect(loadedIds).not.toContain('delivery.deploy')
-      expect(loadedIds).not.toContain('scaffold.workflow')
-    })
-
     it('does not activate auxiliaries from free-text triggers without a model plan', () => {
       // O texto livre não acrescenta nada à selecção determinística — a
       // lista carregada é EXACTAMENTE a mesma com qualquer mensagem.
@@ -88,43 +79,6 @@ describe('auxiliaryRegistry', () => {
       expect(loadedIds).not.toContain('ui_patterns')
     })
 
-    it('loads UI guidance only when the user explicitly asks for visual work', () => {
-      const sel = selectAuxiliaries('default_task', 'polish the account screen layout', false, 'test', undefined, plan({
-        taskDomain: 'design_system/ui',
-        requiredCapabilities: ['component_patterns', 'spacing_typography'],
-        candidateContexts: ['design_system.component_patterns', 'ui_patterns'],
-        selectedContexts: ['design_system.component_patterns', 'ui_patterns'],
-      }))
-      const loadedIds = sel.loaded.map((l) => l.id)
-
-      expect(loadedIds).toContain('design_system.component_patterns')
-      expect(loadedIds).toContain('ui_patterns')
-    })
-
-    it('golden: semantic tokens choose design-system context before project structure', () => {
-      const sel = selectAuxiliaries(
-        'default_task',
-        'Implemente os semantic tokens sidebar.session.item e sidebar.session.itemActive no design system/theme.',
-        false,
-        'test',
-        undefined,
-        plan({
-          taskDomain: 'design_system',
-          requiredCapabilities: ['semantic_tokens', 'theme_config'],
-          minimumContextNeeded: 'summary',
-          candidateContexts: ['design_system.semantic_tokens', 'design_system.theme_config', 'design_system.brand_palette', 'design_system.chakra_recipes', 'project.structure_overview'],
-          selectedContexts: ['design_system.semantic_tokens', 'design_system.theme_config'],
-          fallbackRisk: 'low',
-        }),
-      )
-      const loadedIds = sel.loaded.map((l) => l.id)
-
-      expect(sel.contextPlan.taskDomain).toBe('design_system')
-      expect(sel.contextPlan.requiredCapabilities).toEqual(['semantic_tokens', 'theme_config'])
-      expect(loadedIds).toContain('design_system.semantic_tokens')
-      expect(loadedIds).toContain('design_system.theme_config')
-    })
-
     it('golden: MCP audit chooses agent runtime routing only', () => {
       const sel = selectAuxiliaries('default_task', 'Faça uma auditoria read-only da integração MCP.', true, 'test', undefined, plan({
         taskDomain: 'agent_runtime',
@@ -153,23 +107,6 @@ describe('auxiliaryRegistry', () => {
       expect(loadedIds).toContain('delivery.dev_server')
       expect(loadedIds).not.toContain('delivery.git_status')
       expect(loadedIds).not.toContain('design_system.semantic_tokens')
-    })
-
-    it('golden: UI polish chooses design system and UI patterns', () => {
-      const sel = selectAuxiliaries('default_task', 'Melhore visualmente a lista de sessões.', false, 'test', undefined, plan({
-        taskDomain: 'design_system/ui',
-        requiredCapabilities: ['component_patterns', 'semantic_tokens', 'spacing_typography'],
-        candidateContexts: ['design_system.component_patterns', 'design_system.semantic_tokens', 'ui_patterns', 'project.structure_overview'],
-        selectedContexts: ['design_system.component_patterns', 'design_system.semantic_tokens', 'ui_patterns'],
-        fallbackRisk: 'medium',
-      }))
-      const loadedIds = sel.loaded.map((l) => l.id)
-
-      expect(sel.contextPlan.taskDomain).toBe('design_system/ui')
-      expect(loadedIds).toContain('design_system.component_patterns')
-      expect(loadedIds).toContain('design_system.semantic_tokens')
-      expect(loadedIds).toContain('ui_patterns')
-      expect(loadedIds).not.toContain('project.structure_full')
     })
 
     it('golden: git commit chooses git delivery context only', () => {
@@ -302,6 +239,7 @@ describe('auxiliaryRegistry', () => {
     it('o registry só contém secções que podem ser entregues inline', () => {
       const ids = AUXILIARY_METAS.map(m => m.id)
       for (const dead of [
+        'design_system.semantic_tokens',
         'project.structure_full',
         'project.docs_full',
         'project.symbol_index',
@@ -325,6 +263,7 @@ describe('auxiliaryRegistry', () => {
         'delivery.dev_server',
         'delivery.git_status',
         'scaffold.workflow',
+        'vision.image_rules',
       ])
     })
   })

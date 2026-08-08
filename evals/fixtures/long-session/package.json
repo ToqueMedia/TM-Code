@@ -1,0 +1,7 @@
+{
+  "name": "long-session-evals",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture para o eval de COMPACTAÇÃO: três módulos grandes que o agente tem de ler todos, para a ocupação cruzar o limiar encurtado por VITE_AUTOCOMPACT_PCT.",
+  "scripts": { "start": "node src/index.js" }
+}

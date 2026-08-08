@@ -1,7 +1,7 @@
 import { memo, useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react'
 import { Flex, Box, HStack, Text, VStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiShield, FiCheck, FiAlertCircle, FiEye, FiMoreHorizontal } from 'react-icons/fi'
+import { FiShield, FiCheck, FiAlertCircle, FiEye, FiMoreHorizontal, FiClock } from 'react-icons/fi'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { useChatStore } from '../../stores/chatStore'
 import { useProjectStore } from '../../stores/projectStore'
@@ -11,6 +11,8 @@ import { useSettingsStore } from '../../stores/settingsStore'
 import { useBillingStore, extraConsumptionPct } from '../../stores/billingStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useCollabStore } from '../../stores/collabStore'
+import { useCheckpointStore } from '../../stores/checkpointStore'
+import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import { useByokState } from '../../hooks/useByokState'
 import MessageBubble from '../chat/MessageBubble'
 import ContextWindowIndicator from '../chat/ContextWindowIndicator'
@@ -361,6 +363,11 @@ function ChatView() {
               the Live Preview + Chat affordances. Surface them here, next to
               the session dropdown, so sharing stays reachable while the
               preview is open. */}
+          {/* Em sidebar mode o cluster wide-only (que hospeda os Checkpoints)
+              está desmontado — e o drawer de checkpoints É um dos modos que
+              liga o isSidebarMode. Sem esta segunda montagem, abrir o drawer
+              fazia desaparecer o próprio botão que o fecha. */}
+          {isSidebarMode && <CheckpointsToolbarButton />}
           {isSidebarMode && <CollabShareControls compact previewOnly />}
         </Flex>
 
@@ -381,6 +388,9 @@ function ChatView() {
                 />
               )}
               {/* MCP moved to the prompt actions row (PromptActions). */}
+              {/* Checkpoints — mudou da linha de acções do prompt para aqui
+                  (07-08), à ESQUERDA do Live Preview e do Preview. */}
+              <CheckpointsToolbarButton />
               {/* Project-scoped Live Preview share only — chat/presence moved to
                   the persistent WelcomeSidebar team section (previewOnly). */}
               <CollabShareControls previewOnly />
@@ -761,6 +771,63 @@ function ChatView() {
   )
 }
 
+/**
+ * Checkpoints — mudou da linha de acções do PromptBar para a toolbar do chat
+ * (07-08), à esquerda do Live Preview e do Preview.
+ *
+ * Fecha o terminal ao abrir (o drawer de checkpoints e o painel PTY disputam
+ * o mesmo espaço lateral) — comportamento herdado tal e qual do botão antigo.
+ * O contador de checkpoints só aparece quando há algum.
+ */
+function CheckpointsToolbarButton() {
+  const checkpointCount = useCheckpointStore(s => s.checkpoints.length)
+  const isCheckpointDrawerOpen = useLayoutStore(s => s.isCheckpointDrawerOpen)
+  const toggleCheckpointDrawer = useLayoutStore(s => s.toggleCheckpointDrawer)
+  const closeTerminal = useTerminalPanelStore(s => s.close)
+
+  return (
+    <Box
+      as="button"
+      data-chat-toolbar-action
+      display="flex"
+      alignItems="center"
+      gap="5px"
+      px="8px"
+      h="28px"
+      flexShrink={0}
+      borderRadius="6px"
+      color={isCheckpointDrawerOpen ? tokens.colors.accent.primary : tokens.colors.text.secondary}
+      bg={isCheckpointDrawerOpen ? tokens.colors.accent.primarySubtle : 'transparent'}
+      cursor="pointer"
+      transition={`all ${tokens.transition.fast}`}
+      _hover={{
+        bg: isCheckpointDrawerOpen ? tokens.colors.accent.primarySubtle : tokens.colors.bg.hoverSubtle,
+        color: tokens.colors.text.primary,
+      }}
+      onClick={event => {
+        event.stopPropagation()
+        closeTerminal()
+        toggleCheckpointDrawer()
+      }}
+      aria-label={t('checkpoint.title')}
+      title={t('checkpoint.title')}
+    >
+      <FiClock size={13} />
+      <Text data-chat-toolbar-secondary-label fontSize="11px" fontWeight="500">{t('checkpoint.title')}</Text>
+      {checkpointCount > 0 && (
+        <Text
+          fontSize="9px"
+          fontFamily={tokens.fontFamily.mono}
+          color={isCheckpointDrawerOpen ? tokens.colors.accent.primary : tokens.colors.text.disabled}
+          lineHeight="1"
+        >
+          {checkpointCount}
+        </Text>
+      )}
+    </Box>
+  )
+}
+
 function HeaderOverflowMenu() {
   const [isOpen, setIsOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -768,6 +835,7 @@ function HeaderOverflowMenu() {
   const projectPath = currentProject?.path || ''
   const isSharingLivePreview = useCollabStore(s => s.sharingPreview)
   const sandboxEnabled = useSettingsStore(s => s.sandboxEnabled)
+  const checkpointCount = useCheckpointStore(s => s.checkpoints.length)
 
   useEffect(() => {
     if (!isOpen) return
@@ -830,6 +898,19 @@ function HeaderOverflowMenu() {
           borderRadius="10px"
           boxShadow="0 14px 40px rgba(0,0,0,0.45)"
         >
+          {/* Checkpoints TEM de estar aqui, não só no cluster wide-only: a
+              @container (max-width: 480px) esconde esse cluster e é este menu
+              que o substitui. Sem esta entrada, mover o botão do PromptBar
+              para a toolbar tornava os Checkpoints INACESSÍVEIS com a coluna
+              de chat estreita — no PromptBar ele só perdia a etiqueta. */}
+          <ToolbarMenuItem
+            icon={<FiClock size={14} />}
+            label={checkpointCount > 0 ? `${t('checkpoint.title')} (${checkpointCount})` : t('checkpoint.title')}
+            onClick={() => runAndClose(() => {
+              useTerminalPanelStore.getState().close()
+              useLayoutStore.getState().toggleCheckpointDrawer()
+            })}
+          />
           <ToolbarMenuItem
             icon={<FiEye size={14} />}
             label={t('view.preview')}

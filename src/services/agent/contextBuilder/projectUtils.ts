@@ -336,6 +336,25 @@ const DEV_DEPS_PROMPT_LIMIT = 10
 /** Ceiling da união de workspaces: é para DETECÇÃO, nunca é renderizada. */
 const WORKSPACE_DEPS_LIMIT = 400
 
+/**
+ * Frameworks com build/servidor próprio (front OU back). Consumido por
+ * `isVanillaWeb`: a negação disto é que faz o prompt injetar as regras de
+ * "site sem build".
+ *
+ * Lê `detectionDependencies` (união NÃO truncada, com os sub-pacotes de
+ * workspace) e nunca as listas de RENDER: essas vêm cortadas a 15/10 e
+ * detectar a partir delas dava falso negativo calado num monorepo ou em
+ * qualquer projecto com o framework fora da janela.
+ */
+const FRAMEWORK_DEPS = new Set([
+  'react', 'next', 'vue', 'nuxt', 'svelte', '@angular/core', 'astro',
+  'solid-js', 'express', 'fastify', '@nestjs/core',
+])
+
+export function hasFrameworkDependency(pkg: PackageSummary | null | undefined): boolean {
+  return (pkg?.detectionDependencies ?? []).some(d => FRAMEWORK_DEPS.has(d))
+}
+
 export async function extractPackageSummary(projectPath: string): Promise<PackageSummary | null> {
   const raw = await safeReadFile(`${projectPath}/package.json`)
   if (!raw) return null

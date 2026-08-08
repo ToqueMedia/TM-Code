@@ -465,6 +465,11 @@ interface ByokState {
   } | null
 }
 
+/** Chave do localStorage. Constante porque o listener cross-window abaixo tem
+ *  de bater exactamente com o `name` do persist — se divergirem, a sincronia
+ *  deixa de disparar em silêncio. */
+export const BYOK_STORAGE_KEY = 'byok-storage'
+
 export const useByokStore = create<ByokState>()(
   persist(
     (set, get) => ({
@@ -826,7 +831,7 @@ export const useByokStore = create<ByokState>()(
       },
     }),
     {
-      name: 'byok-storage',
+      name: BYOK_STORAGE_KEY,
       // Persist ONLY metadata. Never persist the key itself, never persist
       // the providers catalog (it can change server-side and is refetched
       // on every load). `catalogLoaded` is in-memory only.
@@ -846,3 +851,29 @@ export const useByokStore = create<ByokState>()(
     },
   ),
 )
+
+// ── Sincronia entre janelas ──────────────────────────────────────────────────
+//
+// O TM Code é multi-janela por desenho (uma janela = um processo = um projecto)
+// e TODAS partilham o mesmo localStorage — a origem é a mesma. O `persist` do
+// zustand hidrata UMA vez, ao criar o store, e depois escreve a fatia INTEIRA
+// em cada `set`. Isso dá um clobber silencioso entre janelas:
+//
+//   1. janela A e janela B abertas, ambas hidrataram com enabled:false;
+//   2. o utilizador liga o BYOK em A → A escreve enabled:true;
+//   3. B não sabe de nada (continua com enabled:false em memória) e qualquer
+//      escrita sua reescreve a fatia toda — `loadProviders()` faz exactamente
+//      isso a cada autenticação, portanto basta B refrescar;
+//   4. o valor em disco volta a false, e no arranque seguinte o toggle aparece
+//      desligado. Do lado do utilizador o sintoma é "a definição não persiste",
+//      quando na verdade foi sobreposta por outra janela.
+//
+// O `authStore` e o `personaStore` já tinham este listener; o byokStore ficou
+// de fora. `rehydrate()` relê o localStorage e faz merge por cima do estado
+// atual — os campos não persistidos (`providers`, `catalogLoaded`) sobrevivem.
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (event) => {
+    if (event.key !== BYOK_STORAGE_KEY || !event.newValue) return
+    void useByokStore.persist.rehydrate()
+  })
+}

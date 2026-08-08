@@ -132,56 +132,60 @@ describe('ContextBuilder', () => {
       expect(sel?.loaded.map(l => l.id)).toContain('vision.image_rules')
     })
 
-    it('sem imagem fica em default_task e retém as regras de visão por evidência', async () => {
+    it('sem imagem fica em default_task e as regras de visão não entram', async () => {
       await builder.buildSystemPrompt(
         '/test/project', 'web', undefined, undefined, 'corrige este bug',
       )
       const sel = builder.getLastAuxiliarySelection()
       expect(sel?.profile).toBe('default_task')
-      // Achado #9 (2026-08-05): a entrega inline mantém-se doutrina, mas o
-      // portão de EVIDÊNCIA retém as regras de visão até a sessão ter uma
-      // imagem. A omissão não é silenciosa — fica no índice on-demand com a
-      // razão, e volta sozinha no turno em que a imagem chega.
+      // Forma `string | null` do cli-vaz: a secção só entra quando tem
+      // referente. Sem imagem na sessão, o texto sobre imagens não vai.
       expect(sel?.loaded.map(l => l.id)).not.toContain('vision.image_rules')
-      expect(sel?.evidenceOmittedSections).toContain('vision.image_rules')
       expect(sel?.omitted.map(o => o.id)).toContain('vision.image_rules')
     })
 
-    // O portão de evidência (achado #9) retém as secções LONGAS de UI num
-    // projecto sem superfície de UI. A linha de base CURTA vive no lembrete
-    // final e é incondicional — é ela que impede que reter as longas custe
-    // qualidade. Este teste trava essa promessa: sem ele, a rede de segurança
-    // podia desaparecer numa poda do lembrete sem ninguém dar por isso.
-    it('num projecto SEM UI: doutrina de geração inline + linha curta na recência', async () => {
-      mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
-        if (cmd === 'build_file_tree') {
-          return {
-            name: 'project', is_directory: true,
-            children: [
-              { name: 'index.js', is_directory: false },
-              { name: 'package.json', is_directory: false },
-            ],
-          }
-        }
-        if (cmd === 'read_file') {
-          const path = (args as Record<string, unknown>)?.path as string
-          if (path?.endsWith('package.json')) return JSON.stringify({ name: 'no-ui', scripts: { start: 'node index.js' } })
-          throw new Error('File not found')
-        }
-        if (cmd === 'path_exists') return false
-        return null
-      })
-      const prompt = await fullPrompt('/test/no-ui', 'node')
-      const sel = builder.getLastAuxiliarySelection()
-      // A doutrina de GERAÇÃO nunca é retida (medido: retê-la custou 2 falhas
-      // em 15 no caso adversarial) — vai inline mesmo sem superfície de UI…
-      expect(sel?.loaded.map(l => l.id)).toContain('ui_patterns')
-      expect(sel?.loaded.map(l => l.id)).toContain('design_system.component_patterns')
-      // …e os PONTEIROS para ficheiros de tema, que aqui não existem, saem.
-      expect(sel?.evidenceOmittedSections).toContain('design_system.semantic_tokens')
-      // A versão curta chega na mesma, na janela de recência.
+    // A linha de base de UI vive numa linha SÓ, no lembrete final, sem versão
+    // longa nenhuma — a forma do cli-vaz depois de 2026-08-06. Este teste trava
+    // a promessa: é a única coisa que carrega a regra dos estados vazios.
+    it('a linha de base de UI chega ao prompt: curta na recência E longa inline', async () => {
+      const prompt = await fullPrompt('/test/project', 'web')
       expect(prompt).toContain('state-first')
       expect(prompt).toContain('Empty states GUIDE')
+      // …e a LONGA também, sem portão nenhum: medido em 8 falhas em 10 quando
+      // se tentou viver só com a curta (ver a nota em sharedSections.ts).
+      expect(prompt).toContain('# UI baseline (when generating frontend')
+      // `# Taste defaults` foi apagada: 414 tokens de restrição sem nenhum
+      // observável que os justifique (duas experiências, 16 corridas verdes
+      // sem ela). A restrição continua na linha curta do lembrete.
+      expect(prompt).not.toContain('# Taste defaults (frontend/UI work)')
+    })
+
+    // Forma `string | null`: a secção do GoLive não pode custar tokens a quem
+    // não usa GoLive, e tem de aparecer a quem usa.
+    it('a verificação do GoLive só entra quando o projecto tem golive.json', async () => {
+      const semGoLive = await fullPrompt('/test/project', 'web')
+      expect(semGoLive).not.toContain('projecto GoLive')
+
+      builder.invalidatePromptCache()
+      const base = mockedInvoke.getMockImplementation()!
+      mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'read_file') {
+          const path = (args as Record<string, unknown>)?.path as string
+          if (path?.endsWith('golive.json')) return '{"project":"x"}'
+        }
+        return base(cmd, args as never)
+      })
+      const comGoLive = await fullPrompt('/test/golive', 'web')
+      expect(comGoLive).toContain('projecto GoLive')
+      expect(comGoLive).toContain('valida o que o bundler faz')
+      // Um comando que sai sozinho — sem ciclo de vida de dev server, e
+      // portanto sem conflito com a regra geral de o manter vivo.
+      expect(comGoLive).toContain('golive dev --check')
+      // O fallback foi medido a ser tomado SEM tentativa (2026-08-07): o
+      // agente foi direto ao `npm run build`. Tem de estar condicionado ao
+      // erro concreto, não oferecido como alternativa.
+      expect(comGoLive).toContain('unknown option --check')
+      expect(comGoLive).not.toContain('DESLIGA')
     })
 
     it('returns a string', async () => {
@@ -267,18 +271,8 @@ describe('ContextBuilder', () => {
       // baseline de delivery; on-demand ficam só as unbounded — MENOS as que
       // o portão de evidência do projecto reteve (achado #9, 2026-08-05).
       // O fixture declara `react` mas não tem tema, nem Chakra, nem imagem.
-      const evidenceHeld = selection?.evidenceOmittedSections ?? []
-      expect(evidenceHeld.sort()).toEqual([
-        'design_system.brand_palette',
-        'design_system.chakra_recipes',
-        'design_system.semantic_tokens',
-        'design_system.theme_config',
-        'vision.image_rules',
-      ])
       expect([...(selection?.contextPlan.selectedContexts ?? [])].sort()).toEqual(
-        [...BOUNDED_INLINE_CONTEXTS, 'delivery.git_status', 'delivery.dev_server']
-          .filter(id => !evidenceHeld.includes(id))
-          .sort(),
+        [...BOUNDED_INLINE_CONTEXTS, 'delivery.git_status', 'delivery.dev_server'].sort(),
       )
       expect(prompt).not.toContain('__TM_SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
     })
@@ -345,23 +339,27 @@ describe('ContextBuilder', () => {
       expect(prompt).toContain('ONE batch of diffs')
     })
 
-    it('o Reminder acaba no bullet 12 e o MCP volta a ser o 13', async () => {
+    it('o Reminder acaba no bullet 13 e o MCP é o 14', async () => {
       // O bullet sobre calls (13) saiu em 2026-07-31 junto com a secção
       // `# Turn efficiency`: o claude-vaz não tem nenhum dos dois, e a
       // doutrina explícita mediu-se a levar 8 → 31 calls na MESMA tarefa
       // (mandava maximizar uma contagem). O encaminhamento para o sub-agente
       // vive agora na descrição do Grep/Glob/LS — o sítio onde o modelo está
       // quando ia disparar o 3.º grep.
+      // O 12 passou a ser "as TUAS sessões por defeito" (2026-08-06): pedir
+      // "analisa a sessão anterior" mandava o agente ao histórico do Claude
+      // Code, porque era a única coisa que o prompt dizia sobre sessões.
       const plain = await fullPrompt('/test/project', 'web')
-      expect(plain).toContain("12. **OTHER AGENTS' SESSIONS**")
-      const tail = plain.slice(plain.indexOf("12. **OTHER AGENTS'")).split('\n#')[0]
-      expect(tail).not.toContain('\n13.')
+      expect(plain).toContain('12. **SESSÕES ANTERIORES — as TUAS por defeito.**')
+      expect(plain).toContain('13. **OUTRO agente, quando nomeado**')
+      const tail = plain.slice(plain.indexOf('12. **SESSÕES ANTERIORES')).split('\n#')[0]
+      expect(tail).not.toContain('\n14.')
 
       const withMcp = await fullPrompt('/test/project', 'web', [
         { name: 'query_db', description: 'run a query', serverName: 'postgres' },
       ])
-      expect(withMcp).toContain('13. **MCP available**')
-      expect(withMcp).not.toContain('14. **MCP available**')
+      expect(withMcp).toContain('14. **MCP available**')
+      expect(withMcp).not.toContain('15. **MCP available**')
     })
 
     it('a secção # Turn efficiency já não é injetada', async () => {

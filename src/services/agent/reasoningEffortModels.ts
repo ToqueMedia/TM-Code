@@ -27,6 +27,9 @@ import type { ReasoningEffortOptions } from '../../stores/reasoningEffortStore'
  *   Sempre raciocina; NÃO enviar `thinking`. Só `reasoning_effort` top-level.
  *   Ref: https://platform.kimi.ai/docs/guide/use-kimi-k2-thinking-model
  *
+ * - **Qwen 3.7 Plus** (DashScope): `off` | `on` (default `on`) — híbrido por
+ *   BOOLEAN `enable_thinking`, sem escala graded (essa só existe no 3.8-max).
+ *
  * O valor viaja no header `X-TM-Reasoning-Effort` (buildExtraHeaders) e o
  * data-plane aplica-o ao body upstream.
  */
@@ -55,17 +58,19 @@ export const EFFORT_BY_MODEL: Record<string, ReasoningEffortOptions> = {
     options: ['low', 'medium', 'xhigh'],
     default: 'xhigh',
   },
-  // MiMo V2.5 Pro (Xiaomi hospedado): SEM reasoning_effort graded — só o
-  // toggle thinking:{type} (thinking_object). Default OFF por recomendação
-  // OFICIAL da Xiaomi para tool calling (FAQ mimo.mi.com, lida 2026-08-05:
-  // "tool_calls in reasoning content indicates instability... recommended
-  // to disable thinking when calling tool") — e o TM Code é 100% agentic.
-  // Antes o MiMo nem estava neste mapa: header nunca saía e a API ficava no
-  // default dela (thinking ON), contra a própria doc.
-  'mimo-v2.5-pro': {
-    param: 'thinking_object',
+  // Qwen 3.7 Plus (DashScope US, promovido a modelo principal 2026-08-07):
+  // a série 3.7 é híbrida por BOOLEAN (`enable_thinking`) — não tem a escala
+  // graded low|medium|xhigh que o 3.8-max ganhou. Por isso o seletor mostra
+  // off/on, e o data-plane traduz o valor para `enable_thinking` (nunca
+  // `reasoning_effort`, que esta família não documenta).
+  //
+  // Default 'on': ao contrário do MiMo (que saiu do catálogo, e cuja doc
+  // desaconselhava thinking com tool calls), a doc do Qwen não tem essa
+  // ressalva e o thinking é o modo recomendado para trabalho agentic.
+  'qwen3.7-plus': {
+    param: 'enable_thinking',
     options: ['off', 'on'],
-    default: 'off',
+    default: 'on',
   },
 }
 
@@ -105,8 +110,8 @@ export function normalizeEffortModelId(
   if (bare.startsWith('grok-4.5') || bare === 'grok-build-latest') return 'grok-4.5'
   if (bare.startsWith('kimi-k3')) return 'kimi-k3'
   if (bare.startsWith('qwen3.8-max')) return 'qwen3.8-max'
-  // Cobre 'mimo-v2.5-pro' e variantes (ex.: -ultraspeed do TM Speed).
-  if (bare.startsWith('mimo-v2.5-pro')) return 'mimo-v2.5-pro'
+  // Cobre 'qwen3.7-plus' e os snapshots datados ('qwen3.7-plus-2026-05-26').
+  if (bare.startsWith('qwen3.7-plus')) return 'qwen3.7-plus'
   return bare
 }
 

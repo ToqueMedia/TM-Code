@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useRef } from 'react'
 import {
   Box,
   Flex,
@@ -21,17 +21,12 @@ import {
 } from 'react-icons/lu'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
-import { GoalCelebration } from '../celebration/GoalCelebration'
-import { WorldCupBadge } from '../celebration/WorldCupBadge'
 import { WelcomeRunner } from '../celebration/WelcomeRunner'
 import { FOOTBALL_MODE_ENABLED } from '@/utils/worldCup'
-import { triggerGoalCelebration } from '@/stores/celebrationStore'
 
 const MotionBox = motion.create(Box)
 
-// Module-scoped so the kick-off burst plays at most once per app launch — not
 // every time the user bounces back to the Welcome hero from a project/settings.
-let welcomeKickoffPlayed = false
 
 interface WelcomeHeroProps {
   onNewProject: () => void
@@ -73,13 +68,6 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({
 
   // Kick-off burst — a one-shot goal celebration when the hero first appears
   // (the welcome screen has no agent run to "score" against). Guarded to once
-  // per launch and to a short delay so the hero has painted first.
-  useEffect(() => {
-    if (!FOOTBALL_MODE_ENABLED || welcomeKickoffPlayed) return
-    welcomeKickoffPlayed = true
-    const tmo = setTimeout(() => triggerGoalCelebration('welcome_kickoff'), 700)
-    return () => clearTimeout(tmo)
-  }, [])
 
   return (
     <Flex
@@ -93,7 +81,6 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({
       py={6}
     >
       {/* Goal celebration overlay (World Cup 2026) — absolute, pointer-events none. */}
-      <GoalCelebration />
       <MotionBox
         maxW="820px"
         w="full"
@@ -103,10 +90,6 @@ const WelcomeHero: React.FC<WelcomeHeroProps> = ({
       >
         {/* Header */}
         <MotionBox variants={fadeUp}>
-          {/* Seasonal eyebrow badge */}
-          <Box mb={3}>
-            <WorldCupBadge />
-          </Box>
           {/* position:relative + reserved top padding give the runner a "track"
               above the title to run, kick and trap the ball in. The padding is
               only added when the seasonal feature is on so nothing shifts when

@@ -1,8 +1,11 @@
 import {
   classifyProbedUrl,
   detectLineRole,
+  extractScriptName,
+  pickDevScript,
   type ClassifySlotState,
 } from '../devServerDetection'
+import { appendDevFlags } from '../devCommandFlags'
 
 const fullstackEmpty: ClassifySlotState = {
   projectKind: 'fullstack',
@@ -122,5 +125,75 @@ describe('classifyProbedUrl — line role overrides first-probe-wins', () => {
     }
     const actions = classifyProbedUrl('http://localhost:5173/', 'html', slot, undefined, 'backend')
     expect(actions).toContainEqual({ type: 'assignFrontend', url: 'http://localhost:5173/' })
+  })
+})
+
+
+// ── Escolha do script de arranque ────────────────────────────────────────────
+//
+// O defeito que isto fecha: a detecção só reconhecia `dev` e `start` EXACTOS.
+// Um projecto com `dev:web` (ou `dev:client`, `dev:all`…) aparecia como "sem
+// comando de dev", e a mensagem pedia para adicionar um script `dev` que já lá
+// estava com outro nome — o botão desligado e a instrução errada ao mesmo tempo.
+describe('pickDevScript', () => {
+  it('`dev` exacto ganha a tudo o resto', () => {
+    expect(pickDevScript({ 'dev:all': 'x', dev: 'vite', 'dev:web': 'y' })).toBe('dev')
+  })
+
+  it('`start` exacto vem a seguir ao `dev`', () => {
+    expect(pickDevScript({ start: 'node .', 'dev:web': 'vite' })).toBe('start')
+  })
+
+  it('sem `dev`/`start`, escolhe a variante que corre TUDO', () => {
+    expect(pickDevScript({ 'dev:api': 'x', 'dev:web': 'y', 'dev:all': 'z' })).toBe('dev:all')
+    expect(pickDevScript({ 'dev:api': 'x', 'dev:fullstack': 'z' })).toBe('dev:fullstack')
+  })
+
+  it('senão, a variante de FRONTEND — é o que o preview mostra', () => {
+    expect(pickDevScript({ 'dev:api': 'x', 'dev:web': 'y' })).toBe('dev:web')
+    expect(pickDevScript({ 'dev:server': 'x', 'dev:client': 'y' })).toBe('dev:client')
+    expect(pickDevScript({ 'dev:worker': 'x', 'dev:ui': 'y' })).toBe('dev:ui')
+  })
+
+  it('uma variante desconhecida ganha a uma de backend', () => {
+    // `dev:playground` não diz nada sobre backend; `dev:api` diz. Entre as
+    // duas, a ambígua tem mais hipóteses de servir uma página.
+    expect(pickDevScript({ 'dev:api': 'x', 'dev:playground': 'y' })).toBe('dev:playground')
+  })
+
+  it('só backend? arranca-o à mesma — melhor que dizer "não tens dev"', () => {
+    // Quem carregou no botão quer que ALGUMA coisa arranque. O classificador
+    // do devServerManager trata de o marcar como backend pelo content-type.
+    expect(pickDevScript({ 'dev:api': 'nodemon' })).toBe('dev:api')
+  })
+
+  it('dentro do mesmo grupo vale a ordem do package.json (a que o autor escreveu)', () => {
+    expect(pickDevScript({ 'dev:site': 'a', 'dev:app': 'b' })).toBe('dev:site')
+    expect(pickDevScript({ 'dev:app': 'b', 'dev:site': 'a' })).toBe('dev:app')
+  })
+
+  it('ignora scripts vazios, não-strings e ausência de scripts', () => {
+    expect(pickDevScript({ dev: '' })).toBeNull()
+    expect(pickDevScript({ dev: 123 })).toBeNull()
+    expect(pickDevScript({})).toBeNull()
+    expect(pickDevScript(null)).toBeNull()
+    expect(pickDevScript(undefined)).toBeNull()
+    expect(pickDevScript({ build: 'tsc', lint: 'eslint .' })).toBeNull()
+  })
+})
+
+// A variante escolhida atravessa DOIS sítios que assumem a forma do comando.
+// Se algum deles tropeçar no `:`, o preview arranca mas fica sem `--host`
+// (Chat) ou sem `--port` (Live Preview), e o sintoma é uma página em branco —
+// longe da causa.
+describe('um comando com script `dev:*` sobrevive ao resto do pipeline', () => {
+  it('extractScriptName lê o nome com dois-pontos (segue a indirecção de wrappers)', () => {
+    expect(extractScriptName('npm run dev:web')).toBe('dev:web')
+    expect(extractScriptName('pnpm run dev:all')).toBe('dev:all')
+  })
+
+  it('appendDevFlags injecta as flags depois do separador', () => {
+    expect(appendDevFlags('npm run dev:web', '--host')).toBe('npm run dev:web -- --host')
+    expect(appendDevFlags('npm run dev:client', '--port 7773')).toBe('npm run dev:client -- --port 7773')
   })
 })

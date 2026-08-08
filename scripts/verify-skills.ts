@@ -57,6 +57,37 @@ function extractFencedBlocks(md: string): Block[] {
   return blocks
 }
 
+/**
+ * Aspa por fechar num bloco de shell.
+ *
+ * ANTES contava-se a PARIDADE de cada tipo de aspa em separado, e isso dava
+ * falsos positivos em shell perfeitamente válido — a paridade não é o mesmo que
+ * estar fechado. O caso que rebentou (skill `hooks`):
+ *
+ *   sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*\/\\1\/p'
+ *
+ * Sete aspas duplas, número ímpar, "unbalanced" — mas o comando está certo: as
+ * aspas estão DENTRO de uma string com plicas, portanto são caracteres
+ * literais e não têm par nenhum a cumprir. O simétrico também acontecia:
+ * `echo "it's fine"` acusava plicas desequilibradas.
+ *
+ * Agora percorre-se o texto com estado, como a shell faz: uma aspa só abre ou
+ * fecha quando NÃO está dentro do outro tipo de citação. É mais correcto e
+ * mais estrito ao mesmo tempo — detecta a aspa por FECHAR em vez de contar.
+ */
+function unclosedQuote(text: string): "'" | '"' | null {
+  let quote: "'" | '"' | null = null
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '\\') { i++; continue } // escapado: consome o seguinte
+    if (ch !== "'" && ch !== '"') continue
+    if (quote === null) quote = ch
+    else if (quote === ch) quote = null
+    // dentro do OUTRO tipo de aspa → literal, ignora-se
+  }
+  return quote
+}
+
 // Shallow lint: just check quotes balance and absence of obvious typos.
 function lintShellBlock(body: string): string[] {
   const problems: string[] = []
@@ -65,10 +96,9 @@ function lintShellBlock(body: string): string[] {
     .split(/\r?\n/)
     .filter(l => l.trim() && !l.trim().startsWith('#'))
     .join('\n')
-  const unescapedSingle = (nonComment.match(/(^|[^\\])'/g) || []).length
-  const unescapedDouble = (nonComment.match(/(^|[^\\])"/g) || []).length
-  if (unescapedSingle % 2 !== 0) problems.push('unbalanced single quotes')
-  if (unescapedDouble % 2 !== 0) problems.push('unbalanced double quotes')
+  const unclosed = unclosedQuote(nonComment)
+  if (unclosed === "'") problems.push('unbalanced single quotes')
+  if (unclosed === '"') problems.push('unbalanced double quotes')
   // Catch `pip install --break-system-packages` which we deprecated — prevents regression
   if (/--break-system-packages/.test(body)) {
     problems.push('uses --break-system-packages (deprecated — use a venv instead)')

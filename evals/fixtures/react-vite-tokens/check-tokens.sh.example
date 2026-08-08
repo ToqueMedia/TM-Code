@@ -1,0 +1,21 @@
+#!/bin/sh
+# Hook PreToolUse: inspecciona o CONTEÚDO que vai ser escrito e recusa-o
+# quando traz cores cruas sem referenciar os design tokens do projecto.
+#
+# Porquê Pre e não Post: o `additionalContext` do PostToolUse é CONSELHO —
+# medido a 2026-08-06, o modelo recebeu-o e ignorou-o (5/10, igual à linha de
+# base). Exit 2 no PreToolUse faz a tool FALHAR: a escrita não acontece e o
+# modelo tem de reescrever. É a diferença entre avisar e impor.
+#
+# Só fala quando há algo a dizer (regra do cli-vaz): ficheiro já com var(--),
+# ou sem cores nenhumas, passa em silêncio.
+PAYLOAD=$(cat)
+printf "%s " "$(printf "%s" "$PAYLOAD" | sed -n "s/.*\"tool_name\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")" >> /tmp/tm-trace
+FILE=$(printf '%s' "$PAYLOAD" | sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+case "$FILE" in *.jsx|*.tsx|*.css) ;; *) exit 0 ;; esac
+printf '%s' "$PAYLOAD" | grep -q 'var(--' && exit 0
+printf '%s' "$PAYLOAD" | grep -qiE '#[0-9a-f]{3,8}' || exit 0
+TOKENS=$(sed -n 's/^[[:space:]]*\(--[a-z0-9-]*\):.*/\1/p' src/theme/tokens.css | tr '\n' ' ')
+echo "Recusado: este projecto define design tokens em src/theme/tokens.css e o conteudo traz cores cruas. Tokens disponiveis: $TOKENS. Reescreve os valores visuais com var(--token)." >&2
+echo "[BLOQUEOU] " >> /tmp/tm-trace
+exit 2

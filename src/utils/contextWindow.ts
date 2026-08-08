@@ -44,6 +44,8 @@
  *   than only showing the spike after the next turn starts.
  */
 
+import { VITE_AUTOCOMPACT_PCT } from './viteEnv'
+
 export const MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000
 
 /**
@@ -178,7 +180,17 @@ export function getAutoCompactThreshold(
     baseBufferFloor,
     Math.floor(effective * AUTOCOMPACT_BUFFER_PCT),
   )
-  return Math.max(0, effective - buffer)
+  const normal = Math.max(0, effective - buffer)
+
+  // Override de TESTE (porte cli-vaz, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`). Só
+  // ENCURTA — o `Math.min` garante que um valor mal posto nunca ADIA a
+  // compactação, apenas a antecipa. É o que permite um eval de compactação
+  // correr em segundos em vez de exigir uma sessão real que encha 131K.
+  const pct = VITE_AUTOCOMPACT_PCT ? parseFloat(VITE_AUTOCOMPACT_PCT) : NaN
+  if (Number.isFinite(pct) && pct > 0 && pct <= 100) {
+    return Math.min(Math.floor(effective * (pct / 100)), normal)
+  }
+  return normal
 }
 
 /**

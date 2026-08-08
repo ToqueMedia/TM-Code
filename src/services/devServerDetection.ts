@@ -34,6 +34,56 @@ export function commandLooksLikeWrapper(cmd: string): boolean {
   return false
 }
 
+// ── Escolha do script de arranque ────────────────────────────────────────────
+//
+// Muitos projectos não têm um script `dev` — têm `dev:web`, `dev:client`,
+// `dev:all`. A detecção só olhava para `dev` e `start` exactos, portanto esses
+// projectos apareciam como "sem comando de dev", com uma mensagem a pedir para
+// adicionar um script `dev` que, na prática, já lá estava com outro nome.
+//
+// A escolha entre variantes é por INTENÇÃO, não alfabética: primeiro a que diz
+// correr tudo, depois a que diz ser o frontend (é o que o preview mostra), e só
+// no fim as que cheiram a backend. Dentro do mesmo grupo vale a ordem do
+// package.json — que é a ordem que o autor escreveu, e melhor palpite do que
+// ordenar por acaso.
+
+/** Variantes que declaram correr o projecto inteiro. */
+const DEV_VARIANT_ALL = /^dev:(all|full|fullstack|everything)$/i
+/** Variantes que declaram ser a parte que o preview mostra. */
+const DEV_VARIANT_FRONTEND = /^dev:(web|client|frontend|front|app|ui|site|renderer)$/i
+/**
+ * Variantes que arrancam algo que NÃO é uma página. Não são excluídas — se for
+ * o único `dev:*` do projecto, arrancá-lo é melhor do que dizer ao utilizador
+ * que não tem comando de dev — mas ficam em último.
+ */
+const DEV_VARIANT_BACKEND = /^dev:(api|server|backend|worker|db|database|functions?|edge|electron|native|android|ios|desktop|docs?)$/i
+
+/**
+ * Escolhe o script de arranque a partir dos scripts do package.json.
+ *
+ * Ordem: `dev` exacto > `start` exacto > `dev:tudo` > `dev:frontend` >
+ * outro `dev:*` > `dev:*` de backend. `null` quando não há nada.
+ *
+ * NOTA para quem alargar isto: `start:*` fica DE FORA de propósito. Um
+ * `start:prod` é um servidor de produção, e arrancá-lo ao carregar em "iniciar
+ * dev server" seria pior do que não fazer nada.
+ */
+export function pickDevScript(scripts: Record<string, unknown> | null | undefined): string | null {
+  if (!scripts || typeof scripts !== 'object') return null
+  const names = Object.keys(scripts).filter(n => typeof scripts[n] === 'string' && scripts[n] !== '')
+
+  if (names.includes('dev')) return 'dev'
+  if (names.includes('start')) return 'start'
+
+  const variants = names.filter(n => n.toLowerCase().startsWith('dev:'))
+  if (variants.length === 0) return null
+
+  return variants.find(n => DEV_VARIANT_ALL.test(n))
+    ?? variants.find(n => DEV_VARIANT_FRONTEND.test(n))
+    ?? variants.find(n => !DEV_VARIANT_BACKEND.test(n))
+    ?? variants[0]
+}
+
 /** Extract the script name from an `npm/pnpm/yarn/bun run <script>` command.
  *  Returns null if the command isn't a script invocation. */
 export function extractScriptName(cmd: string): string | null {

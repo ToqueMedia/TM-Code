@@ -670,3 +670,48 @@ describe('chatStore', () => {
   })
 
 })
+
+/**
+ * O pill de contexto "ia para a frente e recuava" — reportado várias vezes e
+ * corrigido três vezes no sítio errado (denominador, sessão lida, fallback).
+ *
+ * A causa raiz era esta: `lastPromptTokens` tinha DOIS donos com grandezas
+ * diferentes. O `addTokenUsage` escreve o tamanho REAL do prompt (a conversa
+ * toda); o `addEstimatedTokenUsage` escreve um acumulador que arranca em ZERO
+ * a cada run e conta só os deltas desse run. A cada mensagem nova a barra caía
+ * de 86% para 2% e voltava a saltar quando o usage real aterrava.
+ */
+describe('ocupação do contexto: real vs estimativa', () => {
+  it('uma estimativa de run novo NÃO baixa a ocupação real', () => {
+    const store = useChatStore.getState()
+    const sessionId = store.createSession('/test/project')
+    useChatStore.setState({ activeSessionId: sessionId, streamingSessionId: sessionId })
+
+    // Turno real: a conversa toda vai a 98K.
+    useChatStore.getState().addTokenUsage(98_000, 500, true)
+    expect(useChatStore.getState().sessions.get(sessionId)?.lastPromptTokens).toBe(98_000)
+
+    // Mensagem nova: o acumulador do mainDispatch recomeça do zero.
+    useChatStore.getState().addEstimatedTokenUsage(2_000, 100, true)
+    expect(useChatStore.getState().sessions.get(sessionId)?.lastPromptTokens).toBe(98_000)
+
+    // Estimativa a crescer, ainda abaixo do real — continua sem mexer.
+    useChatStore.getState().addEstimatedTokenUsage(40_000, 800, true)
+    expect(useChatStore.getState().sessions.get(sessionId)?.lastPromptTokens).toBe(98_000)
+
+    // Acima do real: aí sim, é informação nova.
+    useChatStore.getState().addEstimatedTokenUsage(101_000, 900, true)
+    expect(useChatStore.getState().sessions.get(sessionId)?.lastPromptTokens).toBe(101_000)
+  })
+
+  it('o usage REAL manda sempre, mesmo para baixo (o histórico encolheu)', () => {
+    const store = useChatStore.getState()
+    const sessionId = store.createSession('/test/project')
+    useChatStore.setState({ activeSessionId: sessionId, streamingSessionId: sessionId })
+
+    useChatStore.getState().addTokenUsage(98_000, 500, true)
+    // Pós-compactação o provider reporta um prompt mais pequeno — e é verdade.
+    useChatStore.getState().addTokenUsage(35_000, 400, true)
+    expect(useChatStore.getState().sessions.get(sessionId)?.lastPromptTokens).toBe(35_000)
+  })
+})

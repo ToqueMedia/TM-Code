@@ -61,6 +61,19 @@ export const VITE_OLLAMA_URL: string | undefined = import.meta.env.VITE_OLLAMA_U
 /** User-provided Worker URL override (Vite env); undefined in Jest. */
 export const VITE_WORKER_URL: string | undefined = import.meta.env.VITE_WORKER_URL as string | undefined
 
+/**
+ * Limiar de auto-compactação em PERCENTAGEM da janela efectiva, só para
+ * TESTAR a compactação. Porte de `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`
+ * (cli-vaz, services/compact/autoCompact.ts:79) — existe lá exactamente pela
+ * mesma razão: sem ele, exercitar a compactação obriga a encher uma janela
+ * inteira, e a única forma de a ver era uma sessão real de horas.
+ *
+ * Só ENCURTA: o valor efectivo é `min(percentagem, limiar normal)`, portanto
+ * um override mal posto nunca deixa a compactação disparar mais tarde do que
+ * devia. Aceite em (0, 100]; ignorado fora disso.
+ */
+export const VITE_AUTOCOMPACT_PCT: string | undefined = import.meta.env.VITE_AUTOCOMPACT_PCT as string | undefined
+
 /** User-provided AI data-plane Worker URL override (Vite env); undefined in Jest. */
 export const VITE_AI_WORKER_URL: string | undefined = import.meta.env.VITE_AI_WORKER_URL as string | undefined
 

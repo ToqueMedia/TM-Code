@@ -200,6 +200,7 @@ interface ChatActions {
    * `addTokenUsage` had cached via `Math.max`.
    */
   addCompactBoundaryMessage: (beforeTokens: number, trigger?: import('@/types/chat').CompactMetadata['trigger'], messagesSummarized?: number, summary?: string, recovery?: string) => void
+  addContextBudgetMarker: (tokensBefore: number, tokensAfter: number, clearedCount: number) => void
   /**
    * Re-capture the current BYOK selection (provider/model/baseURL/caps)
    * from byokStore and store it as the active session's byokSnapshot.
@@ -2456,6 +2457,38 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       })
     },
 
+    /**
+     * Marco do ORÇAMENTO de tool results (porte cli-vaz). Fica no histórico e
+     * no export — auditável — e NÃO é renderizado no chat: o cli-vaz cria a
+     * mensagem (`createMicrocompactBoundaryMessage`) e depois devolve `null`
+     * ao pintá-la (Message.tsx:246). O silêncio total é que era o defeito:
+     * numa sessão real isto levou 21K tokens sem deixar rasto nenhum.
+     */
+    addContextBudgetMarker: (tokensBefore: number, tokensAfter: number, clearedCount: number) => {
+      const targetId = get().streamingSessionId ?? get().activeSessionId
+      if (!targetId) return
+      const message: ChatMessage = {
+        id: generateId('msg'),
+        role: 'system',
+        kind: 'context_budget',
+        content: '',
+        timestamp: Date.now(),
+        contextBudget: { tokensBefore, tokensAfter, clearedCount },
+      }
+      set(state => {
+        const session = state.sessions.get(targetId)
+        if (!session) return state
+        const next = new Map(state.sessions)
+        next.set(targetId, {
+          ...session,
+          messages: [...session.messages, message],
+          updatedAt: Date.now(),
+        })
+        return { sessions: next }
+      })
+      debouncedSave()
+    },
+
     addCompactBoundaryMessage: (beforeTokens: number, trigger: CompactMetadata['trigger'] = 'auto', messagesSummarized?: number, summary?: string, recovery?: string) => {
       const messageId = generateId('msg')
       const message: ChatMessage = {
@@ -3714,7 +3747,40 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
               // O pico NÃO se mexe por estimativa: é irreversível até à
               // próxima compactação, e uma estimativa alta fixava um pico que
               // nunca existiu. Só usage REAL o move (auditoria 06-08).
-              ...(estimateForSession > 0 ? { lastPromptTokens: estimateForSession } : {}),
+              //
+              // ── CAUSA RAIZ do pill a balançar (2026-08-07) ────────────────
+              // `estimateForSession` e `lastPromptTokens` são GRANDEZAS
+              // DIFERENTES e estavam a partilhar o mesmo campo:
+              //
+              //   lastPromptTokens  = tamanho REAL do último prompt enviado —
+              //                       a conversa TODA (98K, p.ex.)
+              //   estimateForSession = acumulador do mainDispatch que arranca
+              //                       em ZERO a cada run e conta só os deltas
+              //                       DESTE run (~2K nos primeiros chunks)
+              //
+              // Consequência, a cada mensagem nova: o real ficava em 98K (86%),
+              // o primeiro delta estimado escrevia 2K e a barra CAÍA para 2%,
+              // subia enquanto os deltas acumulavam, e SALTAVA de volta aos 86%
+              // quando o usage real aterrava no message_stop. Era o "vai para a
+              // frente e recua" — e explica porque é que o requestUsageLog
+              // (só valores reais) crescia monotonicamente enquanto a barra
+              // dançava: os dados nunca estiveram errados, o campo é que tinha
+              // dois donos.
+              //
+              // MONÓTONO por sessão: a ocupação de um prompt só desce quando o
+              // histórico encolhe, e as DUAS quedas legítimas — auto-compactação
+              // e reset manual — já põem este campo a 0 explicitamente (ver
+              // `lastPromptTokens: 0` nos dois sítios). Nada mais tem razão para
+              // o baixar, e uma estimativa parcial de um run novo é exactamente
+              // o que nunca deve baixá-lo.
+              ...(estimateForSession > 0
+                ? {
+                    lastPromptTokens: Math.max(
+                      active.lastPromptTokens ?? 0,
+                      estimateForSession,
+                    ),
+                  }
+                : {}),
               lastResponseTokens: nextResponse,
               updatedAt: Date.now(),
             })

@@ -570,6 +570,9 @@ function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
           lines.push(``)
         }
       }
+      if (e.servedConfigKey) lines.push(`| served config | \`${e.servedConfigKey}\` |`)
+      if (e.costMultiplier != null) lines.push(`| cost multiplier | ${e.costMultiplier}× |`)
+      if (e.modelContextWindow != null) lines.push(`| model context window | ${e.modelContextWindow.toLocaleString()} (a barra divide pela EFECTIVA: esta − reserva de output) |`)
       if (e.coreContextTokens != null) lines.push(`| core context tokens | ${e.coreContextTokens.toLocaleString()} |`)
       if (e.coreSystemTokens != null) lines.push(`| core system tokens | ${e.coreSystemTokens.toLocaleString()} |`)
       if (e.auxiliaryContextTokens != null) lines.push(`| auxiliary context tokens | ${e.auxiliaryContextTokens.toLocaleString()} |`)
@@ -583,14 +586,6 @@ function renderRequestUsageMd(log: RequestUsageEntry[] | undefined): string[] {
       // A razão E os sinais, não só os ids: sem eles o export mostra que o
       // projecto perdeu secções mas não deixa reconstruir porquê — que é a
       // única pergunta que a auditoria seguinte vai fazer.
-      if (e.evidenceOmittedSections?.length) {
-        lines.push(`| evidence-withheld sections | ${e.evidenceOmittedSections.map(id => `\`${id}\``).join(', ')} |`)
-        const reasons = e.evidenceOmitReason ?? {}
-        for (const id of e.evidenceOmittedSections) {
-          if (reasons[id]) lines.push(`| ↳ \`${id}\` | ${reasons[id]} |`)
-        }
-      }
-      if (e.evidenceSignals?.length) lines.push(`| project evidence signals | ${e.evidenceSignals.map(s => `\`${s}\``).join(', ')} |`)
       if (e.contextPlanCandidateSections?.length) lines.push(`| context plan candidates | ${e.contextPlanCandidateSections.map(id => `\`${id}\``).join(', ')} |`)
       if (e.expandedToolNames?.length) lines.push(`| expanded via request_tools | ${e.expandedToolNames.map(name => `\`${name}\``).join(', ')} |`)
       if (e.deniedToolNames?.length) lines.push(`| DENIED by profile bound | ${e.deniedToolNames.map(name => `\`${name}\``).join(', ')} |`)

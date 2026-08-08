@@ -81,6 +81,8 @@ export interface AgentCallbacks {
    * (log/UI). A cobrança (3x por defeito) é aplicada server-side no worker; o
    * cliente nunca faz matemática de consumo e os tokens reportados ficam raw. */
   onUsageUpdate: (inputTokens: number, outputTokens: number, speedApplied?: boolean) => void
+  /** Orçamento de tool results aplicado — marco para o histórico/export. */
+  onContextBudgetApplied?: (info: { tokensBefore: number; tokensAfter: number; clearedCount: number }) => void
 
   /** Per-request usage (real tokens + payloadInspector estimate + breakdown).
    *  Distinct from onUsageUpdate: carries the per-request breakdown that

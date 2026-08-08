@@ -279,7 +279,10 @@ async function handleChatCompletions(
   // resumir/extrair, degradam como desenhado. (`context-planner` era strict
   // pelo contrato JSON; saiu com a decisão 2026-08-04 de não ligar o planner.)
   const requestedSidecar = sidecarKeyForRequestType(requestType)
-  const strictSidecarRequestType = ['vision', 'web_search', 'fim'].includes(
+  // `image` (geração) é STRICT pela mesma razão que os outros três, levada ao
+  // extremo: sem sidecar publicado o pedido cairia num modelo de CHAT e o corpo
+  // (`/images/generations`) não tem sequer `messages` — 400 garantido upstream.
+  const strictSidecarRequestType = ['vision', 'web_search', 'fim', 'image'].includes(
     requestType?.trim().toLowerCase() ?? '',
   )
   if (requestedSidecar && strictSidecarRequestType && active.key !== requestedSidecar) {
@@ -582,6 +585,10 @@ async function handleChatCompletions(
       meterBody,
       upstream.headers.get('content-type'),
       prepared.chars,
+      // Geração de imagens: a resposta não traz tokens, cobra-se por imagem
+      // ao preço do escalão que o provider reporta. Preços da config
+      // (`sidecar:image`); ausentes → o rate card oficial embutido.
+      config.imagePricing,
     )
     responseBody = observer.body
     request.signal.addEventListener('abort', observer.settle, { once: true })

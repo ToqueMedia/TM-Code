@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { Box, Flex, Text, IconButton } from '@chakra-ui/react'
-import { VscWand, VscLoading } from 'react-icons/vsc'
+import { VscWand, VscLoading, VscDiscard } from 'react-icons/vsc'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { useProjectStore } from '@/stores/projectStore'
@@ -151,20 +151,30 @@ function PromptBar() {
           />
 
           {/* Improve Prompt — icon-only, INSIDE the input at the right corner
-              (moved off the actions row: just the wand + tooltip now). */}
+              (moved off the actions row: just the wand + tooltip now).
+              Depois de melhorar, o MESMO botão vira "anular" (07-08): o desfazer
+              é o gesto seguinte da varinha, não uma acção separada lá em baixo
+              — e o ícone (discard) diz sozinho o que faz. Volta a varinha
+              quando já não há nada para anular: o user editou o texto
+              (handleInputChange limpa o backup) ou ENVIOU a mensagem (aceitou
+              a melhoria — clearPromptImprovementBackup no handleSend). */}
           <Box position="absolute" top="8px" right="10px" zIndex={2} data-no-drag>
             <IconButton
-              aria-label={t('prompt.improvePrompt')}
-              title={t('prompt.improvePromptTitle')}
+              aria-label={canUndoImprovePrompt ? t('prompt.undoPromptImprovement') : t('prompt.improvePrompt')}
+              title={canUndoImprovePrompt ? t('prompt.undoPromptImprovementTitle') : t('prompt.improvePromptTitle')}
               size="2xs"
               variant="ghost"
               borderRadius="7px"
               minW="24px"
               h="24px"
-              color={tokens.colors.text.muted}
+              color={canUndoImprovePrompt ? tokens.colors.accent.primary : tokens.colors.text.muted}
               _hover={{ color: tokens.colors.accent.primary, bg: 'rgba(255,255,255,0.06)' }}
-              disabled={isImprovingPrompt || !hasInputContent}
-              onClick={(e) => { e.stopPropagation(); handleImprovePrompt() }}
+              disabled={isImprovingPrompt || (!canUndoImprovePrompt && !hasInputContent)}
+              onClick={(e) => {
+                e.stopPropagation()
+                if (canUndoImprovePrompt) handleUndoImprovePrompt()
+                else handleImprovePrompt()
+              }}
               css={{ '@keyframes tmImproveSpin': { to: { transform: 'rotate(360deg)' } } }}
             >
               <Box
@@ -172,7 +182,9 @@ function PromptBar() {
                 display="inline-flex"
                 css={isImprovingPrompt ? { animation: 'tmImproveSpin 0.8s linear infinite' } : undefined}
               >
-                {isImprovingPrompt ? <VscLoading size={13} /> : <VscWand size={13} />}
+                {isImprovingPrompt
+                  ? <VscLoading size={13} />
+                  : canUndoImprovePrompt ? <VscDiscard size={13} /> : <VscWand size={13} />}
               </Box>
             </IconButton>
           </Box>
@@ -191,12 +203,10 @@ function PromptBar() {
             viewedTaskBusy={viewedTaskBusy}
             hasInput={(hasInputContent || draftAttachments.length > 0) && !isSendBlocked}
             onToggleEditor={toggleEditor}
-            onUndoImprovePrompt={handleUndoImprovePrompt}
             onToggleDevServer={toggleDevServer}
             canToggleDevServer={canToggleDevServer}
             isDevServerActive={isDevServerActive}
             isDevServerStarting={isDevServerStarting}
-            canUndoImprovePrompt={canUndoImprovePrompt}
             onSend={handleSend}
             onStop={handleStop}
             onAttach={handleAttachFiles}

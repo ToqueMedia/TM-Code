@@ -2263,13 +2263,16 @@ function AdminSection() {
 // ─── Sidecars panel (admin) ──────────────────────────────────────────────────
 
 const SIDECAR_SLOTS: Array<{ type: import('../../services/adminService').SidecarType; label: string; desc: string }> = [
-  { type: 'vision', label: 'Visão (imagens)', desc: 'Descreve imagens para modelos sem visão (MiMo V2.5 Pro, GLM)' },
+  { type: 'vision', label: 'Visão (imagens)', desc: 'Descreve imagens para modelos sem visão (GLM)' },
   { type: 'web_search', label: 'Web Search', desc: 'Pesquisa web para modelos sem busca nativa' },
   // utility: corre a CADA turno (memory-extractor/selector/distiller, summarize).
   // Estava fora do UI — um sidecar:utility preso (ex.: glm-5.1) faturava 5.1 em
   // todos os turnos sem forma de o ver/desligar aqui. Desligar → cai no ativo.
   { type: 'utility', label: 'Utility (memória)', desc: 'Memória, sumarização e títulos (memory-*, summarize). Desligar → usa o modelo ativo.' },
   { type: 'fim', label: 'FIM (autocomplete)', desc: 'Code completion inline (X-Request-Type: fim)' },
+  // Geração de imagens. Publicável já; o agente ainda NÃO envia este tipo de
+  // pedido — o slot existe para o modelo ficar configurado (decisão 07-08).
+  { type: 'image', label: 'Imagem (geração)', desc: 'Gera imagens (X-Request-Type: image). Ainda não usado pelo agente.' },
 ]
 
 function SidecarsPanel() {

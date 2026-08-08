@@ -334,6 +334,47 @@ async function runJob(job: RunnerJob): Promise<void> {
         const usage = [...chat.sessions.values()].flatMap(s => s.requestUsageLog ?? [])
         const sum = (pick: (e: (typeof usage)[number]) => number | undefined): number =>
           usage.reduce((acc, e) => acc + (pick(e) ?? 0), 0)
+        // Marcos de CONTEXTO da sessão. Sem isto um caso de compactação só
+        // pode afirmar "acabou verde" — e hoje já se viu duas vezes um caso
+        // passar sem o mecanismo sequer ter corrido (o hook que lia um ficheiro
+        // inexistente, o detector que saltava literais). Contar os marcos é o
+        // que separa "compactou" de "não precisou de compactar".
+        const allMsgs = [...chat.sessions.values()].flatMap(s => s.messages ?? [])
+        const boundaries = allMsgs.filter(m => m.kind === 'compact_boundary')
+        const compaction = {
+          boundaries: boundaries.length,
+          budgetMarkers: allMsgs.filter(m => m.kind === 'context_budget').length,
+          summarized: boundaries.reduce(
+            (n, m) => n + (m.compactMetadata?.messagesSummarized ?? 0), 0,
+          ),
+          // Maior queda de input entre pedidos consecutivos — a prova de que a
+          // compactação libertou espaço, e quanto.
+          largestDropTokens: usage.reduce((max, e, i) => {
+            if (i === 0) return max
+            const prev = usage[i - 1].inputTokens ?? 0
+            const cur = e.inputTokens ?? 0
+            return prev > cur ? Math.max(max, prev - cur) : max
+          }, 0),
+        }
+        // RELEITURAS — a medida do estrago do orçamento de tool results.
+        // Quando o orçamento limpa o conteúdo de um resultado antigo, o modelo
+        // fica com um aviso a dizer "relê"; se relê, paga o ficheiro outra vez
+        // e parte o prefixo de cache. Contar isto é o que transforma "a barra
+        // oscila" numa grandeza: quantas vezes o agente teve de voltar ao que
+        // já tinha lido.
+        const lidos = new Map<string, number>()
+        let rereads = 0
+        for (const m of allMsgs) {
+          for (const tc of m.toolCalls ?? []) {
+            const alvo = (tc.input as Record<string, unknown> | undefined)?.file_path
+            if (typeof alvo !== 'string') continue
+            if (!/read/i.test(tc.toolName)) continue
+            const n = (lidos.get(alvo) ?? 0) + 1
+            lidos.set(alvo, n)
+            if (n > 1) rereads++
+          }
+        }
+
         const cost = {
           requests: usage.length,
           inputTokens: sum(e => e.inputTokens),
@@ -351,6 +392,7 @@ async function runJob(job: RunnerJob): Promise<void> {
           subtype: 'success',
           text,
           cost,
+          compaction: { ...compaction, rereads, distinctFilesRead: lidos.size },
           diag: {
             runSessionId,
             sessionId: (session as { id?: string } | undefined)?.id ?? null,

@@ -1,13 +1,11 @@
 import { memo, useMemo, type MouseEvent, type ReactNode } from 'react'
 import { Box, Flex, IconButton, Text } from '@chakra-ui/react'
-import { FiSend, FiSquare, FiCode, FiImage, FiClock, FiTerminal, FiServer, FiFastForward } from 'react-icons/fi'
-import { VscDiscard } from 'react-icons/vsc'
+import { FiSend, FiSquare, FiCode, FiImage, FiTerminal, FiServer, FiFastForward } from 'react-icons/fi'
 import { useBillingStore } from '../../stores/billingStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useByokStore } from '../../stores/byokStore'
 import { useAgentStore } from '../../stores/agentStore'
-import { useCheckpointStore } from '../../stores/checkpointStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import { EffortSelector } from './EffortSelector'
@@ -26,12 +24,10 @@ interface PromptActionsProps {
   viewedTaskBusy?: boolean
   hasInput: boolean
   onToggleEditor: () => void
-  onUndoImprovePrompt: () => void
   onToggleDevServer: () => void
   canToggleDevServer: boolean
   isDevServerActive: boolean
   isDevServerStarting: boolean
-  canUndoImprovePrompt: boolean
   onSend: () => void
   onStop: () => void
   onAttach: () => void
@@ -45,28 +41,22 @@ function PromptActions({
   viewedTaskBusy = false,
   hasInput,
   onToggleEditor,
-  onUndoImprovePrompt,
   onToggleDevServer,
   canToggleDevServer,
   isDevServerActive,
   isDevServerStarting,
-  canUndoImprovePrompt,
   onSend,
   onStop,
   onAttach,
   attachmentCount,
 }: PromptActionsProps) {
   const billingPlan = useBillingStore(s => s.plan)
-  const checkpointCount = useCheckpointStore(s => s.checkpoints.length)
-  const isCheckpointDrawerOpen = useLayoutStore(s => s.isCheckpointDrawerOpen)
-  const toggleCheckpointDrawer = useLayoutStore(s => s.toggleCheckpointDrawer)
   const autoModePermissions = usePermissionStore(st => st.autoModePermissions)
   const setAutoModePermissions = usePermissionStore(st => st.setAutoModePermissions)
   const setCheckpointDrawerOpen = useLayoutStore(s => s.setCheckpointDrawerOpen)
   const setPlanViewerOpen = useLayoutStore(s => s.setPlanViewerOpen)
   const isTerminalOpen = useTerminalPanelStore(s => s.isOpen)
   const toggleTerminal = useTerminalPanelStore(s => s.toggle)
-  const closeTerminal = useTerminalPanelStore(s => s.close)
 
   // ── Paperclip gate ──
   //
@@ -232,19 +222,8 @@ function PromptActions({
           onClick={onToggleEditor}
         />
 
-        <PromptToolButton
-          icon={<FiClock size={14} />}
-          label={t('checkpoint.title')}
-          active={isCheckpointDrawerOpen}
-          ariaLabel={t('checkpoint.title')}
-          title={t('checkpoint.title')}
-          badge={checkpointCount > 0 ? checkpointCount : undefined}
-          onClick={event => {
-            event.stopPropagation()
-            closeTerminal()
-            toggleCheckpointDrawer()
-          }}
-        />
+        {/* Checkpoints: saiu desta linha (07-08) para a toolbar do ChatView,
+            à esquerda do Live Preview / Preview (ver ChatView.tsx). */}
 
         <PromptToolButton
           icon={<FiTerminal size={14} />}
@@ -275,18 +254,8 @@ function PromptActions({
           }}
         />
 
-        {canUndoImprovePrompt && (
-          <PromptToolButton
-            icon={<VscDiscard size={14} />}
-            label={t('prompt.undoPromptImprovement')}
-            ariaLabel={t('prompt.undoPromptImprovement')}
-            title={t('prompt.undoPromptImprovementTitle')}
-            onClick={event => {
-              event.stopPropagation()
-              onUndoImprovePrompt()
-            }}
-          />
-        )}
+        {/* Anular melhoria de prompt: saiu desta linha (07-08) — passou a ser
+            o estado alternativo da própria varinha, dentro do input. */}
       </Flex>
 
       {/* Send / Stop / Queue — context-window pill lives in ChatView toolbar

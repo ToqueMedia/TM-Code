@@ -28,6 +28,20 @@ export interface ActiveAIConfig {
    * Ausente/inválido → 1×. Compõe com o multiplicador do TM Speed.
    */
   costMultiplier?: number
+  /**
+   * Preço POR IMAGEM em USD, por escalão (config `sidecar:image`).
+   *
+   * A geração de imagens é o único caminho deste worker cuja resposta não traz
+   * tokens: o `usage` do qwen-image é
+   * `{input_image_count, output_image_count, output_image_type, …}`. Sem estes
+   * preços o observador de usage não encontra tokens, cai na estimativa por
+   * bytes e cobra o tamanho do JSON de resposta (~150 tokens) por uma imagem
+   * que custa 3 a 7 cêntimos reais.
+   *
+   * Ausente → o rate card oficial embutido (IMAGE_PRICE_USD em usage.ts). O
+   * campo existe para o preço poder ser corrigido no KV sem deploy.
+   */
+  imagePricing?: { output1k?: number; output2k?: number; input?: number }
   /** Inline provider key — ONLY for Team BYOK configs (`team:{teamId}`), whose
    *  key is per-team and dynamic and so cannot be a static worker env secret
    *  like the managed `active`/`sidecar:*` configs (those always use
@@ -112,6 +126,9 @@ export interface Env {
   SIDECAR_VISION_CONFIG_JSON?: string
   SIDECAR_WEB_SEARCH_CONFIG_JSON?: string
   SIDECAR_FIM_CONFIG_JSON?: string
+  /** Geração de imagens (X-Request-Type: image). Publicado mas ainda não
+   *  consumido por nenhum caminho da IDE — ver activeConfig.ts. */
+  SIDECAR_IMAGE_CONFIG_JSON?: string
   // Personas (Escolha do Modelo) — mesmo par KV/env; ver PERSONA_ENV_FALLBACK.
   PERSONA_STANDARD_CONFIG_JSON?: string
   PERSONA_EXPERT_CONFIG_JSON?: string

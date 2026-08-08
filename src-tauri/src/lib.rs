@@ -1550,6 +1550,7 @@ pub fn run() {
             path_exists,
             has_database_file,
             write_file,
+            download_to_file,
             append_file,
             create_file,
             copy_file_or_directory,

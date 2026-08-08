@@ -58,17 +58,97 @@ export function injectStreamOptions(body: Record<string, unknown>): Record<strin
   return body
 }
 
-function parseUsageObject(value: unknown): ObservedUsage | null {
+/**
+ * Rate card OFICIAL do qwen-image-3.0-pro, em USD por imagem (fornecido pelo
+ * developer a partir da consola Model Studio, 2026-08-08). Guardado verbatim
+ * para ser auditável contra a fonte — a conversão a tokens é separada.
+ *
+ * O escalão NÃO se escolhe NEM se prevê a partir do pedido: vem na resposta,
+ * em `output_image_type` (`qima_output_1k` / `qima_output_2k`). Seis sondagens
+ * a 2026-08-08 provaram-no — o MESMO pedido (1664*928, n=1, seed 42, prompt
+ * idêntico) devolveu 2k a 2752*1536 numa altura e 1k a 1664*928 noutra. É por
+ * isso que este ficheiro lê o escalão reportado em vez de o inferir do corpo
+ * do pedido: inferi-lo daria a factura errada em metade dos casos.
+ * `input` cobre cada imagem de REFERÊNCIA enviada num pedido de edição (I2I).
+ */
+export const IMAGE_PRICE_USD = {
+  output1k: 0.04,
+  output2k: 0.075,
+  input: 0.003,
+} as const
+
+/**
+ * Âncora de conversão USD → tokens: o orçamento deste produto conta-se em
+ * TOKENS, portanto uma imagem tem de ser traduzida para essa moeda. Este é o
+ * preço por milhão de tokens de SAÍDA do modelo de texto de referência.
+ *
+ * ⚠️ É o único número aqui que não vem de um rate card verificado — é a taxa
+ * de câmbio interna do produto. Está isolado numa constante de propósito:
+ * corrigi-lo é uma edição, e toda a aritmética de imagem acompanha.
+ */
+export const USD_PER_MILLION_TOKENS = 2.2
+
+/** USD → tokens-equivalentes. Arredonda para CIMA: nunca cobrar a menos. */
+export function imageUsdToTokens(usd: number): number {
+  if (!Number.isFinite(usd) || usd <= 0) return 0
+  return Math.ceil((usd / USD_PER_MILLION_TOKENS) * 1_000_000)
+}
+
+/** Preços por imagem (USD) que a config pode sobrepor ao rate card acima. */
+export interface ImagePricing {
+  output1k?: number
+  output2k?: number
+  input?: number
+}
+
+function parseUsageObject(value: unknown, imagePricing: ImagePricing | undefined): ObservedUsage | null {
   const usage = value as {
     prompt_tokens?: unknown
     completion_tokens?: unknown
     cached_tokens?: unknown
     cache_read_input_tokens?: unknown
     prompt_tokens_details?: { cached_tokens?: unknown } | null
+    output_image_count?: unknown
+    output_image_type?: unknown
+    input_image_count?: unknown
   } | null
   if (!usage || typeof usage !== 'object') return null
   const prompt = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : 0
   const completion = typeof usage.completion_tokens === 'number' ? usage.completion_tokens : 0
+
+  // Geração de imagens (DashScope qwen-image): o `usage` não tem tokens
+  // NENHUNS — traz contagem, escalão e dimensões das imagens. Este ramo tem de
+  // vir ANTES do guard `prompt<=0 && completion<=0`, senão devolvia null, o
+  // observador caía na estimativa por bytes e uma imagem custava o peso do seu
+  // JSON de resposta (~150 tokens por algo que custa 3 a 7 cêntimos reais).
+  //
+  // Cobra-se pelo que o provider DIZ que produziu, ao preço do escalão que ele
+  // próprio reporta — e as imagens de referência de uma edição (I2I) entram
+  // como input. Tudo em tokens-equivalentes, para reusar o pipeline a jusante
+  // sem lhe tocar: multiplicador da persona, overage e fatia de equipa.
+  const outCount = typeof usage.output_image_count === 'number' ? usage.output_image_count : 0
+  const inCount = typeof usage.input_image_count === 'number' ? usage.input_image_count : 0
+  if (prompt <= 0 && completion <= 0 && outCount > 0) {
+    // Escalão desconhecido → assume-se o CARO. Um `output_image_type` que a
+    // Alibaba renomeie não pode virar desconto silencioso.
+    const is1k = usage.output_image_type === 'qima_output_1k'
+    const outUsd = is1k
+      ? (imagePricing?.output1k ?? IMAGE_PRICE_USD.output1k)
+      : (imagePricing?.output2k ?? IMAGE_PRICE_USD.output2k)
+    const inUsd = imagePricing?.input ?? IMAGE_PRICE_USD.input
+    return {
+      // Imagens de referência = input; imagens geradas = output. Mantém a
+      // separação que o resto do billing já entende (e o desconto de cache
+      // não morde: cachedTokens fica a 0).
+      promptTokens: imageUsdToTokens(inCount * inUsd),
+      completionTokens: imageUsdToTokens(outCount * outUsd),
+      cachedTokens: 0,
+      // authoritative: contagem e escalão vieram do provider. Não é um
+      // palpite sobre bytes — é o que ele diz que gerou.
+      authoritative: true,
+    }
+  }
+
   if (prompt <= 0 && completion <= 0) return null
   // cached_tokens vive em prompt_tokens_details.cached_tokens (OpenAI-compat /
   // DashScope) ou cache_read_input_tokens (Anthropic). É um subconjunto de
@@ -95,6 +175,9 @@ export function observeUsage(
   upstreamBody: ReadableStream<Uint8Array>,
   contentType: string | null,
   requestBodyChars: number,
+  /** Preços por imagem (USD) da config — só usados quando a resposta é de
+   *  geração de imagens. Ausente → o rate card oficial em IMAGE_PRICE_USD. */
+  imagePricing?: ImagePricing,
 ): UsageObserver {
   const isSse = (contentType ?? '').includes('text/event-stream')
   const decoder = new TextDecoder()
@@ -114,7 +197,7 @@ export function observeUsage(
     if (!usage && !isSse && jsonBuffer) {
       try {
         const parsed = JSON.parse(jsonBuffer) as { usage?: unknown }
-        usage = parseUsageObject(parsed.usage)
+        usage = parseUsageObject(parsed.usage, imagePricing)
       } catch { /* corpo não-JSON — segue para a estimativa */ }
     }
     if (!usage && totalBytes > 0) {
@@ -145,7 +228,7 @@ export function observeUsage(
         if (payload && payload !== '[DONE]' && payload.includes('"usage"')) {
           try {
             const parsed = JSON.parse(payload) as { usage?: unknown }
-            const found = parseUsageObject(parsed.usage)
+            const found = parseUsageObject(parsed.usage, imagePricing)
             if (found) usage = found
           } catch { /* chunk parcial/não-JSON — ignora */ }
         }

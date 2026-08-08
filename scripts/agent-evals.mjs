@@ -45,7 +45,12 @@ const onlyIds = only ? only.split(',').map((s) => s.trim()).filter(Boolean) : nu
 
 const cases = JSON.parse(
   readFileSync(path.join(ROOT, 'evals/cases.json'), 'utf8'),
-).filter((c) => !onlyIds || onlyIds.includes(c.id))
+).filter((c) => (onlyIds ? onlyIds.includes(c.id) : !c.benchmark))
+// `benchmark: true` fica FORA da suite por defeito. Não é um portão: é uma
+// régua de medição cuja taxa de falha é uma propriedade do agente, não uma
+// regressão. `ui-design-tokens` falha ~37% das vezes com ou sem as secções de
+// design system (n=20 por braço, p=1.00) — pô-lo no portão de merge tornava o
+// portão ruído. Corre-o de propósito com `--only ui-design-tokens`.
 
 if (cases.length === 0) {
   console.error(`[evals] nenhum caso${only ? ` com id "${only}"` : ''}.`)
@@ -88,7 +93,26 @@ async function ensureStack() {
   if (WORKER_URL.includes(`localhost:${AI_WORKER_PORT}`)) {
     await ensureService('ai-worker', AI_WORKER_PORT, 'yarn', ['dev:ai-worker'], {})
   }
-  await ensureService('vite', VITE_PORT, 'yarn', ['dev'], { VITE_AI_WORKER_URL: WORKER_URL })
+  // `VITE_AUTOCOMPACT_PCT` encurta o limiar de compactação (só encurta —
+  // ver contextWindow.ts). É o que torna um caso de compactação viável: sem
+  // ele seria preciso encher 131K de janela, e a compactação só se via em
+  // sessões reais de horas.
+  //
+  // ATENÇÃO: é uma env de BUILD do vite. Um vite JÁ VIVO em :1420 foi
+  // arrancado sem ela e não a ganha — por isso o aviso abaixo, em vez de um
+  // caso que passa a verde sem nunca ter compactado.
+  const pctOverride = process.env.EVALS_AUTOCOMPACT_PCT
+  const viteJaVivo = await portAlive(VITE_PORT)
+  if (pctOverride && viteJaVivo) {
+    console.log(
+      `[evals] AVISO: EVALS_AUTOCOMPACT_PCT=${pctOverride} pedido, mas o vite de :${VITE_PORT} ` +
+      `já estava a correr sem ele — o limiar NÃO foi encurtado. Fecha o vite e repete.`,
+    )
+  }
+  await ensureService('vite', VITE_PORT, 'yarn', ['dev'], {
+    VITE_AI_WORKER_URL: WORKER_URL,
+    ...(pctOverride ? { VITE_AUTOCOMPACT_PCT: pctOverride } : {}),
+  })
 }
 
 function runCase(c) {
@@ -179,8 +203,17 @@ function runCase(c) {
           if (new RegExp(rx, 'i').test(body)) forbiddenContent.push(`${file} com /${rx}/`)
         }
       }
+      // `expectCompaction`: o caso EXIGE que a compactação tenha corrido. Sem
+      // isto, um caso de compactação passa a verde quando ela nunca disparou —
+      // que é o falso positivo que este harness já produziu duas vezes.
+      const comp = result.compaction ?? {}
+      const missingCompaction =
+        c.expectCompaction && !(comp.boundaries > 0)
+          ? [`compactação exigida mas boundaries=${comp.boundaries ?? 0}`]
+          : []
       const ok = missingText.length === 0 && missingFiles.length === 0 &&
-        missingContent.length === 0 && forbiddenContent.length === 0
+        missingContent.length === 0 && forbiddenContent.length === 0 &&
+        missingCompaction.length === 0
       // A cópia temp só é limpa em SUCESSO — num falhanço fica no disco para
       // autópsia (o path segue no reason).
       if (ok) rmSync(project, { recursive: true, force: true })
@@ -190,10 +223,11 @@ function runCase(c) {
         durationMs,
         text,
         cost: result.cost ?? null,
+        compaction: result.compaction ?? null,
         diag: result.diag,
         reason: ok
           ? ''
-          : `em falta: ${[...missingText.map((m) => `texto /${m}/`), ...missingFiles.map((f) => `ficheiro ${f}`), ...missingContent, ...forbiddenContent.map((f) => `PROIBIDO ${f}`)].join(' | ')} (autópsia: ${project})`,
+          : `em falta: ${[...missingText.map((m) => `texto /${m}/`), ...missingFiles.map((f) => `ficheiro ${f}`), ...missingContent, ...missingCompaction, ...forbiddenContent.map((f) => `PROIBIDO ${f}`)].join(' | ')} (autópsia: ${project})`,
       })
     })
   })
@@ -209,7 +243,8 @@ try {
     console.log(
       r.ok
         ? `[evals] ✅ ${c.id} em ${(r.durationMs / 1000).toFixed(1)}s — "${(r.text ?? '').slice(0, 100)}"` +
-          (r.cost ? `\n         custo: ${r.cost.requests} pedidos, in ${r.cost.inputTokens} (cache ${r.cost.cacheReadInputTokens}), out ${r.cost.outputTokens}, aux/pedido ${r.cost.auxiliaryContextTokensMax}` : '')
+          (r.cost ? `\n         custo: ${r.cost.requests} pedidos, in ${r.cost.inputTokens} (cache ${r.cost.cacheReadInputTokens}), out ${r.cost.outputTokens}, aux/pedido ${r.cost.auxiliaryContextTokensMax}` : '') +
+          (r.compaction ? `\n         contexto: ${r.compaction.boundaries} compactação(ões), ${r.compaction.budgetMarkers} marcos de orçamento, ${r.compaction.rereads} RELEITURAS de ${r.compaction.distinctFilesRead} ficheiros` : '')
         : `[evals] ❌ ${c.id} em ${(r.durationMs / 1000).toFixed(1)}s — ${r.reason}\n` +
           `         text: "${(r.text ?? '').slice(0, 300)}"\n` +
           `         diag: ${JSON.stringify(r.diag ?? null)}`,

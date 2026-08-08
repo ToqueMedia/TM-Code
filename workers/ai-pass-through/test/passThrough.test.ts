@@ -11,6 +11,7 @@ import { clearAccessTokenCache } from '../src/googleAuth'
 import { handleRequest } from '../src/index'
 import { clearPlanCache } from '../src/planGate'
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../src/dashscopePromptCache'
+import { IMAGE_PRICE_USD, imageUsdToTokens } from '../src/usage'
 import type { Env } from '../src/types'
 
 const activeConfig = {
@@ -1783,7 +1784,10 @@ test('sidecar: unpublished strict sidecar (vision/web_search/fim) returns 503 wi
   // Degradar visão/pesquisa/FIM para o modelo ativo GERAL produz 404 (imagem a
   // modelo de texto), alucinação (pesquisa sem motor) ou lixo (FIM sem template).
   // O worker falha já com 503 e o cliente usa fallback de código.
-  for (const type of ['vision', 'web_search', 'fim']) {
+  // `image` (geração) entrou na lista 2026-08-07 pela razão mais crua: sem
+  // sidecar publicado o corpo nativo de imagem (que nem `messages` tem) iria
+  // parar a um modelo de chat.
+  for (const type of ['vision', 'web_search', 'fim', 'image']) {
     clearActiveConfigCache()
     const fetcher = fakeFetcher(Response.json({ ok: true }))
     const res = await handleRequest(typedRequest(type), kvEnv({}), { fetcher })
@@ -1792,6 +1796,213 @@ test('sidecar: unpublished strict sidecar (vision/web_search/fim) returns 503 wi
     assert.match(await res.text(), /tm_sidecar_unavailable/, type)
     assert.equal(fetcher.calls.length, 0, type)
   }
+})
+
+// ── Geração de imagens (sidecar:image) ────────────────────────────────────
+// A DashScope NÃO serve geração de imagens no modo OpenAI-compatible (404
+// verificado ao vivo 2026-08-08); é a API nativa, com um corpo que não se
+// parece nada com chat: { model, input.messages[].content[{text}], parameters }.
+// Estes testes trancam as duas propriedades que isso exige do worker.
+
+const imageSidecarConfig = {
+  provider: 'dashscope',
+  model: 'qwen-image-3.0-pro',
+  baseUrl: 'https://dashscope-intl.test',
+  chatCompletionsPath: '/api/v1/services/aigc/multimodal-generation/generation',
+  authHeader: 'Authorization',
+  authScheme: 'Bearer',
+  apiKeyEnv: 'DASHSCOPE_API_IMAGE',
+  enabled: true,
+  imagePricing: { output1k: 0.04, output2k: 0.075, input: 0.003 },
+}
+
+/** Corpo NATIVO de geração — repara que não tem `messages` no topo. */
+const NATIVE_IMAGE_BODY = {
+  model: 'placeholder',
+  input: { messages: [{ role: 'user', content: [{ text: 'a hero image' }] }] },
+  parameters: { size: '1664*928', n: 1, watermark: false, prompt_extend: false, seed: 7 },
+}
+
+/** Resposta real do qwen-image (forma confirmada ao vivo 2026-08-08). */
+function imageUpstream(imageCount = 1, tier: 'qima_output_1k' | 'qima_output_2k' = 'qima_output_2k') {
+  return Response.json({
+    output: {
+      choices: [{
+        finish_reason: 'stop',
+        message: {
+          role: 'assistant',
+          content: Array.from({ length: imageCount }, (_, i) => ({ image: `https://oss.test/img${i}.png` })),
+        },
+      }],
+    },
+    usage: {
+      input_image_count: 0,
+      output_image_count: imageCount,
+      output_image_type: tier,
+      output_width: tier === 'qima_output_1k' ? 1024 : 2752,
+      output_height: tier === 'qima_output_1k' ? 1024 : 1536,
+    },
+    request_id: 'req-1',
+  })
+}
+
+function imageRequest() {
+  return new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer valid-user-token',
+      'content-type': 'application/json',
+      'x-request-type': 'image',
+    },
+    body: JSON.stringify(NATIVE_IMAGE_BODY),
+  })
+}
+
+test('image: corpo nativo chega ao upstream INTACTO (sem mutações de chat)', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(imageUpstream())
+  const res = await handleRequest(
+    imageRequest(),
+    kvEnv({ 'sidecar:image': JSON.stringify(imageSidecarConfig) }, { DASHSCOPE_API_IMAGE: 'img-secret' }),
+    { fetcher },
+  )
+
+  assert.equal(res.status, 200)
+  assert.equal(
+    String(fetcher.calls[0].input),
+    'https://dashscope-intl.test/api/v1/services/aigc/multimodal-generation/generation',
+  )
+  const sent = fetcher.calls[0].body
+  // O worker carimba o modelo da config (o cliente manda um placeholder).
+  assert.equal(sent.model, 'qwen-image-3.0-pro')
+  // E não toca em mais NADA: os parâmetros nativos sobrevivem tal e qual...
+  assert.deepEqual(sent.parameters, NATIVE_IMAGE_BODY.parameters)
+  assert.deepEqual(sent.input, NATIVE_IMAGE_BODY.input)
+  // ...e as mutações do caminho de chat não aparecem: `stream_options` só
+  // entra em pedidos com stream:true, e o cache de prompt DashScope procura
+  // `body.messages` (que aqui não existe — vive em `input.messages`).
+  assert.equal('stream_options' in sent, false)
+  assert.equal('messages' in sent, false)
+  assert.equal(fetcher.calls[0].headers.get('authorization'), 'Bearer img-secret')
+  assert.equal(res.headers.get('x-tm-config-key'), 'sidecar:image')
+})
+
+test('image: fatura POR IMAGEM (o usage não traz tokens nenhuns)', async () => {
+  clearActiveConfigCache()
+  const { tasks, ctx } = collectorCtx()
+  const fetcher = {
+    calls: [] as any[],
+    firestoreCalls: [] as Array<{ method: string; body: any }>,
+    async fetch(input: RequestInfo | URL, init?: RequestInit) {
+      const url = String(input)
+      if (url.includes(':runQuery')) return Response.json([{ readTime: '2026-06-12T00:00:00Z' }])
+      if (url.includes('firestore.googleapis.com')) {
+        const method = init?.method ?? 'GET'
+        this.firestoreCalls.push({
+          method,
+          body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+        })
+        if (method === 'POST') return Response.json({ writeResults: [] })
+        return firestoreUserDoc({ plan: 'pro' })
+      }
+      return imageUpstream(2)
+    },
+  }
+
+  const res = await handleRequest(
+    imageRequest(),
+    kvEnv({ 'sidecar:image': JSON.stringify(imageSidecarConfig) }, { DASHSCOPE_API_IMAGE: 'img-secret' }),
+    { fetcher: fetcher as any, ctx },
+  )
+  await res.text()
+  await Promise.all(tasks)
+
+  const commits = fetcher.firestoreCalls.filter(c => c.method === 'POST')
+  assert.equal(commits.length, 1)
+  const transforms = commits[0].body.writes[0].transform.fieldTransforms
+  // 2 imagens no escalão 2K, ao preço oficial. Sem este ramo o observador caía
+  // na estimativa por bytes e cobrava o PESO DO JSON (~150 tokens) por duas
+  // imagens que custam $0,15 reais.
+  assert.equal(
+    transforms[0].increment.integerValue,
+    String(imageUsdToTokens(2 * IMAGE_PRICE_USD.output2k)),
+  )
+})
+
+test('image: o escalão 1K custa quase METADE do 2K (o preço vem da resposta)', async () => {
+  // Medido ao vivo: pedir 1024*1024 devolve qima_output_1k. É a diferença
+  // entre um ícone a $0,04 e um hero a $0,075 — e não é uma escolha nossa,
+  // é o que o provider reporta. Um escalão desconhecido paga o CARO.
+  const runTier = async (tier: 'qima_output_1k' | 'qima_output_2k' | 'inventado') => {
+    clearActiveConfigCache()
+    const { tasks, ctx } = collectorCtx()
+    const fetcher = {
+      firestoreCalls: [] as Array<{ method: string; body: any }>,
+      async fetch(input: RequestInfo | URL, init?: RequestInit) {
+        const url = String(input)
+        if (url.includes(':runQuery')) return Response.json([{ readTime: '2026-06-12T00:00:00Z' }])
+        if (url.includes('firestore.googleapis.com')) {
+          const method = init?.method ?? 'GET'
+          this.firestoreCalls.push({
+            method,
+            body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+          })
+          if (method === 'POST') return Response.json({ writeResults: [] })
+          return firestoreUserDoc({ plan: 'pro' })
+        }
+        return imageUpstream(1, tier as 'qima_output_1k')
+      },
+    }
+    const res = await handleRequest(
+      imageRequest(),
+      kvEnv({ 'sidecar:image': JSON.stringify(imageSidecarConfig) }, { DASHSCOPE_API_IMAGE: 'img-secret' }),
+      { fetcher: fetcher as any, ctx },
+    )
+    await res.text()
+    await Promise.all(tasks)
+    const commit = fetcher.firestoreCalls.find(c => c.method === 'POST')!
+    return commit.body.writes[0].transform.fieldTransforms[0].increment.integerValue
+  }
+
+  assert.equal(await runTier('qima_output_1k'), String(imageUsdToTokens(IMAGE_PRICE_USD.output1k)))
+  assert.equal(await runTier('qima_output_2k'), String(imageUsdToTokens(IMAGE_PRICE_USD.output2k)))
+  // Escalão que a Alibaba renomeie não pode virar desconto silencioso.
+  assert.equal(await runTier('inventado'), String(imageUsdToTokens(IMAGE_PRICE_USD.output2k)))
+})
+
+test('image: config sem imagePricing cai no rate card embutido, não em quase-zero', async () => {
+  clearActiveConfigCache()
+  const { imagePricing: _omitted, ...noCost } = imageSidecarConfig
+  const { tasks, ctx } = collectorCtx()
+  const fetcher = {
+    firestoreCalls: [] as Array<{ method: string; body: any }>,
+    async fetch(input: RequestInfo | URL, init?: RequestInit) {
+      const url = String(input)
+      if (url.includes(':runQuery')) return Response.json([{ readTime: '2026-06-12T00:00:00Z' }])
+      if (url.includes('firestore.googleapis.com')) {
+        const method = init?.method ?? 'GET'
+        this.firestoreCalls.push({
+          method,
+          body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+        })
+        if (method === 'POST') return Response.json({ writeResults: [] })
+        return firestoreUserDoc({ plan: 'pro' })
+      }
+      return imageUpstream(1)
+    },
+  }
+
+  const res = await handleRequest(
+    imageRequest(),
+    kvEnv({ 'sidecar:image': JSON.stringify(noCost) }, { DASHSCOPE_API_IMAGE: 'img-secret' }),
+    { fetcher: fetcher as any, ctx },
+  )
+  await res.text()
+  await Promise.all(tasks)
+
+  const commits = fetcher.firestoreCalls.filter(c => c.method === 'POST')
+  const transforms = commits[0].body.writes[0].transform.fieldTransforms
+  assert.equal(transforms[0].increment.integerValue, String(imageUsdToTokens(IMAGE_PRICE_USD.output2k)))
 })
 
 test('sidecar: invalid or disabled specialized sidecar returns 503 (never degrades to active)', async () => {

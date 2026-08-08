@@ -165,16 +165,6 @@ export interface PayloadReport {
   omittedSystemSections: string[]
   /** Sections loaded inline automatically by profile/trigger. */
   autoLoadedSystemSections: string[]
-  /**
-   * Bounded sections WITHHELD by the project-evidence gate (achado #9) — they
-   * would have been inline had the project shown the matching surface. Distinct
-   * from `auxiliaryOmitted`, which also covers the unbounded ones.
-   */
-  evidenceOmittedSections: string[]
-  /** Why each evidence-omitted section was withheld. */
-  evidenceOmitReason: Record<string, string>
-  /** Evidence signals detected in the project (`dep:react`, `dir:ui-like`, …). */
-  evidenceSignals: string[]
   /** Context planner candidate sections for this task. */
   contextPlanCandidateSections: string[]
   /** On-demand context architecture: estimated savings vs loading all phase-1 auxiliaries. */
@@ -737,9 +727,6 @@ export function inspectPayload(
   const loadedSystemSections = auxiliaryLoaded.map((a) => a.id)
   const omittedSystemSections = auxiliaryOmitted.map((a) => a.id)
   const autoLoadedSystemSections = auxiliarySelection?.autoLoadedSystemSections ?? loadedSystemSections
-  const evidenceOmittedSections = auxiliarySelection?.evidenceOmittedSections ?? []
-  const evidenceOmitReason = auxiliarySelection?.evidenceOmitReason ?? {}
-  const evidenceSignals = auxiliarySelection?.evidenceSignals ?? []
   const contextPlanCandidateSections = auxiliarySelection?.contextPlanCandidateSections ?? []
 
   const report: PayloadReport = {
@@ -767,9 +754,6 @@ export function inspectPayload(
     auxiliaryOmitted,
     omittedSystemSections,
     autoLoadedSystemSections,
-    evidenceOmittedSections,
-    evidenceOmitReason,
-    evidenceSignals,
     contextPlanCandidateSections,
     auxiliarySavingsTokens,
     systemPromptSavingsTokens: auxiliarySavingsTokens,

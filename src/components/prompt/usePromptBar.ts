@@ -965,6 +965,13 @@ export function usePromptBar() {
     historyIndexRef.current = -1
     savedDraftRef.current = ''
 
+    // Enviar = ACEITAR a melhoria de prompt: já não há nada para anular, e o
+    // botão (a varinha, que passa a "anular" enquanto o backup existe) volta
+    // ao estado normal. Fica DEPOIS dos guards de early-return acima — um
+    // envio bloqueado (sem auth, tools em falta, permissão pendente) não pode
+    // deitar fora o texto original que o user ainda pode querer de volta.
+    setPromptImprovementBackup(null)
+
     // Close menus
     setShowCommandMenu(false)
     hashtagMenu.close()

@@ -1,14 +1,9 @@
 # #9 — Contexto auxiliar entregue inline sem relação com a tarefa
 
-> **ESTADO: fechado a 2026-08-05.** A medição obrigatória foi feita (resultado
-> na secção "Medição do conteúdo real", abaixo) e o portão de evidência do
-> projecto está implementado. O que se segue mantém-se como registo do achado;
-> a secção final descreve o que ficou em código.
-
-> **Documento de handoff.** Escrito para ser lido numa sessão NOVA, sem
-> qualquer histórico. Contém o achado, as medições, a doutrina que está em
-> vigor (e porquê), a armadilha que já matou a tentativa anterior, e os
-> portões de validação. Data: 2026-08-05. Repo: `exodus-ide` (IDE TM Code).
+> **ESTADO: fechado a 2026-08-06 — e a solução NÃO foi a que este documento
+> sugeria.** O portão de evidência do projecto foi construído, medido e depois
+> **apagado**. Lê a secção final antes de qualquer coisa: a direcção sugerida
+> aqui em baixo está historicamente correcta e operacionalmente errada.
 
 ## O achado
 
@@ -256,6 +251,35 @@ Um quarto ponto foi corrigido por coerência: `savingsTokens` passou a somar os
 medido no corpo real e o total ainda em estimativas, a subtracção misturava as
 duas unidades — e podia ficar negativa quando o corpo real excedia a
 estimativa.
+
+## DESFECHO (2026-08-06): o portão foi apagado
+
+A pergunta certa não era "quais destas secções entregar?" mas **"estas secções
+devem existir?"**. O portão era máquina construída para gerir conteúdo que o
+cli-vaz — a referência — simplesmente não tem. E foi essa máquina que escondeu
+um SEV1 (retinha por falta de dados, auditoria `a3caa31`).
+
+**O que foi apagado:** o índice on-demand e o `request_context` (786-1247
+tokens/pedido, 0 chamadas medidas em 148), o portão inteiro
+(`projectEvidence.ts`, `applyEvidenceOmissions`, a telemetria de evidência), o
+índice de símbolos (órfão), o trio de ponteiros de tema + receitas Chakra
+(378 tk), e o `sharedTasteDefaults` (414 tk). Mais de mil linhas.
+
+**O que ficou, e porquê:** `sharedUiBaselineCore` (864 tk) — entregue SEMPRE,
+sem portão. Apaguei-a também, e o eval respondeu com **8 falhas em 10**:
+componentes a renderizar `tasks.map(...)` sem ramo de lista vazia. A linha
+curta do lembrete não a substitui, e há teste que prova que ela chega ao
+prompt.
+
+**A regra que saiu de tudo isto:** a FORMA do cli-vaz aplica-se — sem catálogo,
+sem detector, entrega sempre ou não tenhas a secção. O CONTEÚDO não se apaga
+por analogia com ele: apaga-se quando uma experiência não encontra nenhum
+observável que a secção mova.
+
+**O número que ficou a descoberto, e é maior do que tudo isto:** a propriedade
+"trata o estado vazio" falha **~13%** das vezes na melhor configuração medida.
+Não é do portão nem das secções apagadas — é o piso actual. Está medido que
+mais texto não o move.
 
 ## Evals: o que a régua mostrou (2026-08-06)
 

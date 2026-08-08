@@ -264,6 +264,14 @@ export interface AutoCompactResult {
   /** Token counts for telemetry. */
   preCompactTokenCount?: number
   postCompactTokenCount?: number
+  /**
+   * Quantas mensagens foram para o sumário. O marco de fronteira mostrava
+   * SEMPRE 0 — era uma constante escrita à mão no agentService, e a contagem
+   * existe aqui desde sempre. Um marco que diz "0 mensagens sumarizadas" numa
+   * compactação que libertou 65% do contexto não é telemetria, é ruído que
+   * ensina a não confiar no marco.
+   */
+  messagesSummarized?: number
   consecutiveFailures?: number
   lastFailureAt?: number
 }
@@ -281,7 +289,28 @@ export interface AutoCompactResult {
  * 3 é o compromisso: chega para o turno em curso e o seu contexto imediato,
  * sem devolver ao prompt o peso que a compactação foi chamada a aliviar.
  */
-export const KEEP_RECENT_TURNS_ON_COMPACT = 3
+/**
+ * Turnos preservados VERBATIM na compactação proativa.
+ *
+ * ZERO, como no cli-vaz (2026-08-06). Lá o `compactConversation` normal
+ * sumariza TUDO — o `messagesToKeep` só existe no caminho PARCIAL
+ * (`partialCompactConversation`, o `/compact` com pivot). O que devolve o
+ * estado de trabalho não são os turnos crus: é o sumário mais a
+ * re-anexação dos ficheiros (aqui, a "Recuperação do estado de trabalho" em
+ * query.ts, que já é paridade claude-vaz e corre a seguir ao sumário).
+ *
+ * Eram 3, e o preço está medido numa sessão real (janela 131K): compactou aos
+ * 98% e aterrou aos 88% — libertou 11%, voltou ao limiar em seis pedidos e
+ * compactou outra vez. Os três turnos traziam leituras de ficheiros grandes;
+ * o número de TURNOS é um mau procurador do TAMANHO, e por isso nenhum valor
+ * >0 resolve o caso — um único turno com uma leitura de 40K estraga-o na
+ * mesma. Compactar para voltar a compactar não é compactar: é thrashing, e
+ * cada ciclo custa uma chamada de sumarização.
+ *
+ * O modo de EMERGÊNCIA (reactivo, depois de o provider já ter rejeitado o
+ * pedido) sempre usou 0 — deixa de haver duas políticas.
+ */
+export const KEEP_RECENT_TURNS_ON_COMPACT = 0
 
 /**
  * Corta o histórico em [antigo | recente] numa fronteira de TURNO.
@@ -291,11 +320,59 @@ export const KEEP_RECENT_TURNS_ON_COMPACT = 3
  * providers rejeitam. Se não houver turnos que cheguem, devolve tudo como
  * antigo — compactar sem libertar espaço não serviria de nada.
  */
+/**
+ * Índice da INSTRUÇÃO ACTUAL — a última mensagem de user que não é um tool
+ * result. Os tool results também chegam com role 'user'; o que os distingue é
+ * o conteúdo (blocos `tool_result`).
+ *
+ * Existe porque sumarizar a instrução que o developer acabou de dar é o pior
+ * caso possível: o agente lê o resumo de uma conversa antiga e não sabe o que
+ * lhe foi pedido. MEDIDO a 2026-08-06 — a compactação disparou entre o prompt
+ * e a resposta, engoliu "implementar `golive dev --check`", e o run seguinte
+ * foi ler documentação e falar de outra flag.
+ *
+ * ── DIVERGÊNCIA DELIBERADA do cli-vaz, e a razão ───────────────────────────
+ * O cli-vaz NÃO faz isto. Lá o `autoCompactIfNeeded` recebe os
+ * `messagesForQuery` — que já incluem o prompt acabado de chegar — e sumariza
+ * tudo. A protecção dele é o PROMPT de sumarização: "Pending Tasks", "Current
+ * Work: …paying special attention to the most recent messages", e o item 9 a
+ * exigir "direct quotes… verbatim to ensure there's no drift in task
+ * interpretation".
+ *
+ * E o TM Code tem esse prompt IDÊNTICO (compactPrompt.ts, itens 1/7/8/9
+ * palavra por palavra). Mesmo assim falhou — o que sobra como diferença é o
+ * SUMARIZADOR: lá é o Claude, aqui é o modelo gerido da persona. Uma protecção
+ * que depende de o sumarizador obedecer não é a mesma coisa em modelos
+ * diferentes, e a falha custa o turno inteiro do developer.
+ *
+ * Por isso guarda-se a instrução ESTRUTURALMENTE, além do prompt: são meia
+ * dúzia de mensagens (não reabre o problema dos turnos grandes, que era sobre
+ * leituras de ficheiros no MEIO da conversa) e é seguro haver as duas — se o
+ * sumário a capturar bem, o custo é ter a ordem duas vezes; se falhar, o
+ * agente continua a saber o que lhe foi pedido.
+ */
+function currentInstructionIndex(messages: MessageLike[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role !== 'user') continue
+    if (typeof m.content === 'string') return i
+    if (Array.isArray(m.content) && !m.content.some(b => b.type === 'tool_result')) return i
+  }
+  return -1
+}
+
 export function splitForCompaction(
   messages: MessageLike[],
   keepRecentTurns: number,
 ): { older: MessageLike[]; recent: MessageLike[] } {
-  if (keepRecentTurns <= 0) return { older: messages, recent: [] }
+  if (keepRecentTurns <= 0) {
+    // A instrução actual (e o que vier depois dela) NUNCA é sumarizada. É um
+    // punhado de mensagens — não reabre o problema dos turnos grandes, que era
+    // sobre leituras de ficheiros no MEIO da conversa.
+    const idx = currentInstructionIndex(messages)
+    if (idx <= 0) return { older: messages, recent: [] }
+    return { older: messages.slice(0, idx), recent: messages.slice(idx) }
+  }
 
   const assistantIndexes: number[] = []
   for (let i = 0; i < messages.length; i++) {
@@ -388,6 +465,19 @@ export async function autoCompact(
   snipTokensFreed?: number,
   limits?: AutoCompactLimits,
   archiveOlder?: ArchiveOlderFn,
+  /**
+   * Chamado assim que a decisão de compactar é tomada e ANTES da sumarização
+   * pelo modelo — que é a parte lenta (dezenas de segundos).
+   *
+   * Existe porque o `compact_start` era emitido pelo chamador DEPOIS de esta
+   * função retornar (query.ts, dentro de `if (autoResult.wasCompacted)`): a
+   * barra de progresso ligava-se e desligava-se no mesmo tick, e o developer
+   * via só o aviso de "compactado" no fim, sem nada durante a espera. A barra
+   * existia, estava ligada, e era estruturalmente invisível no único caminho
+   * que interessa — o automático. O `/compact` manual nunca sofreu disto
+   * porque emite o evento antes de trabalhar.
+   */
+  onCompactStart?: (beforeTokens: number) => void,
 ): Promise<AutoCompactResult> {
   // Disjuntor com arrefecimento — ver a nota em AUTOCOMPACT_BREAKER_COOLDOWN_MS.
   const failures = tracking?.consecutiveFailures ?? 0
@@ -409,6 +499,7 @@ export async function autoCompact(
   }
 
   const preCompactTokenCount = resolveOccupancy(messages, snipTokensFreed ?? 0, limits)
+  onCompactStart?.(preCompactTokenCount)
 
   try {
     const postCompactMessages = await compactNow(
@@ -438,6 +529,12 @@ export async function autoCompact(
       postCompactMessages,
       preCompactTokenCount,
       postCompactTokenCount,
+      // `postCompactMessages` = [sumário, ...preservadas]. O que foi para o
+      // sumário é tudo o resto. Derivado aqui em vez de vir do `compactNow`
+      // porque o corte acontece lá dentro, noutro escopo — e uma segunda
+      // chamada ao `splitForCompaction` só para contar seria a mesma decisão
+      // tomada duas vezes, que é o defeito que passámos o dia a apagar.
+      messagesSummarized: Math.max(0, messages.length - (postCompactMessages.length - 1)),
       // Sucesso limpa o historial: uma tentativa de meio-aberto que acerta
       // devolve o disjuntor a fechado, não a "quase aberto".
       consecutiveFailures: 0,

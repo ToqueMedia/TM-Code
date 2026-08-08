@@ -231,9 +231,22 @@ const AGENT_SHELL_MAX_WAIT_MS = 120_000
 // Control panel reactive instead of waiting for the background tick.
 // execute_command* are included because shell commands (git commit, mv, …)
 // mutate the worktree too.
+/**
+ * Largura máxima com que uma imagem gerada é gravada (px).
+ *
+ * 1600 é a largura útil de um hero num ecrã comum. O provider devolve 2752px
+ * no escalão 2K (~2 MB de PNG) e ninguém publica isso numa página — reduzir por
+ * defeito faz o output sair já publicável, em vez de sair pesado com um aviso
+ * a dizer ao modelo para o comprimir com ferramentas que pode não ter.
+ */
+const DEFAULT_MAX_WIDTH = 1600
+
 const GIT_MUTATING_TOOLS = new Set([
   'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file',
   'create_directory', 'execute_command', 'execute_command_background',
+  // generate_image cria um PNG novo no worktree — sem isto o Source Control
+  // só o mostrava no tick seguinte do poller.
+  'generate_image',
 ])
 
 /**
@@ -1298,6 +1311,9 @@ class ToolExecutor {
       'read_file', READ_AROUND, 'write_file', 'edit_file', 'create_file',
       'create_directory', 'delete_file', 'rename_file',
       'list_directory', 'search_files', 'glob',
+      // generate_image escreve um PNG no projecto — recebe caminho, logo
+      // pertence aqui (a nota abaixo é literalmente sobre este caso).
+      'generate_image',
       'execute_command', 'execute_command_background', 'agent_shell_start'
       // NOTA: copy_file / path_exists / append_file estavam aqui e NÃO existem
       // — nunca foram registadas (auditoria 2026-07-28). Uma lista de scope com
@@ -1305,7 +1321,10 @@ class ToolExecutor {
       // caminhos protege mais superfícies do que as que existem. Ao acrescentar
       // uma tool que recebe caminhos, acrescenta-a AQUI e regista-a de facto.
     ])
-    const pathForScope = (input.file_path || input.oldPath || input.directory || input.cwd || '') as string
+    // `output_path` é o alvo do generate_image — sem ele nesta lista, a tool
+    // estava em FILE_SCOPE_TOOLS mas o clamp nunca via caminho nenhum e
+    // passava sempre (o pior tipo de falso positivo: parece protegido).
+    const pathForScope = (input.file_path || input.oldPath || input.output_path || input.directory || input.cwd || '') as string
     if (pathForScope && FILE_SCOPE_TOOLS.has(toolName)) {
       const scopeCheck = this.checkPathScope(pathForScope)
       if (!scopeCheck.allowed) {
@@ -4138,6 +4157,119 @@ ${preview}
         }
         return this.formatSearchResultsCompact(result)
       }
+    })
+
+    // === generate_image ===
+    //
+    // Fecha o buraco visual das apps que o agente constrói: até aqui, uma
+    // landing page acabada saía com `<img>` sem src, um placeholder cinzento
+    // ou — pior — um hotlink para unsplash/picsum que sobrevive ao preview e
+    // parte no deploy. Isto escreve um ficheiro REAL no projecto.
+    //
+    // Custa dinheiro de verdade ($0,04–0,075 por imagem) e demora ~1 minuto,
+    // por isso é explícita e passa pelo diálogo de permissão normal (não está
+    // em PERMISSION_EXEMPT_TOOLS).
+    this.tools.set('generate_image', {
+      definition: {
+        name: 'generate_image',
+        description: `Generate an image and save it into the project as a real PNG file. Use it for the assets an app actually ships with: hero images, og:image/social previews, favicons and app icons, empty-state illustrations, and placeholder photography for seed data. It replaces missing images and external hotlinks (unsplash/picsum), which break once deployed.
+
+COST — each image costs $0.04 or $0.075 depending on which tier the provider serves. You cannot choose the tier and you cannot predict it from \`size\`: the same request has been observed returning either one. Assume the higher price when deciding whether an image is worth generating, and expect anywhere from ~5 to ~60 seconds.
+Presets: icon/square = 1024*1024, og = 1200*630 (social preview, 1.91:1), hero = 1664*928 (16:9), portrait = 928*1664 (9:16). The provider usually honours the size you ask for, but may return a larger upscaled image — which is why the file is normalised on write (see below).
+
+FILE WEIGHT is handled for you: the image is resized to \`max_width\` (default 1600) before it is written, and \`output_path\` decides the format — end it in \`.jpg\` to re-encode as JPEG (much smaller for photographic heroes) or \`.png\` to keep PNG (right for logos, icons and anything needing transparency).
+
+WRITING GOOD PROMPTS for UI assets: describe style, palette (give hex codes to match the app's theme), composition and negative space. Say "no text" unless you specifically want lettering. Use \`seed\` with the SAME value across a set of assets to keep one visual identity (hero + empty states + icon of the same app), and \`negative_prompt\` to exclude what keeps showing up (max 500 chars).
+
+DO NOT use this for: architecture diagrams or flowcharts (generated text inside images is unreadable — write SVG or Mermaid instead), UI mockups you then intend to implement (it invents a target that does not match the code), or interface icons (use the project's icon library).
+
+Only call this when the developer asked for imagery, or when an asset is genuinely missing from something they asked you to build. Never generate images speculatively.`,
+        input_schema: {
+          type: 'object',
+          properties: {
+            prompt: { type: 'string', description: 'What to depict. Be specific about style, palette (hex codes), composition and negative space.' },
+            output_path: { type: 'string', description: 'Where to save it, e.g. "public/hero.jpg". Relative paths resolve against the project root. Must end in .png, .jpg or .jpeg — the extension decides the encoding.' },
+            size: { type: 'string', description: 'Preset name (icon, square, og, hero, portrait) or explicit "WIDTH*HEIGHT". Defaults to og (1200*630). See the cost note in the description.' },
+            seed: { type: 'number', description: 'Reuse the same seed across assets of one app to keep a consistent visual identity. Range 0-2147483647.' },
+            negative_prompt: { type: 'string', description: 'What to keep OUT of the image (max 500 chars).' },
+            n: { type: 'number', description: 'How many variations to generate (1-6, default 1). Each one is billed separately, but they are generated in parallel so asking for three is barely slower than asking for one. Extra images are saved next to the first as <name>-2, <name>-3, … keeping the same extension.' },
+            prompt_extend: { type: 'boolean', description: 'Let the provider rewrite your prompt for more varied results. Default false — it ignores parts of a precise art-direction brief and makes results non-reproducible.' },
+            max_width: { type: 'number', description: 'Resize down to this width before writing (default 1600). Set it lower for thumbnails; a value above the generated width is a no-op.' },
+          },
+          required: ['prompt', 'output_path'],
+        },
+      },
+      execute: async (input) => {
+        const outputPath = String(input.output_path ?? '').trim()
+        if (!outputPath) return 'Error: output_path is required.'
+        if (!/\.(png|jpe?g)$/i.test(outputPath)) {
+          return `Error: output_path must end in .png, .jpg or .jpeg (got "${outputPath}").`
+        }
+
+        await this.requirePathAccess(outputPath)
+        const absolute = this.resolveToAbsolute(outputPath)
+
+        const {
+          generateImages, saveImageTo, SIZE_PRESETS, ImageGenerationError,
+        } = await import('./imageGeneration')
+
+        // Preset OU "L*A" explícito. Um valor que não seja nenhum dos dois é
+        // um erro do modelo, não algo a "corrigir" em silêncio: cair num
+        // default calado esconde que o tamanho pedido foi ignorado — e o
+        // tamanho é o que decide o escalão de preço.
+        const rawSize = String(input.size ?? 'og').trim()
+        const preset = SIZE_PRESETS[rawSize.toLowerCase()]
+        const size = preset ? preset.size : rawSize
+        if (!preset && !/^\d{3,4}\*\d{3,4}$/.test(size)) {
+          return `Error: size must be a preset (${Object.keys(SIZE_PRESETS).join(', ')}) or "WIDTH*HEIGHT" like "1200*630" — got "${rawSize}".`
+        }
+
+        try {
+          const result = await generateImages({
+            prompt: String(input.prompt ?? ''),
+            size,
+            n: typeof input.n === 'number' ? input.n : 1,
+            seed: typeof input.seed === 'number' ? input.seed : undefined,
+            negativePrompt: typeof input.negative_prompt === 'string' ? input.negative_prompt : undefined,
+            promptExtend: input.prompt_extend === true,
+            signal: input._abortSignal as AbortSignal | undefined,
+          })
+
+          const maxWidth = typeof input.max_width === 'number' && input.max_width > 0
+            ? Math.floor(input.max_width)
+            : DEFAULT_MAX_WIDTH
+          const written: string[] = []
+          let firstBytes = 0
+          for (let i = 0; i < result.images.length; i++) {
+            // A primeira fica no caminho pedido; as variações ganham sufixo,
+            // preservando a extensão escolhida (não é sempre .png).
+            const target = i === 0
+              ? absolute
+              : absolute.replace(/\.(png|jpe?g)$/i, m => `-${i + 1}${m}`)
+            const size = await saveImageTo(result.images[i].url, target, maxWidth)
+            if (i === 0) firstBytes = size
+            written.push(target)
+          }
+
+          const first = result.images[0]
+          const kb = Math.round(firstBytes / 1024)
+          // Reporta o que ACONTECEU, não conselhos: a largura gerada, a que
+          // ficou em disco e o peso final. Antes isto mandava o modelo
+          // "comprimir antes de publicar" sem lhe dar com quê.
+          const resized = first.width > maxWidth
+            ? ` Generated at ${first.width}x${first.height} and resized down to ${maxWidth}px wide on disk.`
+            : ` ${first.width}x${first.height} on disk.`
+          return `Generated ${written.length} image(s), tier ${result.tier ?? 'unknown'}.${resized} First file is ${kb} KB.\n${written.join('\n')}`
+        } catch (err) {
+          if (err instanceof ImageGenerationError) {
+            // Erros accionáveis chegam ao modelo com a causa, não como
+            // "falhou": sidecar não publicado, rate limit e BYOK pedem
+            // respostas DIFERENTES do agente.
+            return `Error generating image (${err.code}): ${err.message}`
+          }
+          return `Error generating image: ${String(err)}`
+        }
+      },
     })
 
     // === write_file ===

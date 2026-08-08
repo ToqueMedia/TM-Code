@@ -80,7 +80,9 @@ export async function fetchAdminVerify(): Promise<VerifyResponse> {
 // catalog model to each slot; a blind active model then gets images described
 // (vision) or web results (web_search) by the sidecar instead of degrading.
 
-export type SidecarType = 'vision' | 'web_search' | 'utility' | 'fim'
+// 'image' = GERAÇÃO de imagens (2026-08-07), ao contrário de 'vision' que as LÊ.
+// Publicável pelo admin; nenhum caminho do agente envia X-Request-Type: image.
+export type SidecarType = 'vision' | 'web_search' | 'utility' | 'fim' | 'image'
 
 export interface SidecarModel {
   id: string

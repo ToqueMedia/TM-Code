@@ -107,6 +107,15 @@ function isGlmModel(model: string): boolean {
   return lower(model).includes('glm')
 }
 
+/**
+ * Família Qwen 3.7 na DashScope (3.7-plus é modelo principal desde 2026-08-07;
+ * 3.7-flash serve o sidecar utility). Híbrida por BOOLEAN `enable_thinking` —
+ * `reasoning_effort` graded é do 3.8-max, não desta série.
+ */
+function isQwen37(ctx: ApplyReasoningEffortCtx): boolean {
+  return isDashScope(ctx) && bareModel(ctx.model).startsWith('qwen3.7')
+}
+
 function isMimo(ctx: ApplyReasoningEffortCtx): boolean {
   const p = lower(ctx.provider)
   const b = lower(ctx.baseUrl)
@@ -144,14 +153,30 @@ export function defaultEffortFor(ctx: ApplyReasoningEffortCtx): string {
   if (isXai(ctx)) return 'high'
   if (isGlmModel(ctx.model) && (isZai(ctx) || isDashScope(ctx))) return 'max'
   // MiMo hospedado: default 'off' por recomendação OFICIAL da Xiaomi para
-  // tool calling (FAQ: thinking ligado torna tool_calls instáveis) — todo o
-  // tráfego TM é agentic. Antes não havia default: a API ficava no default
-  // dela (thinking ON), contra a própria doc.
+  // tool calling — todo o tráfego TM é agentic. VERIFICADO na fonte a
+  // 2026-08-06 (mimo.mi.com/docs/en-US/quick-start/faq/api-integration),
+  // citação exacta: "The appearance of `tool_calls` in the reasoning content
+  // indicates instability and incomplete output caused by the model having
+  // `thinking` enabled when calling `tool`. It is recommended to disable
+  // `thinking` when calling `tool` calls".
+  //
+  // O DEFAULT da API quando o campo é omitido NÃO está verificado: nenhuma
+  // página do mimo.mi.com o declara, e a receita vLLM do mesmo modelo diz o
+  // contrário do que aqui se afirmava antes ("Set enable_thinking: false (or
+  // omit the kwargs) to disable thinking mode"). É indiferente na prática —
+  // este ramo escreve o campo SEMPRE — e por isso a afirmação saiu daqui em
+  // vez de continuar a ser repetida sem fonte.
   if (isMimo(ctx)) return 'off'
   // Qwen 3.8 Max (swap 2026-08-04): low|medium|xhigh, default xhigh — o
   // extraBody da KV já traz reasoning_effort:'xhigh', isto cobre o caso de
   // uma KV publicada sem ele + mantém o guarda-espelho do frontend honesto.
   if (isDashScope(ctx) && bareModel(ctx.model).startsWith('qwen3.8-max')) return 'xhigh'
+  // Qwen 3.7 PLUS como modelo principal (2026-08-07): híbrido por boolean,
+  // default ON (o ramo de aplicação traduz para enable_thinking). Restrito ao
+  // `-plus`: o `-flash` da mesma família serve o sidecar:utility e o default
+  // dele é enable_thinking:FALSE, publicado na config — um default 'on' aqui
+  // ligava-lhe o thinking sempre que o effort chegasse vazio.
+  if (isDashScope(ctx) && bareModel(ctx.model).startsWith('qwen3.7-plus')) return 'on'
   return ''
 }
 
@@ -171,10 +196,58 @@ export function applyReasoningEffort(
   // MiMo hospedado (thinking_object on/off, SEM reasoning_effort): traduz o
   // toggle para thinking:{type} e NÃO envia reasoning_effort (param não
   // documentado na API da Xiaomi). Ramo ANTES da escrita genérica abaixo.
+  //
+  // A FORMA está VERIFICADA (2026-08-06) na página de compatibilidade OpenAI
+  // do próprio endpoint que este ramo serve — mimo.mi.com/docs/en-US/api/chat/
+  // openai-api, cujo exemplo de request traz `"thinking": {"type":"disabled"}`.
+  // `api.xiaomimimo.com` é o host que `isMimo` casa.
+  //
+  // NÃO confundir com `chat_template_kwargs: {enable_thinking: bool}`: essa é
+  // a forma do MiMo servido por vLLM self-host / Aliyun Model Studio, e é
+  // exactamente por isso que o BYOK tem `mimo_chat_template_kwargs` como
+  // thinking-shape SEPARADA. Dois deployments, duas formas — não é
+  // inconsistência do repo.
+  //
+  // AVISO da doc, ainda não coberto por código: em thinking mode o
+  // mimo-v2.5-pro IGNORA `temperature` e `top_p` e força 1.0 / 0.95
+  // (mimo.mi.com/docs/en-US/api/guidance/model-hyperparameters). Com o default
+  // 'off' isto não morde; se alguém ligar o thinking, qualquer temperature
+  // configurada para MiMo passa a ser decorativa.
   if (isMimo(ctx)) {
     body.thinking = { type: effort === 'off' ? 'disabled' : 'enabled' }
     delete body.enable_thinking
     delete body.reasoning_effort
+    return
+  }
+
+  // Qwen 3.7 (DashScope): híbrido por BOOLEAN. O seletor manda 'off'/'on' e
+  // aqui vira `enable_thinking` — `reasoning_effort` é APAGADO de propósito:
+  // a escala graded é do 3.8-max e esta família não a documenta (mandá-la era
+  // o parâmetro não suportado que este ficheiro existe para evitar).
+  //
+  // `preserve_thinking` entra aqui e SÓ aqui: a doc DashScope limita-o às
+  // famílias qwen3.7-*/qwen3.6-*/kimi-k2.x (é a razão pela qual o ramo do GLM
+  // mais abaixo não o envia). Faz o par com o round-trip de `reasoning_content`
+  // que a IDE já faz — sem ele o servidor descarta o raciocínio dos turnos
+  // anteriores que nós pagámos para enviar. Só com thinking ON: desligado não
+  // há raciocínio a preservar.
+  if (isQwen37(ctx)) {
+    // GUARDA (não é zelo — é o sidecar:utility): só valores DESTA família
+    // ('on'/'off') são aplicados. Um valor de outra escala ('max', 'xhigh')
+    // quer dizer que o header foi calculado para o modelo PRINCIPAL e o pedido
+    // acabou noutra config — tipicamente o `sidecar:utility`, que é um
+    // qwen3.7-flash publicado com `enable_thinking:false` DE PROPÓSITO (bench
+    // 04-08: thinking ligado = 5× latência e 5× tokens, sem ganho). Traduzir
+    // um 'max' do GLM para enable_thinking:true aqui destruía essa config em
+    // todos os turnos. Valor fora das options não conta — é o contrato.
+    const isOn = effort === 'on'
+    const isOff = effort === 'off' || isOffEffort(effort)
+    if (!isOn && !isOff) return
+
+    body.enable_thinking = isOn
+    delete body.reasoning_effort
+    if (isOn) body.preserve_thinking = true
+    else delete body.preserve_thinking
     return
   }
 
@@ -219,8 +292,9 @@ export function applyReasoningEffort(
   // queríamos ("pass prior reasoning to subsequent turns"), mas a doc limita-o
   // a qwen3.7-*/qwen3.6-*/kimi-k2.6/kimi-k2.7-* — **GLM não está na lista**.
   // Mandá-lo ao GLM era o parâmetro não suportado que este ficheiro existe para
-  // evitar. Se um dia um qwen3.7 for o modelo principal, é aqui que entra, com
-  // guarda de modelo — não por provider.
+  // evitar. (Desde 2026-08-07 o qwen3.7-plus É modelo principal e recebe
+  // `preserve_thinking` — no ramo `isQwen37` acima, com guarda de MODELO, não
+  // de provider. Este ramo, que é do GLM, continua sem ele.)
   if (isDashScope(ctx) && isGlmModel(ctx.model)) {
     body.enable_thinking = !isOffEffort(effort)
     return

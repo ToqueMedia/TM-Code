@@ -1,0 +1,13 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "Write|write_file|create_file|Edit|edit_file",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "sh ./check-empty.sh"
+        }
+      ]
+    }
+  ]
+}

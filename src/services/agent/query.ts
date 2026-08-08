@@ -288,7 +288,7 @@ export type QueryStreamEvent =
       isError: boolean;
     }
   | { type: "compact_start"; beforeTokens: number }
-  | { type: "compact_end"; beforeTokens: number; afterTokens: number; summary?: string; recovery?: string }
+  | { type: "compact_end"; beforeTokens: number; afterTokens: number; messagesSummarized?: number; summary?: string; recovery?: string }
   | {
       type: "agent_status";
       phase: "attempting" | "retrying" | "connected";
@@ -380,6 +380,23 @@ export interface QueryParams {
    *  estimate + breakdown). Fires once per chat.completions.create, right
    *  after the provider's usage chunk lands. Best-effort, never throws. */
   onRequestUsage?: (entry: RequestUsageEntry) => void;
+  /**
+   * Disparado no INSTANTE em que a auto-compactação decide compactar, antes da
+   * sumarização. O `compact_start` do generator só sai depois (um generator não
+   * pode `yield` de dentro de um callback), e é isso que deixava a barra de
+   * progresso invisível no caminho automático.
+   */
+  onCompactionPhaseStart?: (beforeTokens: number) => void;
+  /**
+   * Orçamento global de tool results aplicado — liberta contexto sem
+   * sumarizar. O cli-vaz regista isto no histórico e NÃO o mostra no chat
+   * (createMicrocompactBoundaryMessage + Message.tsx a devolver null).
+   */
+  onContextBudgetApplied?: (info: {
+    tokensBefore: number
+    tokensAfter: number
+    clearedCount: number
+  }) => void;
   /** Custom compact instructions. */
   compactInstructions?: string;
   /** Extra headers merged into every chat.completions.create request. */
@@ -1305,6 +1322,22 @@ export async function* query(
         `[query] global tool-result budget: compacted ${budgetResult.compactedCount} ` +
         `results (~${budgetResult.tokensBefore}→${budgetResult.tokensAfter} tokens)`,
       );
+      // MARCO no registo (porte cli-vaz, 2026-08-06). Isto liberta contexto em
+      // SILÊNCIO — numa sessão real levou 21K tokens, a barra caiu 16 pontos, e
+      // não havia NADA que o dissesse: nem marcador, nem mensagem, nem entrada
+      // no export. O developer viu o número descer sem explicação possível.
+      //
+      // O cli-vaz faz as duas coisas ao mesmo tempo
+      // (utils/messages.ts:createMicrocompactBoundaryMessage +
+      // components/Message.tsx:246): CRIA uma mensagem
+      // `system`/`microcompact_boundary` com os metadados, e depois devolve
+      // `null` ao renderizá-la. Fica no histórico e no export — auditável — e
+      // não polui o chat. É essa a forma copiada aqui.
+      params.onContextBudgetApplied?.({
+        tokensBefore: budgetResult.tokensBefore,
+        tokensAfter: budgetResult.tokensAfter,
+        clearedCount: budgetResult.compactedCount,
+      });
     }
 
     // 1. Per-message tool result budget — cap oversized single-message bodies.
@@ -1372,6 +1405,7 @@ export async function* query(
     extraHeaders = resolveExtraHeaders();
 
     const ctxLimits = getContextLimits?.();
+    let compactStartedAt: number | null = null;
     const autoResult = await autoCompact(
       messagesForQuery,
       systemPrompt,
@@ -1385,12 +1419,21 @@ export async function* query(
         realOccupancyMessageCount: lastTurnRealOccupancyMessageCount ?? null,
       },
       archivePreCompact,
+      // A barra de progresso tem de ligar ANTES da sumarização, não depois de
+      // ela acabar. Como esta função é um generator, não se pode fazer `yield`
+      // de dentro do callback — guarda-se e emite-se a seguir. O que muda é o
+      // MOMENTO em que o status fica 'compressing': era depois do trabalho
+      // todo (bar invisível), passa a ser no início. Ver a nota em autoCompact.
+      (beforeTokens) => {
+        compactStartedAt = beforeTokens;
+        params.onCompactionPhaseStart?.(beforeTokens);
+      },
     );
 
     if (autoResult.wasCompacted && autoResult.postCompactMessages) {
       yield {
         type: "compact_start",
-        beforeTokens: autoResult.preCompactTokenCount ?? 0,
+        beforeTokens: autoResult.preCompactTokenCount ?? compactStartedAt ?? 0,
       };
       messagesForQuery = autoResult.postCompactMessages;
 
@@ -1453,6 +1496,7 @@ export async function* query(
         type: "compact_end",
         beforeTokens: autoResult.preCompactTokenCount ?? 0,
         afterTokens: autoResult.postCompactTokenCount ?? 0,
+        messagesSummarized: autoResult.messagesSummarized,
         summary: compactSummary,
         recovery: compactRecovery,
       };
@@ -1682,6 +1726,20 @@ export async function* query(
     // nos headers da resposta e gravados no requestUsageLog deste pedido.
     let servedModel: string | null = null;
     let servedProvider: string | null = null;
+    // Config servida + multiplicador de custo aplicado a ESTE pedido. O worker
+    // emite os dois (headers.ts) e o IDE só os escrevia no console.debug —
+    // portanto o export não conseguia responder à única pergunta que o
+    // developer faz sobre personas: "a que escolhi foi mesmo servida, e a que
+    // preço?". Uma persona NÃO publicada degrada em silêncio para a config
+    // ativa (activeConfig.ts), e sem estes dois campos o silêncio é total.
+    let servedConfigKey: string | null = null;
+    let costMultiplier: number | null = null;
+    // Janela declarada pelo data-plane (X-Model-Context-Window). Sem ela, o
+    // export não permite reconstruir a percentagem que o developer VIU: a
+    // barra divide pela janela EFECTIVA (crua − reserva de output), não pela
+    // crua, e a diferença é enorme — 88.714 tokens são 69% de 128k e 98% de
+    // 90k. Um post-mortem sobre "a barra bugou" sem este campo é adivinhação.
+    let modelContextWindow: number | null = null;
     const semanticIdleTimeoutMs = Math.max(
       1,
       params.streamSemanticIdleTimeoutMs ?? STREAM_SEMANTIC_IDLE_TIMEOUT_MS,
@@ -1731,6 +1789,13 @@ export async function* query(
         // export de sessão não distingue que modelo serviu que pedido.
         servedModel = response.headers.get("X-TM-Model") ?? servedModel;
         servedProvider = response.headers.get("X-TM-Provider") ?? servedProvider;
+        servedConfigKey = response.headers.get("X-TM-Config-Key") ?? servedConfigKey;
+        const rawWin = response.headers.get("X-Model-Context-Window");
+        const parsedWin = rawWin == null ? NaN : Number(rawWin);
+        if (Number.isFinite(parsedWin) && parsedWin > 0) modelContextWindow = parsedWin;
+        const rawMult = response.headers.get("X-TM-Cost-Multiplier");
+        const parsedMult = rawMult == null ? NaN : Number(rawMult);
+        if (Number.isFinite(parsedMult) && parsedMult > 0) costMultiplier = parsedMult;
       }
 
       // Process OpenAI stream chunks
@@ -2544,6 +2609,9 @@ export async function* query(
           model,
           servedModel: servedModel ?? undefined,
           servedProvider: servedProvider ?? undefined,
+          servedConfigKey: servedConfigKey ?? undefined,
+          costMultiplier: costMultiplier ?? undefined,
+          modelContextWindow: modelContextWindow ?? undefined,
           requestLatencyMs: Date.now() - turnStartedAt,
           ...(rateLimitRetries > 0
             ? { rateLimitRetries, rateLimitWaitMs }
@@ -2588,9 +2656,6 @@ export async function* query(
           auxiliaryOmitted: payloadReport?.auxiliaryOmitted?.map((a: { id: string }) => a.id),
           omittedSystemSections: payloadReport?.omittedSystemSections,
           autoLoadedSystemSections: payloadReport?.autoLoadedSystemSections,
-          evidenceOmittedSections: payloadReport?.evidenceOmittedSections,
-          evidenceOmitReason: payloadReport?.evidenceOmitReason,
-          evidenceSignals: payloadReport?.evidenceSignals,
           contextPlanCandidateSections: payloadReport?.contextPlanCandidateSections,
           auxiliarySavingsTokens: payloadReport?.auxiliarySavingsTokens,
           systemPromptSavingsTokens: payloadReport?.systemPromptSavingsTokens,

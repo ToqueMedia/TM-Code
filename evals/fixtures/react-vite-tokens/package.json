@@ -1,0 +1,9 @@
+{
+  "name": "react-evals-tokens",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture React+Vite COM design tokens (src/theme/tokens.css) — dá referente às secções de design system que foram apagadas a 2026-08-06.",
+  "scripts": { "dev": "vite", "build": "vite build" },
+  "dependencies": { "react": "^19.0.0", "react-dom": "^19.0.0" },
+  "devDependencies": { "vite": "^6.0.0" }
+}

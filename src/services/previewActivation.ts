@@ -11,6 +11,7 @@ import { ensureDependenciesInstalled } from './dependencyInstaller'
 import { logger } from '../utils/logger'
 import { t } from '../i18n'
 import { readProjectManifest } from './projectManifestService'
+import { pickDevScript } from './devServerDetection'
 
 /**
  * Detect the dev command for a project by checking manifest and package.json.
@@ -31,13 +32,27 @@ export async function detectDevCommand(projectPath: string): Promise<string | nu
     }
   } catch { /* no manifest */ }
 
-  // 3. Check package.json for "dev" or "start" script
+  // 3. Check package.json — `dev`/`start`, and the `dev:*` variants.
+  //
+  // Só `dev` e `start` EXACTOS eram reconhecidos, e isso deixava de fora os
+  // projectos que chamam ao script `dev:web`, `dev:client` ou `dev:all`. O
+  // sintoma era enganador: o botão ficava desligado e a mensagem pedia para
+  // adicionar um script `dev` que já lá estava, com outro nome. A escolha
+  // entre variantes vive em `pickDevScript` (lógica pura, testada à parte).
   try {
     const raw = await invoke<string>('read_file', { path: `${projectPath}/package.json` })
     if (raw) {
       const pkg = JSON.parse(raw)
-      if (pkg.scripts?.dev) return 'npm run dev'
-      if (pkg.scripts?.start) return 'npm start'
+      const script = pickDevScript(pkg?.scripts)
+      if (script === 'start') return 'npm start'
+      if (script) {
+        // Uma variante escolhida por heurística tem de ser VISÍVEL: se o
+        // preview arrancar a coisa errada, isto é a primeira pista.
+        if (script !== 'dev') {
+          logger.info('preview', `package.json sem script "dev" — a usar "${script}"`)
+        }
+        return `npm run ${script}`
+      }
     }
   } catch { /* no package.json */ }
 

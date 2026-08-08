@@ -75,5 +75,84 @@
       "public/index.html"
     ],
     "timeoutSec": 300
+  },
+  {
+    "id": "ui-design-tokens",
+    "project": "evals/fixtures/react-vite-tokens",
+    "task": "Cria o ficheiro src/Badge.jsx: um selo que mostra o estado de uma tarefa (texto curto), estilizado, com os estilos no próprio ficheiro. Exporta por defeito. Não alteres mais nada.",
+    "expect": [],
+    "expectFiles": [
+      "src/Badge.jsx"
+    ],
+    "expectFileContains": {
+      "src/Badge.jsx": [
+        "var\\(--"
+      ]
+    },
+    "cleanupFiles": [
+      "src/Badge.jsx"
+    ],
+    "timeoutSec": 300,
+    "benchmark": true
+  },
+  {
+    "id": "hook-authoring",
+    "project": "evals/fixtures/react-vite-tokens",
+    "task": "Neste projecto quero que fique GARANTIDO, e não apenas recomendado, que nunca se escrevem cores cruas em vez dos design tokens. Trata disso.",
+    "expect": [],
+    "expectFiles": [
+      ".toquemedia/hooks.json"
+    ],
+    "expectFileContains": {
+      ".toquemedia/hooks.json": [
+        "PreToolUse|PostToolUse",
+        "matcher",
+        "command"
+      ]
+    },
+    "cleanupFiles": [
+      ".toquemedia/hooks.json"
+    ],
+    "timeoutSec": 300,
+    "benchmark": true
+  },
+  {
+    "id": "compaction-survives",
+    "project": "evals/fixtures/long-session",
+    "task": "Lê os três módulos em src/ (billing.js, inventory.js, shipping.js), soma as três constantes REFERENCIA_* e escreve o total em TOTAL.txt. O ficheiro deve conter apenas o número.",
+    "expect": [],
+    "expectFiles": [
+      "TOTAL.txt"
+    ],
+    "expectFileContains": {
+      "TOTAL.txt": [
+        "70"
+      ]
+    },
+    "expectCompaction": true,
+    "cleanupFiles": [
+      "TOTAL.txt"
+    ],
+    "benchmark": true,
+    "timeoutSec": 600
+  },
+  {
+    "id": "context-loss-rereads",
+    "project": "evals/fixtures/long-session",
+    "task": "Lê os oito módulos em src/ (auth, audit, billing, inventory, mailer, report, search, shipping), soma as oito constantes REFERENCIA_* e escreve o total em TOTAL.txt. O ficheiro deve conter apenas o número.",
+    "expect": [],
+    "expectFiles": [
+      "TOTAL.txt"
+    ],
+    "expectFileContains": {
+      "TOTAL.txt": [
+        "179"
+      ]
+    },
+    "cleanupFiles": [
+      "TOTAL.txt"
+    ],
+    "benchmark": true,
+    "timeoutSec": 900
   }
 ]

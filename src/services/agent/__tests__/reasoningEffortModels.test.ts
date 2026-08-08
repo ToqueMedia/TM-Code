@@ -116,6 +116,31 @@ describe('resolveEffectiveEffort — preferência-se-válida-senão-default', ()
     expect(normalizeEffortModelId('moonshotai/kimi-k3')).toBe('kimi-k3')
     expect(shouldSendEffort('kimi-k3')).toBe(true)
   })
+
+  // Qwen 3.7 Plus (modelo principal desde 2026-08-07): híbrido por BOOLEAN.
+  // A escala graded (low/medium/xhigh) é do 3.8-max — enviada aqui cairia no
+  // default, que é exactamente o que evita o 400 upstream.
+  it('Qwen 3.7 Plus: off|on, default on; valores graded inválidos → on', () => {
+    expect(resolveEffectiveEffort('qwen3.7-plus', null)).toBe('on')
+    expect(resolveEffectiveEffort('qwen3.7-plus', 'off')).toBe('off')
+    expect(resolveEffectiveEffort('qwen3.7-plus', 'on')).toBe('on')
+    expect(resolveEffectiveEffort('qwen3.7-plus', 'xhigh')).toBe('on')
+    expect(resolveEffectiveEffort('qwen3.7-plus', 'max')).toBe('on')
+    // Snapshot datado do mesmo modelo canonicaliza para a mesma chave.
+    expect(normalizeEffortModelId('qwen3.7-plus-2026-05-26')).toBe('qwen3.7-plus')
+    expect(shouldSendEffort('qwen3.7-plus')).toBe(true)
+    expect(resolveEffortTurnStamp('qwen3.7-plus', 'off')).toEqual({
+      effort: 'off',
+      sent: true,
+    })
+  })
+
+  // O MiMo saiu do catálogo gerido a 2026-08-07: deixou de estar mapeado,
+  // portanto o header X-TM-Reasoning-Effort já não sai para ele.
+  it('MiMo saiu do mapa — não-mapeado, header não sai', () => {
+    expect(shouldSendEffort('mimo-v2.5-pro')).toBe(false)
+    expect(normalizeEffortModelId('mimo-v2.5-pro')).toBe('mimo-v2.5-pro')
+  })
 })
 
 describe('resolveEffortModelId', () => {
