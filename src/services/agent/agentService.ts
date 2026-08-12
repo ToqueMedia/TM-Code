@@ -44,6 +44,7 @@ import {
   FALLBACK_CONTEXT_WINDOW,
   getPostCompactRecoveryMaxChars,
 } from "../../utils/contextWindow";
+import { rememberServedWindow } from "./servedWindowMemory";
 import { getQueryGuard } from "./queryGuard";
 import { beginMainRunClaims, endMainRunClaims } from "./fileClaims";
 import type { ContentPart, ByokSessionSnapshot } from "../../types/chat";
@@ -177,7 +178,16 @@ class AgentService {
 
     if (options) {
       this.lightweightOptions = options;
-      this.tools = options.tools || this.toolExecutor.getToolDefinitions();
+      // `getAllToolDefinitions`, NÃO `getToolDefinitions` — e a diferença é
+      // uma capacidade perdida em silêncio. Um run lightweight não leva o
+      // `ToolSearch` (ver a injecção mais abaixo, atrás de
+      // `!this.lightweightOptions`), portanto o que não vier no schema à
+      // partida é INALCANÇÁVEL para ele. Com as nativas situacionais a serem
+      // diferidas desde 2026-08-12, o método normal deixava um sub-agente sem
+      // 15 tools e sem via de as carregar — deferral a remover capacidade em
+      // vez de a adiar, que é exactamente o modo de falha desta família.
+      // Mantém verdadeiro o contrato do tipo: "if omitted, uses all tools".
+      this.tools = options.tools || this.toolExecutor.getAllToolDefinitions();
       if (options.abortController)
         this.abortController = options.abortController;
     } else {
@@ -609,6 +619,11 @@ class AgentService {
       snapshot,
       byokActive,
       lightweight: !!this.lightweightOptions,
+      // Chave de afinidade do Workers AI — a sessão do RUN, não o utilizador.
+      // Ver sdkClient.createAgentClient para os números que motivaram isto.
+      sessionId: useChatStore.getState().streamingSessionId
+        ?? useChatStore.getState().activeSessionId
+        ?? undefined,
       onByokKeyMissing: () =>
         callbacks.onError(
           new ServiceError(
@@ -1395,6 +1410,13 @@ class AgentService {
             : maxOutputRaw !== null
               ? null
               : undefined;
+
+        // Lembra a janela POR CONFIG (provider+modelo), não por modelo: o mesmo
+        // glm-5.2 vem do z.AI, do DashScope e do Cloudflare Workers AI (262k),
+        // e a tabela de perfis, indexada só pelo id, não distingue os três.
+        // Sem isto, o 1º turno de cada arranque calcula limiares contra a
+        // janela errada até o header chegar. Best-effort, nunca bloqueia.
+        rememberServedWindow(modelProvider, modelName, contextWindow, maxOutputTokens);
 
         useAgentStore.getState().setModelInfo(
           modelName,

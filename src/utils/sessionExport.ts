@@ -61,6 +61,34 @@ interface ExportOptions {
   /** Environment snapshot from `buildEnvironmentSnapshot`. When provided, the
    *  export includes a final section with the system prompt + project state. */
   envSnapshot?: EnvironmentSnapshot | null
+  /**
+   * Entradas EXACTAS do pill de contexto no momento do export.
+   *
+   * PORQUE ISTO EXISTE (2026-08-10): reportou-se "o pill mostrou 0% livre e a
+   * compactação não disparou". O export tinha tudo para provar que a
+   * compactação estava CERTA (pico real 102.361 contra limiar 167.000) e NADA
+   * para explicar o 0% — porque o número que o pill lê (`currentPromptTokens`,
+   * um máximo corrente ao nível do STORE, que atravessa sessões) não era
+   * exportado. A discussão passou a ser por argumento em vez de por medição.
+   *
+   * Com isto, um "pill a 0%" fica decidível a partir do ficheiro: se
+   * `storeCurrentPromptTokens` for muito maior que `sessionLastPromptTokens`,
+   * o pill leu um pico de outra conversa. Trocar a janela publicada (1M → 200K)
+   * é o gatilho clássico: o limiar cai e um máximo antigo passa a excedê-lo.
+   */
+  contextPillState?: {
+    /** Valor scoped à SESSÃO — o que o pill deve usar. */
+    sessionLastPromptTokens?: number | null
+    sessionLastResponseTokens?: number | null
+    sessionPeakPromptTokens?: number | null
+    /** Máximo corrente ao nível do STORE — o fallback que causava o 0%. */
+    storeCurrentPromptTokens?: number | null
+    storeCurrentResponseTokens?: number | null
+    /** Janela resolvida e limiares derivados, para o 0% ser verificável. */
+    resolvedContextWindow?: number | null
+    autoCompactThreshold?: number | null
+    warningThreshold?: number | null
+  } | null
 }
 
 export interface RequestEfficiencyReport {
@@ -213,6 +241,7 @@ export function sessionToJson(session: ChatSession, opts: ExportOptions = {}): s
       byokSnapshot: sanitizeByokSnapshot(session.byokSnapshot),
       requestUsageLog,
       requestEfficiencyReport: buildRequestEfficiencyReport(requestUsageLog),
+      contextPillState: opts.contextPillState ?? null,
       ...(hasSerializeActivity ? { promptSerializeStats } : {}),
       messages: session.messages.map(m => sanitizeMessage(m, stripImageData)),
     },
@@ -744,12 +773,23 @@ export async function buildEnvironmentSnapshot(session: ChatSession): Promise<En
   try {
     const { default: ContextBuilder } = await import('../services/agent/contextBuilder')
     const builder = ContextBuilder.getInstance()
+    // Tools nativas diferidas: passadas, ao contrário das MCP. As MCP dependem
+    // de estado de sessão (que servidores estão ligados AGORA) e ficam vazias
+    // no snapshot; a lista de diferidas nativas é configuração do registo e
+    // está no prompt real. Um export que a omitisse mostraria um prompt sem a
+    // secção "Deferred tools" — e este ficheiro é justamente o artefacto usado
+    // para auditar o que o modelo recebeu.
+    const { default: ToolExecutor } = await import('../services/agent/toolExecutor')
+    const { nativeDeferredToolNames } = await import('../services/agent/toolPolicy')
     out.systemPrompt = await builder.buildSystemPrompt(
       session.projectPath,
       out.projectType,
       [], // mcpTools — empty for snapshot; the live agent path includes them at send time
       undefined,
       lastUserMessage,
+      undefined,
+      undefined,
+      { deferredToolNames: nativeDeferredToolNames(ToolExecutor.getInstance().getDeferredToolIndex()) },
     )
   } catch (err) {
     out.systemPromptError = err instanceof Error ? err.message : String(err)

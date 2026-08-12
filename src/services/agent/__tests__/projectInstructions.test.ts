@@ -252,13 +252,20 @@ describe('getProjectMemorySection inject policy', () => {
     expect(section).toContain('never push secrets')
   })
 
-  it('neither → null', () => {
+  it('neither → injects TMS creation directive (not null)', () => {
     const ctx = {
       ...base,
       tmsContent: null,
       foreignInstructions: null,
     } as PromptContext
-    expect(getProjectMemorySection(ctx)).toBeNull()
+    // When no TMS and no foreign instructions exist, the section now injects
+    // a directive telling the model to CREATE TMS.md at the FINAL CHECKPOINT.
+    // Without this, new/empty projects never receive any TMS guidance.
+    const section = getProjectMemorySection(ctx)!
+    expect(section).toContain('Project memory (TMS.md)')
+    expect(section).toContain('No TMS.md found')
+    expect(section).toContain('FINAL CHECKPOINT')
+    expect(section).toContain('CREATE TMS.md')
   })
 })
 

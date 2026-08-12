@@ -30,6 +30,13 @@ export interface ObservedUsage {
    * é a maioria de cada turno, por isso descontá-lo estica muito a quota.
    */
   cachedTokens: number
+  /**
+   * Geração de imagens: custo REAL em USD (input de referência × preço de
+   * input + imagens geradas × preço do escalão reportado). Presente SÓ no
+   * ramo de imagens — aí o billing debita este valor directamente em µ$
+   * (metering 30/70) em vez de precificar tokens.
+   */
+  imageCostUsd?: number
   /** true quando veio do objeto `usage` do provider; false = estimativa. */
   authoritative: boolean
 }
@@ -138,11 +145,13 @@ function parseUsageObject(value: unknown, imagePricing: ImagePricing | undefined
     const inUsd = imagePricing?.input ?? IMAGE_PRICE_USD.input
     return {
       // Imagens de referência = input; imagens geradas = output. Mantém a
-      // separação que o resto do billing já entende (e o desconto de cache
-      // não morde: cachedTokens fica a 0).
+      // separação em tokens-equivalentes para logs/estimativas antigas.
       promptTokens: imageUsdToTokens(inCount * inUsd),
       completionTokens: imageUsdToTokens(outCount * outUsd),
       cachedTokens: 0,
+      // Metering 30/70: o billing debita o custo REAL em µ$ — a conversão
+      // para tokens acima fica só para observabilidade.
+      imageCostUsd: inCount * inUsd + outCount * outUsd,
       // authoritative: contagem e escalão vieram do provider. Não é um
       // palpite sobre bytes — é o que ele diz que gerou.
       authoritative: true,

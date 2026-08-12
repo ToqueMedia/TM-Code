@@ -25,11 +25,17 @@ import {
   autoCompact,
   compactNow,
   resolveOccupancyWithSource,
+  resolveAutoCompactThreshold,
   getCompactPrompt,
   type AutoCompactTrackingState,
   type CompactFn,
 } from "./compact";
-import { applyGlobalToolResultBudget } from "./toolResultGlobalBudget";
+import {
+  applyGlobalToolResultBudget,
+  resolveToolResultBudgetMode,
+  resolveToolResultBudgetTriggerRatio,
+  shouldApplyToolResultBudget,
+} from "./toolResultGlobalBudget";
 import {
   buildRepeatedCallNoteText,
   buildToolLoopNudgeText,
@@ -538,6 +544,61 @@ interface LoopState {
 }
 
 // ── Helpers ──
+
+/**
+ * Tags de raciocínio inline que podem aparecer em `delta.content`.
+ * Ordem irrelevante; o que importa é o comprimento máximo (`</thought>` = 10)
+ * para saber quanto sufixo reter à espera do chunk seguinte.
+ */
+const INLINE_REASONING_TAGS = ["<think>", "<thought>", "</think>", "</thought>"] as const;
+const MAX_INLINE_TAG_LEN = 10; // '</thought>'.length
+
+/**
+ * Sufixo do buffer que ainda PODE vir a ser uma tag quando chegar mais texto.
+ *
+ * Sem isto, uma tag partida entre chunks de SSE (`<thi` + `nk>`) não casa com
+ * nenhum `indexOf` e sai como texto visível. Devolve '' quando não há nada a
+ * reter. Só retém prefixos PRÓPRIOS — uma tag completa é para processar já.
+ */
+export function heldTagFragment(buffered: string): string {
+  const max = Math.min(MAX_INLINE_TAG_LEN - 1, buffered.length);
+  for (let len = max; len >= 1; len--) {
+    const suffix = buffered.slice(buffered.length - len);
+    for (const tag of INLINE_REASONING_TAGS) {
+      if (tag.length > suffix.length && tag.startsWith(suffix)) return suffix;
+    }
+  }
+  return "";
+}
+
+/**
+ * Primeiro fecho de raciocínio SEM abertura correspondente no buffer.
+ *
+ * `openIdx` é a posição da abertura mais próxima (-1 se não houver). Um fecho
+ * só é órfão se vier ANTES dela — caso contrário pertence ao par e é a máquina
+ * de estados que o trata no ramo `thinkMode`.
+ */
+export function earliestOrphanClose(
+  buffered: string,
+  openIdx: number,
+): { idx: number; len: number } | null {
+  const thinkIdx = buffered.indexOf("</think>");
+  const thoughtIdx = buffered.indexOf("</thought>");
+
+  let idx = -1;
+  let len = 0;
+  if (thinkIdx !== -1 && (thoughtIdx === -1 || thinkIdx < thoughtIdx)) {
+    idx = thinkIdx;
+    len = 8;
+  } else if (thoughtIdx !== -1) {
+    idx = thoughtIdx;
+    len = 10;
+  }
+
+  if (idx === -1) return null;
+  if (openIdx !== -1 && openIdx < idx) return null;
+  return { idx, len };
+}
 
 function generateId(): string {
   return `toolu_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
@@ -1312,10 +1373,56 @@ export async function* query(
           budgetLimits.maxOutputTokens ?? null,
         )
       : undefined;
-    const budgetResult = applyGlobalToolResultBudget(
-      messagesForQuery,
-      dynamicBudget ? { budgetTokens: dynamicBudget } : undefined,
-    );
+    // QUANDO corre. DEFEITO: `off` — não se microcompacta (decisão de produto,
+    // 2026-08-07; ver toolResultGlobalBudget.ts para o porquê e para o alcance
+    // da medição que a precedeu). Com janelas de 1M o limiar de compactação
+    // está longe, e aparar a cada pedido só reescreve o prefixo, parte a cache
+    // e obriga a reler. A válvula é a auto-compactação, com a recuperação de
+    // ficheiros/skills a seguir (contextManager.buildPostCompactRecoveryBlock)
+    // — o modelo do cli-vaz, inteiro.
+    // `always`/`trigger` ficam por knob, para janelas pequenas.
+    //
+    // A ocupação e o limiar são os MESMOS objectos que a auto-compactação usa
+    // no passo 4 — de propósito. O que o braço `trigger` testa é a DISTÂNCIA
+    // entre acordar o orçamento e compactar; se cada um resolvesse a sua conta,
+    // a distância deixava de ser conhecida.
+    const budgetMode = resolveToolResultBudgetMode();
+    const occupancyLimits = {
+      contextWindow: budgetLimits?.contextWindow ?? null,
+      maxOutputTokens: budgetLimits?.maxOutputTokens ?? null,
+      realOccupancyTokens: lastTurnRealOccupancy ?? null,
+      realOccupancyMessageCount: lastTurnRealOccupancyMessageCount ?? null,
+    };
+    // A ocupação só se calcula no modo `trigger`: é uma passagem por TODAS as
+    // mensagens, a cada pedido, e os outros dois braços decidem sem ela.
+    const budgetGateOpen =
+      budgetMode === "trigger"
+        ? shouldApplyToolResultBudget({
+            mode: budgetMode,
+            occupancyTokens: resolveOccupancyWithSource(
+              messagesForQuery,
+              0,
+              occupancyLimits,
+            ).tokens,
+            autoCompactThreshold: resolveAutoCompactThreshold(occupancyLimits),
+            triggerRatio: resolveToolResultBudgetTriggerRatio(),
+          })
+        : shouldApplyToolResultBudget({ mode: budgetMode });
+    const budgetResult = budgetGateOpen
+      ? applyGlobalToolResultBudget(
+          messagesForQuery,
+          dynamicBudget ? { budgetTokens: dynamicBudget } : undefined,
+        )
+      : { messages: messagesForQuery, compactedCount: 0, tokensBefore: 0, tokensAfter: 0 };
+    if (!budgetGateOpen) {
+      // O braço que RETEVE tem de deixar rasto. Sem isto, uma corrida com o
+      // gatilho fechado é indistinguível de uma em que o orçamento correu e não
+      // teve nada para aparar — e a diferença entre as duas é a experiência
+      // inteira.
+      console.debug(
+        `[query] global tool-result budget: RETIDO (braço ${budgetMode}) — nada compactado neste pedido`,
+      );
+    }
     if (budgetResult.compactedCount > 0) {
       messagesForQuery = budgetResult.messages;
       console.debug(
@@ -1924,6 +2031,16 @@ export async function* query(
           let buffered = contentBuffer.join("");
           contentBuffer.length = 0;
 
+          // Retém um sufixo que ainda possa vir a ser uma tag. O comentário
+          // acima ("state machine to handle tags spanning multiple chunks")
+          // descrevia isto, mas o buffer era drenado por inteiro a cada chunk:
+          // uma tag partida entre chunks (`<thi` + `nk>`) saía como texto.
+          const held = heldTagFragment(buffered);
+          if (held) {
+            buffered = buffered.slice(0, buffered.length - held.length);
+            contentBuffer.push(held);
+          }
+
           while (buffered.length > 0) {
             if (!thinkMode) {
               // Look for opening <think> or <thought> tag
@@ -1943,6 +2060,35 @@ export async function* query(
               } else if (thoughtOpenIdx !== -1) {
                 openIdx = thoughtOpenIdx;
                 openTagLen = 9;
+              }
+
+              // FECHO ÓRFÃO (auditoria da sessão golive, 2026-08-10)
+              // ──────────────────────────────────────────────────
+              // O qwen3.7-plus manda o raciocínio em `reasoning_content` E
+              // fecha-o com um `</think>` cru em `delta.content`. A abertura
+              // nunca passou por aqui, logo `thinkMode` é false, e
+              // `indexOf("<think>")` NÃO casa com `</think>` (o `<` é seguido
+              // de `/`). Resultado: caía no ramo "all text is safe" e o
+              // `</think>` era emitido para a UI — 14 fugas mais um bloco
+              // `<thinking>` inteiro em 4 das 5 mensagens da sessão.
+              //
+              // `stripInlineReasoning` (completionText.ts) já tratava o fecho
+              // órfão, mas só serve os caminhos NÃO-streaming (commit message,
+              // sumário de compactação, sidecars). O chat — o caminho que o
+              // utilizador vê — tem esta máquina de estados própria, e a
+              // correcção nunca lhe chegou.
+              //
+              // Semântica igual à do strip: o que vem ANTES de um fecho órfão
+              // é raciocínio, não resposta.
+              const orphanClose = earliestOrphanClose(buffered, openIdx);
+              if (orphanClose) {
+                const leaked = buffered.slice(0, orphanClose.idx);
+                if (leaked) {
+                  assistantThinkingParts.push(leaked);
+                  yield { type: "thinking_delta", thinking: leaked };
+                }
+                buffered = buffered.slice(orphanClose.idx + orphanClose.len);
+                continue;
               }
 
               if (openIdx === -1) {
@@ -2096,6 +2242,24 @@ export async function* query(
           }
         }
 
+      }
+
+      // Fragmento de tag retido que nunca chegou a completar-se: o stream
+      // acabou a meio de algo que PARECIA uma tag (`<thi`, `<`) e afinal era
+      // texto. Reter é seguro durante o stream, mas engolir no fim não —
+      // descarrega-o para o lado a que pertence.
+      if (contentBuffer.length > 0) {
+        const tail = contentBuffer.join("");
+        contentBuffer.length = 0;
+        if (tail) {
+          if (thinkMode) {
+            assistantThinkingParts.push(tail);
+            yield { type: "thinking_delta", thinking: tail };
+          } else {
+            assistantTextParts.push(tail);
+            yield { type: "text_delta", text: tail };
+          }
+        }
       }
 
       // Some OpenAI-compatible providers close the stream after tool-call

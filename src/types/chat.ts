@@ -302,6 +302,22 @@ export interface ChatMessage {
    * por rebuildConversationHistory, o sumário primeiro.
    */
   compactRecovery?: string
+  /**
+   * O que a IDE MOSTRAVA no instante da compactação — não o que o agente fez.
+   *
+   * Existe porque um export com 46 pedidos, tokens, janela e fronteiras não
+   * chegou para explicar um "0% livre continuou visível depois de compactar"
+   * (2026-08-07): nada registava a ocupação de que o indicador partia.
+   * `storeCurrentPromptTokens` é o suspeito principal dessa classe de bug —
+   * é um MÁXIMO que o caminho do Chat nunca repõe.
+   */
+  compactUiState?: {
+    sessionLastPromptTokens: number | null
+    sessionPeakPromptTokens: number | null
+    storeCurrentPromptTokens: number
+    byokContextWindow: number | null
+    recoveryChars: number
+  }
   /** Terminal-mode local command result, rendered like a shell command block. */
   terminalCommand?: {
     command: string

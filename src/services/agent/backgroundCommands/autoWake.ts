@@ -22,6 +22,23 @@ export interface BackgroundCommandWake {
   command: string
   status: 'completed' | 'error' | 'cancelled'
   exitCode?: number | null
+  /**
+   * DONO do comando — capturado no ARRANQUE, não lido no fim (2026-08-10).
+   *
+   * Sem isto o wake era agnóstico ao projecto e acordava sempre o que
+   * estivesse aberto: `addSystemMessage` escreve na sessão activa e
+   * `runAgentWithCallbacks` corre no projecto activo com
+   * `useConversationHistory: true`. Reportado — o agente do projecto A pôs um
+   * deploy em background e adormeceu; entretanto o developer abriu B, e quando
+   * o deploy terminou o wake caiu em **B**: o anúncio no chat de B, o histórico
+   * de B, e o agente de B a chamar `check_background_commands` para ler o
+   * output de A.
+   *
+   * O caminho gémeo dos sub-agentes (`subAgents/autoWake.ts`) já roteia por
+   * dono (`pendingDeliveriesByOwner`); este ficou para trás.
+   */
+  ownerProjectPath?: string
+  ownerSessionId?: string
 }
 
 let wakeTimer: ReturnType<typeof setTimeout> | null = null
@@ -160,6 +177,7 @@ function doWake(): void {
   // Anuncia a retoma NO CHAT antes do run arrancar — sem isto o wake corre
   // com addUserMessage:false e a continuação aparece "do nada", lendo como
   // uma tarefa nova a auto-iniciar.
+  const ownerSessionId = commands.find(c => c.ownerSessionId)?.ownerSessionId
   import('../../../stores/chatStore').then(({ useChatStore }) => {
     const msg = decision.reason === 'failure'
       ? t('backgroundWake.resumingFailure')
@@ -168,21 +186,72 @@ function doWake(): void {
       : t('backgroundWake.resuming')
           .replace('{command}', shortCmd)
           .replace('{count}', String(openTasks))
-    useChatStore.getState().addSystemMessage(
-      msg,
-      decision.reason === 'failure' ? 'warn' : 'info',
-    )
+    const chat = useChatStore.getState()
+    // `addSystemMessage` escreve na sessão ACTIVA — o anúncio aterrava no
+    // projecto que o developer tivesse aberto. Com dono conhecido, vai para a
+    // sessão que lançou o comando.
+    if (ownerSessionId && ownerSessionId !== chat.activeSessionId && chat.sessions.has(ownerSessionId)) {
+      // O campo é `level`, não `systemLevel` — a 1ª versão desta correcção
+      // inventou o nome e escondeu o erro atrás de um cast `as never`, o que
+      // teria posto uma mensagem sem nível na sessão dona. Ver o shape real em
+      // chatStore.addSystemMessage.
+      chat.appendMessageToSession(ownerSessionId, {
+        role: 'system',
+        content: msg,
+        level: decision.reason === 'failure' ? 'warn' : 'info',
+      })
+      chat.persistSessionNow(ownerSessionId)
+      return
+    }
+    chat.addSystemMessage(msg, decision.reason === 'failure' ? 'warn' : 'info')
   }).catch(() => { /* announcement is best-effort */ })
 
-  import('../agentRunner').then(({ runAgentWithCallbacks }) => {
-    runAgentWithCallbacks(wakeMessage, {
-      addUserMessage: false,
-      useConversationHistory: true,
-      isBackgroundRun: true,
-    })
-  }).catch((err) => {
-    logger.warn('agent', `Background command auto-wake failed: ${err}`)
-  })
+  // ROTEAMENTO POR DONO — ver BackgroundCommandWake.ownerProjectPath.
+  // `runAgentWithCallbacks` corre no projecto ACTIVO; se o dono do comando é
+  // outro, acordá-lo aqui despejava o wake no projecto errado.
+  const owner = commands.find(c => c.ownerProjectPath)
+  const ownerPath = owner?.ownerProjectPath
+  void (async () => {
+    try {
+      const { useProjectStore } = await import('../../../stores/projectStore')
+      const currentPath = useProjectStore.getState().currentProject?.path
+      const norm = (p?: string) => (p ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
+
+      if (ownerPath && norm(ownerPath) !== norm(currentPath)) {
+        const { addProjectRun } = await import('../parallelTasks/parallelTaskManager')
+        const routed = addProjectRun(
+          { id: ownerPath, path: ownerPath },
+          wakeMessage,
+          owner?.ownerSessionId ? { sessionId: owner.ownerSessionId } : undefined,
+        )
+        logger.info(
+          'agent',
+          `→ Background command wake ROUTED to owner project ${ownerPath} (active is ${currentPath ?? 'none'})`
+          + (routed ? '' : ' — refused (busy/budget); the owner keeps the pending command'),
+        )
+        // Recusado (projecto ocupado ou sem orçamento): NÃO cair no projecto
+        // activo — errar de projecto é pior que atrasar. Mas `doWake` já
+        // esvaziou `pendingCommands` no início, por isso é preciso REPOR os
+        // comandos: sem isso o retry encontrava a fila vazia e o wake
+        // perdia-se em silêncio (defeito da 1ª versão desta correcção).
+        if (!routed) {
+          for (const c of commands) pendingCommands.set(c.id, c)
+          pendingWake = true
+          ensureIdleListener()
+        }
+        return
+      }
+
+      const { runAgentWithCallbacks } = await import('../agentRunner')
+      runAgentWithCallbacks(wakeMessage, {
+        addUserMessage: false,
+        useConversationHistory: true,
+        isBackgroundRun: true,
+      })
+    } catch (err) {
+      logger.warn('agent', `Background command auto-wake failed: ${err}`)
+    }
+  })()
 }
 
 /** Test-only: reset module state between tests. */

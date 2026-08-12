@@ -32,6 +32,7 @@ import {
   defaultExportFilename,
   buildEnvironmentSnapshot,
 } from '../../utils/sessionExport'
+import { captureContextPillState } from '../../services/agent/contextPillState'
 import { useToastStore } from '../../stores/toastStore'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
@@ -175,6 +176,19 @@ export const markdownStyles = {
   },
 }
 
+
+
+/**
+ * Objectos RESPONSIVOS da bolha, içados do render (2026-08-10).
+ *
+ * São dois por mensagem e eram literais novos a cada render — num chat com N
+ * mensagens, 2N objectos que o Chakra tem de percorrer, normalizar e hashear
+ * (`compact$1`/`simpleHash`, no topo do self-time do perfil). São constantes:
+ * não dependem de props nem de estado. `markdownStyles` acima já vivia aqui
+ * pela mesma razão.
+ */
+const BUBBLE_PX = { base: 2, md: 3 } as const
+const BUBBLE_CONTENT_PL = { base: '0px', md: '36px' } as const
 
 function CopyMessageButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
@@ -388,7 +402,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     // fn never throws (failures land in envSnapshot.systemPromptError).
     const envSnapshot = isAdmin ? await buildEnvironmentSnapshot(session) : undefined
     const content = effectiveFormat === 'json'
-      ? sessionToJson(session, { envSnapshot })
+      ? sessionToJson(session, { envSnapshot, contextPillState: captureContextPillState(session) })
       : sessionToMarkdown(session, envSnapshot ? { envSnapshot } : undefined)
     const mimeType = effectiveFormat === 'json' ? 'application/json' : 'text/markdown'
     try {
@@ -522,7 +536,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   return (
     <Box
       py={isUser ? 3 : 4}
-      px={{ base: 2, md: 3 }}
+      px={BUBBLE_PX}
       bg={isUser ? 'rgba(255, 255, 255, 0.025)' : 'transparent'}
       border={isUser ? '1px solid rgba(255, 255, 255, 0.055)' : '1px solid transparent'}
       borderRadius="10px"
@@ -605,7 +619,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       </Flex>
 
       {/* Content area */}
-      <Box pl={{ base: '0px', md: '36px' }}>
+      <Box pl={BUBBLE_CONTENT_PL}>
         {/* No bare "thinking dots" placeholder here on purpose. Whenever this
             branch would fire (streaming, no content/tools yet) the inline
             AgentActivityIndicator below the transcript is ALREADY showing the

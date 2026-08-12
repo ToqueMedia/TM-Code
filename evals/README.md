@@ -130,10 +130,37 @@ Linha de base medida a 2026-08-07 (orçamento 30% da janela, `keepRecent = 4`):
 
 A falha é a parte que interessa: o estrago não é só custo, é resposta errada.
 
+O contador de releituras cobre tool calls com `file_path` **e** comandos de
+shell (`readAccounting.ts`), e atravessa as duas vias. Até 07-08 só via a
+primeira, e uma corrida que lesse oito ficheiros com `tail` era reportada como
+`0 releituras de 0 ficheiros` — indistinguível de uma corrida perfeita. O
+`result` leva agora `shellReads` e `toolsUsed`: **um `distinctFilesRead` a zero
+numa tarefa que exige leituras é cegueira, não limpeza.** `Grep`/`search_files`
+continua sem atribuição possível (não nomeia um ficheiro) — vê-se em
+`toolsUsed`.
+
 `keepRecent` NÃO é a alavanca — subi-lo de 4 para 12 deixou as releituras em 5.
 O que prende é o orçamento em TOKENS: 8 ficheiros de ~1000 linhas são ~80K de
 tool results contra um tecto de ~29,7K, portanto ~63% tem de sair haja o
 `keepRecent` que houver.
+
+### Trocar de braço sem editar código
+
+`EVALS_TOOL_RESULT_BUDGET_MODE` escolhe QUANDO o orçamento corre:
+`always` (defeito, o que está em produção) · `trigger` (só a 75% do limiar de
+compactação, afinável com `EVALS_TOOL_RESULT_BUDGET_TRIGGER_PCT`) · `off` (o
+modelo do cli-vaz, medido como pior).
+
+```bash
+EVALS_TOOL_RESULT_BUDGET_MODE=trigger yarn evals:agent --only context-loss-rereads
+```
+
+É env de BUILD, com a armadilha do costume — mas agora o `result` diz que braço
+correu de facto (`compaction.budgetMode`, impresso na linha do caso). Um export
+cujo `budgetMode` não é o braço que pediste é uma corrida inválida: o vite de
+:1420 estava vivo e serviu o bundle antigo. Um valor desconhecido cai em
+`always` de propósito — um override mal escrito não pode desligar em silêncio o
+único tecto do prompt.
 
 Referências, para contexto: o cli-vaz tem o microcompact DESLIGADO por defeito
 (`enabled: false`) e, ligado, dispara por TEMPO — 60 min sem resposta, quando
@@ -141,14 +168,67 @@ a cache do servidor já expirou de qualquer forma. O grok-build só trunca dentr
 da compactação, como degradação por etapas, e apenas o que sozinho excede o
 orçamento. Nenhum dos dois limpa a cada pedido.
 
+### Deferral de tools: TRÊS probes tentadas, TRÊS sem dentes (2026-08-12)
+
+Não há caso de eval para a deferral de tools nativas. **Não por esquecimento:
+tentaram-se três e o controlo negativo matou as três.** Fica aqui o registo,
+porque a conclusão é sobre o mecanismo, não sobre o harness — e sem isto a
+quarta pessoa tenta a mesma coisa.
+
+O ponto de partida era o do `docs/HANDOFF-CACHE-E-DEFERRAL.md`: uma tool
+diferida perde o schema, e sem anúncio do nome o modelo "não sabe que existe,
+logo nunca a pede". **Essa premissa está ERRADA**, e foi o controlo negativo
+que o mostrou.
+
+| probe | resultado sem o anúncio | porquê |
+|---|---|---|
+| `web_fetch` — título de `example.com`, `yolo:false` | **verde** | chamou `WebFetch` às cegas e acertou |
+| `expectTools: [ToolSearch]` | vermelho SEMPRE (3/3) | o modelo nunca chama o ToolSearch |
+| nomear as tools de worktree | **verde** | descobriu-as com o ToolSearch por palavra-chave |
+
+1. **Diferir não impede executar.** O deferral tira o schema do pedido; a tool
+   continua registada e a chamada às cegas corre (há um teste que o afirma:
+   *"a execução de uma tool diferida continua registada e funcional"*). Com um
+   nome de TREINO — `WebFetch` está em `ADVERTISED_TOOL_NAMES` por ser um nome
+   que o modelo já sabe — ele adivinha-o e acerta nos parâmetros.
+2. **Uma tool não anunciada é DESCOBRÍVEL.** O def do `ToolSearch` é injectado
+   sempre que existam diferidas, e a busca por palavra-chave pontua contra as
+   DESCRIÇÕES. Perguntando por worktrees sem o bloco de anúncio, o modelo
+   escreveu *"deixa-me verificar se existem ferramentas diferidas relacionadas
+   com git worktrees"* e encontrou as duas. Invisível, não é.
+3. **Logo qualquer tarefa do tipo "que ferramentas tens para X" convida a uma
+   busca** e passa nos dois estados. É por construção que estas probes não têm
+   dentes.
+
+**O que o anúncio vale, então** (n=1 por braço, indicativo): com o bloco, 2
+pedidos / 49 548 de input; sem ele, 3 pedidos / 72 823 — **uma ida e volta de
+descoberta a mais**. O ganho é essa ida e volta e a fiabilidade, não a
+existência da capacidade.
+
+Uma probe COM dentes teria de ser uma tarefa onde o modelo **não desconfia**
+de que a capacidade existe (candidata: `capture_url_design` — pedir o aspecto
+VISUAL de uma página; sem anúncio ele resolve com texto e nunca procura um
+screenshot). Precisa de rede e browser, é lenta, e ninguém a mediu ainda.
+
+Entretanto a rede é de testes unitários, em `contextBuilder.test.ts` — os
+nomes entram no prompt estático, e mudar o conjunto invalida a cache. Esses
+foram controlados negativamente e ficam vermelhos (2 de 3) sem o bloco.
+
+**Nenhum caso usa hoje o `expectTools`** (a asserção que o harness ganhou nesta
+tentativa). Ficou porque é a única forma de distinguir "chamou a tool" de
+"disse que ia chamar" — foi ela que mediu o ponto 2 acima. Se daqui a uns meses
+continuar sem utilizador, apagar.
+
 ## Acrescentar um caso
 
 Entrada em `cases.json`: `{ id, project (fixture), task, expect[] (regex,
 case-insensitive, TODAS têm de bater no result.text), expectFiles[]
 (têm de existir na fixture no fim), expectFileContains{ficheiro: [regex]} e
 refuteFileContains{ficheiro: [regex]} (asserções sobre o CONTEÚDO gerado — é
-o que mede qualidade em vez de existência), cleanupFiles[] (apagados antes do
-run), timeoutSec }`. `--only` aceita ids separados por vírgula.
+o que mede qualidade em vez de existência), expectTools[] (tools que TÊM de
+ter sido chamadas; `a|b` = alternativa), yolo (false põe o run em read-only),
+cleanupFiles[] (apagados antes do run), timeoutSec }`. `--only` aceita ids
+separados por vírgula.
 
 **Enunciado NEUTRO nos casos de qualidade.** `ui-screen-react` e
 `ui-page-no-ui-project` NÃO pedem tratamento do estado vazio: se ele aparecer

@@ -330,24 +330,14 @@ describe('AgentService X-TM-Speed header', () => {
     expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'low' })
   })
 
-  it('sends Kimi low/high/max natively; medium falls back to max default', () => {
+  it('Kimi K3 fora do catálogo gerido (11-08): effort deixa de ser enviado', () => {
+    // O Kimi saiu do catálogo gerido a 2026-08-11 — o id já não está no mapa
+    // de effort, portanto o header não sai (o provider usa o default nativo;
+    // BYOK Kimi continua a funcionar, só perde o pré-preenchimento).
     mockActiveModelId = 'kimi-k3'
     mockSelectedEffort = 'low'
-    let headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
-    expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'low' })
-
-    mockSelectedEffort = 'high'
-    headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
-    expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'high' })
-
-    mockSelectedEffort = 'max'
-    headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
-    expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'max' })
-
-    // Preferência legada do Grok (medium) → default Kimi max
-    mockSelectedEffort = 'medium'
-    headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
-    expect(headers).toEqual({ 'X-TM-Persona': 'standard', 'X-TM-Reasoning-Effort': 'max' })
+    const headers = (AgentService.getInstance() as unknown as { buildExtraHeaders: () => Record<string, string> | undefined }).buildExtraHeaders()
+    expect(headers).toEqual({ 'X-TM-Persona': 'standard' })
   })
 
   it('does not send X-TM-Reasoning-Effort for unmapped models', () => {

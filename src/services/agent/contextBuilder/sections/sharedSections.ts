@@ -178,6 +178,38 @@ Skip empty filler and recap of the user's message — don't restate their reques
 Separate distinct actions with a blank line (\`\\n\\n\`). Without it, sentences render as a single concatenated paragraph.`
 }
 
+/**
+ * Tools NATIVAS diferidas — anúncio só pelo NOME.
+ *
+ * Uma tool diferida sai do array de schemas. Sem este bloco ela fica invisível:
+ * o modelo não a pede porque não sabe que existe, e não há erro nenhum a
+ * denunciá-lo. Foi assim que a primeira tentativa de deferral nativa passou a
+ * 5/5 nas evals estando partida (2026-08-12) — o único sítio que anunciava
+ * nomes diferidos era o `sharedMcpBlock`, que lista apenas `mcp__*`.
+ *
+ * NOMES-SÓ, sem descrições, e isto é a decisão inteira da secção. O índice do
+ * executor devolve `{name, description}` porque a descrição alimenta o SCORING
+ * da busca por palavras-chave do ToolSearch (searchDeferredTools) — nunca o
+ * prompt. Imprimi-las aqui anula o ganho: remove-se o schema e mantém-se o
+ * texto, que é a parte grande. Medido na tentativa anterior: −1,4%, dentro do
+ * ruído. O cli-vaz lista `CronCreate CronDelete CronList DesignSync …` e mais
+ * nada — é esse o contrato.
+ *
+ * O nome tem de bastar para o modelo DESCONFIAR que a tool serve. Uma tool
+ * cujo nome não se explica sozinho não é candidata a deferral.
+ */
+export function sharedDeferredToolsBlock(names: string[]): string | null {
+  if (!names || names.length === 0) return null
+  // Ordenado: a chave de cache do prompt ordena os mesmos nomes, e as duas
+  // ordens têm de coincidir ou o prompt muda sem a chave mudar.
+  const list = names.slice().sort().join('\n')
+  return `# Deferred tools
+
+The tools below exist but their schemas are NOT loaded — calling one directly fails. Fetch the schemas you need with \`ToolSearch\` (\`{ query: "select:Name" }\`, comma-separated for several, or keywords), then call them normally. Fetch everything you expect to need in ONE call: each fetch is a cache break, and one call costs the same as one.
+
+${list}`
+}
+
 export function sharedMcpBlock(mcpTools: MCPToolSummary[], actor: string): string | null {
   if (!mcpTools || mcpTools.length === 0) return null
   // Descrições orçamentadas: são texto de terceiros (o servidor MCP escreve-o,

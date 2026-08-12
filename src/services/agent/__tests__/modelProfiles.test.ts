@@ -11,6 +11,9 @@ import {
 // Swap 2026-08-07: o MiMo V2.5 Pro (que sobreviveu ao anterior e era o default)
 // saiu de vez; entrou o qwen3.7-plus como modelo de código; o default passou ao
 // glm-5.2 — a config ATIVA em produção e o perfil mais conservador do catálogo.
+// Swap 2026-08-11 (metering 30/70): Kimi K3 saiu do catálogo gerido (Moonshot
+// directo E gateway); o Grok 4.5 volta a ser x.AI directo — o alias
+// 'xai/grok-4.5' do gateway saiu com ele.
 describe('modelProfiles', () => {
   describe('MODEL_PROFILES registry', () => {
     it('contains the expected model + alias keys', () => {
@@ -22,14 +25,10 @@ describe('modelProfiles', () => {
       expect(MODEL_PROFILES['glm-5']).toBe(MODEL_PROFILES['glm-5.2'])
       expect(ids).toContain('qwen3.8-max')
       expect(ids).toContain('qwen3.7-plus')
-      // Grok 4.5 + aliases (incl. o id author/model do Cloudflare AI Gateway).
+      // Grok 4.5 (x.AI directo desde 2026-08-11) + aliases documentados.
       expect(ids).toContain('grok-4.5')
-      expect(MODEL_PROFILES['xai/grok-4.5']).toBe(MODEL_PROFILES['grok-4.5'])
       expect(MODEL_PROFILES['grok-4.5-latest']).toBe(MODEL_PROFILES['grok-4.5'])
       expect(MODEL_PROFILES['grok-build-latest']).toBe(MODEL_PROFILES['grok-4.5'])
-      // Kimi K3 — Moonshot directo e via Cloudflare AI Gateway.
-      expect(ids).toContain('kimi-k3')
-      expect(MODEL_PROFILES['moonshotai/kimi-k3']).toBe(MODEL_PROFILES['kimi-k3'])
     })
 
     it('removed models are gone from the registry', () => {
@@ -42,6 +41,11 @@ describe('modelProfiles', () => {
       // o X-TM-Model reportava (o alias sem sufixo -1m).
       expect(ids).not.toContain('mimo-v2.5-pro-1m')
       expect(ids).not.toContain('mimo-v2.5-pro')
+      // Kimi K3 (Moonshot directo e gateway) e o alias gateway do Grok saíram
+      // a 2026-08-11 — o Grok mantém-se só pela via x.AI directa.
+      expect(ids).not.toContain('kimi-k3')
+      expect(ids).not.toContain('moonshotai/kimi-k3')
+      expect(ids).not.toContain('xai/grok-4.5')
     })
 
     it('qwen3.7-plus has native vision and search, boolean-hybrid thinking', () => {
@@ -89,14 +93,6 @@ describe('modelProfiles', () => {
       expect(qwen.supportsSearch).toBe(true)
     })
 
-    it('kimi-k3 has 1M context and mandatory (always-on) thinking', () => {
-      const kimi = MODEL_PROFILES['kimi-k3']
-      expect(kimi.modelId).toBe('kimi-k3')
-      expect(kimi.contextWindow).toBe(1_048_576)
-      expect(kimi.thinkingMode).toBe('mandatory')
-      expect(kimi.thinkingMandatory).toBe(true)
-      expect(kimi.supportsThinking).toBe(true)
-    })
   })
 
   describe('getModelProfile', () => {

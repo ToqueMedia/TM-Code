@@ -24,6 +24,7 @@ commands.allow = [
   "file_signature",
   "file_stat",
   "read_file_with_signature",
+  "read_file_range_with_signature",
   "path_exists",
   "has_database_file",
   "write_file",

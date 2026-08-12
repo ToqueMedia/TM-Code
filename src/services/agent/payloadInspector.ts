@@ -544,6 +544,78 @@ export function inspectPayload(
       continue
     }
 
+    // role:assistant — os tool_calls e o raciocínio viajam no ENVELOPE da
+    // mensagem no formato OpenAI (`msg.tool_calls`, `msg.reasoning_content`),
+    // NÃO como blocos de `content`. Percorrer só o `content` reportava
+    // tool_call=0 e thinking=0 em todos os pedidos.
+    //
+    // Não era cosmético: os argumentos de um `Write` de ficheiro inteiro são
+    // dos maiores objectos do histórico e ficavam invisíveis. Na sessão golive
+    // (2026-08-10) o erro do estimador foi de −3.190 no turno 1 para +25.978
+    // no turno 45 — a barra de contexto mostrava menos 26% do que a realidade.
+    //
+    // ÂMBITO: isto é observabilidade, não decisão. Quem decide compactar é
+    // `tokenCountWithEstimation` (compact/autoCompact.ts), que percorre a
+    // representação INTERNA — onde os tool calls SÃO blocos de content — e já
+    // os conta desde a auditoria que lhe pôs o ramo `block.type === 'tool_call'`.
+    // O defeito era só aqui porque este inspector percorre o formato de FIO
+    // (OpenAI), onde os mesmos tool calls viajam no envelope. Dois estimadores,
+    // duas representações, e a correcção só tinha chegado a um deles.
+    // O envelope só se conta quando o `content` NÃO traz já os mesmos blocos.
+    // As duas representações são mutuamente exclusivas na prática — o formato
+    // de fio usa envelope, o interno usa blocos — mas contar as duas somaria a
+    // dobrar exactamente o número que esta correcção existe para acertar.
+    // A sessão BYOK/MiMo (2026-08-10) confirma o ramo de blocos vivo: 47
+    // blocos `tool_call` em `content`, com `toolCall` já não-zero antes daqui.
+    const contentBlocks = Array.isArray(msg.content) ? (msg.content as AnyMessage[]) : []
+    const contentHasToolCallBlocks = contentBlocks.some(b => b?.type === 'tool_call')
+    const contentHasThinkingBlocks = contentBlocks.some(b => b?.type === 'thinking')
+
+    if (role === 'assistant') {
+      const toolCalls = contentHasToolCallBlocks || !Array.isArray(msg.tool_calls)
+        ? []
+        : (msg.tool_calls as AnyMessage[])
+      for (const tc of toolCalls) {
+        // O custo real é o objecto serializado (id + type + name + arguments),
+        // que é o que vai no corpo — não só os argumentos.
+        const text = JSON.stringify(tc ?? {})
+        const fn = (tc?.function ?? {}) as AnyMessage
+        blocks.push({
+          messageIndex: i,
+          role,
+          kind: 'tool_call',
+          tokens: roughTokenEstimate(text),
+          chars: text.length,
+          hash: fnv1aHex(text),
+          preview: previewOf(text),
+          toolCallId: tc?.id as string | undefined,
+          toolName: fn?.name as string | undefined,
+        })
+        tally('tool_call', text.length)
+      }
+
+      // O raciocínio volta ao provider no round-trip nativo (ver
+      // nativeAssistantMessage em query.ts) — logo ocupa contexto e paga.
+      const reasoningParts: string[] = []
+      if (!contentHasThinkingBlocks) {
+        if (typeof msg.reasoning_content === 'string') reasoningParts.push(msg.reasoning_content)
+        if (Array.isArray(msg.reasoning_details)) reasoningParts.push(JSON.stringify(msg.reasoning_details))
+      }
+      for (const part of reasoningParts) {
+        if (!part) continue
+        blocks.push({
+          messageIndex: i,
+          role,
+          kind: 'thinking',
+          tokens: roughTokenEstimate(part),
+          chars: part.length,
+          hash: fnv1aHex(part),
+          preview: previewOf(part),
+        })
+        tally('thinking', part.length)
+      }
+    }
+
     // role:user or role:assistant — content can be string or array of parts
     const content = msg.content
     if (typeof content === 'string' || content === null || content === undefined) {

@@ -134,15 +134,33 @@ export function usePromptBar() {
   // sessão: depois de uma micro-compactação o envio ficava bloqueado com o
   // contexto já folgado. `maxOutputTokens` também faltava, pelo que os dois
   // usavam denominadores diferentes (auditoria 05-08).
+  // `??` e NÃO `> 0` (2026-08-10). Este era o GÉMEO que não recebeu a
+  // correcção que o `ContextWindowIndicator` levou — e que o comentário dele
+  // descreve literalmente como "`??` e NÃO `> 0`".
+  //
+  // Um zero aqui é LEGÍTIMO: a compactação repõe `lastPromptTokens` a 0, e uma
+  // sessão acabada de criar também tem 0. Com o teste `> 0`, esse zero era
+  // lido como "sem valor" e caía-se em `s.currentPromptTokens` — um MÁXIMO
+  // CORRENTE ao nível do STORE, que atravessa sessões E projectos.
+  //
+  // Medido na sessão de 2026-08-10 17:12: ocupação real da sessão 125 742,
+  // `currentPromptTokens` do store 204 436 — mais do que a janela INTEIRA de
+  // 200 000, porque vinha de outra conversa. Com esse valor, o portão de envio
+  // recusa um prompt com 40 000 tokens de folga, e o indicador oscila entre
+  // "0% livre" e escondido conforme o `lastPromptTokens` da sessão passa por
+  // zero. É o "fica parado no 0% e por vezes desaparece e reaparece".
+  //
+  // Sem valor scoped à sessão, 0 é a resposta CORRECTA e não uma aproximação:
+  // uma sessão sem turno registado tem mesmo ocupação zero.
   const currentPromptTokens = useChatStore(s => {
-    if (!s.activeSessionId) return s.currentPromptTokens
-    const persisted = s.sessions.get(s.activeSessionId)?.lastPromptTokens ?? 0
-    return persisted > 0 ? persisted : s.currentPromptTokens
+    if (!s.activeSessionId) return 0
+    const persisted = s.sessions.get(s.activeSessionId)?.lastPromptTokens
+    return typeof persisted === 'number' ? persisted : 0
   })
   const currentResponseTokens = useChatStore(s => {
-    if (!s.activeSessionId) return s.currentResponseTokens
-    const persisted = s.sessions.get(s.activeSessionId)?.lastResponseTokens ?? 0
-    return persisted > 0 ? persisted : s.currentResponseTokens
+    if (!s.activeSessionId) return 0
+    const persisted = s.sessions.get(s.activeSessionId)?.lastResponseTokens
+    return typeof persisted === 'number' ? persisted : 0
   })
   const headerContextWindow = useAgentStore(s => s.modelContextWindow)
   const modelMaxOutputTokens = useAgentStore(s => s.modelMaxOutputTokens)

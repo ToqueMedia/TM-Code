@@ -3,7 +3,18 @@
  * agents (F2/F3: one agent per project, several projects in this window).
  *
  * Each row: project monogram · task title · status · Stop.
- * Reads parallelTaskStore only.
+ *
+ * MOSTRA OS OUTROS PROJECTOS, NÃO O ACTUAL (2026-08-10)
+ * ────────────────────────────────────────────────────
+ * Listava TODOS os runs, incluindo o do projecto aberto — e esse já está
+ * representado no `AgentActivityIndicator`, a faixa "Tarefa paralela a
+ * trabalhar" imediatamente acima do composer, com o seu próprio Stop.
+ * Resultado: aberto o projecto B, o painel anunciava "B a correr em paralelo"
+ * logo abaixo de uma faixa que já dizia o mesmo — enquanto o projecto A, que
+ * era o que estava mesmo a correr em paralelo, não aparecia em lado nenhum.
+ *
+ * A regra passa a ser posicional: este painel é sobre o que está a acontecer
+ * FORA da vista actual. Em B mostra A; ao mudar para A mostra B.
  */
 
 import { memo, useMemo } from 'react'
@@ -18,6 +29,8 @@ import {
   type ParallelTaskStatus,
 } from '@/stores/parallelTaskStore'
 import { openParallelTaskChat } from '@/hooks/useParallelTaskRows'
+import { useProjectStore } from '@/stores/projectStore'
+import { normalizeProjectPath } from '@/services/agent/parallelTasks/parallelTaskManager'
 
 const pulseCss = {
   animation: 'ptSpin 0.85s linear infinite',
@@ -182,12 +195,20 @@ function TaskRow({ run }: { run: ParallelTaskRun }) {
 
 function ParallelTasksDock() {
   const runs = useParallelTaskStore((s) => s.runs)
-  const abortAll = useParallelTaskStore((s) => s.abortAll)
+  const abortOne = useParallelTaskStore((s) => s.abort)
   const clearFinished = useParallelTaskStore((s) => s.clearFinished)
+  const currentProjectPath = useProjectStore((s) => s.currentProject?.path)
 
   const list = useMemo(
-    () => Array.from(runs.values()).sort((a, b) => a.createdAt - b.createdAt),
-    [runs],
+    () =>
+      Array.from(runs.values())
+        // Fora o projecto aberto: um run SEM projectPath pertence ao actual
+        // por construção (foi criado a partir do composer desta vista), logo
+        // também sai. Ver a nota no topo do ficheiro.
+        .filter((r) => !!r.projectPath
+          && normalizeProjectPath(r.projectPath) !== normalizeProjectPath(currentProjectPath))
+        .sort((a, b) => a.createdAt - b.createdAt),
+    [runs, currentProjectPath],
   )
   if (list.length === 0) return null
 
@@ -250,7 +271,10 @@ function ParallelTasksDock() {
             bg="rgba(248, 81, 73, 0.1)"
             border="1px solid rgba(248, 81, 73, 0.28)"
             _hover={{ bg: 'rgba(248, 81, 73, 0.18)' }}
-            onClick={() => abortAll()}
+            // Só o que está LISTADO. `abortAll()` matava também o run do
+            // projecto ABERTO, que desde o filtro já não aparece aqui — um
+            // "Parar todos" que mata o que não se vê.
+            onClick={() => { for (const r of list) if (r.status === 'running' || r.status === 'queued') abortOne(r.id) }}
           >
             <FiSquare size={9} fill="currentColor" />
             {t('parallel.stopAll')}

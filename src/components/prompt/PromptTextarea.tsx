@@ -74,15 +74,48 @@ function PromptTextarea({ textareaRef, onChange, onKeyDown, onBlur, onPaste, dis
   // as its dep; moving it here keeps the resize work co-located with the
   // value subscription, and stops the parent hook from needing the
   // reactive input read in the first place.
+  // Comprimento do valor da passagem ANTERIOR. Só serve para saber se o texto
+  // pode ter ENCOLHIDO — ver a nota do reset no efeito abaixo.
+  const prevLenRef = useRef(0)
+
   useLayoutEffect(() => {
     const ta = textareaRef.current
     const ov = overlayRef.current
     if (!ta) return
-    // Height first — auto + scrollHeight measure, then transform sync so the
-    // overlay tracks any new scrollTop the browser set after the height change.
-    ta.style.height = 'auto'
     const maxHeight = 7 * 23
-    ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`
+    const encolheu = value.length < prevLenRef.current
+    prevLenRef.current = value.length
+
+    // O RESET PARA `auto` SÓ É PRECISO PARA ENCOLHER — e é ele que custa.
+    //
+    // A sequência antiga corria em TODAS as teclas: escrever `height:auto`
+    // (invalida o layout) → ler `scrollHeight` (força um layout SÍNCRONO) →
+    // escrever a altura (invalida outra vez). Dois flushes por caracter, com
+    // o custo a crescer com o tamanho do prompt. Era o `PromptTextarea` a
+    // 10,4% de self-time no perfil de 2026-08-11.
+    //
+    // A assimetria que o evita: `scrollHeight` é a altura do CONTEÚDO e pode
+    // exceder a altura fixada, portanto a caixa cresce sem precisar de reset.
+    // Só o caminho inverso precisa — com a altura fixada em H, um conteúdo que
+    // passe a caber em menos do que H continua a reportar `scrollHeight === H`
+    // (nunca é menor que o clientHeight) e a caixa ficaria presa em H.
+    //
+    // A digitação normal é ADITIVA, logo a esmagadora maioria das teclas deixa
+    // de pagar o reset. Apagar volta a pagá-lo, que é quando é preciso.
+    //
+    // Usa-se o comprimento e não o conteúdo porque é a única pergunta que
+    // interessa ("pode ter ficado mais curto?") e é O(1). Um caso em que o
+    // texto encurta e MESMO ASSIM precisa de mais altura — apagar um espaço e
+    // fazer uma palavra longa mudar de linha — cai no ramo do reset na mesma,
+    // porque encolher em chars é a condição, não encolher em altura.
+    if (encolheu) ta.style.height = 'auto'
+
+    const alvo = Math.min(ta.scrollHeight, maxHeight)
+    // Escrita CONDICIONAL: reescrever a mesma altura invalida o layout à toa.
+    // No estado estacionário (prompt no tecto dos 7 rows, ou de uma só linha)
+    // isto passa a não escrever nada.
+    if (ta.style.height !== `${alvo}px`) ta.style.height = `${alvo}px`
+
     if (ov) {
       ov.style.transform = `translateY(-${ta.scrollTop}px)`
     }

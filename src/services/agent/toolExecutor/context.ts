@@ -25,7 +25,11 @@ export interface ReadTimestamp {
  */
 export interface ToolRegistrationContext {
   // ── Tool map (shared mutable) ──────────────────────────────────────
-  tools: Map<string, { definition: { name: string; description: string; input_schema: Record<string, unknown>; concurrencySafe?: boolean; passive?: boolean }; execute: (input: Record<string, unknown>) => Promise<string> }>
+  /** `deferred` está aqui para os módulos de ops poderem marcar as SUAS —
+   *  sem o campo no tipo, uma tool registada fora do toolExecutor.ts não tem
+   *  como se diferir. Ver sharedDeferredToolsBlock: diferir sem anunciar o
+   *  nome torna a tool invisível, não barata. */
+  tools: Map<string, { definition: { name: string; description: string; input_schema: Record<string, unknown>; concurrencySafe?: boolean; passive?: boolean }; execute: (input: Record<string, unknown>) => Promise<string>; deferred?: boolean }>
 
   // ── Project root ───────────────────────────────────────────────────
   getProjectRoot(): string

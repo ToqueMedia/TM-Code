@@ -100,10 +100,29 @@ export interface ContextWindowCandidates {
   /** Janela publicada pelo admin para a persona escolhida — vale antes da 1ª
    *  resposta, quando ainda não há header. */
   personaContextWindow?: number | null
+  /**
+   * Último `X-Model-Context-Window` visto PARA ESTA CONFIG (provider+modelo),
+   * lembrado entre arranques.
+   *
+   * PORQUÊ (2026-08-10): a tabela de perfis é indexada pelo ID DO MODELO, e o
+   * mesmo modelo é servido por vários provedores com janelas diferentes — o
+   * glm-5.2 vem do z.AI, do DashScope e do Cloudflare Workers AI (262.144).
+   * Um único `contextWindow` no perfil não pode ser verdade para os três.
+   *
+   * Antes da 1ª resposta de cada arranque não há header, e o perfil ganhava:
+   * o IDE calculava limiar 931.000 onde o correcto era 229.144, e o portão de
+   * envio do composer deixava passar um prompt que só podia voltar em
+   * `prompt_too_long`. Esta memória é o que o servidor JÁ DISSE sobre esta
+   * config exacta — mais fiável que uma tabela por modelo, menos que a persona
+   * publicada agora pelo admin (que pode reflectir uma troca de provedor).
+   */
+  learnedContextWindow?: number | null
   /** Janela do perfil do modelo conhecido (tabela local). */
   profileContextWindow?: number | null
   /** Tecto de output servido; e o do perfil como recurso. */
   headerMaxOutputTokens?: number | null
+  /** Último `X-Model-Max-Output-Tokens` visto para esta config. */
+  learnedMaxOutputTokens?: number | null
   profileMaxOutputTokens?: number | null
 }
 
@@ -122,10 +141,12 @@ export function resolveContextWindow(
       positive(candidates.byokContextWindow) ??
       positive(candidates.headerContextWindow) ??
       positive(candidates.personaContextWindow) ??
+      positive(candidates.learnedContextWindow) ??
       positive(candidates.profileContextWindow) ??
       FALLBACK_CONTEXT_WINDOW,
     maxOutputTokens:
       positive(candidates.headerMaxOutputTokens) ??
+      positive(candidates.learnedMaxOutputTokens) ??
       positive(candidates.profileMaxOutputTokens) ??
       null,
   }

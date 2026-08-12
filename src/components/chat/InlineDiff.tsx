@@ -24,6 +24,74 @@ interface DiffLine {
   sourceLineIdx: number
 }
 
+/**
+ * Estilos CONSTANTES da linha de diff, içados para fora do render (2026-08-10).
+ *
+ * PORQUÊ (perfil do Web Inspector, 12,7s / 1.952 amostras)
+ * ───────────────────────────────────────────────────────
+ * 96,2% das amostras dentro de `react-dom`, **61,5% dentro do motor de estilos
+ * do Chakra** — `get` 12,7% de self-time, mais `simpleHash` 2,4%, `compact$1`
+ * 2,2%, `serializeStyles` 1,8%, `createStringFromObject` 1,8%. O nosso próprio
+ * código nem chega aos 2%: o travamento a escrever no composer durante um run
+ * é o Chakra a re-serializar estilos, não markdown nem realce de sintaxe.
+ *
+ * Cada linha de diff monta 8 componentes Chakra. Com os props inline, TODOS os
+ * objectos de estilo são literais novos a cada render, portanto o Chakra falha
+ * a cache e recalcula a chave para cada um. Os dois objectos RESPONSIVOS
+ * (`pr` e `fontSize` do conteúdo) são os piores: são percorridos e hasheados
+ * por linha, por render.
+ *
+ * Içar não muda um pixel — os valores são idênticos e o CSS gerado é o mesmo.
+ * Só o que é CONSTANTE sobe; tudo o que depende de `line.type` (fundos, cores,
+ * bordas, boxShadow) fica inline, senão congelava no primeiro valor.
+ */
+const DIFF_ROW_STYLE = {
+  minH: '21px',
+  display: 'grid',
+  gridTemplateColumns: '44px 44px 22px minmax(0, 1fr)',
+  minW: 0,
+} as const
+
+const DIFF_GUTTER_STYLE = {
+  minH: '21px',
+  display: 'flex',
+  justifyContent: 'flex-end',
+  alignItems: 'flex-start',
+  pt: '2px',
+  pr: '10px',
+  userSelect: 'none',
+} as const
+
+const DIFF_GUTTER_TEXT_STYLE = {
+  fontSize: '10px',
+  lineHeight: '21px',
+  whiteSpace: 'nowrap',
+} as const
+
+const DIFF_PREFIX_CELL_STYLE = {
+  minH: '21px',
+  justify: 'center',
+  align: 'flex-start',
+  pt: '2px',
+  userSelect: 'none',
+} as const
+
+const DIFF_PREFIX_TEXT_STYLE = {
+  fontSize: '11px',
+  lineHeight: '21px',
+  fontWeight: '700',
+} as const
+
+/** Os dois objectos responsivos vivem AQUI — eram recriados por linha/render. */
+const DIFF_CONTENT_STYLE = {
+  minW: 0,
+  pr: { base: 3, md: 4 },
+  whiteSpace: 'pre-wrap',
+  overflowWrap: 'anywhere',
+  fontSize: { base: '11.5px', md: '12px' },
+  lineHeight: '21px',
+} as const
+
 function InlineDiff({
   filePath,
   oldContent,
@@ -366,68 +434,41 @@ function InlineDiff({
                   <Box
                     key={`${line.type}-${line.oldNum ?? 'n'}-${line.newNum ?? 'n'}`}
                     data-diff-row
+                    {...DIFF_ROW_STYLE}
                     bg={bg}
-                    minH="21px"
-                    display="grid"
-                    gridTemplateColumns="44px 44px 22px minmax(0, 1fr)"
-                    minW={0}
                     boxShadow={line.type === 'added'
                       ? 'inset 2px 0 0 rgba(46, 160, 67, 0.58)'
                       : line.type === 'removed'
                         ? 'inset 2px 0 0 rgba(248, 81, 73, 0.58)'
                         : 'none'}
                   >
-                    <Box
-                      minH="21px"
-                      display="flex"
-                      justifyContent="flex-end"
-                      alignItems="flex-start"
-                      pt="2px"
-                      pr="10px"
-                      bg={gutterBg}
-                      userSelect="none"
-                    >
-                      <Text fontSize="10px" lineHeight="21px" color={gutterTextColor} whiteSpace="nowrap">
+                    <Box {...DIFF_GUTTER_STYLE} bg={gutterBg}>
+                      <Text {...DIFF_GUTTER_TEXT_STYLE} color={gutterTextColor}>
                         {line.oldNum ?? ''}
                       </Text>
                     </Box>
                     <Box
-                      minH="21px"
-                      display="flex"
-                      justifyContent="flex-end"
-                      alignItems="flex-start"
-                      pt="2px"
-                      pr="10px"
+                      {...DIFF_GUTTER_STYLE}
                       bg={gutterBg}
                       borderRight={`1px solid ${gutterBorder}`}
-                      userSelect="none"
                     >
-                      <Text fontSize="10px" lineHeight="21px" color={gutterTextColor} whiteSpace="nowrap">
+                      <Text {...DIFF_GUTTER_TEXT_STYLE} color={gutterTextColor}>
                         {line.newNum ?? ''}
                       </Text>
                     </Box>
-                    <Flex minH="21px" justify="center" align="flex-start" pt="2px" userSelect="none">
+                    <Flex {...DIFF_PREFIX_CELL_STYLE}>
                       <Text
-                        fontSize="11px"
-                        lineHeight="21px"
+                        {...DIFF_PREFIX_TEXT_STYLE}
                         color={line.type === 'added'
                           ? tokens.colors.diff.addedText
                           : line.type === 'removed'
                             ? tokens.colors.diff.removedText
                             : 'transparent'}
-                        fontWeight="700"
                       >
                         {prefixChar}
                       </Text>
                     </Flex>
-                    <Box
-                      minW={0}
-                      pr={{ base: 3, md: 4 }}
-                      whiteSpace="pre-wrap"
-                      overflowWrap="anywhere"
-                      fontSize={{ base: '11.5px', md: '12px' }}
-                      lineHeight="21px"
-                    >
+                    <Box {...DIFF_CONTENT_STYLE}>
                       {lineTokens.map((token, ti) => (
                         <span key={ti} style={{ color: token.color }}>
                           {token.text}

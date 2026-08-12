@@ -1107,8 +1107,9 @@ test('billing: budget headers carry the pre-flight state', async () => {
   assert.equal(res.status, 200)
   assert.equal(res.headers.get('x-plan'), 'explorer')
   assert.equal(res.headers.get('x-budget-status'), 'allowed_warning')
-  assert.equal(res.headers.get('x-tokens-consumed'), '1250000')
-  assert.equal(res.headers.get('x-extra-tokens'), '7000')
+  assert.equal(res.headers.get('x-budget-unit'), 'tokens') // explorer mantém tokens
+  assert.equal(res.headers.get('x-budget-consumed'), '1250000')
+  assert.equal(res.headers.get('x-extra-balance'), '7000')
   assert.equal(res.headers.get('x-cycle-end'), '2026-12-31')
   assert.ok(Math.abs(parseFloat(res.headers.get('x-budget-pct') ?? '0') - 1_250_000 / 1_500_000) < 0.001)
 })
@@ -1299,7 +1300,7 @@ test('billing: the streamed bytes reaching the client are identical with usage c
   assert.equal(await res.text(), chunks.join(''))
 })
 
-test('billing: TM Speed served applies the 3x multiplier server-side', async () => {
+test('billing: TM Speed served NÃO multiplica a cobrança (30/70 — custo real)', async () => {
   const { tasks, ctx } = collectorCtx()
   const upstreamResponse = () => sseUpstream([USAGE_CHUNK])
   const fetcher = {
@@ -1334,14 +1335,17 @@ test('billing: TM Speed served applies the 3x multiplier server-side', async () 
   const commits = fetcher.firestoreCalls.filter(c => c.method === 'POST')
   assert.equal(commits.length, 1)
   const transforms = commits[0].body.writes[0].transform.fieldTransforms
-  assert.equal(transforms[0].increment.integerValue, '450') // (100+50) × 3
+  // 30/70: o speed já NÃO multiplica — comita-se o custo real do modelo que
+  // serviu. A config de teste ('mimo') cai no fallback conservador
+  // ($2/$0.30/$6 por M): 100×2 + 50×6 = 500 µ$, em costConsumed (pro = µ$).
+  assert.equal(transforms[0].fieldPath, 'tokenBudget.costConsumed')
+  assert.equal(transforms[0].increment.integerValue, '500')
 })
 
-test('billing: persona costMultiplier applies server-side ((100+50)×2)', async () => {
-  // Espelho do teste do Speed 3× acima: persona expert com costMultiplier 2
-  // via env fallback → commit = (100 prompt + 50 completion) × 2 = 300. O
-  // desconto de cache entraria ANTES do multiplicador (billableTokenTotal),
-  // por isso cache paga 50% do valor do admin — coberto em cacheBilling.test.
+test('billing: persona costMultiplier é IGNORADO (30/70 — persona só escolhe o modelo)', async () => {
+  // Espelho do teste do Speed acima: persona expert publicada com
+  // costMultiplier 2 — o campo deixou de existir no billing (2026-08-11).
+  // O commit é o custo real do modelo servido, com ou sem multiplicador.
   const { tasks, ctx } = collectorCtx()
   const upstreamResponse = () => sseUpstream([USAGE_CHUNK])
   const fetcher = {
@@ -1373,9 +1377,7 @@ test('billing: persona costMultiplier applies server-side ((100+50)×2)', async 
     },
     body: JSON.stringify({ stream: true }),
   })
-  // Multiplicador via KV (como em produção: UI→control-plane→KV). Configs de
-  // ENV fallback têm o costMultiplier REMOVIDO pelo worker (decisão 05-08:
-  // consumo não é mutável por env) — testado logo abaixo.
+  // costMultiplier via KV (como vinha de produção) — agora ignorado.
   const res = await handleRequest(
     req,
     kvEnv({ 'persona:expert': JSON.stringify({ ...activeConfig, model: 'expert-model', costMultiplier: 2 }) }),
@@ -1388,7 +1390,9 @@ test('billing: persona costMultiplier applies server-side ((100+50)×2)', async 
   const commits = fetcher.firestoreCalls.filter(c => c.method === 'POST')
   assert.equal(commits.length, 1)
   const transforms = commits[0].body.writes[0].transform.fieldTransforms
-  assert.equal(transforms[0].increment.integerValue, '300') // (100+50) × 2
+  // 500 µ$ (100×2 + 50×6 no fallback) — NÃO 300×2: o multiplicador morreu.
+  assert.equal(transforms[0].fieldPath, 'tokenBudget.costConsumed')
+  assert.equal(transforms[0].increment.integerValue, '500')
 })
 
 test('billing: overage commit decrements extraUsageBalance and floors it at 0', async () => {
@@ -1920,12 +1924,13 @@ test('image: fatura POR IMAGEM (o usage não traz tokens nenhuns)', async () => 
   const commits = fetcher.firestoreCalls.filter(c => c.method === 'POST')
   assert.equal(commits.length, 1)
   const transforms = commits[0].body.writes[0].transform.fieldTransforms
-  // 2 imagens no escalão 2K, ao preço oficial. Sem este ramo o observador caía
-  // na estimativa por bytes e cobrava o PESO DO JSON (~150 tokens) por duas
-  // imagens que custam $0,15 reais.
+  // 30/70: imagens debitam o custo REAL em µ$ — 2 imagens 2K × $0,075 = $0,15
+  // = 150 000 µ$, em costConsumed (plan pro = µ$). Sem o ramo de imagens o
+  // observador caía na estimativa por bytes e cobrava o peso do JSON.
+  assert.equal(transforms[0].fieldPath, 'tokenBudget.costConsumed')
   assert.equal(
     transforms[0].increment.integerValue,
-    String(imageUsdToTokens(2 * IMAGE_PRICE_USD.output2k)),
+    String(Math.ceil(2 * IMAGE_PRICE_USD.output2k * 1_000_000)),
   )
 })
 
@@ -1964,10 +1969,11 @@ test('image: o escalão 1K custa quase METADE do 2K (o preço vem da resposta)',
     return commit.body.writes[0].transform.fieldTransforms[0].increment.integerValue
   }
 
-  assert.equal(await runTier('qima_output_1k'), String(imageUsdToTokens(IMAGE_PRICE_USD.output1k)))
-  assert.equal(await runTier('qima_output_2k'), String(imageUsdToTokens(IMAGE_PRICE_USD.output2k)))
+  const micros = (usd: number) => String(Math.ceil(usd * 1_000_000))
+  assert.equal(await runTier('qima_output_1k'), micros(IMAGE_PRICE_USD.output1k))
+  assert.equal(await runTier('qima_output_2k'), micros(IMAGE_PRICE_USD.output2k))
   // Escalão que a Alibaba renomeie não pode virar desconto silencioso.
-  assert.equal(await runTier('inventado'), String(imageUsdToTokens(IMAGE_PRICE_USD.output2k)))
+  assert.equal(await runTier('inventado'), micros(IMAGE_PRICE_USD.output2k))
 })
 
 test('image: config sem imagePricing cai no rate card embutido, não em quase-zero', async () => {
@@ -2002,7 +2008,7 @@ test('image: config sem imagePricing cai no rate card embutido, não em quase-ze
 
   const commits = fetcher.firestoreCalls.filter(c => c.method === 'POST')
   const transforms = commits[0].body.writes[0].transform.fieldTransforms
-  assert.equal(transforms[0].increment.integerValue, String(imageUsdToTokens(IMAGE_PRICE_USD.output2k)))
+  assert.equal(transforms[0].increment.integerValue, String(Math.ceil(IMAGE_PRICE_USD.output2k * 1_000_000)))
 })
 
 test('sidecar: invalid or disabled specialized sidecar returns 503 (never degrades to active)', async () => {
@@ -2272,24 +2278,25 @@ function teamFetcher(opts: {
 }
 
 test('team: budget headers reflect the member slice (pie × allocation), at the cost of 2 reads', async () => {
-  // tier team-pro fallback 20.91M, sem extra. Fatia 50% = 10.455M.
-  // Consumido 8.364M = 80% → allowed_warning.
+  // tier team-pro fallback 17.5M µ$ (envelope 30/70 do Pro), sem extra.
+  // Fatia 50% = 8.75M µ$. Consumido 7M µ$ = 80% → allowed_warning.
   const fetcher = teamFetcher({
-    teamDoc: () => firestoreTeamDoc({ planTier: 'team-pro', percentAllocation: 0.5, memberConsumed: 8_364_000 }),
+    teamDoc: () => firestoreTeamDoc({ planTier: 'team-pro', percentAllocation: 0.5, memberConsumed: 7_000_000 }),
   })
   const res = await handleRequest(request(), env(), { fetcher })
 
   assert.equal(res.status, 200)
   assert.equal(res.headers.get('x-plan'), 'pro') // H4: tier team-pro → plano-base 'pro'
   assert.equal(res.headers.get('x-budget-status'), 'allowed_warning')
-  assert.equal(res.headers.get('x-tokens-consumed'), '8364000')
-  assert.equal(res.headers.get('x-extra-tokens'), '0') // membro não tem overage pessoal
+  assert.equal(res.headers.get('x-budget-unit'), 'micros') // equipas são sempre µ$
+  assert.equal(res.headers.get('x-budget-consumed'), '7000000')
+  assert.equal(res.headers.get('x-extra-balance'), '0') // membro não tem overage pessoal
   assert.ok(Math.abs(parseFloat(res.headers.get('x-budget-pct') ?? '0') - 0.8) < 0.001)
   // §3.5: headers de contexto de equipa para a IDE enquadrar fatia/bolo.
   assert.equal(res.headers.get('x-team-id'), 'team-1')
   assert.equal(res.headers.get('x-team-tier'), 'team-pro')
-  assert.equal(res.headers.get('x-slice-tokens'), '10455000') // 50% × 20.91M
-  assert.equal(res.headers.get('x-pie-total'), '20910000')
+  assert.equal(res.headers.get('x-team-slice-micros'), '8750000') // 50% × 17.5M
+  assert.equal(res.headers.get('x-team-pie-micros'), '17500000')
   // Pré-voo do membro = 2 GETs (users/{uid} + teams/{id}).
   assert.equal(fetcher.firestoreCalls.filter(c => c.method === 'GET').length, 2)
 })
@@ -2357,12 +2364,13 @@ test('team: commit is an atomic dual-write to teams/{id} (total + member slice),
   // Escreve no doc da EQUIPA, não em users/{uid}.
   assert.match(write.transform.document, /\/documents\/teams\/team-1$/)
   const t = write.transform.fieldTransforms
-  assert.equal(t[0].fieldPath, 'tokenBudget.tokensConsumed')
-  assert.equal(t[0].increment.integerValue, '150')
-  assert.equal(t[1].fieldPath, 'lifetimeTokensConsumed')
-  assert.equal(t[1].increment.integerValue, '150')
-  assert.equal(t[2].fieldPath, 'members.`test-user`.tokensConsumed')
-  assert.equal(t[2].increment.integerValue, '150')
+  // Equipas são sempre µ$: 100×2 + 50×6 no fallback da config de teste = 500 µ$.
+  assert.equal(t[0].fieldPath, 'tokenBudget.costConsumed')
+  assert.equal(t[0].increment.integerValue, '500')
+  assert.equal(t[1].fieldPath, 'lifetimeCostConsumed')
+  assert.equal(t[1].increment.integerValue, '500')
+  assert.equal(t[2].fieldPath, 'members.`test-user`.costConsumed')
+  assert.equal(t[2].increment.integerValue, '500')
   // Hard cap estrito: exatamente 3 transforms, um único write (sem extra/floor).
   assert.equal(t.length, 3)
   assert.equal(commits[0].body.writes.length, 1)

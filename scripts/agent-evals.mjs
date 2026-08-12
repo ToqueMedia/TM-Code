@@ -77,7 +77,15 @@ async function ensureService(name, port, cmd, args, env) {
     return
   }
   console.log(`[evals] a arrancar ${name} em :${port}…`)
-  const proc = spawn(cmd, args, { cwd: ROOT, env: { ...process.env, ...env }, stdio: 'ignore' })
+  // `detached: true` põe o filho num GRUPO de processos próprio, para o
+  // SIGTERM da limpeza levar o vite NETO e não só o `yarn` líder. Endurecimento
+  // preventivo, não a causa de nenhum incidente conhecido: a 07-08 as corridas
+  // em série limparam sempre bem. Está aqui porque um vite órfão a segurar a
+  // :1420 é indistinguível de um vite alheio — e nesse caso a corrida seguinte
+  // herdaria a env da anterior sem que nada o dissesse.
+  const proc = spawn(cmd, args, {
+    cwd: ROOT, env: { ...process.env, ...env }, stdio: 'ignore', detached: true,
+  })
   spawned.push(proc)
   for (let i = 0; i < 120; i++) {
     if (await portAlive(port)) return
@@ -93,27 +101,75 @@ async function ensureStack() {
   if (WORKER_URL.includes(`localhost:${AI_WORKER_PORT}`)) {
     await ensureService('ai-worker', AI_WORKER_PORT, 'yarn', ['dev:ai-worker'], {})
   }
-  // `VITE_AUTOCOMPACT_PCT` encurta o limiar de compactação (só encurta —
-  // ver contextWindow.ts). É o que torna um caso de compactação viável: sem
-  // ele seria preciso encher 131K de janela, e a compactação só se via em
-  // sessões reais de horas.
+  // Instrumentos de contexto, todos por env de BUILD do vite:
   //
-  // ATENÇÃO: é uma env de BUILD do vite. Um vite JÁ VIVO em :1420 foi
-  // arrancado sem ela e não a ganha — por isso o aviso abaixo, em vez de um
-  // caso que passa a verde sem nunca ter compactado.
-  const pctOverride = process.env.EVALS_AUTOCOMPACT_PCT
-  const viteJaVivo = await portAlive(VITE_PORT)
-  if (pctOverride && viteJaVivo) {
-    console.log(
-      `[evals] AVISO: EVALS_AUTOCOMPACT_PCT=${pctOverride} pedido, mas o vite de :${VITE_PORT} ` +
-      `já estava a correr sem ele — o limiar NÃO foi encurtado. Fecha o vite e repete.`,
-    )
+  //  EVALS_AUTOCOMPACT_PCT           encurta o limiar de compactação (SÓ
+  //                                  encurta — ver contextWindow.ts). Sem ele
+  //                                  seria preciso encher 131K de janela para
+  //                                  ver uma compactação.
+  //  EVALS_TOOL_RESULT_BUDGET_MODE   braço do orçamento de tool results:
+  //                                  always (defeito) | trigger | off.
+  //  EVALS_TOOL_RESULT_BUDGET_TRIGGER_PCT  a que % do limiar o modo trigger
+  //                                  acorda (defeito 75).
+  //
+  // ATENÇÃO, e é a armadilha que já produziu falsos positivos duas vezes: um
+  // vite JÁ VIVO em :1420 foi arrancado sem estas env e NÃO as ganha. O caso
+  // passa a verde sem o mecanismo ter corrido. Daí o aviso — e, do outro lado,
+  // o `compaction.budgetMode` que o runner mete no result diz que braço correu
+  // de facto.
+  // SÓ o que é mesmo de build fica aqui. O braço do orçamento e a persona
+  // passaram a KNOBS de runtime (ver RUNNER_KNOBS abaixo): viajam na env do
+  // BINÁRIO, por processo, e por isso funcionam com um vite partilhado — que
+  // era exactamente o que faltava quando 12 corridas mediram a mesma célula.
+  // O limiar de compactação continua de build porque é lido na resolução do
+  // módulo, não por corrida.
+  const buildEnv = {
+    VITE_AUTOCOMPACT_PCT: process.env.EVALS_AUTOCOMPACT_PCT,
   }
-  await ensureService('vite', VITE_PORT, 'yarn', ['dev'], {
-    VITE_AI_WORKER_URL: WORKER_URL,
-    ...(pctOverride ? { VITE_AUTOCOMPACT_PCT: pctOverride } : {}),
-  })
+  const pedidas = Object.entries(buildEnv).filter(([, v]) => v)
+  const viteJaVivo = await portAlive(VITE_PORT)
+  if (pedidas.length && viteJaVivo) {
+    // ABORTA — não avisa. Era um aviso, e um aviso é uma linha de texto que
+    // quem lê o output pode filtrar sem dar por isso: foi exactamente assim
+    // que 12 corridas (2 braços × 2 personas) mediram todas a MESMA célula a
+    // 2026-08-07, porque um vite alheio ocupava a :1420 e o `grep` do operador
+    // não incluía a palavra AVISO. A terceira vez que esta armadilha morde
+    // neste repo. Uma corrida que não pode honrar a env pedida não é uma
+    // corrida degradada — é uma medição falsa, e essa custa mais do que não
+    // medir nada.
+    console.error(
+      `\n[evals] ABORTADO: pediste ${pedidas.map(([k, v]) => `${k}=${v}`).join(', ')},\n` +
+      `  mas já há um vite em :${VITE_PORT} arrancado SEM essa env. É env de BUILD:\n` +
+      `  um vite vivo não a ganha, e o binário receberia o bundle antigo — a corrida\n` +
+      `  mediria outra coisa e diria que correu esta.\n\n` +
+      `  Fecha o vite de :${VITE_PORT} e repete (se for teu, é o \`yarn dev\`/\`tauri:dev:all\`).\n`,
+    )
+    process.exit(3)
+  }
+  await ensureService('vite', VITE_PORT, 'yarn', ['dev'], Object.fromEntries(
+    [['VITE_AI_WORKER_URL', WORKER_URL], ...pedidas],
+  ))
 }
+
+/**
+ * Interruptores de MEDIÇÃO entregues ao binário (env por PROCESSO), não ao
+ * vite. É esta a diferença que permite correr braços diferentes com um vite
+ * partilhado — incluindo o `yarn dev` do developer. A 2026-08-07, com os
+ * mesmos interruptores em env de BUILD, 12 corridas (2 braços × 2 personas)
+ * mediram todas `always/standard` porque um vite alheio ocupava a :1420.
+ *
+ * O runner regista no `result` o braço, a persona e o modelo que REALMENTE
+ * correram — é assim que um `--json` se autodenuncia se isto falhar.
+ */
+const RUNNER_KNOBS = Object.fromEntries(
+  Object.entries({
+    TM_RUN_KNOB_BUDGET_MODE: process.env.EVALS_TOOL_RESULT_BUDGET_MODE,
+    TM_RUN_KNOB_BUDGET_TRIGGER_PCT: process.env.EVALS_TOOL_RESULT_BUDGET_TRIGGER_PCT,
+    // standard=mimo · expert=glm · master=qwen. O runner fixa `standard` por
+    // omissão (headlessRunner.ts, "ronda-2 #11").
+    TM_RUN_KNOB_PERSONA: process.env.EVALS_PERSONA,
+  }).filter(([, v]) => v),
+)
 
 function runCase(c) {
   // HERMÉTICO (03-08): cada caso corre numa CÓPIA fresca da fixture em
@@ -136,6 +192,7 @@ function runCase(c) {
         TM_RUN_TASK: c.task,
         TM_RUN_PROJECT: project,
         TM_RUN_YOLO: c.yolo === false ? '' : '1',
+        ...RUNNER_KNOBS,
       },
     })
     let buf = ''
@@ -211,9 +268,21 @@ function runCase(c) {
         c.expectCompaction && !(comp.boundaries > 0)
           ? [`compactação exigida mas boundaries=${comp.boundaries ?? 0}`]
           : []
+      // `expectTools`: o caso EXIGE que estas tools tenham sido CHAMADAS.
+      // Existe por causa de uma regressão específica (2026-08-12): marcar
+      // tools nativas como diferidas tirou-lhes o schema E o anúncio — o
+      // modelo deixou de saber que existiam — e a suite ficou 5/5 verde
+      // porque nenhum caso as exercitava. Asserção sobre o TEXTO não chega:
+      // a descrição de uma tool pode conter a resposta, e o modelo responde
+      // sem a chamar. Só o registo da chamada distingue "sabe fazer" de
+      // "adivinhou". Uma entrada com `|` é uma alternativa (basta uma).
+      const toolsUsed = comp.toolsUsed ?? {}
+      const missingTools = (c.expectTools ?? []).filter(
+        (spec) => !spec.split('|').some((name) => (toolsUsed[name] ?? 0) > 0),
+      ).map((spec) => `tool ${spec} nunca chamada (usadas: ${Object.keys(toolsUsed).join(',') || 'nenhuma'})`)
       const ok = missingText.length === 0 && missingFiles.length === 0 &&
         missingContent.length === 0 && forbiddenContent.length === 0 &&
-        missingCompaction.length === 0
+        missingCompaction.length === 0 && missingTools.length === 0
       // A cópia temp só é limpa em SUCESSO — num falhanço fica no disco para
       // autópsia (o path segue no reason).
       if (ok) rmSync(project, { recursive: true, force: true })
@@ -227,7 +296,7 @@ function runCase(c) {
         diag: result.diag,
         reason: ok
           ? ''
-          : `em falta: ${[...missingText.map((m) => `texto /${m}/`), ...missingFiles.map((f) => `ficheiro ${f}`), ...missingContent, ...missingCompaction, ...forbiddenContent.map((f) => `PROIBIDO ${f}`)].join(' | ')} (autópsia: ${project})`,
+          : `em falta: ${[...missingText.map((m) => `texto /${m}/`), ...missingFiles.map((f) => `ficheiro ${f}`), ...missingContent, ...missingCompaction, ...missingTools, ...forbiddenContent.map((f) => `PROIBIDO ${f}`)].join(' | ')} (autópsia: ${project})`,
       })
     })
   })
@@ -244,14 +313,19 @@ try {
       r.ok
         ? `[evals] ✅ ${c.id} em ${(r.durationMs / 1000).toFixed(1)}s — "${(r.text ?? '').slice(0, 100)}"` +
           (r.cost ? `\n         custo: ${r.cost.requests} pedidos, in ${r.cost.inputTokens} (cache ${r.cost.cacheReadInputTokens}), out ${r.cost.outputTokens}, aux/pedido ${r.cost.auxiliaryContextTokensMax}` : '') +
-          (r.compaction ? `\n         contexto: ${r.compaction.boundaries} compactação(ões), ${r.compaction.budgetMarkers} marcos de orçamento, ${r.compaction.rereads} RELEITURAS de ${r.compaction.distinctFilesRead} ficheiros` : '')
+          (r.compaction ? `\n         contexto: ${r.compaction.boundaries} compactação(ões), ${r.compaction.budgetMarkers} marcos de orçamento, ${r.compaction.rereads} RELEITURAS de ${r.compaction.distinctFilesRead} ficheiros` +
+            ` (${r.compaction.shellReads ?? 0} por shell)` +
+            ` [braço: ${r.compaction.budgetMode ?? '?'} · ${r.compaction.persona ?? '?'}/${r.compaction.modelName ?? '?'}]` : '')
         : `[evals] ❌ ${c.id} em ${(r.durationMs / 1000).toFixed(1)}s — ${r.reason}\n` +
           `         text: "${(r.text ?? '').slice(0, 300)}"\n` +
           `         diag: ${JSON.stringify(r.diag ?? null)}`,
     )
   }
 } finally {
-  for (const proc of spawned) proc.kill('SIGTERM')
+  // Mata o GRUPO (pid negativo), não só o líder — ver `detached` acima.
+  for (const proc of spawned) {
+    try { process.kill(-proc.pid, 'SIGTERM') } catch { try { proc.kill('SIGTERM') } catch { /* já morto */ } }
+  }
 }
 
 const passed = results.filter((r) => r.ok).length
@@ -278,7 +352,12 @@ console.log(
 )
 const jsonIdx = process.argv.indexOf('--json')
 if (jsonIdx >= 0 && process.argv[jsonIdx + 1]) {
-  writeFileSync(process.argv[jsonIdx + 1], JSON.stringify({ totals, cases: results.map(r => ({ id: r.c.id, ok: r.ok, durationMs: r.durationMs, cost: r.cost })) }, null, 2))
+  // `compaction` VAI no export. Sem ele, o ficheiro guardava o custo e perdia
+  // exactamente as grandezas por que a experiência do orçamento de contexto se
+  // decide — releituras, marcos, compactações — e o braço que correu
+  // (budgetMode). Comparar dois `--json` sem isto é comparar preços sem saber
+  // o que se comprou.
+  writeFileSync(process.argv[jsonIdx + 1], JSON.stringify({ totals, cases: results.map(r => ({ id: r.c.id, ok: r.ok, durationMs: r.durationMs, cost: r.cost, compaction: r.compaction, reason: r.ok ? undefined : r.reason })) }, null, 2))
   console.log(`  ── gravado em ${process.argv[jsonIdx + 1]}`)
 }
 process.exit(passed === results.length ? 0 : 1)

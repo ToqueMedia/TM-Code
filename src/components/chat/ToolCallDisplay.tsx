@@ -78,6 +78,42 @@ const SKILL_DESCRIPTIONS: Record<string, string> = {
   'frontend-design': t('toolLabel.designGuide'),
 }
 
+
+/**
+ * Estilos CONSTANTES das linhas de output realçado, içados do render
+ * (2026-08-10). Mesmo motivo do InlineDiff: o perfil do Web Inspector põe
+ * 61,5% das amostras dentro do motor de estilos do Chakra, e este `.map`
+ * monta 3 componentes POR LINHA de output — com props inline, cada linha
+ * recria os objectos e falha a cache de estilos.
+ *
+ * Nada aqui depende de dados; a única parte variável é a cor de cada token,
+ * que já vai num `style` nativo do `<span>` e nem passa pelo Chakra.
+ * Os valores são idênticos aos que estavam inline — o CSS não muda.
+ */
+const OUTPUT_LINE_ROW_STYLE = {
+  align: 'center',
+  minH: '18px',
+} as const
+
+const OUTPUT_LINE_NUM_STYLE = {
+  w: '36px',
+  flexShrink: 0,
+  textAlign: 'right',
+  pr: '10px',
+  fontSize: '10px',
+  color: 'rgba(255,255,255,0.18)',
+  userSelect: 'none',
+  fontFamily: tokens.fontFamily.mono,
+} as const
+
+const OUTPUT_LINE_TEXT_STYLE = {
+  flex: '1',
+  whiteSpace: 'pre',
+  fontSize: '11px',
+  fontFamily: tokens.fontFamily.mono,
+  lineHeight: '18px',
+} as const
+
 function describeSkill(name: string): string {
   return SKILL_DESCRIPTIONS[name] || t('toolLabel.genericGuide')
 }
@@ -541,26 +577,11 @@ function ToolCallDisplayComponent({ toolCall }: ToolCallDisplayProps) {
           {highlightedOutput ? (
             <>
               {(showExpand ? highlightedOutput.slice(0, 4) : highlightedOutput).map((lineTokens, li) => (
-                <Flex key={`tcl-${li}-${lineTokens[0]?.text?.slice(0, 16) ?? ''}`} align="center" minH="18px">
-                  <Text
-                    w="36px"
-                    flexShrink={0}
-                    textAlign="right"
-                    pr="10px"
-                    fontSize="10px"
-                    color="rgba(255,255,255,0.18)"
-                    userSelect="none"
-                    fontFamily={tokens.fontFamily.mono}
-                  >
+                <Flex key={`tcl-${li}-${lineTokens[0]?.text?.slice(0, 16) ?? ''}`} {...OUTPUT_LINE_ROW_STYLE}>
+                  <Text {...OUTPUT_LINE_NUM_STYLE}>
                     {li + 1}
                   </Text>
-                  <Box
-                    flex="1"
-                    whiteSpace="pre"
-                    fontSize="11px"
-                    fontFamily={tokens.fontFamily.mono}
-                    lineHeight="18px"
-                  >
+                  <Box {...OUTPUT_LINE_TEXT_STYLE}>
                     {lineTokens.map((token, ti) => (
                       <span key={ti} style={{ color: token.color }}>
                         {token.text}

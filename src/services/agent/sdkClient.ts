@@ -58,6 +58,20 @@ export function createAgentClient(
     maxRetries?: number
     timeout?: number
     baseURL?: string
+    /**
+     * Id da sessão do chat — vira `x-tm-session-id`, que o data-plane usa
+     * como chave de AFINIDADE no Cloudflare Workers AI (2026-08-11).
+     *
+     * PORQUÊ: o prefix cache do Workers AI só acerta quando o pedido aterra na
+     * instância que tem os tensores. A afinidade por UTILIZADOR resolveu-o em
+     * parte (25,2% → 54,6% numa sessão de um só run) mas degrada com o número
+     * de runs, porque todos partilham a mesma chave e despejam o prefixo uns
+     * dos outros:
+     *   1 run  → 54,6%      5 runs → 36,2%      9 runs → 33,6%
+     * (prefixo byte-estável em todas — um só promptPrefixHash por sessão.)
+     * Uma chave por sessão dá a cada run a sua instância e o seu prefixo.
+     */
+    sessionId?: string
   },
 ): OpenAI {
   const workerUrl = options?.baseURL ?? resolveAIWorkerUrl()
@@ -70,6 +84,7 @@ export function createAgentClient(
     timeout: options?.timeout ?? DEFAULT_TIMEOUT_MS,
     defaultHeaders: {
       'x-app': 'tm-code',
+      ...(options?.sessionId ? { 'x-tm-session-id': options.sessionId } : {}),
     },
   })
 }
@@ -86,6 +101,8 @@ export function createSubAgentClient(
     maxRetries?: number
     timeout?: number
     baseURL?: string
+    /** Ver createAgentClient — mesma chave de afinidade do Workers AI. */
+    sessionId?: string
   },
 ): OpenAI {
   return createAgentClient(authToken, {

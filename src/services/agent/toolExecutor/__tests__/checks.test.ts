@@ -9,6 +9,7 @@ import {
   isSensitiveFile,
   ENV_TEMPLATE_FILES,
   commandReferencesSealedEnv,
+  looksLikeFilenameFilter,
 } from '../checks'
 
 export {}
@@ -95,6 +96,44 @@ describe('commandReferencesSealedEnv — selo nas superfícies de shell', () => 
     it('não rebenta com undefined/vazio', () => {
       expect(isSensitiveFile(undefined)).toBe(false)
       expect(isSensitiveFile('')).toBe(false)
+    })
+  })
+
+  /**
+   * Sessão golive (2026-08-10): o pré-commit de segurança do próprio agente
+   * foi bloqueado porque o token `.env` aparecia no PADRÃO de um grep sobre
+   * nomes de ficheiro em staging. A mensagem genérica falava de
+   * request_credentials — irrelevante ali — e o agente respondeu a re-correr o
+   * comando SEM o padrão de ficheiros sensíveis, apagando a verificação.
+   *
+   * O bloqueio mantém-se (distinguir "grep sobre nomes" de "grep que abre
+   * ficheiros" obriga a parsear pipelines); o que muda é a mensagem.
+   */
+  describe('looksLikeFilenameFilter — falso positivo do selo', () => {
+    it('reconhece o pré-commit real que foi bloqueado', () => {
+      const cmd = `git diff --cached --name-only | grep -iE '\\.env($|\\.)|\\.key$|service-account'`
+      expect(commandReferencesSealedEnv(cmd)).toBe(true) // continua bloqueado
+      expect(looksLikeFilenameFilter(cmd)).toBe(true)    // …com outra mensagem
+    })
+
+    it('cobre os filtros de stream habituais', () => {
+      expect(looksLikeFilenameFilter('git status --short | rg "\\.env"')).toBe(true)
+      expect(looksLikeFilenameFilter('ls -a | awk "/\\.env/"')).toBe(true)
+      expect(looksLikeFilenameFilter('find . -type f | sed -n "/.env/p"')).toBe(true)
+    })
+
+    it('NÃO reclassifica uma leitura directa do .env', () => {
+      expect(looksLikeFilenameFilter('cat .env')).toBe(false)
+      expect(looksLikeFilenameFilter('head -20 .env.production')).toBe(false)
+      expect(looksLikeFilenameFilter('xxd .env')).toBe(false)
+    })
+
+    it('NÃO reclassifica um cat cujo output passa por um pipe', () => {
+      // Há pipe e há grep, mas quem lê o ficheiro é o cat À CABEÇA — a
+      // mensagem específica seria errada aqui. O selo bloqueia na mesma;
+      // o que não pode é sugerir "lista os nomes e filtra tu".
+      expect(commandReferencesSealedEnv('cat .env | grep KEY')).toBe(true)
+      expect(looksLikeFilenameFilter('cat .env | grep KEY')).toBe(false)
     })
   })
 })

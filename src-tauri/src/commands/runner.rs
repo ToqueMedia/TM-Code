@@ -15,6 +15,21 @@ pub struct RunnerJob {
     pub task: String,
     pub project: String,
     pub yolo: bool,
+    /// Interruptores de MEDIÇÃO, por processo (`TM_RUN_KNOB_<NOME>=valor`).
+    ///
+    /// Porquê aqui e não em `import.meta.env` (2026-08-07): os primeiros
+    /// interruptores de contexto (braço do orçamento, persona) eram env de
+    /// BUILD do vite. Isso amarra cada corrida ao processo do vite que a serve
+    /// — e um vite já vivo, seja de outra corrida seja do developer, não a
+    /// ganha. O resultado é uma corrida que diz ter medido uma coisa e mediu
+    /// outra: aconteceu a 07-08 com 12 corridas (2 braços × 2 personas) a
+    /// medirem todas a MESMA célula.
+    ///
+    /// Por aqui é por PROCESSO: o binário do runner lê a env que lhe foi dada,
+    /// e o mesmo vite pode servir corridas com interruptores diferentes. É um
+    /// mapa aberto de propósito — um interruptor novo não precisa de tocar em
+    /// Rust nem de reconstruir o binário.
+    pub knobs: std::collections::HashMap<String, String>,
 }
 
 static RUNNER_JOB: Mutex<Option<RunnerJob>> = Mutex::new(None);

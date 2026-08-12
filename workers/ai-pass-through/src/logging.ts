@@ -6,6 +6,58 @@ export function createRequestId(request: Request): string {
   return crypto.randomUUID()
 }
 
+/**
+ * Evento de CACHE, um por pedido metered — hit **ou miss**.
+ *
+ * PORQUÊ EXISTE: até 2026-08-12 o worker só escrevia quando
+ * `cachedTokens > 0`. O log dava o NUMERADOR e escondia o DENOMINADOR, logo a
+ * taxa de acerto do cache nunca foi mensurável a partir daqui: a sessão de
+ * 10-08 com 11 misses em 17 pedidos aparecia no `wrangler tail` como 6 linhas
+ * de sucesso — indistinguível de 6 pedidos com 100% de acerto.
+ *
+ * É o que bloqueia a decisão do Cloudflare (35% de cache → margem −55%): sem
+ * denominador não há como confirmar o número, nem como comparar a afinidade
+ * por SESSÃO com a afinidade por utilizador que está em produção.
+ *
+ * `affinity` vai no evento porque a pergunta é exactamente essa: pedidos com a
+ * MESMA chave aterram na mesma instância? Vai já hasheado da origem
+ * (`applySessionAffinity`) — nunca é o uid nem o id da sessão em claro.
+ *
+ * Função PURA e separada do `console.info` de propósito: a forma do evento é
+ * testável sem simular um Worker inteiro, e o teste de que ela é emitida SEM
+ * condição vive ao lado (cacheObservability.test.ts).
+ */
+export interface CacheEventInput {
+  requestId: string
+  provider: string
+  model: string
+  affinity: string | null
+  promptTokens: number
+  cachedTokens: number
+  authoritative: boolean
+}
+
+export function buildCacheEvent(input: CacheEventInput): Record<string, unknown> {
+  return {
+    event: 'ai_cache',
+    request_id: input.requestId,
+    provider: input.provider,
+    model: input.model,
+    affinity: input.affinity,
+    prompt_tokens: input.promptTokens,
+    cached_tokens: input.cachedTokens,
+    cached_pct: input.promptTokens > 0
+      ? Math.round((input.cachedTokens / input.promptTokens) * 1000) / 10
+      : 0,
+    hit: input.cachedTokens > 0,
+    // Um `usage` ESTIMADO tem cachedTokens=0 por construção (o provider omitiu
+    // o objecto e contámos bytes). Sem esta flag, esses pedidos entram na
+    // amostra como misses e afundam a taxa medida sem nada os denunciar —
+    // filtrar por `authoritative: true` antes de calcular seja o que for.
+    authoritative: input.authoritative,
+  }
+}
+
 export async function logRequest(event: {
   requestId: string
   userId: string

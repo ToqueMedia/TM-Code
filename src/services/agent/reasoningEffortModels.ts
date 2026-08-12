@@ -23,10 +23,6 @@ import type { ReasoningEffortOptions } from '../../stores/reasoningEffortStore'
  *   Reasoning NÃO se desliga. Chat Completions: `reasoning_effort` top-level.
  *   Ref: https://docs.x.ai/developers/model-capabilities/text/reasoning
  *
- * - **Kimi K3** (Moonshot): `low` | `high` | `max` (default `max`).
- *   Sempre raciocina; NÃO enviar `thinking`. Só `reasoning_effort` top-level.
- *   Ref: https://platform.kimi.ai/docs/guide/use-kimi-k2-thinking-model
- *
  * - **Qwen 3.7 Plus** (DashScope): `off` | `on` (default `on`) — híbrido por
  *   BOOLEAN `enable_thinking`, sem escala graded (essa só existe no 3.8-max).
  *
@@ -35,20 +31,32 @@ import type { ReasoningEffortOptions } from '../../stores/reasoningEffortStore'
  */
 export const EFFORT_BY_MODEL: Record<string, ReasoningEffortOptions> = {
   // GLM-5.2 — só níveis com comportamento distinto (aliases removidos 07-23).
+  // Vale para as vias z.AI e DashScope, que partilham este vocabulário.
   'glm-5.2': {
     param: 'reasoning_effort',
     options: ['none', 'high', 'max'],
     default: 'max',
   },
-  'grok-4.5': {
+  // GLM-5.2 pelo Cloudflare Workers AI (2026-08-10) — MESMO modelo, escala
+  // DIFERENTE. A doc do Workers AI descreve `reasoning_effort` com o texto da
+  // OpenAI ("Constrains effort on reasoning for reasoning models (o1,
+  // o3-mini, …)"), portanto o conjunto válido é low|medium|high. O `max` e o
+  // `none` das outras duas vias são vocabulário do z.AI/DashScope.
+  //
+  // PORQUE PRECISA DE CHAVE PRÓPRIA: `normalizeEffortModelId` corta no último
+  // `/` para aceitar prefixos de catálogo (`z-ai/glm-5.2`), e o id do Workers
+  // AI é `@cf/zai-org/glm-5.2` — colapsava para `glm-5.2` e a UI mostrava a
+  // escala errada, com MAX (reportado pelo developer). É o mesmo detector por
+  // NOME que o `isCloudflareAI` do data-plane já evita, e que aqui passou.
+  'glm-5.2-cloudflare': {
     param: 'reasoning_effort',
     options: ['low', 'medium', 'high'],
     default: 'high',
   },
-  'kimi-k3': {
+  'grok-4.5': {
     param: 'reasoning_effort',
-    options: ['low', 'high', 'max'],
-    default: 'max',
+    options: ['low', 'medium', 'high'],
+    default: 'high',
   },
   // Qwen 3.8 Max (DashScope US, swap 2026-08-04): híbrido com
   // reasoning_effort low|medium|xhigh (default xhigh, docs qwencloud) —
@@ -106,9 +114,19 @@ export function normalizeEffortModelId(
   // OpenRouter / catalog prefixes: "z-ai/glm-5.2" → "glm-5.2"
   const bare = raw.includes('/') ? raw.slice(raw.lastIndexOf('/') + 1) : raw
 
+  // O corte acima existe para aceitar prefixos de catálogo, mas DEITA FORA a
+  // única pista do provedor — e o mesmo glm-5.2 é servido por três, com
+  // escalas de effort diferentes. O id nativo do Cloudflare Workers AI
+  // (`@cf/zai-org/glm-5.2`) tem de ser reconhecido ANTES do corte, senão
+  // colapsa em `glm-5.2` e a UI oferece `max`, que aquele endpoint não aceita.
+  //
+  // `zai-org` (autor do modelo no catálogo Cloudflare) não colide com o
+  // `z-ai/` dos prefixos de OpenRouter — strings diferentes, de propósito.
+  const isCloudflareNative = raw.startsWith('@cf/') || raw.includes('zai-org/')
+  if (isCloudflareNative && bare.startsWith('glm-5.2')) return 'glm-5.2-cloudflare'
+
   if (bare.startsWith('glm-5.2')) return 'glm-5.2'
   if (bare.startsWith('grok-4.5') || bare === 'grok-build-latest') return 'grok-4.5'
-  if (bare.startsWith('kimi-k3')) return 'kimi-k3'
   if (bare.startsWith('qwen3.8-max')) return 'qwen3.8-max'
   // Cobre 'qwen3.7-plus' e os snapshots datados ('qwen3.7-plus-2026-05-26').
   if (bare.startsWith('qwen3.7-plus')) return 'qwen3.7-plus'
@@ -202,7 +220,6 @@ export function effortDescriptionKey(
   const key = normalizeEffortModelId(modelId)
   if (key === 'glm-5.2') return `prompt.effort.desc.glm.${value}`
   if (key === 'grok-4.5') return `prompt.effort.desc.grok.${value}`
-  if (key === 'kimi-k3') return `prompt.effort.desc.kimi.${value}`
   return `prompt.effort.desc.${value}`
 }
 

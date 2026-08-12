@@ -161,13 +161,9 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     ? Math.floor(obj.maxOutputTokens)
     : undefined
 
-  // Multiplicador de custo da persona. Mesma tolerância dos numéricos acima:
-  // ausente/inválido/≤0 → undefined e o billing usa 1×. O tecto de 100 é
-  // sanidade contra typos do admin (1000× apagaria um budget num turno).
-  const costMultiplier = typeof obj.costMultiplier === 'number'
-    && Number.isFinite(obj.costMultiplier) && obj.costMultiplier > 0 && obj.costMultiplier <= 100
-    ? obj.costMultiplier
-    : undefined
+  // costMultiplier deixou de ser lido (metering 30/70, 2026-08-11): o consumo
+  // é o custo real do modelo servido; a persona decide só o modelo. O campo
+  // pode existir no KV publicado — ignorado aqui de propósito.
 
   // Preço por imagem em USD, por escalão (config `sidecar:image`). Existe
   // porque a geração de imagens NÃO devolve tokens: o `usage` dela é
@@ -231,7 +227,6 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     extraBody,
     contextWindow,
     maxOutputTokens,
-    costMultiplier,
     imagePricing,
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
   }
@@ -255,10 +250,6 @@ export async function getActiveConfig(env: Env, now = Date.now()): Promise<Resol
   if (!config.enabled) {
     throw new HttpError(503, 'tm_active_config_disabled', 'Active AI provider config is disabled.')
   }
-  // Consumo só via UI→KV (2026-08-05): a active vinda do env fallback
-  // (dev local) também não traz multiplicador.
-  if (!kvRaw) delete config.costMultiplier
-
   const resolved = { config, source, key }
   configCache.set(key, { value: resolved, expiresAt: now + CONFIG_CACHE_MS })
   return resolved
@@ -293,10 +284,6 @@ async function resolveAuxConfig(
       missingConfigCache.set(key, now + CONFIG_CACHE_MS)
       return null
     }
-    // Valores de CONSUMO só vêm da UI→KV (decisão 2026-08-05): uma config
-    // vinda do fallback de ENV (dev local) nunca traz multiplicador — um
-    // secret não pode mudar a fatura. Env serve routing/modelo, sempre 1×.
-    if (!kvRaw) delete config.costMultiplier
     const resolved: ResolvedActiveAIConfig = { config, source: kvRaw ? 'kv' : 'env', key }
     configCache.set(key, { value: resolved, expiresAt: now + CONFIG_CACHE_MS })
     return resolved

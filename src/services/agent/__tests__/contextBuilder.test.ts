@@ -193,6 +193,55 @@ describe('ContextBuilder', () => {
       expect(typeof prompt).toBe('string')
     })
 
+    // ── Anúncio das tools diferidas (2026-08-12) ────────────────────────
+    //
+    // A regressão que estes testes travam não tem sintoma: marcar uma tool
+    // como diferida tira-lhe o schema, e se o nome não for ANUNCIADO o modelo
+    // deixa de saber que ela existe. Não há erro — ele apenas nunca a pede.
+    // A primeira tentativa passou 5/5 nas evals exactamente assim.
+    describe('deferred tool announcement', () => {
+      it('os nomes diferidos entram no prompt ESTÁTICO', async () => {
+        const prompt = await builder.buildSystemPrompt(
+          '/test/project', 'web', undefined, undefined, undefined, undefined, undefined,
+          { deferredToolNames: ['WebFetch', 'lsp'] },
+        )
+        expect(prompt).toContain('# Deferred tools')
+        expect(prompt).toContain('WebFetch')
+        expect(prompt).toContain('lsp')
+        // Estático, não volátil: o conjunto é fixo durante o run, portanto
+        // pertence ao prefixo cacheável. Se cair abaixo da fronteira, paga-se
+        // em cada turno o que se estava a tentar poupar.
+        //
+        // `buildSystemPrompt` já devolve SÓ a metade estática (o volátil sai
+        // por getLastVolatileContext, e o marcador da fronteira nem chega ao
+        // texto) — logo o `toContain` acima é a prova de que é estático, e
+        // esta é a prova de que não está TAMBÉM no volátil, duplicado.
+        expect(builder.getLastVolatileContext() ?? '').not.toContain('# Deferred tools')
+      })
+
+      it('sem nomes diferidos a secção não aparece', async () => {
+        const prompt = await builder.buildSystemPrompt('/test/project', 'web')
+        expect(prompt).not.toContain('# Deferred tools')
+      })
+
+      // O PASSO DE RISCO da funcionalidade. O prompt muda, a chave não, e o
+      // build seguinte serve o prompt anterior — o modelo lê nomes de tools
+      // que já não estão no schema (ou deixa de ler os que estão) e nada
+      // falha visivelmente.
+      it('mudar o conjunto diferido invalida a cache do prompt', async () => {
+        const primeiro = await builder.buildSystemPrompt(
+          '/test/project', 'web', undefined, undefined, undefined, undefined, undefined,
+          { deferredToolNames: ['WebFetch'] },
+        )
+        const segundo = await builder.buildSystemPrompt(
+          '/test/project', 'web', undefined, undefined, undefined, undefined, undefined,
+          { deferredToolNames: ['WebFetch', 'generate_image'] },
+        )
+        expect(primeiro).not.toContain('generate_image')
+        expect(segundo).toContain('generate_image')
+      })
+    })
+
     it('includes the project path (static + volatile)', async () => {
       const prompt = await fullPrompt('/test/project', 'web')
       expect(prompt).toContain('/test/project')

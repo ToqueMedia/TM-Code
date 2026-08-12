@@ -3,27 +3,33 @@ import { authenticateUser } from './auth'
 import {
   checkCostBudget,
   checkTeamByokBudget,
-  commitTokenConsumption,
+  commitConsumption,
   commitTeamByokConsumption,
+  explorerTokenTotal,
   getUserBudgetState,
+  planMeteringUnit,
   resolveEnforcementMode,
   resolvePlanBudgetFor,
-  resolveSpeedMultiplier,
-  resolveCacheBillingFactor,
-  billableTokenTotal,
   shortenBudgetStateCacheTtl,
   type CostBudgetCheck,
   type UserBudgetState,
 } from './billing'
+import {
+  byokCacheRatio,
+  computeRequestCostMicros,
+  imageCostMicros,
+  resolveModelPricing,
+} from './pricing'
 import { isSpeedAllowedForPlanState } from './planGate'
 import { HttpError, jsonError, methodNotAllowed } from './errors'
 import { buildResponseHeaders, buildUpstreamHeaders, corsPreflight, withCors } from './headers'
-import { createRequestId, logRequest } from './logging'
+import { buildCacheEvent, createRequestId, logRequest } from './logging'
 import { injectStreamOptions, observeUsage } from './usage'
 import { withStreamIdleTimeout } from './streamWatchdog'
 import { ensureGeminiThoughtSummaries, ensureVertexPublisher } from './geminiThinking'
 import { applyDashScopePromptCache } from './dashscopePromptCache'
 import { applyReasoningEffort } from './applyReasoningEffort'
+import { applySessionAffinity } from './providers'
 import type { Env, Fetcher, WaitUntilContext } from './types'
 
 export interface HandlerOptions {
@@ -155,6 +161,7 @@ async function bodyWithActiveModel(
   extraBody?: Record<string, unknown>,
   isGoogleOAuth = false,
   bodyTimeoutMs = 0,
+  requestType: string | null = null,
 ): Promise<PreparedBody> {
   let parsed: unknown
   // O timer TEM de ser limpo no caminho feliz. Sem o clearTimeout ficava armado
@@ -225,12 +232,15 @@ async function bodyWithActiveModel(
   // devolvem o objeto `usage` no chunk final — é a fonte autoritativa da
   // contabilidade de billing (usage.ts / billing.ts).
   const withUsage = injectStreamOptions(merged)
-  const cacheStats = applyDashScopePromptCache(withUsage, { provider, baseUrl, model })
-  if (cacheStats.found) {
+  const cacheStats = applyDashScopePromptCache(withUsage, { provider, baseUrl, model, requestType })
+  if (cacheStats.found || cacheStats.rollingMarkerApplied) {
     const tag = cacheStats.cacheControlApplied ? 'explicit' : 'implicit'
+    // `rolling` é o sinal a vigiar: sem ele o cache-read congela no valor do
+    // bloco de system e todo o histórico é refacturado a preço cheio.
     console.info(
       `[ai-pass-through] dashscope prompt cache ${tag} ` +
-        `model=${model} static=${cacheStats.staticBytes}B dynamic=${cacheStats.dynamicBytes}B`,
+        `model=${model} static=${cacheStats.staticBytes}B dynamic=${cacheStats.dynamicBytes}B ` +
+        `rolling=${cacheStats.rollingMarkerApplied} history=${cacheStats.historyBytes}B`,
     )
   }
 
@@ -258,8 +268,8 @@ async function handleChatCompletions(
   // Personas (Escolha do Modelo): o selector da IDE manda X-TM-Persona
   // (standard/expert/master) e o main loop roteia para a config `persona:*`
   // publicada pelo admin — SEM revelar o modelo ao user. Sidecar tem
-  // prioridade; persona não publicada degrada para a ativa. O multiplicador
-  // de custo da persona (config.costMultiplier) aplica-se no metering abaixo.
+  // prioridade; persona não publicada degrada para a ativa. (Metering 30/70:
+  // a persona decide só o MODELO — o consumo é o custo real do modelo servido.)
   const persona = request.headers.get('x-tm-persona')
   // `let` because Team BYOK may override the MAIN-path config after we know the
   // requester's team (resolved below, post-suspension-gate).
@@ -437,8 +447,9 @@ async function handleChatCompletions(
   // elegível (derivado do MESMO budgetState — zero leituras extra); em
   // qualquer outro caso o pedido segue no modelo normal em vez de falhar,
   // para o toggle da IDE nunca quebrar o chat. A resposta leva
-  // `X-TM-Speed-Applied` e o multiplicador de cobrança é aplicado AQUI no
-  // commit (server-side) — a IDE usa o header só para o indicador visual.
+  // `X-TM-Speed-Applied` para o indicador visual. (Metering 30/70: o speed
+  // já NÃO multiplica a cobrança — o consumo é o custo real do modelo que
+  // serviu, sem multiplicadores.)
   const speedRequested = request.headers.get('x-tm-speed') === 'true'
   let speedEligible = false
   if (speedRequested && config.speedModel) {
@@ -461,8 +472,24 @@ async function handleChatCompletions(
     config.extraBody,
     config.authScheme === 'google_oauth',
     resolveClientBodyTimeout(env),
+    requestType,
   )
   const { headers: upstreamHeaders, providerKey } = await buildUpstreamHeaders(request, config, env, fetcher)
+
+  // Afinidade de sessão do Workers AI — sem isto o prefix cache dele quase não
+  // pega: os pedidos espalham-se por instâncias e só acertam quando calham numa
+  // quente. Medido na sessão GLM-5.2/Cloudflare de 2026-08-10: 25,2% de
+  // cache-read com o prefixo comprovadamente IDÊNTICO nos 35 pedidos (um só
+  // promptPrefixHash), contra 94,7% do qwen/DashScope. Ver providers.ts.
+  const affinity = applySessionAffinity(
+    upstreamHeaders,
+    { provider: config.provider, baseUrl: config.baseUrl, model },
+    user.userId,
+    request.headers.get('x-tm-session-id'),
+  )
+  if (affinity) {
+    console.info(`[ai-pass-through] session affinity ${affinity} model=${model}`)
+  }
 
   // O signal do upstream é um controller próprio em vez de request.signal
   // direto: o abort do cliente continua a propagar durante TODO o ciclo de
@@ -593,15 +620,19 @@ async function handleChatCompletions(
     responseBody = observer.body
     request.signal.addEventListener('abort', observer.settle, { once: true })
 
-    // Multiplicador composto: persona (costMultiplier do admin, default 1×) ×
-    // speed (3×, se aplicado). O desconto de cache (billableTokenTotal) entra
-    // ANTES — tokens cacheados custam sempre 50% do valor da persona, como
-    // definido pelo produto. Team BYOK não passa por aqui (ledger raw 1×).
-    const personaMultiplier =
-      typeof config.costMultiplier === 'number' && config.costMultiplier > 0
-        ? config.costMultiplier
-        : 1
-    const multiplier = personaMultiplier * (speedApplied ? resolveSpeedMultiplier(env) : 1)
+    // Metering 30/70 (2026-08-11): o consumo é o CUSTO REAL do provider em
+    // µ$ — miss ao preço de input, hit ao preço de cache, output ao preço de
+    // output (pricing.ts). Sem multiplicadores: a persona decide o MODELO e o
+    // preço do modelo decide o ritmo de consumo. A única excepção de unidade
+    // é o plano explorer (tokens reais). Team BYOK não passa por aqui para o
+    // budget da TM (ledger virtual em tokens, com o desconto de cache REAL do
+    // provider — o provider já o descontou na fatura do admin).
+    // Modelo sem preço na tabela cai no fallback conservador — o aviso
+    // (uma vez por chave) vive em pricing.ts.
+    const pricing = resolveModelPricing({ provider: config.provider, baseUrl: config.baseUrl, model })
+    // Sem budgetState (lookup falhado) assume µ$: os planos pagos são a
+    // esmagadora maioria e o explorer só comita tokens com estado resolvido.
+    const unit = planMeteringUnit(budgetState?.plan)
     const asOverage = budgetCheck?.asOverage ?? false
     const teamId = budgetState?.team?.teamId
     waitUntil(observer.done.then(async (usage) => {
@@ -617,37 +648,55 @@ async function handleChatCompletions(
           `prompt≈${usage.promptTokens} completion≈${usage.completionTokens}`,
         )
       }
-      // Team BYOK: ledger virtual da equipa, tokens RAW (1x, sem multiplicador
-      // da TM — é a despesa do admin no provedor, não inferência gerida).
-      // Desconto de cache: tokens de prompt cacheados faturam a
-      // resolveCacheBillingFactor (default 0.5). Vale para o billing gerido
-      // E para o ledger Team BYOK (o provider já descontou o cache na fatura
-      // real do admin — contá-lo a 100% no ledger virtual inflava a despesa).
-      const cacheFactor = resolveCacheBillingFactor(env)
-      const billableTotal = billableTokenTotal(usage, cacheFactor)
+      // Evento de CACHE — SEMPRE, hit ou miss. Nunca meter isto atrás de uma
+      // condição: era exactamente esse `if` que tornava a taxa de acerto
+      // imensurável (só se viam hits). O porquê completo, e o que depende
+      // disto, está em logging.ts → buildCacheEvent.
+      //
+      // ÂMBITO: corre dentro do `meterBody`, portanto o pass-through de Team
+      // BYOK sem pool não entra. É o caminho GERIDO que interessa medir.
+      console.info(JSON.stringify(buildCacheEvent({
+        requestId,
+        provider: config.provider,
+        model,
+        affinity,
+        promptTokens: usage.promptTokens,
+        cachedTokens: usage.cachedTokens,
+        authoritative: usage.authoritative,
+      })))
       if (usage.cachedTokens > 0) {
         console.log(
-          `[billing] cache discount user=${user.userId} prompt=${usage.promptTokens} ` +
-          `cached=${usage.cachedTokens}@${cacheFactor}x → billablePrompt=${billableTotal - usage.completionTokens} completion=${usage.completionTokens}`,
+          `[billing] cost user=${user.userId} prompt=${usage.promptTokens} cached=${usage.cachedTokens} ` +
+          `completion=${usage.completionTokens} model=${pricing.key}`,
         )
       }
       if (teamByokMetered && teamId) {
+        // Ledger do admin: tokens com o desconto de cache à proporção REAL
+        // do provider (cachedPerM/inputPerM); modelo fora da tabela → raw 1×.
+        const ratio = byokCacheRatio(pricing.fallback ? null : pricing.pricing)
+        const missTokens = Math.max(0, usage.promptTokens - usage.cachedTokens)
+        const ledgerTokens = missTokens + Math.floor(usage.cachedTokens * ratio) + usage.completionTokens
         await commitTeamByokConsumption({
           env,
           userId: user.userId,
           idToken,
           teamId,
-          rawTokens: billableTotal,
+          rawTokens: ledgerTokens,
           fetcher,
         })
         return
       }
-      const rawTokens = Math.ceil(billableTotal * multiplier)
-      await commitTokenConsumption({
+      const amount = unit === 'tokens'
+        ? explorerTokenTotal(usage)
+        : usage.imageCostUsd != null
+          ? imageCostMicros(usage.imageCostUsd)
+          : computeRequestCostMicros(usage, pricing.pricing)
+      await commitConsumption({
         env,
         userId: user.userId,
         idToken,
-        rawTokens,
+        amount,
+        unit,
         asOverage,
         fetcher,
         // Membro de equipa: dual-write na equipa (total + fatia), não no user.
@@ -669,7 +718,6 @@ async function handleChatCompletions(
     providerKey,
     configSource: active.source,
     configKey: active.key,
-    costMultiplier: typeof config.costMultiplier === 'number' && config.costMultiplier > 0 ? config.costMultiplier : 1,
     teamByok,
     upstreamHost,
   })
@@ -711,7 +759,6 @@ async function handleChatCompletions(
       teamByok,
       configSource: active.source,
       configKey: active.key,
-    costMultiplier: typeof config.costMultiplier === 'number' && config.costMultiplier > 0 ? config.costMultiplier : 1,
       // Janela de contexto real do modelo ativo (quando declarada na config) —
       // emitida em X-Model-Context-Window para a IDE alinhar a pressão de
       // contexto e o auto-compact com a janela verdadeira do modelo.
@@ -732,17 +779,18 @@ async function handleChatCompletions(
             plan: budgetState.team ? (budgetState.plan === 'team-max' ? 'max' : 'pro') : budgetState.plan,
             status: budgetCheck.status,
             consumedPct: budgetCheck.consumedPct,
-            tokensConsumed: budgetState.tokensConsumed,
+            consumed: budgetState.consumed,
+            unit: budgetState.unit,
             extraUsageBalance: budgetState.extraUsageBalance,
             cycleEnd: budgetState.cycleEnd,
-            // §3.5: contexto de equipa (tier cru + fatia/bolo em tokens) para a
-            // IDE enquadrar "a tua fatia / o bolo". sliceTokens = teto do membro.
+            // §3.5: contexto de equipa (tier cru + fatia/bolo em µ$) para a
+            // IDE enquadrar "a tua fatia / o bolo". slice = teto do membro.
             team: budgetState.team
               ? {
                   teamId: budgetState.team.teamId,
                   tier: budgetState.plan,
-                  sliceTokens: budgetCheck.tokenBudget,
-                  pieTotal: planBudget + budgetState.team.purchasedExtra,
+                  sliceMicros: budgetCheck.tokenBudget,
+                  pieMicros: planBudget + budgetState.team.purchasedExtra,
                 }
               : undefined,
           }

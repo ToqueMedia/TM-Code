@@ -19,15 +19,10 @@ export interface ActiveAIConfig {
    *  É o esquema exigido pela Vertex AI, que não aceita API keys estáticas. */
   authScheme: 'Bearer' | 'none' | 'google_oauth'
   apiKeyEnv: string
-  /**
-   * Multiplicador de CUSTO da persona (feature Escolha do Modelo, 2026-08-04):
-   * o admin atribui um modelo a cada persona (standard/expert/master) e define
-   * quantas vezes ela consome — tokens faturáveis = billableTokenTotal × este
-   * valor. O desconto de cache (50%) aplica-se ANTES do multiplicador, por isso
-   * tokens cacheados custam sempre metade do valor definido pelo admin.
-   * Ausente/inválido → 1×. Compõe com o multiplicador do TM Speed.
-   */
-  costMultiplier?: number
+  // costMultiplier foi REMOVIDO (metering 30/70, 2026-08-11): o consumo é o
+  // custo REAL do modelo servido em µ$ (pricing.ts); a persona decide só o
+  // modelo. O campo pode continuar a vir no JSON do KV publicado pelo admin —
+  // é ignorado (parseActiveConfig não o lê).
   /**
    * Preço POR IMAGEM em USD, por escalão (config `sidecar:image`).
    *

@@ -78,11 +78,16 @@ function isDashScopeHost(baseURL: string | undefined): boolean {
  * resto do routing), em vez de qualquer lista em código. Enquanto isso não
  * existir, uma família não obriga a um commit por ponto de versão.
  */
-function supportsExplicitCache(model: string, baseURL: string | undefined): boolean {
+function supportsExplicitCache(model: string, _baseURL: string | undefined): boolean {
   if (DASHSCOPE_EXPLICIT_CACHE_MODELS.has(model)) return true
-  if (!/^glm-/i.test(model) || !baseURL) return false
-  const host = baseURL.toLowerCase()
-  return host === 'dashscope.aliyuncs.com' || host.includes('cn-beijing')
+  // Família GLM — ramo vivo: o mesmo glm-5.2 é servido por z.AI E DashScope
+  // em simultâneo (e um terceiro, Cloudflare Workers AI, a caminho). Ver a
+  // nota gémea no worker para o porquê de o gate de REGIÃO ter saído: era a
+  // terceira encarnação do mesmo defeito (versão → região), e o DashScope que
+  // usamos é o **US**, que nenhum dos ramos anteriores reconhecia.
+  // `isDashScopeHost` a montante continua a garantir que só marcamos em hosts
+  // DashScope.
+  return /^glm-/i.test(model)
 }
 
 /**

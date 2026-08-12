@@ -61,7 +61,6 @@ export function buildCorsHeaders(request: Request): Headers {
     'X-TM-Upstream-Status',
     'X-TM-Config-Source',
     'X-TM-Config-Key',
-    'X-TM-Cost-Multiplier',
     // Team BYOK: a equipa serviu pelo seu próprio provedor/chave — a IDE mostra
     // o indicador "Team BYOK" e sabe que não há metering da TM neste pedido.
     'X-TM-Team-Byok',
@@ -69,14 +68,15 @@ export function buildCorsHeaders(request: Request): Headers {
     'X-Plan',
     'X-Budget-Status',
     'X-Budget-Pct',
-    'X-Tokens-Consumed',
-    'X-Extra-Tokens',
+    'X-Budget-Unit',
+    'X-Budget-Consumed',
+    'X-Extra-Balance',
     'X-Cycle-End',
     // Contexto de equipa (§3.5) — a IDE enquadra "fatia/bolo" + CTA de bloqueio.
     'X-Team-Id',
     'X-Team-Tier',
-    'X-Slice-Tokens',
-    'X-Pie-Total',
+    'X-Team-Slice-Micros',
+    'X-Team-Pie-Micros',
     'Retry-After',
     'X-RateLimit-Limit',
     'X-RateLimit-Remaining',
@@ -187,17 +187,19 @@ export interface BudgetHeaderMeta {
   plan: string
   status: string
   consumedPct: number
-  tokensConsumed: number
+  /** Consumo do ciclo, na unidade do plano (`unit`). */
+  consumed: number
+  /** explorer → tokens; planos pagos → microdólares (µ$, metering 30/70). */
+  unit: 'tokens' | 'micros'
   extraUsageBalance: number
   cycleEnd: string
   /** Contexto de EQUIPA (§3.5): presente só quando o user é membro de uma
    *  equipa. `plan` continua a ser o plano-BASE (team-pro→pro); o tier cru e a
-   *  pie/fatia em tokens vão aqui, para a IDE enquadrar "a tua fatia / o bolo". */
-  team?: { teamId: string; tier: string; sliceTokens: number; pieTotal: number }
+   *  pie/fatia em µ$ vão aqui, para a IDE enquadrar "a tua fatia / o bolo". */
+  team?: { teamId: string; tier: string; sliceMicros: number; pieMicros: number }
 }
 
 export function buildResponseHeaders(upstream: Response, meta: {
-  costMultiplier?: number
   requestId: string
   provider: string
   model: string
@@ -244,11 +246,9 @@ export function buildResponseHeaders(upstream: Response, meta: {
   headers.set('x-tm-upstream-status', String(upstream.status))
   headers.set('x-tm-config-source', meta.configSource)
   headers.set('x-tm-config-key', meta.configKey)
-  // Multiplicador de custo aplicado a ESTE pedido (ronda-2 #8): sem isto a
-  // UI de budget não conseguia explicar porque é que 40k tokens andaram 120k
-  // na barra — o suporte não tinha nenhum campo para mostrar. 1 quando não
-  // há persona/multiplicador.
-  headers.set('x-tm-cost-multiplier', String(meta.costMultiplier ?? 1))
+  // (x-tm-cost-multiplier foi REMOVIDO com o metering 30/70 — já não há
+  // multiplicador entre o custo real e o contador; a unidade do consumo vem
+  // em x-budget-unit.)
   // Always emitted (true/false) so the IDE can clear a stale flag when a later
   // turn is served by the managed path again.
   headers.set('x-tm-team-byok', meta.teamByok ? 'true' : 'false')
@@ -284,14 +284,17 @@ export function buildResponseHeaders(upstream: Response, meta: {
     headers.set('x-plan', meta.budget.plan)
     headers.set('x-budget-status', meta.budget.status)
     headers.set('x-budget-pct', meta.budget.consumedPct.toFixed(4))
-    headers.set('x-tokens-consumed', String(meta.budget.tokensConsumed))
-    headers.set('x-extra-tokens', String(meta.budget.extraUsageBalance))
+    // Metering 30/70: o consumo vem na unidade do plano — tokens no explorer,
+    // µ$ nos pagos (a IDE formata $ a partir de µ$). x-budget-unit diz qual.
+    headers.set('x-budget-unit', meta.budget.unit)
+    headers.set('x-budget-consumed', String(meta.budget.consumed))
+    headers.set('x-extra-balance', String(meta.budget.extraUsageBalance))
     if (meta.budget.cycleEnd) headers.set('x-cycle-end', meta.budget.cycleEnd)
     if (meta.budget.team) {
       headers.set('x-team-id', meta.budget.team.teamId)
       headers.set('x-team-tier', meta.budget.team.tier)
-      headers.set('x-slice-tokens', String(meta.budget.team.sliceTokens))
-      headers.set('x-pie-total', String(meta.budget.team.pieTotal))
+      headers.set('x-team-slice-micros', String(meta.budget.team.sliceMicros))
+      headers.set('x-team-pie-micros', String(meta.budget.team.pieMicros))
     }
   }
   return headers

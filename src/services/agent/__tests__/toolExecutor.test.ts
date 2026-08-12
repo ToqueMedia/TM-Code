@@ -269,8 +269,9 @@ import {
   BASH_ALIAS,
   ADVERTISED_TOOL_NAMES,
   CAPTURE_URL_DESIGN,
+  advertisedToolName,
 } from '../toolNames'
-import { DESTRUCTIVE_TOOLS } from '../toolPolicy'
+import { DESTRUCTIVE_TOOLS, SITUATIONAL_DEFERRED_TOOLS, nativeDeferredToolNames } from '../toolPolicy'
 // agentStore is NOT mocked — update_tasks drives the real Zustand store, so
 // the evidence-guard tests seed and assert against it directly.
 import { useAgentStore } from '../../../stores/agentStore'
@@ -283,6 +284,21 @@ function freshExecutor(): ToolExecutor {
   // @ts-expect-error — reset private singleton for test isolation
   ToolExecutor.instance = undefined
   return ToolExecutor.getInstance()
+}
+
+/**
+ * TODAS as definições registadas — as que viajam no pedido MAIS as diferidas.
+ *
+ * `getToolDefinitions()` responde a "o que vai no schema DESTE turno", e desde
+ * que as nativas situacionais passaram a ser diferidas (2026-08-12) isso é um
+ * subconjunto. Um teste sobre o CONTRATO de uma tool (o nome anunciado, o texto
+ * da descrição) tem de ver as duas metades: uma tool diferida chega ao modelo
+ * na mesma, via ToolSearch, e a descrição dela conta exactamente na mesma.
+ * Usar `getToolDefinitions()` nesses testes fá-los-ia passar por AUSÊNCIA — o
+ * modo de falha que esta funcionalidade já teve uma vez.
+ */
+function allToolDefinitions(exec: ToolExecutor) {
+  return exec.getAllToolDefinitions()
 }
 
 /** Approve all permission requests by default. */
@@ -1833,7 +1849,7 @@ describe('I: Tool definitions and metadata', () => {
     // capacidade — antes iam as DUAS (~1017 tokens duplicados por request) e o
     // modelo escolhia sempre a de treino de qualquer maneira.
     const exec = freshExecutor()
-    const names = exec.getToolDefinitions().map(d => d.function.name)
+    const names = allToolDefinitions(exec).map(d => d.function.name)
 
     for (const trained of ['Read', 'Grep', 'Glob', 'LS', 'Bash', 'Edit', 'Write', 'Task', 'WebFetch', 'WebSearch']) {
       expect(names).toContain(trained)
@@ -1860,7 +1876,7 @@ describe('I: Tool definitions and metadata', () => {
     const exec = freshExecutor()
     const leaks: string[] = []
 
-    for (const def of exec.getToolDefinitions()) {
+    for (const def of allToolDefinitions(exec)) {
       const text = def.function.description ?? ''
       for (const [canonical, advertised] of Object.entries(ADVERTISED_TOOL_NAMES)) {
         // `glob`/`delegate` são palavras inglesas correntes ("a glob
@@ -1883,7 +1899,7 @@ describe('I: Tool definitions and metadata', () => {
 
     expect(count).toBeGreaterThan(0)
     // Should match the number of tools that don't start with 'mcp__'
-    const defs = exec.getToolDefinitions()
+    const defs = allToolDefinitions(exec)
     const coreCount = defs.filter(d => !d.function.name.startsWith('mcp__')).length
     expect(count).toBe(coreCount)
   })
@@ -1919,7 +1935,10 @@ describe('I: Tool definitions and metadata', () => {
       expect(advertised).not.toContain('mcp__chakra-ui__get_theme')
       expect(advertised).not.toContain('mcp__chakra-ui__list_components')
 
-      const index = exec.getDeferredToolIndex()
+      // Filtrado a `mcp__`: o índice leva TAMBÉM as nativas situacionais
+      // (SITUATIONAL_DEFERRED_TOOLS) desde 2026-08-12. Este teste é sobre as
+      // MCP — a lista das nativas tem o seu próprio teste.
+      const index = exec.getDeferredToolIndex().filter(d => d.name.startsWith('mcp__'))
       expect(index.map(d => d.name).sort()).toEqual([
         'mcp__chakra-ui__get_theme',
         'mcp__chakra-ui__list_components',
@@ -1956,13 +1975,73 @@ describe('I: Tool definitions and metadata', () => {
       expect(result).toContain('mcp result')
     })
 
-    it('tools locais nunca são diferidas', () => {
+    // Chamava-se "tools locais nunca são diferidas". Deixou de ser verdade a
+    // 2026-08-12 (as nativas situacionais passaram a diferir-se) e um nome de
+    // teste que mente sobre o que garante é pior do que não haver teste.
+    // O que ele SEMPRE guardou, e continua a guardar, é o núcleo.
+    it('o CICLO DE TRABALHO fica sempre carregado, mesmo com MCP registado', () => {
       const exec = freshExecutor()
       exec.registerMCPTools(sampleMcpTools as never, callToolFn)
       const names = exec.getToolDefinitions().map(d => d.function.name)
-      for (const trained of ['Read', 'Grep', 'Bash', 'Edit', 'Write']) {
+      for (const trained of ['Read', 'Grep', 'Glob', 'LS', 'Bash', 'Edit', 'Write', 'Task']) {
         expect(names).toContain(trained)
       }
+    })
+
+    // ── A lista de deferral nativa (2026-08-12) ───────────────────────────
+    //
+    // O `applyNativeDeferral` avisa em runtime quando um nome não bate, mas um
+    // warn num log é o canal que já se provou insuficiente neste repo. Isto é
+    // o mesmo invariante como TESTE: renomear uma tool sem actualizar a lista
+    // fica vermelho aqui.
+    it('SITUATIONAL_DEFERRED_TOOLS: todos os nomes existem e ficaram diferidos', () => {
+      const exec = freshExecutor()
+      const diferidas = new Set(exec.getDeferredToolIndex().map(d => d.name))
+      const naoDiferidas = SITUATIONAL_DEFERRED_TOOLS.filter(
+        n => !diferidas.has(n) && !diferidas.has(advertisedToolName(n)),
+      )
+      expect(naoDiferidas).toEqual([])
+    })
+
+    it('uma tool diferida sai do schema mas continua CARREGÁVEL pelo nome', () => {
+      // As duas metades do contrato. Sem a primeira não há poupança nenhuma;
+      // sem a segunda a tool fica inalcançável — que é a regressão que esta
+      // funcionalidade já teve.
+      const exec = freshExecutor()
+      const eager = exec.getToolDefinitions().map(d => d.function.name)
+      expect(eager).not.toContain('WebFetch')
+      expect(eager).not.toContain('generate_image')
+
+      const { defs, missing } = exec.getDeferredToolDefinitions(['WebFetch', 'generate_image'])
+      expect(missing).toEqual([])
+      expect(defs.map(d => d.function.name).sort()).toEqual(['WebFetch', 'generate_image'])
+      expect(defs.every(d => (d.function.description ?? '').length > 0)).toBe(true)
+    })
+
+    // Um run lightweight NÃO leva o ToolSearch (agentService: a injecção está
+    // atrás de `!this.lightweightOptions`), portanto o que não vier no schema
+    // à partida é inalcançável para ele. Se o fallback do construtor voltar a
+    // `getToolDefinitions()`, um sub-agente perde 15 tools em silêncio.
+    it('getAllToolDefinitions inclui as diferidas — é o que salva quem não tem ToolSearch', () => {
+      const exec = freshExecutor()
+      const todas = exec.getAllToolDefinitions().map(d => d.function.name)
+      const eager = exec.getToolDefinitions().map(d => d.function.name)
+      expect(eager).not.toContain('WebFetch')
+      expect(todas).toContain('WebFetch')
+      expect(todas).toContain('generate_image')
+      // Superconjunto estrito, sem duplicados.
+      expect(todas.length).toBe(eager.length + exec.getDeferredToolIndex().length)
+      expect(new Set(todas).size).toBe(todas.length)
+    })
+
+    it('nativeDeferredToolNames deixa as MCP de fora (a secção MCP já as lista)', () => {
+      const exec = freshExecutor()
+      exec.registerMCPTools(sampleMcpTools as never, callToolFn)
+      const nomes = nativeDeferredToolNames(exec.getDeferredToolIndex())
+      expect(nomes.some(n => n.startsWith('mcp__'))).toBe(false)
+      // E as nativas continuam lá — um filtro que devolvesse [] passaria o
+      // assert de cima e não anunciaria nada.
+      expect(nomes).toContain('WebFetch')
     })
   })
 
@@ -2006,7 +2085,8 @@ describe('I: Tool definitions and metadata', () => {
     // Deferred (2026-08-03): o def NÃO viaja em getToolDefinitions — vive no
     // índice de diferidas até o modelo o carregar via ToolSearch.
     expect(exec.getToolDefinitions().some(d => d.function.name.startsWith('mcp__'))).toBe(false)
-    expect(exec.getDeferredToolIndex().map(d => d.name)).toEqual(['mcp__brave__search'])
+    expect(exec.getDeferredToolIndex().map(d => d.name).filter(n => n.startsWith('mcp__')))
+      .toEqual(['mcp__brave__search'])
 
     // Core count should be unchanged
     expect(exec.getCoreToolCount()).toBe(initialCount)
@@ -2024,7 +2104,8 @@ describe('I: Tool definitions and metadata', () => {
       jest.fn()
     )
 
-    expect(exec.getDeferredToolIndex().map(d => d.name)).toEqual(['mcp__srv__tool2'])
+    expect(exec.getDeferredToolIndex().map(d => d.name).filter(n => n.startsWith('mcp__')))
+      .toEqual(['mcp__srv__tool2'])
   })
 
   it('resetSessionState clears large result tracking', () => {
@@ -2465,7 +2546,7 @@ describe('update_tasks evidence guard', () => {
 // Os invariantes valem IGUAIS antes e depois de virar os nomes.
 describe('Z: invariantes do registo de tools', () => {
   function registeredNames(): Set<string> {
-    return new Set(freshExecutor().getToolDefinitions().map(t => t.function.name))
+    return new Set(allToolDefinitions(freshExecutor()).map(t => t.function.name))
   }
 
   it('tudo o que TOOL_NAMES declara resolve para uma tool registada', () => {
@@ -3081,7 +3162,7 @@ describe('conformidade do contrato das tools', () => {
     }
 
     it('a descrição encaminha para o capture_url_design', () => {
-      const wf = freshExecutor().getToolDefinitions().find(d => d.function.name === 'WebFetch')
+      const wf = allToolDefinitions(freshExecutor()).find(d => d.function.name === 'WebFetch')
       const desc = wf?.function.description ?? ''
       expect(desc).toContain(CAPTURE_URL_DESIGN)
       // A frase mudou quando os PDFs passaram a ser suportados; o que tem de
@@ -3184,7 +3265,7 @@ describe('conformidade do contrato das tools', () => {
     // Um marcador por resolver é pior do que o nome errado: não corresponde a
     // tool nenhuma, e o modelo não tem como adivinhar o que lá devia estar.
     const leaks: string[] = []
-    for (const def of freshExecutor().getToolDefinitions()) {
+    for (const def of allToolDefinitions(freshExecutor())) {
       const text = `${def.function.name} ${def.function.description ?? ''}`
       // Só MAIÚSCULAS_COM_UNDERSCORE: é assim que as constantes de nome de
       // tool se escrevem. `${project}` em minúsculas é prosa deliberada — a
@@ -3250,7 +3331,7 @@ describe('conformidade do contrato das tools', () => {
       // Bash: quatro turnos para o que agora é uma chamada. Uma descrição que
       // desmente o código é pior do que uma descrição em falta — desliga
       // activamente uma capacidade que existe.
-      const wf = freshExecutor().getToolDefinitions().find(d => d.function.name === 'WebFetch')
+      const wf = allToolDefinitions(freshExecutor()).find(d => d.function.name === 'WebFetch')
       const desc = wf?.function.description ?? ''
       expect(desc).toMatch(/PDFs ARE supported/i)
       expect(desc).not.toMatch(/NOT for binary URLs:\s*a PDF/i)
@@ -3260,7 +3341,7 @@ describe('conformidade do contrato das tools', () => {
     })
 
     it('a descrição anuncia o contrato e o custo de o ignorar', () => {
-      const wf = freshExecutor().getToolDefinitions().find(d => d.function.name === 'WebFetch')
+      const wf = allToolDefinitions(freshExecutor()).find(d => d.function.name === 'WebFetch')
       const desc = wf?.function.description ?? ''
       expect(desc).toContain('PASS A `prompt`')
       expect(desc).toMatch(/ANSWER/)
@@ -3298,3 +3379,4 @@ describe('conformidade do contrato das tools', () => {
     })
   })
 })
+

@@ -14,6 +14,31 @@ import type { Promotion } from './promotionsStore'
 // is published separately as Active AI Config by the Control Plane.
 export type UserPlanName = 'explorer' | 'vibe' | 'pro' | 'max' | 'welcome' | 'byok-only'
 
+/**
+ * Unidade de metering do plano (decisão de produto 2026-08-11 — metering
+ * 30/70): o EXPLORER mantém-se em tokens; os planos pagos contam o consumo
+ * em MICRODÓLARES (µ$ = 1e-6 USD) de custo real do provider — cache hit ao
+ * preço de cache, miss ao preço cheio, output ao preço de output. A IDE
+ * recebe a unidade do servidor (X-Budget-Unit / /v1/me) — nunca assume.
+ */
+export type BudgetUnit = 'tokens' | 'micros'
+
+/**
+ * Formatação única para valores de orçamento na unidade do plano.
+ * tokens → "1.25M" / "850k"; micros → "$7.00" (2 casas; <$0.01 quando mínimo).
+ */
+export function formatBudgetAmount(value: number, unit: BudgetUnit): string {
+  if (unit === 'micros') {
+    const usd = Math.max(0, value) / 1_000_000
+    if (usd > 0 && usd < 0.01) return '<$0.01'
+    return `$${usd.toFixed(2)}`
+  }
+  const v = Math.max(0, value)
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(2).replace(/\.?0+$/, '')}M`
+  if (v >= 1_000) return `${Math.round(v / 1_000)}k`
+  return String(Math.round(v))
+}
+
 export type CostBudgetStatus =
   | 'allowed'
   | 'allowed_warning'
@@ -30,8 +55,8 @@ export type CostBudgetStatus =
 export interface TeamBillingContext {
   teamId: string
   tier: string          // 'team-pro' | 'team-max'
-  pieTotal: number      // tokens do bolo (tier base + comprado)
-  mySliceTokens: number // teto do membro em tokens
+  pieTotal: number      // bolo (tier base + comprado), na unidade do plano
+  mySliceTokens: number // teto do membro, na unidade do plano (equipas: µ$)
   mySlicePct: number    // 0..1 — fatia do membro na pie
   role: string          // 'owner' | 'member'
 }
@@ -45,6 +70,9 @@ export interface MeResponse {
     consumedPct: number
     tokensConsumed: number
     tokenBudget: number
+    /** Unidade dos dois valores acima (metering 30/70). Workers/control-plane
+     *  antigos não enviam → assume-se a unidade anterior (tokens). */
+    unit?: BudgetUnit
     cycleEnd: string
     extraUsageBalance: number
     status: CostBudgetStatus
@@ -99,11 +127,13 @@ interface BillingState {
 
   // Cost budget
   consumedPct: number        // 0–1 normal, > 1 overage
-  /** Multiplicador aplicado ao ÚLTIMO pedido (persona; valor do ADMIN via
-   *  X-TM-Cost-Multiplier — nada hardcoded no cliente). */
-  lastCostMultiplier: number
-  tokensConsumed: number     // raw tokens in current cycle
-  tokenBudget: number        // plan budget (depends on plan)
+  // (lastCostMultiplier foi REMOVIDO no metering 30/70 — já não há
+  // multiplicador entre o custo e o contador; a persona decide só o modelo.)
+  /** Unidade do consumo/orçamento: tokens (explorer) ou µ$ (planos pagos). */
+  budgetUnit: BudgetUnit
+  /** Consumo do ciclo, na unidade do plano (nomes históricos preservados). */
+  tokensConsumed: number
+  tokenBudget: number        // envelope do plano, na unidade do plano
   cycleEnd: string           // "YYYY-MM-DD"
   /** Expiração da SUBSCRIÇÃO (ISO) — '' quando não aplicável. Ver MeResponse. */
   planExpiresAt: string
@@ -149,7 +179,7 @@ const DEFAULT_STATE: BillingState = {
   isActive: true,
   isLoaded: false,
   consumedPct: 0,
-  lastCostMultiplier: 1,
+  budgetUnit: 'tokens',
   tokensConsumed: 0,
   tokenBudget: 0,
   cycleEnd: '',
@@ -186,6 +216,7 @@ interface BillingCacheRecord {
   plan: UserPlanName
   isActive: boolean
   consumedPct: number
+  budgetUnit?: BudgetUnit
   tokensConsumed: number
   tokenBudget: number
   cycleEnd: string
@@ -227,6 +258,7 @@ export function persistBillingCache(uid: string): void {
       plan: s.plan,
       isActive: s.isActive,
       consumedPct: s.consumedPct,
+      budgetUnit: s.budgetUnit,
       tokensConsumed: s.tokensConsumed,
       tokenBudget: s.tokenBudget,
       cycleEnd: s.cycleEnd,
@@ -257,6 +289,7 @@ function buildInitialState(): BillingState {
     plan: cached.plan,
     isActive: cached.isActive,
     consumedPct: cached.consumedPct,
+    budgetUnit: cached.budgetUnit ?? 'tokens',
     tokensConsumed: cached.tokensConsumed,
     tokenBudget: cached.tokenBudget,
     cycleEnd: cached.cycleEnd,
@@ -355,20 +388,15 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
       if (!isNaN(pct)) updates.consumedPct = pct
     }
 
-    const tokensRaw = headers.get('X-Tokens-Consumed')
-    if (tokensRaw) {
-      const tokens = parseInt(tokensRaw, 10)
-      if (!isNaN(tokens)) updates.tokensConsumed = tokens
-    }
-
-    // Multiplicador de custo APLICADO a este pedido (X-TM-Cost-Multiplier) —
-    // é o valor que o ADMIN definiu na persona, emitido pelo worker. A UI de
-    // budget mostra-o para explicar "40k tokens → 120k na barra"; NUNCA um
-    // número hardcoded no cliente.
-    const multRaw = headers.get('X-TM-Cost-Multiplier')
-    if (multRaw) {
-      const mult = parseFloat(multRaw)
-      if (!isNaN(mult) && mult > 0) updates.lastCostMultiplier = mult
+    // Metering 30/70: o consumo vem em X-Budget-Consumed na unidade declarada
+    // por X-Budget-Unit (tokens no explorer, µ$ nos pagos). Workers antigos
+    // ainda emitem X-Tokens-Consumed — fallback para o período de transição.
+    const unitRaw = headers.get('X-Budget-Unit')
+    if (unitRaw === 'tokens' || unitRaw === 'micros') updates.budgetUnit = unitRaw
+    const consumedRaw = headers.get('X-Budget-Consumed') ?? headers.get('X-Tokens-Consumed')
+    if (consumedRaw) {
+      const consumed = parseInt(consumedRaw, 10)
+      if (!isNaN(consumed)) updates.tokensConsumed = consumed
     }
 
     const statusRaw = headers.get('X-Budget-Status')
@@ -380,7 +408,7 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
     const cycleEnd = headers.get('X-Cycle-End')
     if (cycleEnd) updates.cycleEnd = cycleEnd
 
-    const tmsRaw = headers.get('X-Extra-Tokens')
+    const tmsRaw = headers.get('X-Extra-Balance') ?? headers.get('X-Extra-Tokens')
     if (tmsRaw) {
       const tms = parseInt(tmsRaw, 10)
       if (!isNaN(tms)) updates.tmsRemaining = tms
@@ -391,11 +419,12 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
 
     // Contexto de equipa (§3.5) — só ATUALIZA quando o header está presente
     // (pedido de equipa); nunca LIMPA (isso é autoridade do /v1/me). Mantém o
-    // enquadramento fatia/bolo vivo entre chamadas ao /v1/me.
+    // enquadramento fatia/bolo vivo entre chamadas ao /v1/me. Fatia/bolo vêm
+    // em µ$ (equipas são sempre planos pagos).
     const teamId = headers.get('X-Team-Id')
     if (teamId) {
-      const sliceTokens = parseInt(headers.get('X-Slice-Tokens') || '', 10)
-      const pieTotal = parseInt(headers.get('X-Pie-Total') || '', 10)
+      const sliceTokens = parseInt(headers.get('X-Team-Slice-Micros') || '', 10)
+      const pieTotal = parseInt(headers.get('X-Team-Pie-Micros') || '', 10)
       const tier = headers.get('X-Team-Tier') || ''
       set(state => ({
         ...updates,
@@ -426,6 +455,8 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
       isActive: data.isActive,
       isLoaded: true,
       consumedPct: data.billing.consumedPct,
+      // Ausente em backends antigos → mantém a unidade conhecida.
+      ...(data.billing.unit ? { budgetUnit: data.billing.unit } : {}),
       tokensConsumed: data.billing.tokensConsumed,
       tokenBudget: data.billing.tokenBudget,
       cycleEnd: data.billing.cycleEnd,

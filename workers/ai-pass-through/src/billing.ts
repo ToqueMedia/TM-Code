@@ -15,12 +15,23 @@
  *      do planGate — zero round-trips extra).
  *   2. `checkCostBudget` — porte 1:1 dos thresholds do control-plane
  *      (80/95/100%, overage via extraUsageBalance, rejected).
- *   3. `commitTokenConsumption` — porte 1:1 do control-plane: increment
- *      atómico de `tokenBudget.tokensConsumed` (+ decremento do
- *      `tokenBudget.extraUsageBalance` com floor a 0 em overage), via
- *      `ctx.waitUntil` depois do stream terminar. O multiplicador do TM
- *      Speed aplica-se AQUI (server-side) — a IDE deixa de ser quem decide
- *      quanto se cobra.
+ *   3. `commitConsumption` — increment atómico do contador do ciclo
+ *      (+ decremento do `tokenBudget.extraUsageBalance` com floor a 0 em
+ *      overage), via `ctx.waitUntil` depois do stream terminar.
+ *
+ * UNIDADES (decisão de produto 2026-08-11 — metering 30/70):
+ *   • Planos PAGOS (vibe/pro/max/team-*) contam-se em MICRODÓLARES (µ$) de
+ *     CUSTO REAL do provider — cache hit ao preço de cache, miss ao preço
+ *     cheio, output ao preço de output (pricing.ts). Sem multiplicadores de
+ *     persona nem de speed: a margem de 30% vive no preço do plano; os 70%
+ *     restantes são o envelope que o utilizador consome exactamente ao custo.
+ *     Campos: `tokenBudget.costConsumed` + `lifetimeCostConsumed`.
+ *   • O plano EXPLORER mantém-se em TOKENS (1,5M por ciclo, sem desconto de
+ *     cache nem multiplicadores — contador simples de tokens reais). Campos:
+ *     `tokenBudget.tokensConsumed` + `lifetimeTokensConsumed` (os antigos —
+ *     o explorer nunca migra de unidade).
+ *   As duas unidades NUNCA se misturam num utilizador: o campo lido/escrito
+ *   escolhe-se pelo plano resolvido no pré-voo (`planMeteringUnit`).
  *
  * Custo: ~1 leitura Firestore/60s/utilizador + 1 write/pedido (waitUntil,
  * não bloqueia a resposta). Sem polling, sem cron, sem Durable Objects.
@@ -42,18 +53,34 @@ import { resolveFirestoreAuthHeaders } from './googleAuth'
 // extra por pedido. Mudanças de pricing exigem atualizar o env/deploy — o
 // drift é aceitável porque o /v1/me continua a ser a fonte do UI.
 
+/**
+ * Budgets por plano, na UNIDADE de cada plano (ver planMeteringUnit):
+ * explorer em TOKENS; todos os outros em MICRODÓLARES (µ$ = 1e-6 USD).
+ *
+ * Envelopes 30/70 (decisão 2026-08-11, preços $10/$25/$100): o utilizador
+ * consome 70% do preço a custo real → $7 / $17,50 / $70 = 7M / 17,5M / 70M µ$.
+ */
 const DEFAULT_PLAN_BUDGETS: Record<string, number> = {
-  explorer: 1_500_000,
-  vibe: 10_820_000,
-  pro: 20_910_000,
-  max: 129_810_000,
-  welcome: 32_500_000,
+  explorer: 1_500_000, // TOKENS — o único plano que mantém a unidade antiga
+  vibe: 7_000_000, // µ$ ($7,00)
+  pro: 17_500_000, // µ$ ($17,50)
+  max: 70_000_000, // µ$ ($70,00)
+  // PROVISÓRIO (2026-08-11): equivalência de custo da antiga allowance de
+  // 32,5M tokens (~$22,40 a ρ≈$0,69/M) até decisão de produto sobre o trial.
+  welcome: 22_400_000, // µ$ ($22,40)
   'byok-only': 0,
   // Tiers de equipa (Plano de Equipas): o budget base da "pie" partilhada. Só
   // fallback — o valor real vem do subscription_plans do admin (planKey
   // 'team-pro'/'team-max'), igual aos planos pessoais.
-  'team-pro': 20_910_000,
-  'team-max': 129_810_000,
+  'team-pro': 17_500_000, // µ$
+  'team-max': 70_000_000, // µ$
+}
+
+/** Unidade de metering do plano — escolhe o campo lido/escrito no Firestore. */
+export type MeteringUnit = 'tokens' | 'micros'
+
+export function planMeteringUnit(plan: string | undefined): MeteringUnit {
+  return plan === 'explorer' ? 'tokens' : 'micros'
 }
 
 export function resolvePlanBudgets(env: Env): Record<string, number> {
@@ -122,42 +149,29 @@ export function resetBillingDisabledWarning(): void {
   warnedBillingDisabled = false
 }
 
-// ── Constantes de consumo (2026-08-05, decisão de produto) ────────────────
-// Valores de CONSUMO não são mutáveis por env — "por isso é que tem UI": o
-// único knob de consumo configurável é o costMultiplier POR PERSONA,
-// publicado pelo admin no painel (→ KV). Os antigos envs
-// TM_SPEED_BILLING_MULTIPLIER e TM_CACHE_BILLING_FACTOR foram removidos —
-// um secret esquecido não pode mudar a fatura de ninguém.
-
-/** Multiplicador do TM Speed (3× — feature retirada; constante mantida pelo
- *  caminho de código ainda existente). */
-export function resolveSpeedMultiplier(_env: Env): number {
-  return 3
-}
-
-/**
- * Fração a que os tokens de prompt CACHEADOS são faturados (2026-07-15,
- * decisão de produto): 0.5 = metade do preço. Compõe com o costMultiplier
- * da persona por ORDEM (billable primeiro, multiplicador depois) — cache
- * custa sempre 50% do valor definido pelo admin, por construção.
- */
-export function resolveCacheBillingFactor(_env: Env): number {
-  return 0.5
-}
+// ── Fim dos multiplicadores (2026-08-11, metering 30/70) ──────────────────
+// resolveSpeedMultiplier, resolveCacheBillingFactor e billableTokenTotal
+// foram REMOVIDOS: o consumo passou a ser o custo REAL do provider em µ$
+// (pricing.ts) e não há multiplicador nenhum entre o custo e o contador.
+// O costMultiplier da persona deixou de existir no billing (a persona decide
+// só o modelo; o preço do modelo É a diferenciação de consumo). O TM Speed
+// mantém o gate de elegibilidade (planGate) mas já não multiplica nada.
+//
+// História preservada de propósito: o factor de cache anterior (0,50→0,43)
+// calibrava margens sobre uma unidade abstracta; a doutrina actual torna a
+// calibração desnecessária — margem fixa de 30% no preço do plano, envelope
+// de 70% a passe-a-custo, para qualquer cache rate, provider ou mix.
 
 /**
- * Total de tokens FATURÁVEIS antes do multiplicador de velocidade:
- *   (prompt não-cacheado)·1 + (prompt cacheado)·factor + completion·1
- * = promptTokens − cached·(1 − factor) + completionTokens
- * cached é subconjunto de promptTokens (o provider já o inclui no total).
+ * Tokens reais para o plano EXPLORER (o único que mantém a unidade antiga):
+ * prompt + completion, sem desconto de cache nem multiplicadores — um
+ * contador simples e explicável para o tier gratuito.
  */
-export function billableTokenTotal(
-  usage: { promptTokens: number; completionTokens: number; cachedTokens?: number },
-  cacheFactor: number,
-): number {
-  const cached = Math.max(0, Math.min(usage.promptTokens, usage.cachedTokens ?? 0))
-  const discount = Math.floor(cached * (1 - cacheFactor))
-  return Math.max(0, usage.promptTokens - discount) + usage.completionTokens
+export function explorerTokenTotal(usage: {
+  promptTokens: number
+  completionTokens: number
+}): number {
+  return Math.max(0, usage.promptTokens) + Math.max(0, usage.completionTokens)
 }
 
 // ── User budget state (cached read) ──────────────────────────────────────
@@ -184,7 +198,10 @@ export interface TeamMemberBudget {
 
 export interface UserBudgetState {
   plan: string
-  tokensConsumed: number
+  /** Consumo do ciclo, na unidade do plano (`unit`). */
+  consumed: number
+  /** Unidade de metering do plano (explorer=tokens; pagos=µ$). */
+  unit: MeteringUnit
   extraUsageBalance: number
   cycleEnd: string
   /** Cap por utilizador que SUBSTITUI o budget do plano quando presente
@@ -298,12 +315,16 @@ export async function getUserBudgetState(
   const projectId = typeof env.FIREBASE_PROJECT_ID === 'string' ? env.FIREBASE_PROJECT_ID : ''
   if (!projectId || !idToken) return null
 
+  // Os DOIS contadores de ciclo na máscara: o plano resolve qual se lê
+  // (planMeteringUnit) — o explorer mantém `tokensConsumed` (tokens), os
+  // planos pagos lêem `costConsumed` (µ$, migração 2026-08-11).
   const mask = [
     'userPlan',
     'activeTeamId',
     'blocked',
     'deleted',
     'tokenBudget.tokensConsumed',
+    'tokenBudget.costConsumed',
     'tokenBudget.extraUsageBalance',
     'tokenBudget.cycleEnd',
     'tokenBudget.tokenBudgetOverride',
@@ -341,7 +362,9 @@ export async function getUserBudgetState(
         if (team) {
           state = {
             plan: team.planTier,
-            tokensConsumed: team.memberConsumed,
+            consumed: team.memberConsumed,
+            // Tiers de equipa são sempre pagos → µ$.
+            unit: 'micros',
             extraUsageBalance: 0,
             cycleEnd: team.cycleEnd,
             blocked: userBlocked || team.memberBlocked,
@@ -360,9 +383,21 @@ export async function getUserBudgetState(
       }
       if (!state && typeof plan === 'string' && plan) {
         const overrideRaw = intField(budget['tokenBudgetOverride'])
+        // Campo do ciclo pela unidade do plano. Fallback defensivo para o
+        // lado µ$: doc ainda sem `costConsumed` (pré-migração) lê o contador
+        // antigo — valores em unidade errada só são possíveis na janela entre
+        // o deploy do worker e a migração do control-plane, e o reset geral
+        // da migração zera-os a seguir.
+        const unit = planMeteringUnit(plan)
+        const consumed = unit === 'tokens'
+          ? intField(budget['tokensConsumed'])
+          : (budget['costConsumed'] !== undefined
+            ? intField(budget['costConsumed'])
+            : intField(budget['tokensConsumed']))
         state = {
           plan,
-          tokensConsumed: Math.max(0, intField(budget['tokensConsumed'])),
+          consumed: Math.max(0, consumed),
+          unit,
           extraUsageBalance: Math.max(0, intField(budget['extraUsageBalance'])),
           cycleEnd: (budget['cycleEnd'] as { stringValue?: string } | undefined)?.stringValue ?? '',
           tokenBudgetOverride: overrideRaw > 0 ? overrideRaw : undefined,
@@ -476,7 +511,11 @@ async function getTeamMemberBudget(
       planTier,
       purchasedExtra: Math.max(0, intField(tb['purchasedExtra'])),
       percentAllocation: Math.min(1, Math.max(0, numField(member['percentAllocation']))),
-      memberConsumed: Math.max(0, intField(member['tokensConsumed'])),
+      // Tiers de equipa são pagos → µ$ (`costConsumed`); fallback ao campo
+      // antigo só cobre a janela pré-migração (o reset geral zero-a).
+      memberConsumed: Math.max(0, member['costConsumed'] !== undefined
+        ? intField(member['costConsumed'])
+        : intField(member['tokensConsumed'])),
       memberBlocked: (member['blocked'] as { booleanValue?: boolean } | undefined)?.booleanValue === true,
       cycleEnd: (cycle['cycleEnd'] as { stringValue?: string } | undefined)?.stringValue ?? '',
       byokTeamConsumed: Math.max(0, intField(byok['consumed'])),
@@ -547,7 +586,14 @@ export async function resolvePlanBudgetFor(
     if (response.ok) {
       const rows = await response.json() as Array<{ document?: { fields?: Record<string, unknown> } }>
       const fields = Array.isArray(rows) ? rows.find(r => r.document)?.document?.fields : undefined
-      const raw = intField(fields?.['tokenBudget'])
+      // Migração 30/70: o admin passa a publicar o envelope em µ$ no campo
+      // `costBudget`; `tokenBudget` fica como fallback até o control-plane
+      // publicar no campo novo (o valor antigo em tokens NÃO é conversível —
+      // mas na janela de transição o reset geral já correu, por isso o pior
+      // caso é o fallback hardcoded em µ$).
+      const raw = fields?.['costBudget'] !== undefined
+        ? intField(fields['costBudget'])
+        : intField(fields?.['tokenBudget'])
       adminBudget = raw > 0 ? raw : null
     } else {
       const text = await response.text().catch(() => '')
@@ -562,13 +608,14 @@ export async function resolvePlanBudgetFor(
 }
 
 /** Avança a cache local depois de um commit para que turnos consecutivos do
- *  agent loop vejam o consumo a crescer sem reler o Firestore. */
-export function bumpCachedConsumption(userId: string, rawTokens: number, asOverage: boolean): void {
+ *  agent loop vejam o consumo a crescer sem reler o Firestore. `amount` vem
+ *  na unidade do plano (tokens no explorer, µ$ nos pagos). */
+export function bumpCachedConsumption(userId: string, amount: number, asOverage: boolean): void {
   const cached = stateCache.get(userId)
   if (!cached?.state) return
-  cached.state.tokensConsumed += rawTokens
+  cached.state.consumed += amount
   if (asOverage) {
-    cached.state.extraUsageBalance = Math.max(0, cached.state.extraUsageBalance - rawTokens)
+    cached.state.extraUsageBalance = Math.max(0, cached.state.extraUsageBalance - amount)
   }
 }
 
@@ -625,7 +672,7 @@ export function checkCostBudget(state: UserBudgetState, budgets: Record<string, 
   // Override por utilizador (gifts) substitui o budget do plano — mesma
   // semântica do tokenBudgetOverride na web/control-plane.
   const tokenBudget = state.tokenBudgetOverride ?? budgets[state.plan] ?? 0
-  const tokensConsumed = Math.max(0, state.tokensConsumed)
+  const consumed = Math.max(0, state.consumed)
   const overageAvailable = Math.max(0, state.extraUsageBalance)
 
   // Plano sem orçamento (byok-only / desconhecido) — fail-safe: rejeita em
@@ -634,7 +681,7 @@ export function checkCostBudget(state: UserBudgetState, budgets: Record<string, 
     return { allowed: false, status: 'rejected', consumedPct: 0, tokenBudget, asOverage: false }
   }
 
-  const consumedPct = tokensConsumed / tokenBudget
+  const consumedPct = consumed / tokenBudget
   if (consumedPct >= 1) {
     if (overageAvailable > 0) {
       return { allowed: true, status: 'allowed_overage', consumedPct, tokenBudget, asOverage: true }
@@ -663,7 +710,7 @@ function checkTeamSliceBudget(state: UserBudgetState, budgets: Record<string, nu
   const baseBudget = budgets[state.plan] ?? 0
   const pieTotal = Math.max(0, baseBudget + (state.team?.purchasedExtra ?? 0))
   const sliceTokens = Math.floor(pieTotal * (state.team?.percentAllocation ?? 0))
-  const consumed = Math.max(0, state.tokensConsumed)
+  const consumed = Math.max(0, state.consumed)
 
   // Fatia nula (membro sem alocação) ou tier sem budget → rejeita.
   if (sliceTokens <= 0) {
@@ -689,20 +736,24 @@ export interface CommitArgs {
   env: Env
   userId: string
   idToken: string
-  rawTokens: number
+  /** Valor a comitar, na unidade do plano (`unit`). */
+  amount: number
+  /** explorer → tokens (campos antigos); restantes → µ$ (campos novos). */
+  unit: MeteringUnit
   asOverage: boolean
   fetcher: Fetcher
   /** Quando presente, o commit é dual-write na EQUIPA (total + fatia do
-   *  membro), não em `users/{uid}`. Hard cap estrito → nunca há overage. */
+   *  membro), não em `users/{uid}`. Hard cap estrito → nunca há overage.
+   *  Equipas são sempre µ$. */
   team?: { teamId: string }
 }
 
-export async function commitTokenConsumption(args: CommitArgs): Promise<boolean> {
+export async function commitConsumption(args: CommitArgs): Promise<boolean> {
   // Membro de equipa: dual-write na equipa em vez de users/{uid}.
   if (args.team) return commitTeamConsumption(args)
 
-  const { env, userId, idToken, rawTokens, asOverage, fetcher } = args
-  if (rawTokens <= 0) return true
+  const { env, userId, idToken, amount, unit, asOverage, fetcher } = args
+  if (amount <= 0) return true
 
   const projectId = typeof env.FIREBASE_PROJECT_ID === 'string' ? env.FIREBASE_PROJECT_ID : ''
   if (!projectId) return false
@@ -710,24 +761,29 @@ export async function commitTokenConsumption(args: CommitArgs): Promise<boolean>
   const docName = `projects/${projectId}/databases/(default)/documents/users/${userId}`
   const commitUrl = `${firestoreBase(env)}/v1/projects/${projectId}/databases/(default)/documents:commit`
 
-  // tokensConsumed cresce SEMPRE (também em overage) para o consumedPct do UI
-  // passar de 1.0 monotonicamente — mesma semântica do control-plane.
+  // Campos pela unidade do plano: o explorer continua nos campos antigos em
+  // tokens; os pagos escrevem nos campos novos em µ$ (migração 2026-08-11).
+  const cycleField = unit === 'tokens' ? 'tokenBudget.tokensConsumed' : 'tokenBudget.costConsumed'
+  const lifetimeField = unit === 'tokens' ? 'lifetimeTokensConsumed' : 'lifetimeCostConsumed'
+
+  // O contador do ciclo cresce SEMPRE (também em overage) para o consumedPct
+  // do UI passar de 1.0 monotonicamente — mesma semântica do control-plane.
   const transforms: Array<Record<string, unknown>> = [{
-    fieldPath: 'tokenBudget.tokensConsumed',
-    increment: { integerValue: String(rawTokens) },
+    fieldPath: cycleField,
+    increment: { integerValue: String(amount) },
   }, {
     // Contador vitalício ("todos os tempos") — campo de topo, DELIBERADAMENTE
     // fora de tokenBudget para nenhum reset de ciclo / mudança de plano
     // (control-plane firestore.ts) o zerar. Cresce em cada commit, nunca
     // decrementa. O transform increment auto-cria o campo (a partir de
-    // rawTokens) nos docs que não o tenham — sem migração para users antigos.
-    fieldPath: 'lifetimeTokensConsumed',
-    increment: { integerValue: String(rawTokens) },
+    // amount) nos docs que não o tenham — sem migração para users antigos.
+    fieldPath: lifetimeField,
+    increment: { integerValue: String(amount) },
   }]
   if (asOverage) {
     transforms.push({
       fieldPath: 'tokenBudget.extraUsageBalance',
-      increment: { integerValue: String(-rawTokens) },
+      increment: { integerValue: String(-amount) },
     })
     // Rastreio do overage pago neste ciclo — o carry-over do reset de ciclo
     // (control-plane firestore.ts computeCarryOver) subtrai-o do overshoot
@@ -735,7 +791,7 @@ export async function commitTokenConsumption(args: CommitArgs): Promise<boolean>
     // no ciclo seguinte.
     transforms.push({
       fieldPath: 'tokenBudget.overageConsumed',
-      increment: { integerValue: String(rawTokens) },
+      increment: { integerValue: String(amount) },
     })
   }
 
@@ -766,15 +822,15 @@ export async function commitTokenConsumption(args: CommitArgs): Promise<boolean>
     })
     if (!response.ok) {
       const text = await response.text().catch(() => '')
-      console.error(`[billing] commit failed (${response.status}) user=${userId} tokens=${rawTokens}: ${text.slice(0, 200)}`)
+      console.error(`[billing] commit failed (${response.status}) user=${userId} amount=${amount} unit=${unit}: ${text.slice(0, 200)}`)
       return false
     }
     // Log de sucesso deliberado (1 linha/pedido): na fase shadow é a
     // evidência de que a cadeia SA → Firestore funciona em produção; com os
     // Workers Logs persistentes ([observability] no wrangler.toml) fica
     // consultável no dashboard sem precisar de um `wrangler tail` aberto.
-    console.info(`[billing] committed ${rawTokens} tokens user=${userId} mode=${asOverage ? 'overage' : 'cycle'}`)
-    bumpCachedConsumption(userId, rawTokens, asOverage)
+    console.info(`[billing] committed ${amount} ${unit === 'tokens' ? 'tokens' : 'µ$'} user=${userId} mode=${asOverage ? 'overage' : 'cycle'}`)
+    bumpCachedConsumption(userId, amount, asOverage)
     return true
   } catch (error) {
     console.error('[billing] commit threw:', error)
@@ -791,8 +847,8 @@ export async function commitTokenConsumption(args: CommitArgs): Promise<boolean>
  * turnos seguintes verem o consumo a crescer sem reler.
  */
 async function commitTeamConsumption(args: CommitArgs): Promise<boolean> {
-  const { env, userId, idToken, rawTokens, fetcher, team } = args
-  if (rawTokens <= 0 || !team) return true
+  const { env, userId, idToken, amount, fetcher, team } = args
+  if (amount <= 0 || !team) return true
 
   const projectId = typeof env.FIREBASE_PROJECT_ID === 'string' ? env.FIREBASE_PROJECT_ID : ''
   if (!projectId) return false
@@ -800,13 +856,14 @@ async function commitTeamConsumption(args: CommitArgs): Promise<boolean> {
   const docName = `projects/${projectId}/databases/(default)/documents/teams/${team.teamId}`
   const commitUrl = `${firestoreBase(env)}/v1/projects/${projectId}/databases/(default)/documents:commit`
 
+  // Equipas são sempre planos pagos → µ$ (campos costConsumed).
   const writes = [{
     transform: {
       document: docName,
       fieldTransforms: [
-        { fieldPath: 'tokenBudget.tokensConsumed', increment: { integerValue: String(rawTokens) } },
-        { fieldPath: 'lifetimeTokensConsumed', increment: { integerValue: String(rawTokens) } },
-        { fieldPath: `members.${fieldPathSegment(userId)}.tokensConsumed`, increment: { integerValue: String(rawTokens) } },
+        { fieldPath: 'tokenBudget.costConsumed', increment: { integerValue: String(amount) } },
+        { fieldPath: 'lifetimeCostConsumed', increment: { integerValue: String(amount) } },
+        { fieldPath: `members.${fieldPathSegment(userId)}.costConsumed`, increment: { integerValue: String(amount) } },
       ],
     },
   }]
@@ -821,11 +878,11 @@ async function commitTeamConsumption(args: CommitArgs): Promise<boolean> {
     })
     if (!response.ok) {
       const text = await response.text().catch(() => '')
-      console.error(`[billing] team commit failed (${response.status}) team=${team.teamId} user=${userId} tokens=${rawTokens}: ${text.slice(0, 200)}`)
+      console.error(`[billing] team commit failed (${response.status}) team=${team.teamId} user=${userId} micros=${amount}: ${text.slice(0, 200)}`)
       return false
     }
-    console.info(`[billing] committed ${rawTokens} tokens team=${team.teamId} member=${userId}`)
-    bumpCachedConsumption(userId, rawTokens, false)
+    console.info(`[billing] committed ${amount} µ$ team=${team.teamId} member=${userId}`)
+    bumpCachedConsumption(userId, amount, false)
     return true
   } catch (error) {
     console.error('[billing] team commit threw:', error)

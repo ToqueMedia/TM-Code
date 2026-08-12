@@ -64,12 +64,20 @@ interface ChatState {
    */
   totalTokensUsed: { input: number; output: number }
   /**
-   * Last turn's prompt size, replaced (not summed) on every addTokenUsage.
-   * Represents the amount of context actually sent over the wire on the most
-   * recent API call. The context-window pill combines this with
-   * `currentResponseTokens` against the effective window. Reset to 0 on new
-   * user message and on compaction boundary so the pill reflects the fresh
-   * post-compression state.
+   * MÁXIMO CORRENTE do tamanho do prompt — `Math.max(anterior, input)` em
+   * `addTokenUsage`, NÃO um "replaced (not summed)".
+   *
+   * A descrição anterior dizia o contrário ("replaced… Reset to 0 on new user
+   * message") e era falsa: no caminho do Chat este contador nunca é reposto e
+   * vive no STORE, não na sessão, portanto atravessa trocas de sessão. Duas
+   * auditorias (05-08, 06-08) corrigiram sítios que o liam como se fosse a
+   * ocupação actual, e uma terceira (10-08, sessão byok-ctxx) apanhou o pill a
+   * cair nele e a mostrar "0% livre" num run cujo pico real (141 615) estava
+   * abaixo do limiar de aviso (147 000) — lido pelo developer como falha da
+   * auto-compactação, que na verdade estava correcta.
+   *
+   * Para OCUPAÇÃO usa-se `lastPromptTokens` da sessão. Este campo serve o
+   * indicador de actividade ("↑ Nk"), não a pressão de contexto.
    */
   currentPromptTokens: number
   /**
@@ -914,6 +922,34 @@ type DeltaEntry = { kind: 'text' | 'ui_text' | 'reasoning'; delta: string }
 let deltaQueue: DeltaEntry[] = []
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 
+/**
+ * UM render por flush, não um por entrada da fila (2026-08-10).
+ *
+ * O flush de 50ms existia para não renderizar por byte, mas replicava a fila
+ * chamando `appendTextDelta`/`appendReasoningDelta` UMA VEZ POR ENTRADA — e
+ * cada uma dessas funções faz o seu próprio `set(streamingVersion + 1)`. Ou
+ * seja, o batching agrupava as escrituras no MODELO mas não os RENDERS.
+ *
+ * A coalescência só junta entradas do mesmo tipo consecutivas, portanto uma
+ * sequência intercalada (reasoning → text → reasoning → text …) produz uma
+ * entrada por alternância. Com modelos que intercalam muito — o GLM-5.2 fechou
+ * uma sessão com 47.271 tokens de thinking, 30% do payload — uma janela de
+ * 50ms podia disparar dezenas de passagens de render. A main thread satura e o
+ * utilizador sente-o exactamente onde reportou: a escrever no composer
+ * enquanto o agente trabalha.
+ *
+ * Este contador suspende a notificação durante a replicação; o flush emite um
+ * único `set` no fim. As mutações do conteúdo já acontecem fora do `set` (as
+ * funções mutam os objectos da mensagem e usam `streamingVersion` só como
+ * sinal), por isso suspender a notificação não perde nada.
+ */
+let deltaNotifySuspended = 0
+
+/** True enquanto a replicação do flush decorre — as funções de delta saltam o `set`. */
+function shouldSuspendDeltaNotify(): boolean {
+  return deltaNotifySuspended > 0
+}
+
 export function appendTextDeltaBuffered(delta: string) {
   // Coalesce with the immediately preceding text entry so multiple character-
   // sized text_delta events don't churn the renderer with one append per byte.
@@ -1068,10 +1104,21 @@ function scheduleFlush() {
       // Replay each entry in arrival order. Mixed text/reasoning sequences
       // therefore land in contentBlocks with the same interleaving the model
       // emitted them in.
-      for (const entry of queued) {
-        if (entry.kind === 'text') store.appendTextDelta(entry.delta)
-        else if (entry.kind === 'ui_text') store.appendUiTextDelta(entry.delta)
-        else store.appendReasoningDelta(entry.delta)
+      // Um só render no fim — ver deltaNotifySuspended. O `finally` garante
+      // que uma excepção a meio da replicação não deixa a notificação
+      // suspensa para sempre (o stream ficaria vivo e a UI congelada).
+      deltaNotifySuspended++
+      try {
+        for (const entry of queued) {
+          if (entry.kind === 'text') store.appendTextDelta(entry.delta)
+          else if (entry.kind === 'ui_text') store.appendUiTextDelta(entry.delta)
+          else store.appendReasoningDelta(entry.delta)
+        }
+      } finally {
+        deltaNotifySuspended--
+      }
+      if (queued.length > 0) {
+        useChatStore.setState(s => ({ streamingVersion: s.streamingVersion + 1 }))
       }
     }, 50)
   }
@@ -1648,6 +1695,38 @@ async function rehydrateSessionImages(sessionId: string): Promise<void> {
     /* best-effort — a miss just means the image isn't re-viewable this run */
   }
 }
+
+
+/**
+ * Liberta o conteúdo de um diff JÁ RESOLVIDO (2026-08-11).
+ *
+ * `diffOldContent`/`diffNewContent` guardam DUAS cópias completas do ficheiro
+ * por edição, vivas enquanto a sessão viver. Depois de aprovado ou rejeitado o
+ * diff já está aplicado (ou descartado) no disco — as cópias só servem para
+ * re-renderizar um cartão que já está resolvido.
+ *
+ * Medido por bissecção de RSS do processo WebContent: abrir projecto +1 MB,
+ * run só de leituras +1 MB, **run com diffs +35 MB — e não desce**. Em repouso
+ * estabiliza (<1 MB), portanto não é periódico. ~80 runs desses dão os 3,4 GB
+ * observados, com o DOM em 9.153 nós e o lado Rust ilibado pelo `ps`.
+ *
+ * TECTO E NÃO CORTE CEGO: só se liberta acima de 200 KB combinados. A esmagadora
+ * maioria dos ficheiros fica muito abaixo disso e mantém o cartão de diff
+ * intacto; só os grandes é que degradam. `hasDiff` em ToolCallDisplay testa
+ * `diffNewContent !== undefined`, portanto um diff libertado cai na linha
+ * normal de tool call — degradação graciosa, sem crash.
+ */
+const MAX_RETAINED_DIFF_CHARS = 200_000
+
+function releaseResolvedDiff<T extends { diffOldContent?: string; diffNewContent?: string }>(tc: T): T {
+  const size = (tc.diffOldContent?.length ?? 0) + (tc.diffNewContent?.length ?? 0)
+  if (size <= MAX_RETAINED_DIFF_CHARS) return tc
+  const next = { ...tc }
+  delete next.diffOldContent
+  delete next.diffNewContent
+  return next
+}
+
 
 export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
   // Wire sessionService getters
@@ -2491,11 +2570,39 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
     addCompactBoundaryMessage: (beforeTokens: number, trigger: CompactMetadata['trigger'] = 'auto', messagesSummarized?: number, summary?: string, recovery?: string) => {
       const messageId = generateId('msg')
+      // Snapshot ANTES do set(): é o estado que a IDE mostrava no instante da
+      // compactação. Depois do set() os contadores já foram a zero e o registo
+      // seria sempre `0, 0, 0` — inútil para diagnosticar uma barra presa.
+      const uiSnap = get()
+      const uiSessionId = uiSnap.streamingSessionId ?? uiSnap.activeSessionId
+      const uiSession = uiSessionId ? uiSnap.sessions.get(uiSessionId) : undefined
       const message: ChatMessage = {
         id: messageId,
         role: 'system',
         kind: 'compact_boundary',
         compactBeforeTokens: beforeTokens,
+        // O ESTADO QUE A IDE MOSTRAVA no instante da compactação, não só o que
+        // o agente fez (2026-08-07).
+        //
+        // PORQUÊ: um developer reportou "0% livre continuou visível depois de
+        // compactar" e, mais tarde, "voltou a mostrar 3%". O export tinha os
+        // 46 pedidos, os tokens, a janela e as fronteiras — e mesmo assim era
+        // impossível dizer porquê, porque nada registava o que o INDICADOR
+        // tinha resolvido. Ler o código só provou que ele DEVIA esconder-se
+        // (os dois contadores vão a zero aqui), o que torna o relato ainda
+        // mais valioso e ainda menos diagnosticável.
+        //
+        // Estes campos são o mínimo para fechar essa classe de pergunta:
+        // a ocupação de que o pill parte, o pico, e o contador vivo do store —
+        // que é um MÁXIMO nunca reposto no caminho do Chat e o suspeito óbvio
+        // de uma barra que fica presa no valor pré-compactação.
+        compactUiState: {
+          sessionLastPromptTokens: uiSession?.lastPromptTokens ?? null,
+          sessionPeakPromptTokens: uiSession?.peakPromptTokens ?? null,
+          storeCurrentPromptTokens: uiSnap.currentPromptTokens,
+          byokContextWindow: uiSession?.byokSnapshot?.contextWindow ?? null,
+          recoveryChars: recovery?.length ?? 0,
+        },
         compactMetadata: { trigger, beforeTokens, messagesSummarized },
         // Persist the summary ON the boundary. rebuildConversationHistory re-emits
         // it into the outgoing prompt so the model keeps the pre-boundary context
@@ -2718,7 +2825,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         session.updatedAt = Date.now()
       }
 
-      set(s => ({ streamingVersion: s.streamingVersion + 1 }))
+      if (!shouldSuspendDeltaNotify()) set(s => ({ streamingVersion: s.streamingVersion + 1 }))
     },
 
     appendUiTextDelta: (delta: string) => {
@@ -2735,7 +2842,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         session.updatedAt = Date.now()
       }
 
-      set(s => ({ streamingVersion: s.streamingVersion + 1 }))
+      if (!shouldSuspendDeltaNotify()) set(s => ({ streamingVersion: s.streamingVersion + 1 }))
     },
 
     appendReasoningDelta: (delta: string) => {
@@ -2778,7 +2885,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         session.updatedAt = Date.now()
       }
 
-      set(s => ({ streamingVersion: s.streamingVersion + 1 }))
+      if (!shouldSuspendDeltaNotify()) set(s => ({ streamingVersion: s.streamingVersion + 1 }))
     },
 
     toggleReasoning: (messageId: string) => {
@@ -3201,7 +3308,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
                 ...msg,
                 toolCalls: msg.toolCalls!.map(tc =>
                   tc.id === toolId
-                    ? { ...tc, diffStatus: 'approved' as const, diffResultId: newDiff!.id }
+                    ? releaseResolvedDiff({ ...tc, diffStatus: 'approved' as const, diffResultId: newDiff!.id })
                     : tc,
                 ),
               }
@@ -3307,7 +3414,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const messages = session.messages.map(msg => {
           if (msg.id !== messageId) return msg
           const toolCalls = (msg.toolCalls || []).map(tc =>
-            tc.id === toolCallId ? { ...tc, diffStatus: 'denied' as const } : tc
+            tc.id === toolCallId ? releaseResolvedDiff({ ...tc, diffStatus: 'denied' as const }) : tc
           )
           return { ...msg, toolCalls }
         })
@@ -3392,14 +3499,29 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
         let changed = false
         const messages = session.messages.map(msg => {
+          // `msgChanged` é POR MENSAGEM. O `changed` partilhado, sozinho,
+          // fazia todas as mensagens DEPOIS da alterada serem recriadas
+          // (`{...msg, toolCalls}` com um array novo de itens idênticos) —
+          // identidade nova sem conteúdo novo, ou seja re-render à toa em
+          // toda a cauda da conversa.
+          let msgChanged = false
           const toolCalls = (msg.toolCalls || []).map(tc => {
             if (tc.diffResultId === diffResultId && tc.diffStatus === 'pending') {
               changed = true
-              return { ...tc, diffStatus: status }
+              msgChanged = true
+              // LIBERTAR aqui também. Este é o SEXTO caminho de resolução, e
+              // ficou de fora do fix de 2026-08-11 (`15d4ef1`) que tratou os
+              // outros cinco — o mesmo padrão de gémeos dessincronizados que
+              // já mordeu neste repo três vezes. E não é um caminho raro: é o
+              // que o fluxo de aprovação chama (via `acceptDiff` →
+              // `syncDiffStatusByResultId`), portanto a fuga dos +35 MB por
+              // run sobrevivia exactamente no caso NORMAL enquanto os testes
+              // verdes cobriam só o descarte.
+              return releaseResolvedDiff({ ...tc, diffStatus: status })
             }
             return tc
           })
-          return changed ? { ...msg, toolCalls } : msg
+          return msgChanged ? { ...msg, toolCalls } : msg
         })
 
         if (!changed) return state
@@ -4000,7 +4122,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const messages = session.messages.map(msg => {
           if (!msg.toolCalls?.some(tc => tc.diffStatus === 'pending')) return msg
           const toolCalls = msg.toolCalls.map(tc =>
-            tc.diffStatus === 'pending' ? { ...tc, diffStatus: 'denied' as const } : tc
+            tc.diffStatus === 'pending' ? releaseResolvedDiff({ ...tc, diffStatus: 'denied' as const }) : tc
           )
           return { ...msg, toolCalls }
         })
@@ -4045,7 +4167,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           const updatedToolCalls = toolCalls.map(tc => {
             if (tc.diffStatus === 'pending') {
               msgChanged = true
-              return { ...tc, diffStatus: 'approved' as const }
+              return releaseResolvedDiff({ ...tc, diffStatus: 'approved' as const })
             }
             return tc
           })

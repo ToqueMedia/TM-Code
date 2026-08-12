@@ -23,10 +23,6 @@ describe('EFFORT_BY_MODEL — official product levels', () => {
     expect(EFFORT_BY_MODEL['grok-4.5'].default).toBe('high')
     expect(EFFORT_BY_MODEL['grok-4.5'].options).toEqual(['low', 'medium', 'high'])
   })
-  it('Kimi K3 → default max, low|high|max (Moonshot)', () => {
-    expect(EFFORT_BY_MODEL['kimi-k3'].default).toBe('max')
-    expect(EFFORT_BY_MODEL['kimi-k3'].options).toEqual(['low', 'high', 'max'])
-  })
 })
 
 describe('normalizeEffortModelId', () => {
@@ -36,8 +32,6 @@ describe('normalizeEffortModelId', () => {
     expect(normalizeEffortModelId('z-ai/glm-5.2')).toBe('glm-5.2')
     expect(normalizeEffortModelId('grok-4.5-latest')).toBe('grok-4.5')
     expect(normalizeEffortModelId('grok-build-latest')).toBe('grok-4.5')
-    expect(normalizeEffortModelId('kimi-k3')).toBe('kimi-k3')
-    expect(normalizeEffortModelId('moonshotai/kimi-k3')).toBe('kimi-k3')
   })
   it('null / vazio → null', () => {
     expect(normalizeEffortModelId(null)).toBeNull()
@@ -61,14 +55,12 @@ describe('resolveEffectiveEffort — preferência-se-válida-senão-default', ()
   it('sem preferência → default oficial do modelo', () => {
     expect(resolveEffectiveEffort('glm-5.2', null)).toBe('max')
     expect(resolveEffectiveEffort('grok-4.5', null)).toBe('high')
-    expect(resolveEffectiveEffort('kimi-k3', null)).toBe('max')
   })
   it('preferência VÁLIDA para o modelo → mantida', () => {
     expect(resolveEffectiveEffort('glm-5.2', 'high')).toBe('high')
     expect(resolveEffectiveEffort('glm-5.2', 'none')).toBe('none')
     expect(resolveEffectiveEffort('glm-5.2', 'max')).toBe('max')
     expect(resolveEffectiveEffort('grok-4.5', 'low')).toBe('low')
-    expect(resolveEffectiveEffort('kimi-k3', 'high')).toBe('high')
   })
   it('preferências LEGADAS do GLM (lista de 7) → nível real', () => {
     // Docs: low/medium → high; xhigh → max; minimal → none.
@@ -80,7 +72,6 @@ describe('resolveEffectiveEffort — preferência-se-válida-senão-default', ()
   it('preferência INVÁLIDA para o modelo → cai no default (regra da troca)', () => {
     expect(resolveEffectiveEffort('grok-4.5', 'xhigh')).toBe('high')
     expect(resolveEffectiveEffort('grok-4.5', 'max')).toBe('high')
-    expect(resolveEffectiveEffort('kimi-k3', 'medium')).toBe('max')
   })
   it('modelo desconhecido/null → escala UI do GLM; NÃO aplica alias legado low→high', () => {
     // Bug fix Grok: com modelId null, selected=low NÃO deve virar high
@@ -101,20 +92,12 @@ describe('resolveEffectiveEffort — preferência-se-válida-senão-default', ()
     expect(resolveEffectiveEffort('grok-4.5', 'max')).toBe('high')
   })
 
-  it('Kimi K3: low|high|max nativos, default max; medium inválido → max', () => {
-    expect(resolveEffectiveEffort('kimi-k3', null)).toBe('max')
-    expect(resolveEffectiveEffort('kimi-k3', 'low')).toBe('low')
-    expect(resolveEffectiveEffort('kimi-k3', 'high')).toBe('high')
-    expect(resolveEffectiveEffort('kimi-k3', 'max')).toBe('max')
-    // medium é do Grok — não existe no Kimi → default max (não 400)
-    expect(resolveEffectiveEffort('kimi-k3', 'medium')).toBe('max')
-    expect(resolveEffectiveEffort('kimi-k3', 'none')).toBe('max')
-    expect(resolveEffortTurnStamp('kimi-k3', 'low')).toEqual({
-      effort: 'low',
-      sent: true,
-    })
-    expect(normalizeEffortModelId('moonshotai/kimi-k3')).toBe('kimi-k3')
-    expect(shouldSendEffort('kimi-k3')).toBe(true)
+  // Kimi K3 saiu do catálogo gerido a 2026-08-11: o id já não está mapeado,
+  // portanto shouldSendEffort('kimi-k3') é false e a escala cai no default
+  // GLM (o comportamento de qualquer modelo desconhecido). BYOK Kimi continua
+  // a funcionar — o header simplesmente deixa de ir pré-preenchido.
+  it('Kimi K3 (fora do catálogo): effort não é enviado', () => {
+    expect(shouldSendEffort('kimi-k3')).toBe(false)
   })
 
   // Qwen 3.7 Plus (modelo principal desde 2026-08-07): híbrido por BOOLEAN.
@@ -202,10 +185,67 @@ describe('shouldSendEffort — guarda contra params inválidos', () => {
     expect(shouldSendEffort('glm-5.2-fast-preview')).toBe(true)
     expect(shouldSendEffort('grok-4.5')).toBe(true)
     expect(shouldSendEffort('grok-4.5-latest')).toBe(true)
-    expect(shouldSendEffort('kimi-k3')).toBe(true)
   })
   it('modelo NÃO-mapeado (não-null) → NÃO envia', () => {
     expect(shouldSendEffort('gpt-qualquer')).toBe(false)
     expect(shouldSendEffort('mimo-v2.5')).toBe(false)
+  })
+})
+
+/**
+ * GLM-5.2 pelo Cloudflare Workers AI (2026-08-10) — o MESMO modelo servido por
+ * três provedores, com escalas de effort diferentes.
+ *
+ * O bug reportado: a UI mostrava `MAX` para a via Cloudflare.
+ * `normalizeEffortModelId` corta no último `/` (para aceitar prefixos de
+ * catálogo como `z-ai/glm-5.2`), e nesse corte `@cf/zai-org/glm-5.2` vira
+ * `glm-5.2` — herdando `none|high|max` do z.AI/DashScope. O `max` não existe
+ * no conjunto que o Workers AI declara (texto da OpenAI → low|medium|high).
+ *
+ * É o mesmo detector-por-nome que o `isCloudflareAI` do data-plane evita.
+ */
+describe('GLM-5.2 multi-provider — escala de effort por VIA', () => {
+  const CF = '@cf/zai-org/glm-5.2'
+
+  it('o id do Workers AI NÃO colapsa na chave do z.AI/DashScope', () => {
+    expect(normalizeEffortModelId(CF)).toBe('glm-5.2-cloudflare')
+    expect(normalizeEffortModelId('glm-5.2')).toBe('glm-5.2')
+  })
+
+  it('não oferece max — o valor que causou o report', () => {
+    const opts = getEffortOptionsForModel(CF)
+    expect(opts.options).toEqual(['low', 'medium', 'high'])
+    expect(opts.options).not.toContain('max')
+    expect(opts.default).toBe('high')
+  })
+
+  it('as outras duas vias mantêm a escala delas', () => {
+    const opts = getEffortOptionsForModel('glm-5.2')
+    expect(opts.options).toEqual(['none', 'high', 'max'])
+    expect(opts.default).toBe('max')
+  })
+
+  it('o prefixo de catálogo z-ai/ continua a ser z.AI, não Cloudflare', () => {
+    // `z-ai` (OpenRouter) e `zai-org` (autor no catálogo Cloudflare) são
+    // strings diferentes de propósito — não podem colidir.
+    expect(normalizeEffortModelId('z-ai/glm-5.2')).toBe('glm-5.2')
+  })
+
+  it('uma preferência max herdada do z.AI cai no default do Cloudflare', () => {
+    // Sem isto o header levava um valor fora do conjunto do endpoint.
+    expect(resolveEffectiveEffort(CF, 'max')).toBe('high')
+    expect(resolveEffectiveEffort(CF, 'none')).toBe('high')
+    expect(resolveEffectiveEffort(CF, 'low')).toBe('low')
+    expect(resolveEffectiveEffort(CF, 'medium')).toBe('medium')
+  })
+
+  it('o alias legado do GLM NÃO se aplica ao Cloudflare — low ali é low', () => {
+    // No z.AI `low` é alias de `high`; no Cloudflare `low` existe mesmo.
+    expect(resolveEffectiveEffort('glm-5.2', 'low')).toBe('high')
+    expect(resolveEffectiveEffort(CF, 'low')).toBe('low')
+  })
+
+  it('continua a enviar o header — a chave está mapeada', () => {
+    expect(shouldSendEffort(CF)).toBe(true)
   })
 })

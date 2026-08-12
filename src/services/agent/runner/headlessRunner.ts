@@ -26,11 +26,26 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { setAgentHost } from '../host/agentHost'
 import { createHeadlessAgentHost } from '../host/headlessHost'
+import { resolveToolResultBudgetMode, setToolResultBudgetOverrides } from '../toolResultGlobalBudget'
+import { computeReadAccounting } from './readAccounting'
+import { shouldAbortForBilling } from './runnerBillingGate'
+import { getActiveContextWindow } from '../activeContextWindow'
+import { getPersonaFallbackContextWindow } from '@/stores/activeModelStore'
+import { getAutoCompactThreshold, getToolResultBudgetTokens } from '@/utils/contextWindow'
+import { VITE_EVAL_PERSONA } from '@/utils/viteEnv'
 
 interface RunnerJob {
   task: string
   project: string
   yolo: boolean
+  /**
+   * Interruptores de MEDIÇÃO por processo (`TM_RUN_KNOB_<NOME>=valor` →
+   * `knobs.<nome>`). Ver a nota em src-tauri/src/commands/runner.rs: existem
+   * porque a env de BUILD do vite amarra a corrida ao processo que a serve, e
+   * um vite já vivo não a ganha — o que produziu 12 corridas a medir a mesma
+   * célula a 2026-08-07. Opcional: binários anteriores a essa data não o têm.
+   */
+  knobs?: Record<string, string>
 }
 
 const HARD_TIMEOUT_MS = 30 * 60_000
@@ -79,10 +94,28 @@ async function runJob(job: RunnerJob): Promise<void> {
   setAgentHost(createHeadlessAgentHost({ yolo: job.yolo }))
   // Persona determinística (ronda-2 #11): sem isto o runner herdava do
   // localStorage a última persona escolhida na GUI — um eval era servido e
-  // faturado conforme o humor da janela. Headless corre SEMPRE na standard
-  // (a base do sistema); quando fizer falta por-job, o RunnerJob ganha campo.
-  const { usePersonaStore } = await import('../../../stores/personaStore')
-  usePersonaStore.getState().setSelected('standard')
+  // faturado conforme o humor da janela. Headless corre por omissão na
+  // standard (a base do sistema).
+  //
+  // `VITE_EVAL_PERSONA` levanta essa fixação por CORRIDA (2026-08-07). Fez
+  // falta assim que se percebeu que a persona escolhe o MODELO e o modelo
+  // escreve as compactações: comparar dois braços de gestão de contexto sem
+  // saber (nem poder variar) o modelo é comparar duas coisas e chamar-lhes uma.
+  // Valor inválido → standard, para um override mal escrito não trocar
+  // silenciosamente o modelo que está a ser facturado.
+  // Ordem: knob de RUNTIME (por processo) → env de BUILD (recurso) → standard.
+  const { usePersonaStore, PERSONAS } = await import('../../../stores/personaStore')
+  const personaPedida = (job.knobs?.persona ?? VITE_EVAL_PERSONA)?.trim().toLowerCase()
+  const persona = (PERSONAS as readonly string[]).includes(personaPedida ?? '')
+    ? (personaPedida as (typeof PERSONAS)[number])
+    : 'standard'
+  usePersonaStore.getState().setSelected(persona)
+
+  // Braço do orçamento de tool results, também por processo.
+  setToolResultBudgetOverrides({
+    mode: job.knobs?.budget_mode,
+    triggerPct: job.knobs?.budget_trigger_pct,
+  })
   // Com --yolo, liga TAMBÉM o YOLO do permissionStore: é o interruptor que
   // faz o createDiffApprovalPromise APLICAR os diffs ao disco pelo caminho
   // provado da janela (DiffService.acceptDiff, com a honestidade de escrita
@@ -344,6 +377,57 @@ async function runJob(job: RunnerJob): Promise<void> {
         const compaction = {
           boundaries: boundaries.length,
           budgetMarkers: allMsgs.filter(m => m.kind === 'context_budget').length,
+          // O BRAÇO que realmente correu, lido do bundle que o binário
+          // carregou — não do que o operador julga ter pedido. `VITE_*` é env
+          // de BUILD: um vite já vivo em :1420 foi arrancado sem ela e não a
+          // ganha, e foi assim que dois casos passaram a verde sem o mecanismo
+          // ter corrido (evals/README.md documenta a armadilha três vezes).
+          // Com isto no result, um `--json` fica auto-descritivo e a comparação
+          // entre braços deixa de poder medir a mesma árvore duas vezes.
+          budgetMode: resolveToolResultBudgetMode(),
+          // A PERSONA e o MODELO servido. Sem eles, dois `--json` só são
+          // comparáveis por acidente: a persona escolhe o modelo, e é o modelo
+          // do loop principal que escreve as compactações — logo "compactar é
+          // mais destrutivo que aparar" é uma afirmação sobre AQUELE
+          // sumarizador. `modelName` vem do X-TM-Model que o worker emitiu;
+          // null quer dizer que nenhuma resposta chegou a declarar modelo.
+          persona: usePersonaStore.getState().selected,
+          modelName: useAgentStore.getState().modelName,
+          // ── A JANELA, e DE ONDE VEIO ──────────────────────────────────
+          // Sem isto os números absolutos de um export não são
+          // interpretáveis: um tecto de tool results de 54K e um de 250K
+          // descrevem regimes opostos, e nada na corrida dizia qual correu.
+          // A proveniência entra porque a cadeia tem cinco degraus
+          // (byok → header → persona → perfil → fallback 200K) e "200K" não
+          // diz se o header falhou ou se nunca chegou.
+          //
+          // `budgetTriggeredAt` é o total de tool results que fez o orçamento
+          // disparar (do próprio marcador): é a medida directa do tecto
+          // efectivo, sem depender de eu ter percebido bem a aritmética.
+          window: (() => {
+            try {
+              const agent = useAgentStore.getState()
+              const janela = getActiveContextWindow()
+              const marcos = allMsgs.filter(m => m.kind === 'context_budget')
+              return {
+                resolved: janela.contextWindow,
+                maxOutputTokens: janela.maxOutputTokens,
+                fromHeader: agent.modelContextWindow ?? null,
+                fromPersona: getPersonaFallbackContextWindow(),
+                toolResultBudget: getToolResultBudgetTokens(
+                  janela.contextWindow,
+                  janela.maxOutputTokens,
+                ),
+                autoCompactThreshold: getAutoCompactThreshold(
+                  janela.contextWindow,
+                  janela.maxOutputTokens,
+                ),
+                budgetTriggeredAt: marcos.map(m => m.contextBudget?.tokensBefore ?? null),
+              }
+            } catch (e) {
+              return { error: String(e) }
+            }
+          })(),
           summarized: boundaries.reduce(
             (n, m) => n + (m.compactMetadata?.messagesSummarized ?? 0), 0,
           ),
@@ -362,18 +446,12 @@ async function runJob(job: RunnerJob): Promise<void> {
         // e parte o prefixo de cache. Contar isto é o que transforma "a barra
         // oscila" numa grandeza: quantas vezes o agente teve de voltar ao que
         // já tinha lido.
-        const lidos = new Map<string, number>()
-        let rereads = 0
-        for (const m of allMsgs) {
-          for (const tc of m.toolCalls ?? []) {
-            const alvo = (tc.input as Record<string, unknown> | undefined)?.file_path
-            if (typeof alvo !== 'string') continue
-            if (!/read/i.test(tc.toolName)) continue
-            const n = (lidos.get(alvo) ?? 0) + 1
-            lidos.set(alvo, n)
-            if (n > 1) rereads++
-          }
-        }
+        //
+        // Conta TODAS as vias (ver readAccounting.ts): a versão inline só via
+        // tool calls com `file_path`, e o modelo troca de estratégia sozinho —
+        // corridas que acertaram a soma de OITO ficheiros reportavam "0
+        // releituras de 0 ficheiros" por terem lido com `tail`/`grep`.
+        const contas = computeReadAccounting(allMsgs)
 
         const cost = {
           requests: usage.length,
@@ -392,7 +470,7 @@ async function runJob(job: RunnerJob): Promise<void> {
           subtype: 'success',
           text,
           cost,
-          compaction: { ...compaction, rereads, distinctFilesRead: lidos.size },
+          compaction: { ...compaction, ...contas },
           diag: {
             runSessionId,
             sessionId: (session as { id?: string } | undefined)?.id ?? null,
@@ -431,6 +509,24 @@ async function runJob(job: RunnerJob): Promise<void> {
     // Bate também DURANTE o run (smoke P6: o silêncio pós-arranque era
     // indistinguível de um encravamento) — só o finish o cala.
     if (finished) return
+
+    // ── Consumo esgotado = a fila NUNCA drena ──────────────────────────
+    // Ver runnerBillingGate.ts para o porquê e para a carência. Resumo: o
+    // portão de billing do useQueueProcessor segura a fila à espera de um
+    // humano que aqui não existe, e o desfecho media-se em 15 minutos de
+    // silêncio até ao timeout duro.
+    const billingNow = useBillingStore.getState()
+    if (shouldAbortForBilling(billingNow, Date.now() - startAt)) {
+      finish(1, {
+        type: 'result',
+        subtype: 'error',
+        error:
+          'consumo esgotado — a fila não drena sem créditos (portão de billing do useQueueProcessor). ' +
+          'Compre consumo extra ou aguarde o reinício do ciclo.',
+        billingStatus: billingNow.status,
+      })
+      return
+    }
     if (isQueuePaused()) {
       emit({ type: 'system', subtype: 'queue_resumed', note: 'persisted pause overridden by runner' })
       setQueuePaused(false)

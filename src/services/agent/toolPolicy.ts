@@ -72,11 +72,14 @@ export const DESTRUCTIVE_TOOLS = new Set<string>([
 //     defs para o array vivo do run — o query loop envia o MESMO array por
 //     referência em cada pedido, e a activação vale do turno seguinte em
 //     diante sem tocar no engine.
-//   - Só MCP é diferido. Os schemas locais são o dialecto de treino e ficam
-//     congelados o run inteiro (prefixo de cache intacto).
-//   - Tools diferidas são anunciadas SÓ PELO NOME na secção MCP do prompt —
-//     o A/B de search hints do cli-vaz (exp_xenhnnmn0smrx4) não mostrou
-//     benefício.
+//   - Diferem-se as MCP e as nativas SITUACIONAIS (critério do cli-vaz: o
+//     ciclo de trabalho fica, o situacional difere-se). O núcleo — ler,
+//     escrever, editar, procurar, shell — é o dialecto de treino e fica
+//     congelado o run inteiro (prefixo de cache intacto).
+//   - Tools diferidas são anunciadas SÓ PELO NOME: as MCP na secção MCP, as
+//     nativas na secção "Deferred tools" (sharedDeferredToolsBlock). O A/B de
+//     search hints do cli-vaz (exp_xenhnnmn0smrx4) não mostrou benefício, e
+//     medir descrições no lugar dos schemas deu −1,4% — ruído.
 export const TOOL_SEARCH_NAME = 'ToolSearch'
 
 export interface DeferredToolIndexEntry {
@@ -85,24 +88,81 @@ export interface DeferredToolIndexEntry {
   description: string
 }
 
+/**
+ * Tools NATIVAS diferidas. Porte da regra do cli-vaz (isDeferredTool): **o
+ * ciclo de trabalho fica carregado, o situacional difere-se.** Lá são 25 de
+ * 40; ficam sempre presentes ler/escrever/editar/procurar/glob/shell/skill/
+ * delegar — as que qualquer tarefa usa nos primeiros turnos e cujo schema o
+ * modelo já conhece do treino.
+ *
+ * O critério para acrescentar uma tool a esta lista tem DUAS partes, e a
+ * segunda esquece-se: (1) a maioria dos runs nunca a chama; (2) o NOME basta
+ * para o modelo desconfiar de que ela serve, porque o nome é tudo o que ele
+ * vai ver até a carregar. Uma tool que só se percebe pela descrição fica
+ * carregada.
+ *
+ * NÃO listar aqui tools do ciclo de trabalho por parecerem grandes. O ganho de
+ * diferir é o schema; o custo é um turno extra de ToolSearch no momento da
+ * necessidade. Para uma tool que quase todos os runs chamam, o custo ganha.
+ *
+ * Uma entrada que não corresponda a nenhuma tool registada é um ERRO de
+ * manutenção (tool renomeada, módulo removido) e é reportada em
+ * applyNativeDeferral — sem isso, o nome morto fica aqui a não fazer nada,
+ * que é como esta funcionalidade já falhou uma vez.
+ */
+export const SITUATIONAL_DEFERRED_TOOLS: readonly string[] = [
+  'web_search',
+  'web_fetch',
+  'capture_url_design',
+  'enter_worktree',
+  'exit_worktree',
+  'lsp',
+  'ask_user_question',
+  'request_credentials',
+  'update_tasks',
+  'collect_results',
+  'generate_image',
+  'distill_memory',
+  'forget_memory',
+  'get_project_state_dir',
+  'read_large_result',
+]
+
+/**
+ * Nomes diferidos NÃO-MCP, para o bloco de anúncio do prompt.
+ *
+ * As `mcp__*` são diferidas na mesma, mas a secção MCP já as lista com o seu
+ * hint de routing por servidor — deixá-las passar aqui punha cada uma DUAS
+ * vezes no mesmo prompt.
+ */
+export function nativeDeferredToolNames(index: ReadonlyArray<{ name: string }>): string[] {
+  return index.map(e => e.name).filter(n => !n.startsWith('mcp__'))
+}
+
 export function toolSearchDefinition(): OpenAI.ChatCompletionTool {
   return {
     type: 'function',
     function: {
       name: TOOL_SEARCH_NAME,
       // Texto do contrato de treino (cli-vaz getPrompt), com o location hint
-      // adaptado: no TM os nomes diferidos vivem na secção MCP do prompt.
+      // adaptado: no TM os nomes diferidos vivem em DUAS secções do prompt —
+      // "Deferred tools" (nativas) e a secção MCP.
       // Sem interpolações — o def é byte-estável entre runs (cache).
       description:
         'Fetches full schema definitions for deferred tools so they can be called.\n\n' +
-        'Deferred tools appear by name in the MCP tools section of the system prompt. ' +
+        'Deferred tools appear by name in the "Deferred tools" and "MCP tools" sections of the system prompt. ' +
         'Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked. ' +
         'This tool takes a query, matches it against the deferred tool list, and returns the matched tools\' complete JSONSchema definitions inside a <functions> block. ' +
         'Once a tool\'s schema appears in that result, it is callable exactly like any tool defined at the top of the prompt.\n\n' +
         'Result format: each matched tool appears as one <function>{"description": "...", "name": "...", "parameters": {...}}</function> line inside the <functions> block — the same encoding as the tool list at the top of this prompt.\n\n' +
+        // Os exemplos misturam nativas e MCP DE PROPÓSITO desde que as nativas
+        // situacionais passaram a ser diferidas: exemplos só com `mcp__*`
+        // ensinam que a tool serve para MCP, e o modelo não a usa para ir
+        // buscar o WebFetch.
         'Query forms:\n' +
-        '- "select:mcp__server__toolA,mcp__server__toolB" — fetch these exact tools by name\n' +
-        '- "theme components" — keyword search, up to max_results best matches\n' +
+        '- "select:WebFetch,lsp" — fetch these exact tools by name\n' +
+        '- "select:mcp__server__toolA,mcp__server__toolB" — same form for MCP tools\n' +
+        '- "fetch a web page" — keyword search, up to max_results best matches\n' +
         '- "+chakra theme" — require "chakra" in the name, rank by remaining terms',
       parameters: {
         type: 'object',

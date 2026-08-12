@@ -148,6 +148,11 @@ export interface PromptContext {
   langInstruction: string
   modelProfile: import('../modelProfiles').ModelProfile | null
   mcpTools: MCPToolSummary[]
+  /** Nomes ANUNCIADOS das tools nativas diferidas (as `mcp__*` já vão na
+   *  secção MCP e ficam FORA desta lista, ou seriam anunciadas duas vezes).
+   *  São nomes-só: a descrição de cada uma serve o scoring do ToolSearch,
+   *  nunca o prompt — ver sharedDeferredToolsBlock. */
+  deferredToolNames: string[]
   /** Contagem real de tools do registo. OPCIONAL de propósito: um fallback
    *  cozido (era `?? 20`) faz o prompt afirmar um número falso em qualquer
    *  caminho que não o passe — e o sessionExport, que é justamente o artefacto

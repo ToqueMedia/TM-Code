@@ -19,6 +19,7 @@
 import ContextBuilder from './contextBuilder'
 import { appendVolatileReminder } from './volatileAppend'
 import ToolExecutor from './toolExecutor'
+import { nativeDeferredToolNames } from './toolPolicy'
 import AgentService from './agentService'
 import MCPService from '../mcp/mcpService'
 import { browserSession } from '../browserSessionManager'
@@ -138,6 +139,9 @@ export interface BuildMainSystemPromptArgs {
   builder?: ContextBuilder
   /** Contagem de tools do schema — tarefas passam o tamanho do SEU set. */
   coreToolCountOverride?: number
+  /** Nomes das tools nativas diferidas — tarefas passam os do SEU set.
+   *  Omitido = lidos do executor singleton (mesma regra do coreToolCount). */
+  deferredToolNamesOverride?: string[]
   /** Mensagem traz imagens — activa o perfil vision (regras de imagem no prompt). */
   hasImage?: boolean
 }
@@ -158,6 +162,10 @@ export async function buildMainSystemPrompt(args: BuildMainSystemPromptArgs): Pr
     )
   }
   const coreToolCount = args.coreToolCountOverride ?? ToolExecutor.getInstance().getCoreToolCount()
+  // Só as NATIVAS. As `mcp__*` são diferidas na mesma, mas já se anunciam na
+  // secção MCP — deixá-las passar aqui listava cada uma DUAS vezes no prompt.
+  const deferredToolNames = args.deferredToolNamesOverride
+    ?? nativeDeferredToolNames(ToolExecutor.getInstance().getDeferredToolIndex())
   return builder.buildSystemPrompt(
     args.projectPath,
     args.projectType,
@@ -166,7 +174,7 @@ export async function buildMainSystemPrompt(args: BuildMainSystemPromptArgs): Pr
     args.userMessageText,
     AgentService.getInstance().getAccessedFilePaths(),
     effectiveIntent ?? undefined,
-    { hasImage: args.hasImage },
+    { hasImage: args.hasImage, deferredToolNames },
   )
 }
 

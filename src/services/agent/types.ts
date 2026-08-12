@@ -117,7 +117,9 @@ export interface TurnResult {
 // ── Lightweight sub-agent options ──
 
 export interface LightweightAgentOptions {
-  /** Custom tool definitions (subset of tools). If omitted, uses all tools. */
+  /** Custom tool definitions (subset of tools). If omitted, uses all tools —
+   *  incluindo as DIFERIDAS, porque um run lightweight não leva `ToolSearch`
+   *  e não teria como as carregar depois (ver o construtor do AgentService). */
   tools?: OpenAIToolDefinition[]
   /** Maximum turns before stopping. Default: 50. */
   maxTurns?: number

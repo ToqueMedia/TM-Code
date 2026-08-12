@@ -63,6 +63,7 @@ import {
   sharedContextPreservation,
   sharedIdentity,
   sharedMcpBlock,
+  sharedDeferredToolsBlock,
   sharedMcpIndexBlock,
   sharedOutputEfficiency,
   sharedShellExecutionLoop,
@@ -254,7 +255,7 @@ class ContextBuilder {
         return [
           '# Agent runtime: tool loading',
           'Local tool definitions are FROZEN for the whole run (stable schemas keep the provider prompt-cache prefix intact).',
-          'MCP tool definitions are DEFERRED: the MCP section of the system prompt lists their names, and full schemas are only sent after you fetch them with `ToolSearch` (query "select:name" or keywords). One fetch is a single cache break at the moment of need — cheaper than shipping every MCP schema on every request.',
+          'Some tool definitions are DEFERRED — every MCP tool, plus the situational native ones. The system prompt lists their names (the "Deferred tools" and MCP sections) and full schemas are only sent after you fetch them with `ToolSearch` (query "select:name" or keywords). One fetch is a single cache break at the moment of need — cheaper than shipping every schema on every request.',
           'Expected files: src/services/agent/toolPolicy.ts (meta-tool definitions), src/services/agent/toolExecutor.ts (registry + deferral).',
         ].join('\n')
       case 'delivery.dev_server':
@@ -445,7 +446,14 @@ class ContextBuilder {
     }
   }
 
-  async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[], coreToolCount?: number, userMessage?: string, accessedPaths?: string[], intentOverride?: IntentOverride, signals?: { hasImage?: boolean }): Promise<string> {
+  /**
+   * O 8º parâmetro é o SACO DE OPÇÕES, e é onde tudo o que for novo tem de
+   * entrar. Chamava-se `signals` e transportava só `hasImage`; passou a
+   * `options` quando os nomes das tools diferidas precisaram de chegar cá
+   * (2026-08-12). Sete posicionais já são de mais para se acrescentar um
+   * oitavo — quem precisar de mais um campo, põe-no aqui dentro.
+   */
+  async buildSystemPrompt(projectPath: string, projectType: string, mcpTools?: MCPToolSummary[], coreToolCount?: number, userMessage?: string, accessedPaths?: string[], intentOverride?: IntentOverride, options?: { hasImage?: boolean; deferredToolNames?: string[] }): Promise<string> {
     this.lastVolatileContext = null
     // Cache key must include everything that affects the prompt shape.
     // Plan is read below; include it in the key so plan switches bypass the cache.
@@ -464,6 +472,17 @@ class ContextBuilder {
       agentLangKey = useSettingsStore.getState().agentLanguage || 'en'
     } catch { /* non-critical */ }
     const mcpSig = (mcpTools ?? []).map(t => `${t.serverName}:${t.name}`).sort().join(',')
+    // Os nomes diferidos ENTRAM na chave porque entram no PROMPT
+    // (sharedDeferredToolsBlock, bloco estático). Sem isto o conjunto de tools
+    // diferidas muda — BYOK, um perfil de modelo, um set reduzido de tarefa — e
+    // o prompt servido continua a ser o da chave antiga: o modelo lê nomes de
+    // tools que já não estão no schema, ou deixa de ler os que estão. É um
+    // defeito SILENCIOSO (nada falha; o modelo só não pede o que não vê), que
+    // é a assinatura desta família inteira de bugs.
+    // `.sort()` aqui e no bloco: duas ordens diferentes fariam a mesma chave
+    // descrever dois prompts.
+    const deferredToolNames = options?.deferredToolNames ?? []
+    const deferredSig = deferredToolNames.slice().sort().join(',')
     // Hashtag-driven sticky must invalidate cache when the set of recognised
     // tags changes — same conversation but the user just typed `#design`
     // for the first time should re-render with the design skill inlined.
@@ -499,7 +518,7 @@ class ContextBuilder {
     // numa lista de secções. Dois passos de indirecção sobre `hasImage`, com
     // um nome que prometia inferência e convidava a ressuscitar o router.
     const auxProfile: PromptProfile = intentOverride?.profile
-      ?? (signals?.hasImage ? 'vision' : 'default_task')
+      ?? (options?.hasImage ? 'vision' : 'default_task')
     const readOnly = intentOverride?.readOnly ?? false
     // SELEÇÃO DE CONTEXTO: DETERMINISTA, sem chamar modelo nenhum.
     //
@@ -523,7 +542,7 @@ class ContextBuilder {
     // descrição no histórico que o modelo ainda lê no turno 8 — retirar-lhe as
     // regras aí traz de volta o "não consigo ver imagens" sobre conteúdo que
     // ele TEM. Não sabendo, entrega-se (o `catch` deixa isto a true).
-    let sessionHasImage = signals?.hasImage === true
+    let sessionHasImage = options?.hasImage === true
     try {
       const { useChatStore } = await import('../../stores/chatStore')
       sessionHasImage = sessionHasImage || (useChatStore.getState().getActiveSession()?.messages ?? [])
@@ -576,7 +595,7 @@ class ContextBuilder {
       auxSelection.contextPlan.selectedContexts.join(','),
       auxSelection.contextPlan.candidateContexts.join(','),
     ].join('|')
-    const cacheKeyBase = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|${mcpSig}|${stickyHashtagSig}|fs${fsVersion}|ac${accessedCount}|p${auxProfile}|ro${auxSelection.readOnly ? 1 : 0}|cp${contextPlanSig}`
+    const cacheKeyBase = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|${mcpSig}|df${deferredSig}|${stickyHashtagSig}|fs${fsVersion}|ac${accessedCount}|p${auxProfile}|ro${auxSelection.readOnly ? 1 : 0}|cp${contextPlanSig}`
 
     const now = Date.now()
     // Kick off memory work IMMEDIATELY so its network call (selector
@@ -737,6 +756,7 @@ class ContextBuilder {
       langInstruction,
       modelProfile,
       mcpTools: mcpTools || [],
+      deferredToolNames,
       coreToolCount,
       loadedSkillNames: loadedSkills.map(s => s.name),
       hashtagSkills: stickyHashtagSkills,
@@ -857,6 +877,13 @@ class ContextBuilder {
       sharedShellExecutionLoop(),
       getClosedLoopSection(),
       getToolsSection(ctx),
+      // ESTÁTICO, colado à secção de tools. O conjunto de tools diferidas é
+      // fixo durante o run (os schemas locais são congelados à partida), logo
+      // pertence ao prefixo cacheável — e a chave já o inclui (`df` em
+      // cacheKeyBase). As MCP ficam de fora: vão na sua própria secção, abaixo
+      // da fronteira, porque a lista delas muda quando o developer liga ou
+      // desliga um servidor.
+      sharedDeferredToolsBlock(ctx.deferredToolNames),
       // Regras de AUTORIA de dev server. Estáticas de propósito: aplicam-se ao
       // escrever os scripts do projecto, portanto antes de existir servidor
       // nenhum — condicioná-las ao servidor estar vivo entregava-as tarde

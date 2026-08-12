@@ -19,6 +19,15 @@
  *   https://platform.kimi.ai/docs/guide/use-kimi-k2-thinking-model
  */
 
+import {
+  bareModel,
+  isCloudflareAI,
+  isDashScope,
+  isMoonshot,
+  isXAI as isXai,
+  isZAI as isZai,
+} from './providers'
+
 export interface ApplyReasoningEffortCtx {
   provider: string
   baseUrl: string
@@ -29,83 +38,18 @@ function lower(s: string): string {
   return (s ?? '').toLowerCase()
 }
 
-/**
- * Id de modelo SEM o prefixo de autor. O Cloudflare AI Gateway (catálogo
- * unificado, 2026-08-04) usa a sintaxe `author/model` — `xai/grok-4.5`,
- * `moonshotai/kimi-k3` — e os detectores por startsWith() abaixo falhavam
- * com o prefixo: o Grok/K3 via gateway ficava sem as regras de companion
- * fields (thinking apagado, temperature do K3, etc.).
- */
-function bareModel(model: string): string {
-  const m = lower(model)
-  const slash = m.lastIndexOf('/')
-  return slash >= 0 ? m.slice(slash + 1) : m
-}
-
-function isDashScope(ctx: ApplyReasoningEffortCtx): boolean {
-  const p = lower(ctx.provider)
-  const b = lower(ctx.baseUrl)
-  return (
-    p === 'dashscope' ||
-    p === 'aliyun' ||
-    b.includes('dashscope') ||
-    b.includes('aliyuncs.com') ||
-    b.includes('maas.aliyuncs.com')
-  )
-}
-
-function isZai(ctx: ApplyReasoningEffortCtx): boolean {
-  const p = lower(ctx.provider)
-  const b = lower(ctx.baseUrl)
-  return (
-    p === 'zai' ||
-    p === 'z.ai' ||
-    p === 'zhipu' ||
-    p === 'bigmodel' ||
-    b.includes('z.ai') ||
-    b.includes('bigmodel.cn') ||
-    b.includes('open.bigmodel')
-  )
-}
-
-function isMoonshot(ctx: ApplyReasoningEffortCtx): boolean {
-  const p = lower(ctx.provider)
-  const b = lower(ctx.baseUrl)
-  const m = bareModel(ctx.model)
-  // provider pode ser `moonshot`, `moonshotai`, `kimi`, … — e via Cloudflare
-  // AI Gateway o provider é `cloudflare` e o modelo `moonshotai/kimi-k3`
-  // (bareModel + o prefixo de autor no id cobrem esse caso).
-  return (
-    p.includes('moonshot') ||
-    p.includes('kimi') ||
-    b.includes('moonshot') ||
-    b.includes('kimi.ai') ||
-    lower(ctx.model).startsWith('moonshotai/') ||
-    m.startsWith('kimi-k3') ||
-    m.startsWith('kimi-k2')
-  )
-}
-
+// Detectores de família e bareModel vivem em providers.ts (partilhados com o
+// pricing.ts desde o metering 30/70) — uma definição, não duas.
 function isKimiK3(model: string): boolean {
   return bareModel(model).startsWith('kimi-k3')
-}
-
-function isXai(ctx: ApplyReasoningEffortCtx): boolean {
-  const p = lower(ctx.provider)
-  const b = lower(ctx.baseUrl)
-  const m = bareModel(ctx.model)
-  return (
-    p === 'xai' ||
-    p === 'x.ai' ||
-    b.includes('api.x.ai') ||
-    lower(ctx.model).startsWith('xai/') ||
-    m.startsWith('grok-')
-  )
 }
 
 function isGlmModel(model: string): boolean {
   return lower(model).includes('glm')
 }
+
+// `isCloudflareAI` vive em providers.ts desde que ganhou um segundo consumidor
+// (a afinidade de sessão em index.ts). Uma definição, não duas.
 
 /**
  * Família Qwen 3.7 na DashScope (3.7-plus é modelo principal desde 2026-08-07;
@@ -152,6 +96,13 @@ export function defaultEffortFor(ctx: ApplyReasoningEffortCtx): string {
   if (isMoonshot(ctx)) return isKimiK3(ctx.model) ? 'max' : ''
   if (isXai(ctx)) return 'high'
   if (isGlmModel(ctx.model) && (isZai(ctx) || isDashScope(ctx))) return 'max'
+  // GLM no Cloudflare Workers AI: a doc do modelo declara `reasoning_effort`
+  // com a descrição da OpenAI ("Constrains effort on reasoning for reasoning
+  // models (o1, o3-mini, …)"), portanto o conjunto válido é o da OpenAI —
+  // low|medium|high. NÃO se manda 'max' como no z.AI/DashScope: é um valor
+  // fora desse conjunto e este ficheiro existe para não enviar parâmetros que
+  // o provedor não aceita.
+  if (isGlmModel(ctx.model) && isCloudflareAI(ctx)) return 'high'
   // MiMo hospedado: default 'off' por recomendação OFICIAL da Xiaomi para
   // tool calling — todo o tráfego TM é agentic. VERIFICADO na fonte a
   // 2026-08-06 (mimo.mi.com/docs/en-US/quick-start/faq/api-integration),
@@ -277,10 +228,23 @@ export function applyReasoningEffort(
     return
   }
 
-  // Grok 4.5: só reasoning_effort; reasoning não se desliga.
+  // Grok 4.5 (x.AI): só reasoning_effort; reasoning não se desliga.
+  // A referência REST da x.AI é explícita: frequency_penalty, presence_penalty
+  // e stop NÃO são suportados nos modelos de reasoning — "requests that
+  // include them return an error" (docs.x.ai, chat completions). logit_bias
+  // está marcado unsupported. max_tokens é deprecated → max_completion_tokens
+  // (default 128k quando ausente — só conta output visível).
   if (isXai(ctx)) {
     delete body.thinking
     delete body.enable_thinking
+    delete body.frequency_penalty
+    delete body.presence_penalty
+    delete body.stop
+    delete body.logit_bias
+    if (body.max_tokens !== undefined && body.max_completion_tokens === undefined) {
+      body.max_completion_tokens = body.max_tokens
+    }
+    delete body.max_tokens
     return
   }
 
@@ -319,6 +283,16 @@ export function applyReasoningEffort(
     body.thinking = isOffEffort(effort)
       ? { type: 'disabled' }
       : { type: 'enabled', clear_thinking: false }
+    return
+  }
+
+  // GLM no Cloudflare Workers AI: `reasoning_effort` e MAIS NADA. Não leva o
+  // `enable_thinking` do DashScope nem o `thinking:{type, clear_thinking}` do
+  // z.AI — a doc do Workers AI não declara nenhum dos dois, e mandá-los era o
+  // parâmetro não suportado que este ficheiro existe para evitar. Ramo
+  // explícito (em vez de cair no fall-through) para que a intenção fique
+  // escrita e um teste a possa fixar.
+  if (isCloudflareAI(ctx) && isGlmModel(ctx.model)) {
     return
   }
 

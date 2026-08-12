@@ -66,6 +66,70 @@ const ENV_TOKEN_RE = /\.env(\.[A-Za-z0-9_-]+)?(?![A-Za-z0-9_-])/g
 /** Flags that HAND the file to another program instead of printing it. */
 const ENV_PASSTHROUGH_FLAG_RE = /--env[-_]?file(=|\s+)$/i
 
+/** Utilitários que, a jusante de um pipe, filtram o STDIN em vez de abrir ficheiros. */
+const STREAM_FILTER_HEAD_RE = /^\s*(grep|egrep|fgrep|rg|ag|awk|sed|cut)\b/
+
+/** True quando `index` cai dentro de uma string entre aspas simples ou duplas. */
+function isInsideQuotes(text: string, index: number): boolean {
+  let quote: string | null = null
+  for (let i = 0; i < index; i++) {
+    const ch = text[i]
+    if (ch === '\\') { i++; continue }
+    if (quote) {
+      if (ch === quote) quote = null
+    } else if (ch === "'" || ch === '"') {
+      quote = ch
+    }
+  }
+  return quote !== null
+}
+
+/**
+ * O comando bloqueado parece um FILTRO sobre uma lista de nomes, não uma
+ * leitura do `.env`?
+ *
+ * Caso real (sessão golive, 2026-08-10): o agente correu o seu próprio
+ * pré-commit de segurança —
+ *   `git diff --cached --name-only | grep -E '\.env($|\.)|\.key$|service-account'`
+ * — que lista nomes de ficheiros em staging e NUNCA abre o `.env`. O selo
+ * disparou porque o token `.env` aparece no PADRÃO do grep. Até aqui, um falso
+ * positivo aceitável.
+ *
+ * O dano veio a seguir: a mensagem de bloqueio explica "o .env é selado, usa
+ * request_credentials", que não responde a nada nesta situação. O agente
+ * concluiu que a verificação era impossível e RE-CORREU o comando sem o padrão
+ * de ficheiros sensíveis. Uma guarda desenhada para proteger segredos causou a
+ * remoção da verificação de fuga de segredos.
+ *
+ * NÃO se desbloqueia o comando de propósito: distinguir "grep sobre nomes" de
+ * "grep que abre ficheiros" (`grep x .env`) obriga a parsear pipelines, e um
+ * erro nesse parser vaza segredos. O que se corrige é a SAÍDA — dizer ao agente
+ * qual é o caminho suportado, para a resposta deixar de ser apagar a guarda.
+ */
+export function looksLikeFilenameFilter(command: string): boolean {
+  if (!command || !command.includes('|')) return false
+
+  // Cada troço do pipeline que mencione um .env selado tem de ser um FILTRO
+  // (`grep`/`rg`/`awk`/…) e o token tem de estar dentro de aspas, ou seja, ser
+  // um PADRÃO e não um operando. `cat .env | grep KEY` falha na primeira
+  // condição — quem lê o ficheiro está à cabeça do pipeline, não no filtro.
+  const segments = command.split('|')
+  let sawFilterMention = false
+
+  for (const segment of segments) {
+    ENV_TOKEN_RE.lastIndex = 0
+    let match: RegExpExecArray | null
+    while ((match = ENV_TOKEN_RE.exec(segment)) !== null) {
+      if (!isEnvFile(match[0])) continue
+      if (!STREAM_FILTER_HEAD_RE.test(segment)) return false
+      if (!isInsideQuotes(segment, match.index)) return false
+      sawFilterMention = true
+    }
+  }
+
+  return sawFilterMention
+}
+
 /**
  * True when a shell command would read a sealed `.env`.
  *

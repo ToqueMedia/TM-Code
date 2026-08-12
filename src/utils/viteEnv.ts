@@ -74,6 +74,33 @@ export const VITE_WORKER_URL: string | undefined = import.meta.env.VITE_WORKER_U
  */
 export const VITE_AUTOCOMPACT_PCT: string | undefined = import.meta.env.VITE_AUTOCOMPACT_PCT as string | undefined
 
+/**
+ * Braço da experiência do orçamento de tool results: `always` (defeito, o que
+ * está em produção), `trigger` (só perto do limiar de compactação) ou `off`
+ * (nunca — o modelo do cli-vaz).
+ *
+ * Existe para os três braços se medirem sem editar código entre corridas: a
+ * comparação exige n ≥ 10 por braço, e um `git checkout` por corrida era o
+ * caminho mais curto para medir árvores diferentes sem dar por isso. Valor
+ * desconhecido cai em `always`. Ver toolResultGlobalBudget.ts.
+ */
+export const VITE_TOOL_RESULT_BUDGET_MODE: string | undefined = import.meta.env.VITE_TOOL_RESULT_BUDGET_MODE as string | undefined
+
+/** Fracção do limiar de compactação (em %) a que o modo `trigger` acorda. */
+export const VITE_TOOL_RESULT_BUDGET_TRIGGER_PCT: string | undefined = import.meta.env.VITE_TOOL_RESULT_BUDGET_TRIGGER_PCT as string | undefined
+
+/**
+ * Persona a fixar no arranque do RUNNER HEADLESS (`standard`/`expert`/`master`).
+ *
+ * Só é lida pelo runner — a app interactiva continua a mandar na escolha do
+ * utilizador (localStorage `tm_model_persona`). Existe porque a persona decide
+ * o MODELO servido, e uma medição de contexto que não diga com que modelo foi
+ * feita não é comparável com outra: a compactação é escrita pelo modelo do loop
+ * principal, portanto "compactar é mais destrutivo que aparar" é uma afirmação
+ * sobre AQUELE sumarizador, não uma lei.
+ */
+export const VITE_EVAL_PERSONA: string | undefined = import.meta.env.VITE_EVAL_PERSONA as string | undefined
+
 /** User-provided AI data-plane Worker URL override (Vite env); undefined in Jest. */
 export const VITE_AI_WORKER_URL: string | undefined = import.meta.env.VITE_AI_WORKER_URL as string | undefined
 

@@ -58,6 +58,166 @@
 
 import type { ContentBlockAPI } from '../../types/chat'
 import { GREP_ALIAS, READ_ALIAS, canonicalToolName, normalizeToolInputForCanonical } from './toolNames'
+import { VITE_TOOL_RESULT_BUDGET_MODE, VITE_TOOL_RESULT_BUDGET_TRIGGER_PCT } from '../../utils/viteEnv'
+
+// ── QUANDO o orçamento corre (os três braços da experiência) ──
+
+/**
+ * Os três regimes possíveis para o orçamento de tool results.
+ *
+ * PORQUÊ ISTO EXISTE (2026-08-07)
+ * ───────────────────────────────
+ * Está MEDIDO que o orçamento é a causa das releituras — no caso
+ * `context-loss-rereads`, 5 dos 8 ficheiros foram relidos com ele, 2 sem ele.
+ * E está igualmente medido que TIRÁ-LO piorou o resultado (2/3 correctos → 1/3):
+ * sem nada a aparar tool results, o prompt cresce até compactar, e a
+ * compactação é mais destrutiva que limpar resultados antigos. Troca-se
+ * "releio cinco ficheiros" por "tenho uma narrativa da conversa".
+ *
+ * A hipótese por bater é o meio-termo, e é isso que `trigger` é: manter o
+ * orçamento, mas só o accionar quando a ocupação REAL se aproxima do limiar de
+ * compactação — em vez de a cada pedido, por os tool results sozinhos passarem
+ * 30% da janela. A previsão é ficar com as releituras baixas do braço `off`
+ * sem a compactação precoce que o afundou.
+ *
+ * Nenhum destes braços é opinião: são para correr `yarn evals:agent --only
+ * context-loss-rereads` com n ≥ 10 e comparar. O defeito continua `always`
+ * (o comportamento que já está em produção) até haver números — ver docs/
+ * PLAN-CONTEXT-BUDGET.md, "O que NÃO fazer".
+ */
+export type ToolResultBudgetMode =
+  /** Avalia-se em TODOS os pedidos. */
+  | 'always'
+  /** Só quando a ocupação se aproxima do limiar de compactação. */
+  | 'trigger'
+  /** DEFEITO: nunca. Modelo cli-vaz — a compactação é a única válvula. */
+  | 'off'
+
+/**
+ * DEFEITO: `off` — não se microcompacta (decisão do produto, 2026-08-07).
+ *
+ * PORQUÊ, e porque é que a medição desta sessão NÃO o contradiz
+ * ────────────────────────────────────────────────────────────
+ * A matriz de 07-08 deu vantagem ao `always` (10/10 contra 6/10 e 1/3). Mas
+ * essa medição correu com uma janela EFECTIVA pequena: com os 1M que as
+ * personas declaram (`PERSONA_*_CONFIG_JSON.contextWindow`), o orçamento seria
+ * `min(980K × 30%, 250K)` = 250.000 tokens, e a fixture de oito ficheiros
+ * (~80K de tool results) **nunca lá chegaria** — `always` e `off` seriam o
+ * mesmo braço. O que a matriz mediu foi o regime de janela apertada, não o de
+ * produção.
+ *
+ * O critério passa a ser o do cli-vaz e assenta na mesma premissa: com janela
+ * grande, o limiar de compactação está longe e aparar a cada pedido só serve
+ * para reescrever o prefixo, partir a cache e obrigar o modelo a reler o que
+ * já tinha. A janela é gerida pelo admin e é grande por decisão, não por sorte.
+ *
+ * A válvula que resta é a auto-compactação — exactamente como no cli-vaz.
+ * `always` e `trigger` continuam disponíveis por knob: se algum dia for
+ * publicado um modelo de janela pequena, o aparo volta a fazer sentido e o
+ * braço já está escrito e medido.
+ */
+export const DEFAULT_TOOL_RESULT_BUDGET_MODE: ToolResultBudgetMode = 'off'
+
+/**
+ * A que fracção do limiar de auto-compactação o modo `trigger` acorda.
+ *
+ * 0,75 e não 1,0 por causa de um desfasamento real: a ocupação ancora no
+ * `prompt_tokens` do turno ANTERIOR, portanto os tool results produzidos no
+ * turno corrente ainda não estão contados. Acordar em cima do limiar chegaria
+ * tarde de mais para evitar a compactação — que é a única coisa que o braço C
+ * existe para evitar.
+ */
+export const TOOL_RESULT_BUDGET_TRIGGER_RATIO = 0.75
+
+const VALID_MODES: ReadonlySet<string> = new Set<ToolResultBudgetMode>(['always', 'trigger', 'off'])
+
+/**
+ * Override de RUNTIME, posto pelo runner headless a partir dos `knobs` do job
+ * (`TM_RUN_KNOB_BUDGET_MODE`, `TM_RUN_KNOB_BUDGET_TRIGGER_PCT`).
+ *
+ * Manda sobre a env de build. PORQUÊ (2026-08-07): a env do vite é de BUILD e
+ * amarra a corrida ao processo que a serve — um vite já vivo não a ganha, e a
+ * corrida mede a árvore errada sem o dizer. Os `knobs` viajam por processo,
+ * portanto o mesmo vite serve braços diferentes. A env de build fica como
+ * recurso, para quem queira exercitar isto fora do runner.
+ */
+let overrideMode: ToolResultBudgetMode | null = null
+let overrideTriggerRatio: number | null = null
+
+/** Chamado só pelo runner headless. Valores inválidos são ignorados. */
+export function setToolResultBudgetOverrides(knobs: {
+  mode?: string
+  triggerPct?: string
+}): void {
+  const m = knobs.mode?.trim().toLowerCase()
+  if (m && VALID_MODES.has(m)) overrideMode = m as ToolResultBudgetMode
+  const pct = knobs.triggerPct ? parseFloat(knobs.triggerPct) : NaN
+  if (Number.isFinite(pct) && pct > 0 && pct <= 100) overrideTriggerRatio = pct / 100
+}
+
+/** Limpa os overrides — usado pelos testes. */
+export function clearToolResultBudgetOverrides(): void {
+  overrideMode = null
+  overrideTriggerRatio = null
+}
+
+/**
+ * Braço activo: override de runtime → env de BUILD → defeito. Valor ausente ou
+ * desconhecido → `always`: um override mal escrito não pode DESLIGAR o
+ * orçamento em silêncio (o prompt ficaria sem tecto nenhum), tal como o
+ * override do limiar de compactação só encurta e nunca adia.
+ */
+export function resolveToolResultBudgetMode(): ToolResultBudgetMode {
+  if (overrideMode) return overrideMode
+  const raw = VITE_TOOL_RESULT_BUDGET_MODE?.trim().toLowerCase()
+  return raw && VALID_MODES.has(raw)
+    ? (raw as ToolResultBudgetMode)
+    : DEFAULT_TOOL_RESULT_BUDGET_MODE
+}
+
+/** Fracção do limiar em que o modo `trigger` acorda; override em (0, 100]. */
+export function resolveToolResultBudgetTriggerRatio(): number {
+  if (overrideTriggerRatio !== null) return overrideTriggerRatio
+  const pct = VITE_TOOL_RESULT_BUDGET_TRIGGER_PCT
+    ? parseFloat(VITE_TOOL_RESULT_BUDGET_TRIGGER_PCT)
+    : NaN
+  return Number.isFinite(pct) && pct > 0 && pct <= 100
+    ? pct / 100
+    : TOOL_RESULT_BUDGET_TRIGGER_RATIO
+}
+
+export interface BudgetGateInput {
+  mode: ToolResultBudgetMode
+  /** Ocupação resolvida (real ancorado + estimativa do que veio depois). */
+  occupancyTokens?: number | null
+  /** Limiar a que a auto-compactação dispara, para o mesmo modelo activo. */
+  autoCompactThreshold?: number | null
+  /** Defeito: TOOL_RESULT_BUDGET_TRIGGER_RATIO. */
+  triggerRatio?: number
+}
+
+/**
+ * Decide se o orçamento corre NESTE pedido. Pura, para o portão ser testável
+ * sem montar um loop de agente.
+ *
+ * O ramo de incerteza inclina para APLICAR: sem ocupação ou sem limiar
+ * (turno 1 pré-handshake, modelo sem janela publicada) o modo `trigger`
+ * comporta-se como `always`. A alternativa — não aparar por não se conseguir
+ * medir a pressão — é a única que pode estourar a janela, e o custo de a
+ * aplicar de mais é uma releitura.
+ */
+export function shouldApplyToolResultBudget(input: BudgetGateInput): boolean {
+  if (input.mode === 'off') return false
+  if (input.mode === 'always') return true
+
+  const occupancy = input.occupancyTokens
+  const threshold = input.autoCompactThreshold
+  if (typeof occupancy !== 'number' || occupancy <= 0) return true
+  if (typeof threshold !== 'number' || threshold <= 0) return true
+
+  const ratio = input.triggerRatio ?? TOOL_RESULT_BUDGET_TRIGGER_RATIO
+  return occupancy >= Math.floor(threshold * ratio)
+}
 
 // ── Constants ──
 

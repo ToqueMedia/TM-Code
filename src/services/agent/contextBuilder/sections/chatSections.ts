@@ -925,7 +925,7 @@ export function getProjectMemorySection(ctx: PromptContext): string | null {
       '# Project memory (TMS.md)',
       `Path: ${ctx.normalizedProjectPath}/TMS.md`,
       header,
-      'At FINAL CHECKPOINT of a significant task, if durable facts changed (commands, entrypoints, patterns, agent rules, confirmed/inferred/pending), write those updates into TMS.md before you stop.',
+      'At FINAL CHECKPOINT of a significant task, you MUST update TMS.md when durable facts changed (commands, entrypoints, patterns, agent rules, confirmed/inferred/pending) — this is not optional. Write those updates into TMS.md before you stop.',
       '',
       sanitizeProjectContent(capped),
     ].join('\n')
@@ -935,18 +935,35 @@ export function getProjectMemorySection(ctx: PromptContext): string | null {
 
   // Compat: no TMS.md — inject full AGENTS.md / CLAUDE.md (claude-vaz style).
   const foreign = ctx.foreignInstructions
-  if (!foreign) return null
-  const capped = truncateNamed(
-    foreign.content.trim(),
-    STATIC_PROJECT_INSTRUCTIONS_MAX_CHARS,
-    foreign.relPath,
-  )
+  if (foreign) {
+    const capped = truncateNamed(
+      foreign.content.trim(),
+      STATIC_PROJECT_INSTRUCTIONS_MAX_CHARS,
+      foreign.relPath,
+    )
+    return [
+      `# Project instructions (${foreign.relPath} — no TMS.md)`,
+      `Path: ${ctx.normalizedProjectPath}/${foreign.relPath}`,
+      'Developer instructions for this repository. Follow them.',
+      'At FINAL CHECKPOINT of a significant task, create TMS.md (structured project memory) so future sessions start with accurate context. Use /init structure: Overview, Stack, Commands, Structure, EntryPoints, Project Patterns, Agent Rules, Confirmed, Inferred, Pending Confirmation, lastGeneratedAt, sourceFilesUsed.',
+      '',
+      sanitizeProjectContent(capped),
+    ].join('\n')
+  }
+
+  // No TMS.md AND no foreign instructions — the model would otherwise receive
+  // ZERO guidance about project memory. Without this block, the FINAL
+  // CHECKPOINT instruction never reaches the model for new/empty projects, so
+  // TMS.md is never created (the /init manual path was the only option).
+  // Inject a minimal directive so the model creates TMS.md at the end of the
+  // first significant task.
   return [
-    `# Project instructions (${foreign.relPath} — no TMS.md)`,
-    `Path: ${ctx.normalizedProjectPath}/${foreign.relPath}`,
-    'Developer instructions for this repository. Follow them. Run /init only if the developer wants structured TMS.md memory.',
-    '',
-    sanitizeProjectContent(capped),
+    '# Project memory (TMS.md)',
+    `Path: ${ctx.normalizedProjectPath}/TMS.md`,
+    'No TMS.md found — this project has no structured project memory yet.',
+    'At FINAL CHECKPOINT of a significant task, CREATE TMS.md at the path above so future sessions start with accurate project context.',
+    'Use the /init structure: Overview, Stack, Commands, Structure, EntryPoints, Project Patterns, Agent Rules, Confirmed, Inferred, Pending Confirmation, lastGeneratedAt, sourceFilesUsed.',
+    'Keep it concise — only what an agent would likely get wrong without this file. Mine doctrine from CI workflows, ownership boundaries, and long "why" comments in core modules.',
   ].join('\n')
 }
 
@@ -1195,17 +1212,24 @@ export function getMemoryGuidanceSection(ctx: PromptContext): string | null {
   if (ctx.tmsContent) {
     return [
       'TMS.md is compact operational project memory (/init structure: Overview, Stack, Commands, Structure, EntryPoints, Project Patterns, Agent Rules, Confirmed, Inferred, Pending Confirmation, lastGeneratedAt, sourceFilesUsed).',
-      'At FINAL CHECKPOINT of a significant task, update TMS.md when durable commands, entrypoints, repo patterns, agent rules, confirmed facts, or pending confirmations changed during the work.',
+      'At FINAL CHECKPOINT of a significant task, you MUST update TMS.md when durable commands, entrypoints, repo patterns, agent rules, confirmed facts, or pending confirmations changed during the work — this is not optional.',
       'Keep it short — no milestone diaries, no legacy Project Analysis/Memory/Custom Instructions dumps.',
     ].join(' ')
   }
   if (ctx.foreignInstructions) {
     return [
       `This project has developer instructions in ${ctx.foreignInstructions.relPath} (not structured TMS.md).`,
-      'Follow them. Run /init only if the developer wants structured TM Code project memory.',
+      'Follow them. At FINAL CHECKPOINT of a significant task, create TMS.md with the /init structure so future sessions have structured project memory.',
     ].join(' ')
   }
-  return null
+  // No TMS and no foreign instructions — the model must be told to CREATE
+  // TMS.md at the FINAL CHECKPOINT. Without this, new/empty projects never
+  // get a TMS.md because the instruction never reaches the model.
+  return [
+    'No TMS.md exists for this project.',
+    'At FINAL CHECKPOINT of a significant task, you MUST create TMS.md at the project root using the /init structure (Overview, Stack, Commands, Structure, EntryPoints, Project Patterns, Agent Rules, Confirmed, Inferred, Pending Confirmation, lastGeneratedAt, sourceFilesUsed) — this is not optional.',
+    'Mine doctrine from CI workflows, ownership boundaries, and long "why" comments. Keep it concise.',
+  ].join(' ')
 }
 
 // ── 13. Skills (uses pre-loaded list from buildSystemPrompt) ──

@@ -31,6 +31,8 @@ export interface BuildRunClientOptions {
   lightweight: boolean
   /** Chamado quando a rota é BYOK mas falta a key de um provider cloud. */
   onByokKeyMissing?: () => void
+  /** Id da sessão do run — chave de afinidade do Workers AI (ver sdkClient). */
+  sessionId?: string
 }
 
 export interface RunClient {
@@ -46,7 +48,7 @@ export interface RunClient {
  * reporta o erro à sua maneira e aborta.
  */
 export async function buildRunClient(opts: BuildRunClientOptions): Promise<RunClient | null> {
-  const { authToken, snapshot, byokActive, lightweight } = opts
+  const { authToken, snapshot, byokActive, lightweight, sessionId } = opts
 
   if (byokActive && snapshot) {
     const byokClient = await buildByokClientFromSnapshot(snapshot, {
@@ -61,7 +63,12 @@ export async function buildRunClient(opts: BuildRunClientOptions): Promise<RunCl
     }
   }
 
-  const make = lightweight ? createSubAgentClient : createAgentClient
+  // A afinidade é por SESSÃO, não por utilizador: com uma chave só, vários
+  // runs em paralelo despejam o prefixo uns dos outros da mesma instância
+  // (medido: 1 run 54,6% → 9 runs 33,6% de cache-read).
+  const make = lightweight
+    ? (t: string) => createSubAgentClient(t, { sessionId })
+    : (t: string) => createAgentClient(t, { sessionId })
   return {
     client: make(authToken),
     refreshClient: async (): Promise<OpenAI | null> => {

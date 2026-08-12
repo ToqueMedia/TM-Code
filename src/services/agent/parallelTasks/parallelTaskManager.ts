@@ -34,7 +34,7 @@ function deriveDescription(prompt: string): string {
   return firstLine.slice(0, 51).trimEnd() + '…'
 }
 
-function normalizeProjectPath(path: string | null | undefined): string {
+export function normalizeProjectPath(path: string | null | undefined): string {
   if (!path) return ''
   return path.replace(/\\/g, '/').replace(/\/+$/, '')
 }

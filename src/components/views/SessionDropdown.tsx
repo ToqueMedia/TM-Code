@@ -1,7 +1,10 @@
-import { memo, useRef, useEffect, useCallback, useState } from 'react'
+import { memo, useRef, useEffect, useCallback, useMemo, useState } from 'react'
 import { Flex, Box, Text, Input } from '@chakra-ui/react'
 import { FiPlus, FiClock, FiChevronDown, FiTrash2, FiEdit2, FiCheck, FiX } from 'react-icons/fi'
 import { useChatStore } from '../../stores/chatStore'
+import { useParallelTaskStore } from '../../stores/parallelTaskStore'
+import { useAgentStore } from '../../stores/agentStore'
+import { isProjectAgentBusy } from '../../services/agent/parallelTasks/parallelTaskManager'
 import { SessionSummary } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
@@ -43,10 +46,42 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming, compact = 
     return () => document.removeEventListener('mousedown', handleClick)
   }, [showSessions])
 
+  // NOVO CHAT: BLOQUEIA POR PROJECTO, NÃO GLOBALMENTE (2026-08-10)
+  // ─────────────────────────────────────────────────────────────
+  // Bloqueava em `isStreaming`, que é uma flag GLOBAL do store. Com o pivot
+  // multi-projecto isso passou a significar: basta o projecto A estar a correr
+  // para "Novo Chat" ficar morto no projecto B — exactamente o passo de pôr o
+  // segundo projecto a trabalhar.
+  //
+  // A regra certa é por projecto, porque outro projecto é outro contexto:
+  //   A a correr, estou em A  → bloqueia (um agente por projecto)
+  //   A a correr, estou em B idle → permite
+  //   B começa a correr        → bloqueia em B
+  //
+  // `isProjectAgentBusy` é a MESMA verificação que a política "um agente por
+  // projecto" (F3) já usa para recusar ou orientar um segundo agente: cobre o
+  // loop principal preso a uma sessão deste projecto E os runs vivos do
+  // parallelTaskStore. Reusá-la evita um segundo detector a divergir do
+  // primeiro.
+  // Subscreve os TRÊS stores que o `isProjectAgentBusy` consulta. A 1ª versão
+  // só subscrevia o `parallelTaskStore`, e o run PRINCIPAL deste projecto
+  // (que vive no chatStore/agentStore) não disparava re-render: o botão ficava
+  // activo depois de o agente arrancar e só acertava por acaso, quando outra
+  // coisa qualquer re-renderizasse o componente.
+  const parallelRuns = useParallelTaskStore((s) => s.runs)
+  const chatStreamingId = useChatStore((s) => s.streamingSessionId)
+  const chatIsStreaming = useChatStore((s) => s.isStreaming)
+  const agentStatus = useAgentStore((s) => s.status)
+  const busyHere = useMemo(
+    () => (projectPath ? isProjectAgentBusy(projectPath) : false),
+    // As dependências são os SINAIS; o valor vem da função partilhada.
+    [projectPath, parallelRuns, chatStreamingId, chatIsStreaming, agentStatus],
+  )
+
   const handleNewChat = useCallback(async () => {
-    if (!projectPath || isStreaming) return
+    if (!projectPath || isProjectAgentBusy(projectPath)) return
     await useChatStore.getState().createNewSession(projectPath)
-  }, [projectPath, isStreaming])
+  }, [projectPath])
 
   const handleToggleSessions = useCallback(async () => {
     if (!projectPath || loadingSessions) return
@@ -163,10 +198,11 @@ function SessionDropdown({ projectPath, activeSessionId, isStreaming, compact = 
         fontSize="12px"
         fontWeight="600"
         whiteSpace="nowrap"
-        cursor={isStreaming ? 'not-allowed' : 'pointer'}
-        opacity={isStreaming ? 0.5 : 1}
+        cursor={busyHere ? 'not-allowed' : 'pointer'}
+        opacity={busyHere ? 0.5 : 1}
+        title={busyHere ? t('parallel.oneAgentPerProject') : undefined}
         transition={`all ${tokens.transition.fast}`}
-        _hover={!isStreaming ? {
+        _hover={!busyHere ? {
           bg: tokens.colors.bg.panel,
           borderColor: tokens.colors.accent.primary,
           color: tokens.colors.text.primary

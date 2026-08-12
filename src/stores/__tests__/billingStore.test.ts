@@ -104,6 +104,41 @@ describe('billingStore', () => {
       expect(state.plan).toBe('max')
     })
 
+    it('metering 30/70: headers novos na unidade do plano (µ$ nos pagos)', () => {
+      const headers = new Headers({
+        'X-Budget-Pct': '0.30',
+        'X-Budget-Status': 'allowed',
+        'X-Budget-Unit': 'micros',
+        'X-Budget-Consumed': '2100000', // $2.10 de custo real
+        'X-Extra-Balance': '500000',
+        'X-Plan': 'vibe',
+        'X-Team-Id': 'team-1',
+        'X-Team-Tier': 'team-pro',
+        'X-Team-Slice-Micros': '8750000',
+        'X-Team-Pie-Micros': '17500000',
+      })
+      useBillingStore.getState().updateFromHeaders(headers)
+      const state = useBillingStore.getState()
+      expect(state.budgetUnit).toBe('micros')
+      expect(state.tokensConsumed).toBe(2_100_000)
+      expect(state.tmsRemaining).toBe(500_000)
+      expect(state.team?.mySliceTokens).toBe(8_750_000)
+      expect(state.team?.pieTotal).toBe(17_500_000)
+      expect(state.team?.mySlicePct).toBeCloseTo(0.5, 4)
+    })
+
+    it('explorer mantém a unidade tokens (header + /v1/me sem unit)', () => {
+      const headers = new Headers({
+        'X-Budget-Unit': 'tokens',
+        'X-Budget-Consumed': '1250000',
+        'X-Plan': 'explorer',
+      })
+      useBillingStore.getState().updateFromHeaders(headers)
+      const state = useBillingStore.getState()
+      expect(state.budgetUnit).toBe('tokens')
+      expect(state.tokensConsumed).toBe(1_250_000)
+    })
+
     it('sets noCredits when X-Budget-Status=rejected', () => {
       const headers = new Headers({ 'X-Budget-Status': 'rejected' })
       useBillingStore.getState().updateFromHeaders(headers)

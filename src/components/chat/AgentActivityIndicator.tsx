@@ -3,7 +3,6 @@ import { Flex, Text, Box } from "@chakra-ui/react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useParallelTaskStore, type ParallelTaskRun } from "../../stores/parallelTaskStore";
 import { useChatStore } from "../../stores/chatStore";
-import { useBillingStore } from "../../stores/billingStore";
 import { useAgentElapsed } from "../../hooks/useAgentElapsed";
 import { useCompactionProgress, formatCompactElapsed } from "../../hooks/useCompactionProgress";
 import { tokens } from "@/theme/tokens";
@@ -71,10 +70,8 @@ function AgentActivityIndicator() {
   const abortTask = useParallelTaskStore((s) => s.abort);
   const mainRunIsViewed = !streamingSessionId || streamingSessionId === activeSessionId;
   const totalTokensUsed = useChatStore((s) => s.totalTokensUsed);
-  // Multiplicador da persona aplicado ao último pedido (X-TM-Cost-Multiplier
-  // — o valor definido pelo ADMIN, nada hardcoded). Mostrado quando ≠1 para
-  // a barra de budget "andar 3× os tokens" ter explicação visível.
-  const lastCostMultiplier = useBillingStore((s) => s.lastCostMultiplier);
+  // (O badge ×N do multiplicador de persona foi REMOVIDO com o metering 30/70
+  // — já não há multiplicador entre o custo e o contador.)
   // Session-mode elapsed: total wall time per request, freezes during permission waits.
   const { elapsedMs: elapsed } = useAgentElapsed("session");
   // Compaction progress — synthetic time-eased estimate; active only while the
@@ -392,11 +389,6 @@ function AgentActivityIndicator() {
             )}
             {formatTokens(outputTokens)}
           </>
-        )}
-        {lastCostMultiplier !== 1 && (
-          <Box as="span" css={{ color: tokens.colors.accent.orange }}>
-            {" \u00B7 \u00D7"}{lastCostMultiplier}
-          </Box>
         )}
         {")"}
       </Text>

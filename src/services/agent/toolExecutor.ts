@@ -20,6 +20,7 @@ import type { ToolRegistrationContext } from './toolExecutor/context'
 import {
   isEnvFile,
   commandReferencesSealedEnv,
+  looksLikeFilenameFilter,
   isSensitiveFile,
   simpleHash,
   matchDangerousCommand,
@@ -95,6 +96,7 @@ import { hasBinaryExtension } from './toolExecutor/binaryExtensions'
 import { getSnippetForTwoFileDiff } from './toolExecutor/changedFileSnippet'
 import { extractReadFilesFromMessages } from './toolExecutor/readStateRecovery'
 import { logger } from '../../utils/logger'
+import { SITUATIONAL_DEFERRED_TOOLS } from './toolPolicy'
 import { budgetMcpDescriptions } from './mcpDescriptionBudget'
 import { getLegacyProjectStateDir, getProjectStateDir } from '../projectStatePaths'
 // Os caminhos que o PROJECTO declara gerados. Partilhado com o system prompt
@@ -350,6 +352,66 @@ function formatBackgroundCommandResult(cmd: {
   return lines.join('\n')
 }
 
+
+/**
+ * Tecto do output RETIDO por comando (2026-08-11).
+ *
+ * `allOutput: string[]` acumulava cada chunk para sempre, nos três caminhos
+ * (install, comando síncrono, comando de background). Um comando de background
+ * deixado a correr — um deploy, um watch, um dev server — emite output
+ * indefinidamente, e o array retém-no todo.
+ *
+ * Reportado: a app nos 62 GB de RAM a subir para 102 GB, com a IDE congelada
+ * (só o scroll funciona; escrever não). O perfil confirma que NÃO é
+ * JavaScript: 724 ms de script em 23,4 s contra 6.536 ms de composite — a
+ * máquina está em swap, e o compositing lento é sintoma, não causa. O painel
+ * de Layers não mostra nenhuma camada anormal, o que exclui a hipótese de um
+ * backing store gigante.
+ *
+ * O `commandLogs` da UI já estava capado a 500 linhas; este buffer não tinha
+ * tecto nenhum.
+ *
+ * Mantém-se cabeça E cauda, como na truncagem de persistência: o comando está
+ * no princípio do output e o veredicto no fim.
+ */
+const MAX_RETAINED_OUTPUT_CHARS = 2_000_000
+const RETAINED_OUTPUT_HEAD_CHARS = 400_000
+/** Verificação amortizada — somar o array a cada chunk seria O(n²). */
+const OUTPUT_CHECK_EVERY_CHUNKS = 256
+
+function pushBoundedOutput(buf: string[], data: string): void {
+  buf.push(data)
+  if (buf.length % OUTPUT_CHECK_EVERY_CHUNKS !== 0) return
+
+  let total = 0
+  for (const chunk of buf) total += chunk.length
+  if (total <= MAX_RETAINED_OUTPUT_CHARS) return
+
+  const tailBudget = MAX_RETAINED_OUTPUT_CHARS - RETAINED_OUTPUT_HEAD_CHARS
+  const head: string[] = []
+  let headLen = 0
+  for (const chunk of buf) {
+    if (headLen >= RETAINED_OUTPUT_HEAD_CHARS) break
+    head.push(chunk)
+    headLen += chunk.length
+  }
+  const tail: string[] = []
+  let tailLen = 0
+  for (let i = buf.length - 1; i >= head.length; i--) {
+    if (tailLen >= tailBudget) break
+    tail.unshift(buf[i])
+    tailLen += buf[i].length
+  }
+  const dropped = total - headLen - tailLen
+  buf.length = 0
+  for (const c of head) buf.push(c)
+  if (dropped > 0) {
+    buf.push(`\n[... ${dropped.toLocaleString()} chars de output omitidos - buffer limitado a ${MAX_RETAINED_OUTPUT_CHARS.toLocaleString()} ...]\n`)
+  }
+  for (const c of tail) buf.push(c)
+}
+
+
 class ToolExecutor {
   private static instance: ToolExecutor
   private tools: Map<string, ToolEntry> = new Map()
@@ -558,6 +620,7 @@ class ToolExecutor {
   private constructor() {
     this.ctx = this.buildContext()
     this.registerTools()
+    this.applyNativeDeferral()
     void invoke<string>('get_home_directory')
       .then((home) => { this.homeDir = home })
       .catch(() => { /* sem home dir, `~` não expande — não é fatal */ })
@@ -1302,6 +1365,14 @@ class ToolExecutor {
       SHELL_COMMAND_TOOLS.has(toolName) &&
       commandReferencesSealedEnv(String(commandText))
     ) {
+      // Filtro sobre nomes de ficheiro (ex.: um pré-commit que procura
+      // segredos em staging) precisa de outra resposta: a mensagem genérica
+      // fala de request_credentials, que aqui não resolve nada — e o agente
+      // reagiu a isso APAGANDO a própria verificação de segurança
+      // (ver looksLikeFilenameFilter).
+      if (looksLikeFilenameFilter(String(commandText))) {
+        return 'Blocked: the .env seal screens the command TEXT, and this command mentions .env inside a filter pattern. The seal cannot tell "grep over a list of NAMES" from "grep that opens .env", so it blocks both — that is a known false positive, NOT a sign that a key is missing.\n\nDo NOT re-run this command with the sensitive-file pattern removed: that deletes the check instead of performing it. Run the producing command on its own (e.g. `git diff --cached --name-only`) and inspect the file list yourself — you can apply the same criteria to the output without a filter that trips the seal.'
+      }
       return 'Blocked: .env is sealed (it holds secrets) — shell commands may not read it either, and this block holds in every permission mode. It is NOT a sign that a key is missing. To supply a credential, call request_credentials (it writes straight to .env); once it returns "Credentials saved to .env", that key IS present — trust that result instead of verifying by hand. To check which keys a project EXPECTS, read .env.example. If the file only needs to be handed to another program, pass it via --env-file (allowed) or ask the developer to run that command themselves.'
     }
 
@@ -1598,6 +1669,54 @@ class ToolExecutor {
    * nunca é enviada em índices ao modelo: as tools diferidas anunciam-se só
    * pelo nome (contrato cli-vaz; o A/B de hints não mostrou benefício).
    */
+  /**
+   * Marca as tools de SITUATIONAL_DEFERRED_TOOLS depois de todas registadas —
+   * incluindo as dos módulos de ops, que se registam por último.
+   *
+   * Passagem central em vez de `deferred: true` espalhado por 15 sítios em 4
+   * ficheiros: a política lê-se de uma vez (é o equivalente ao isDeferredTool
+   * do cli-vaz) e uma entrada morta é DETECTÁVEL. Espalhada, uma tool
+   * renomeada deixava a flag num sítio que já ninguém lê, sem nada a apitar.
+   *
+   * O warn não é decoração. O modo de falha desta funcionalidade inteira é
+   * silencioso: diferir sem anunciar torna a tool invisível ao modelo, e nada
+   * estoira — ele apenas nunca a pede. Um nome que não bate é o mesmo defeito
+   * um passo antes.
+   */
+  private applyNativeDeferral(): void {
+    const desconhecidas: string[] = []
+    for (const name of SITUATIONAL_DEFERRED_TOOLS) {
+      const entry = this.tools.get(name)
+      if (!entry) {
+        desconhecidas.push(name)
+        continue
+      }
+      entry.deferred = true
+    }
+    if (desconhecidas.length > 0) {
+      logger.warn(
+        'agent',
+        `[tools] SITUATIONAL_DEFERRED_TOOLS nomeia tools que não existem no registo: ${desconhecidas.join(', ')} — ` +
+        'renomeadas ou removidas. Corrigir a lista em toolPolicy.ts.',
+      )
+    }
+  }
+
+  /**
+   * TODAS as definições registadas — as que viajam no pedido MAIS as diferidas.
+   *
+   * Existe para quem NÃO tem como carregar uma tool diferida a meio do run. O
+   * `getToolDefinitions()` responde a "o que vai no schema deste turno", e
+   * desde 2026-08-12 isso é um SUBCONJUNTO; um consumidor sem `ToolSearch`
+   * (sub-agentes lightweight) que use esse método fica sem as 15 nativas
+   * diferidas e sem via de recuperação — deferral que remove capacidade em vez
+   * de a adiar. Ver o construtor do AgentService.
+   */
+  getAllToolDefinitions(): OpenAIToolDefinition[] {
+    const deferred = this.getDeferredToolIndex().map(d => d.name)
+    return [...this.getToolDefinitions(), ...this.getDeferredToolDefinitions(deferred).defs]
+  }
+
   getDeferredToolIndex(): Array<{ name: string; description: string }> {
     return Array.from(this.tools.values())
       .filter(t => t.deferred)
@@ -2340,7 +2459,7 @@ ${preview}
     allOutput: string[],
     toolCallId: string | null | undefined,
   ): void {
-    allOutput.push(data)
+    pushBoundedOutput(allOutput, data)
     if (!toolCallId) return
 
     // Accumulate full output into commandLogs for the shell log viewer.
@@ -3402,7 +3521,39 @@ ${preview}
     this.tools.set('read_file', {
       definition: {
         name: 'read_file',
-        description: 'Read the contents of a file at the given file_path. By default reads the entire file; for large files use `offset` + `limit` to read a line range (1-indexed), matching Claude Code\'s Read tool semantics. Files larger than 256 KB throw with instructions to use offset/limit — auto-truncating would waste 25K+ tokens of context vs. the model refining its call. When you already know which part of the file you need, only read that part — this is important for larger files.',
+        // A ÚLTIMA frase é load-bearing e já esteve ao contrário (2026-08-07).
+        //
+        // Dizia "only read that part — this IS important for larger files", sem
+        // definir "larger". Medido: o modelo aplicou-o a ficheiros de 20 KB —
+        // uma ordem de grandeza abaixo do que este tool sequer trunca (100 KB)
+        // e duas abaixo do que rejeita (256 KB) — e gastou 21 leituras em 8
+        // ficheiros (~2,6 por ficheiro) a adivinhar offsets, porque NÃO PODE
+        // saber onde está o que procura sem ler.
+        //
+        // O texto veio do claude-vaz, mas do braço ERRADO: lá são duas
+        // variantes mutuamente exclusivas (FileReadTool/prompt.ts) e a
+        // `OFFSET_INSTRUCTION_TARGETED` está atrás de uma flag de experiência
+        // (`targetedRangeNudge`), com "CAN be important". O DEFEITO deles é o
+        // oposto — `OFFSET_INSTRUCTION_DEFAULT`: "it's recommended to read the
+        // whole file by not providing these parameters". Copiámos a variante
+        // em teste, endurecemos-lhe a linguagem e tirámos-lhe o número.
+        //
+        // O limite anunciado não é decoração: é o que dá ao modelo uma régua
+        // em vez de um adjectivo. Ver também o comentário em
+        // getToolResultMaxChars — a Anthropic testou A/B limitar leituras e
+        // REVERTEU, porque releituras paginadas custam mais que uma leitura
+        // completa.
+        //
+        // MEDIDO (context-loss-rereads, n=2 antes / n=3 depois): chamadas de
+        // Read 21,21 → 13,16,13. O comportamento mudou na direcção prevista e
+        // as gamas não se sobrepõem. O CUSTO não seguiu: input/pedido ~52K dos
+        // dois lados, pedidos e duração dentro do ruído — trocaram-se leituras
+        // parciais por leituras completas, e o total transportado é
+        // semelhante. Portanto: mantém-se pelo argumento (alinha com o defeito
+        // da referência, tira um imperativo sem justificação, dá uma régua),
+        // NÃO por um ganho de custo provado. Quem reabrir isto não deve citar
+        // poupança que não existe.
+        description: 'Read the contents of a file at the given file_path. By default reads the entire file — recommended: omit `offset`/`limit` and read the whole thing. You can optionally specify a line offset and limit (1-indexed, especially handy for long files), but a partial read that misses what you need costs more round-trips than one complete read. Reads return up to ~100 KB (~25k tokens); only above that does a range become worth it. Files larger than 256 KB throw with instructions to use offset/limit — auto-truncating would waste 25K+ tokens of context vs. the model refining its call. Matches Claude Code\'s Read tool semantics.',
         input_schema: {
           type: 'object',
           properties: {
@@ -6066,10 +6217,26 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         // Fix #6: declared before listeners so they can clear it on normal exit
         let timeoutTimer: ReturnType<typeof setTimeout> | undefined
 
+        // DONO do comando, capturado AGORA e não no fim: quando o comando
+        // terminar, o developer pode ter aberto outro projecto, e ler o
+        // contexto activo nessa altura acordava o agente errado (report
+        // 2026-08-10 — deploy do projecto A a acordar o agente de B).
+        const ownerProjectPath = this.getProjectContext()?.projectPath
+        const ownerSessionId = await (async () => {
+          try {
+            const { useChatStore } = await import('../../stores/chatStore')
+            const chat = useChatStore.getState()
+            return chat.streamingSessionId ?? chat.activeSessionId ?? undefined
+          } catch { return undefined }
+        })()
+
         const wakeForTerminalState = (status: 'completed' | 'error' | 'cancelled', exitCode?: number | null) => {
           import('./backgroundCommands/autoWake')
             .then(({ maybeWakeMainAgentForBackgroundCommand }) => {
-              maybeWakeMainAgentForBackgroundCommand({ id: cmdId, command: cmd, status, exitCode })
+              maybeWakeMainAgentForBackgroundCommand({
+                id: cmdId, command: cmd, status, exitCode,
+                ownerProjectPath, ownerSessionId,
+              })
             })
             .catch(() => { /* auto-wake is best-effort */ })
         }
@@ -6084,7 +6251,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
             if (targetPid === 0) {
               bufferedOutput.push({ pid: event.payload.pid, data: event.payload.data })
             } else if (event.payload.pid === targetPid) {
-              allOutput.push(event.payload.data)
+              pushBoundedOutput(allOutput, event.payload.data)
               processRegistry.appendOutput(cmdId, event.payload.data)
             }
           }
@@ -6154,7 +6321,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
           // Flush buffered events (events emitted between spawn and PID assignment)
           for (const ev of bufferedOutput) {
             if (ev.pid === pid) {
-              allOutput.push(ev.data)
+              pushBoundedOutput(allOutput, ev.data)
               processRegistry.appendOutput(cmdId, ev.data)
             }
           }

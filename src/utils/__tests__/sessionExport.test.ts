@@ -135,3 +135,38 @@ describe('sessionExport request efficiency report', () => {
     expect(withStats.session.promptSerializeStats.charsSavedVsMini).toBeGreaterThan(0)
   })
 })
+
+/**
+ * O export tem de carregar as entradas do pill (2026-08-10).
+ *
+ * Reportou-se "0% livre e a compactação não disparou". O ficheiro provava que
+ * a compactação estava certa (pico 102.361 < limiar 167.000) e não tinha nada
+ * para explicar o 0%, porque `currentPromptTokens` — o máximo corrente do
+ * STORE, que atravessa sessões — não era exportado. Sem ele a análise é
+ * argumento; com ele é medição.
+ */
+describe('contextPillState no export', () => {
+  it('inclui o bloco quando o chamador o fornece', () => {
+    const json = JSON.parse(sessionToJson(session([]), {
+      contextPillState: {
+        sessionLastPromptTokens: 102_361,
+        storeCurrentPromptTokens: 480_000,
+        resolvedContextWindow: 200_000,
+        autoCompactThreshold: 167_000,
+        warningThreshold: 147_000,
+      },
+    }))
+
+    const pill = json.session.contextPillState
+    expect(pill.sessionLastPromptTokens).toBe(102_361)
+    // A assinatura do defeito: o valor do store excede o limiar, o da sessão não.
+    expect(pill.storeCurrentPromptTokens).toBeGreaterThan(pill.autoCompactThreshold)
+    expect(pill.sessionLastPromptTokens).toBeLessThan(pill.autoCompactThreshold)
+  })
+
+  it('fica a null quando não é fornecido — nunca em falta', () => {
+    const json = JSON.parse(sessionToJson(session([])))
+    expect(json.session).toHaveProperty('contextPillState')
+    expect(json.session.contextPillState).toBeNull()
+  })
+})

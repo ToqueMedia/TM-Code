@@ -79,3 +79,38 @@ describe('shouldWakeForBackgroundCommands', () => {
 })
 
 export {}
+
+/**
+ * Roteamento por DONO (2026-08-10).
+ *
+ * Reportado: o agente do projecto A pôs um deploy em background e adormeceu;
+ * o developer abriu B; quando o deploy terminou, o wake caiu em **B** — o
+ * anúncio no chat de B, o histórico de B, e o agente de B a chamar
+ * `check_background_commands` para ler o output de A.
+ *
+ * Causa: `BackgroundCommandWake` não tinha dono, e o caminho de wake usa
+ * `addSystemMessage` (sessão activa) + `runAgentWithCallbacks` (projecto
+ * activo). O gémeo dos sub-agentes já roteava por dono; este ficou para trás.
+ */
+describe('dono do comando de background', () => {
+  it('o tipo carrega o projecto e a sessão que o lançaram', () => {
+    const wake: import('../backgroundCommands/autoWake').BackgroundCommandWake = {
+      id: 'cmd-1',
+      command: 'yarn deploy',
+      status: 'completed',
+      ownerProjectPath: '/proj/a',
+      ownerSessionId: 'sess-a',
+    }
+    expect(wake.ownerProjectPath).toBe('/proj/a')
+    expect(wake.ownerSessionId).toBe('sess-a')
+  })
+
+  it('a decisão de acordar é independente do dono — só o DESTINO muda', () => {
+    const { shouldWakeForBackgroundCommands } = require('../backgroundCommands/autoWake')
+    const base = { id: 'c', command: 'x', status: 'error' as const }
+    expect(shouldWakeForBackgroundCommands([base], 0).wake).toBe(true)
+    expect(
+      shouldWakeForBackgroundCommands([{ ...base, ownerProjectPath: '/proj/a' }], 0).wake,
+    ).toBe(true)
+  })
+})

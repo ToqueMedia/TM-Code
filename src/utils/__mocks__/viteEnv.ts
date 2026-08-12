@@ -15,6 +15,11 @@ export const VITE_OLLAMA_URL: string | undefined = undefined
 export const VITE_WORKER_URL: string | undefined = undefined
 /** Override do limiar de compactação — os testes põem-no via jest.mock. */
 export const VITE_AUTOCOMPACT_PCT: string | undefined = undefined
+/** Braço do orçamento de tool results — sem override, o defeito (`always`). */
+export const VITE_TOOL_RESULT_BUDGET_MODE: string | undefined = undefined
+export const VITE_TOOL_RESULT_BUDGET_TRIGGER_PCT: string | undefined = undefined
+/** Persona fixada no runner headless — sem override, a escolha do utilizador. */
+export const VITE_EVAL_PERSONA: string | undefined = undefined
 export const VITE_AI_WORKER_URL: string | undefined = undefined
 export const VITE_COLLAB_SIGNALING_URL: string | undefined = undefined
 export const IS_VITE_DEV = false

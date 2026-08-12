@@ -866,10 +866,22 @@ pub fn run() {
                             }
                         }
                     }
+                    // Interruptores de medição: TM_RUN_KNOB_<NOME>=valor.
+                    // Prefixo varrido em vez de campos fixos — ver a nota em
+                    // commands/runner.rs. A chave fica em minúsculas, sem o
+                    // prefixo (TM_RUN_KNOB_BUDGET_MODE → "budget_mode").
+                    let knobs: std::collections::HashMap<String, String> = std::env::vars()
+                        .filter_map(|(k, v)| {
+                            k.strip_prefix("TM_RUN_KNOB_")
+                                .filter(|nome| !nome.is_empty() && !v.is_empty())
+                                .map(|nome| (nome.to_ascii_lowercase(), v.clone()))
+                        })
+                        .collect();
                     commands::runner::set_runner_job(commands::runner::RunnerJob {
                         task,
                         project: project.unwrap_or_default(),
                         yolo,
+                        knobs,
                     });
                 }
             }

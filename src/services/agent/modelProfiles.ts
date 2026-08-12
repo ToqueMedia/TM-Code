@@ -157,22 +157,60 @@ const QWEN_3_7_PLUS: ModelProfile = {
 }
 
 // ─────────────────────────────────────────────────
-// Grok 4.5 — desde 2026-08-04 servido via Cloudflare AI Gateway
-// (api.cloudflare.com/client/v4/accounts/{id}/ai/v1, model `xai/grok-4.5`,
-// billing unificado Cloudflare) — antes era xAI directo (api.x.ai/v1).
+// GLM-5.2 — TERCEIRO provedor: Cloudflare Workers AI (2026-08-10)
+//
+// Mesmo modelo do bloco acima, id e JANELA diferentes. A doc oficial
+// (developers.cloudflare.com/workers-ai/models/glm-5.2/) declara:
+//   · Model ID  `@cf/zai-org/glm-5.2`
+//   · Context Window  262 144  ← NÃO é 1M como no z.AI
+//   · Function calling: sim; Reasoning: sim, via `reasoning_effort`
+//   · Endpoint OpenAI-compatible `/v1/chat/completions`
+//
+// PORQUÊ UM PERFIL SEPARADO E NÃO UM ALIAS
+// ────────────────────────────────────────
+// `MODEL_PROFILES` é indexado pelo ID DO MODELO, e a janela pertence ao par
+// (provedor, modelo). Apontar este id para GLM_5_2 herdava 1M e o IDE
+// calculava um limiar de compactação de 931 000 onde o correcto é 229 144 —
+// o portão de envio do composer deixava passar um prompt que só podia voltar
+// em `prompt_too_long`. Como o Workers AI reporta um id PRÓPRIO em X-TM-Model,
+// a tabela consegue distinguir os três provedores; onde não conseguir (z.AI e
+// DashScope reportam ambos `glm-5.2`) entra a memória por config
+// (servedWindowMemory.ts), que guarda o `X-Model-Context-Window` visto.
+//
+// `maxOutputTokens` herda os 131 072 do modelo: a doc do Cloudflare NÃO
+// publica um tecto (descreve `max_completion_tokens` como parâmetro, sem
+// valor). Herdar não distorce nada aqui — este campo só alimenta a reserva
+// para o sumário, que é `min(maxOutputTokens, MAX_OUTPUT_TOKENS_FOR_SUMMARY)`
+// e portanto dá 20 000 para qualquer valor acima disso. Inventar um número
+// MENOR é que teria custo: truncava output legítimo.
+// ─────────────────────────────────────────────────
+
+const GLM_5_2_CLOUDFLARE: ModelProfile = {
+  ...GLM_5_2,
+  id: '@cf/zai-org/glm-5.2',
+  name: 'GLM-5.2 (Cloudflare)',
+  modelId: '@cf/zai-org/glm-5.2',
+  contextWindow: 262_144,
+}
+
+// ─────────────────────────────────────────────────
+// Grok 4.5 — x.AI DIRECTO (api.x.ai/v1, model `grok-4.5`). A via Cloudflare
+// AI Gateway foi REMOVIDA a 2026-08-11 (decisão de produto): o metering 30/70
+// debita o custo real do provider, e o directo dá controlo do preço e do
+// cache automático da x.AI (`x-grok-conv-id` para afinidade, providers.ts).
 //
 // Modelo agentic/coding de fronteira da xAI (também por trás do "Grok Build").
-// Reasoning SEMPRE ativo (mandatory) — não se desliga. O stream expõe o
-// raciocínio em `reasoning_content`, que a IDE já parseia genericamente (sem
-// código de parsing novo). Input text+image → text; a IDE não envia
-// penalties/stop (que os modelos de reasoning do xAI rejeitam). Search por
+// Reasoning SEMPRE ativo (mandatory) — não se desliga; effort low|medium|high
+// (default high). O stream expõe o raciocínio em `reasoning_content`, que a
+// IDE já parseia genericamente. Input text+image → text; frequency_penalty/
+// presence_penalty/stop/logit_bias são limpos pelo data-plane (a referência
+// REST da x.AI marca-os unsupported nos modelos de reasoning). Search por
 // sidecar.
 //
-// JANELA CAPADA EM 200K (deliberado, não é a janela real de 500K): o preço do
-// Grok directo na xAI tinha dois patamares por tamanho de prompt (<200k =
-// $2/$0.30/$6; ≥200k = $4/$0.60/$12) e o cap prendia-nos ao barato. Via
-// gateway o preço de tabela do provider presume-se repassado — manter o cap
-// até o billing unificado provar o contrário.
+// JANELA CAPADA EM 200K (deliberado, não é a janela real de 500K): na x.AI,
+// prompts com ≥200k tokens pagam TODOS os preços A DOBRO ($2/$0.30/$6 →
+// $4/$0.60/$12). No metering 30/70 isso dobraria o consumo real do utilizador
+// num único pedido — o cap mantém todos os pedidos no escalão barato.
 // ─────────────────────────────────────────────────
 
 const GROK_4_5: ModelProfile = {
@@ -192,33 +230,11 @@ const GROK_4_5: ModelProfile = {
 }
 
 // ─────────────────────────────────────────────────
-// Kimi K3 — Moonshot/Kimi (api.moonshot.ai/v1, OpenAI-compatible, Bearer)
-//
-// Flagship multimodal agentic/coding da Moonshot (lançado 2026-07-16). Janela
-// 1M; reasoning SEMPRE ativo (mandatory), controlado só por `reasoning_effort`
-// (low/high/max, default max) — a forma é injetada pela config gerida via
-// extraBody; a IDE não a envia. O stream expõe o raciocínio em
-// `reasoning_content` (já parseado genericamente). Regra multi-turno: a
-// mensagem completa do assistant (incl. reasoning_content + tool_calls) tem de
-// voltar as-is — o round-trip de thinking da IDE já o faz. Confirmado nas docs
-// oficiais platform.kimi.ai (2026-07). Search por sidecar.
+// (Kimi K3 — Moonshot directo e via Cloudflare AI Gateway — foi REMOVIDO do
+// catálogo gerido a 2026-08-11, decisão de produto. Continua disponível como
+// provider BYOK: byokRouting/byokStore e o parsing de `reasoning_content`
+// mantêm-se para quem ligar a própria chave.)
 // ─────────────────────────────────────────────────
-
-const KIMI_K3: ModelProfile = {
-  id: 'kimi-k3',
-  name: 'Kimi K3',
-  modelId: 'kimi-k3',
-  contextWindow: 1_048_576,
-  maxOutputTokens: 131_072,
-
-  thinkingMode: 'mandatory',
-  supportsThinking: true,
-  thinkingMandatory: true,
-
-  supportsAttachments: true,
-  supportsSearch: false,
-  counterweights: [],
-}
 
 // ─────────────────────────────────────────────────
 // Registry
@@ -229,19 +245,17 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
   // DashScope/Alibaba Cloud (US) ainda pode reportar o id base 'glm-5' em
   // X-TM-Model — alias para o MESMO perfil, senão o lookup cairia no default.
   'glm-5': GLM_5_2,
+  // Cloudflare Workers AI expõe o MESMO glm-5.2 com um id próprio e uma janela
+  // MENOR. Entrada separada, não alias — ver GLM_5_2_CLOUDFLARE.
+  '@cf/zai-org/glm-5.2': GLM_5_2_CLOUDFLARE,
+  'zai-org/glm-5.2': GLM_5_2_CLOUDFLARE,
   'qwen3.8-max': QWEN_3_8_MAX,
   'qwen3.7-plus': QWEN_3_7_PLUS,
-  // Grok 4.5. Via Cloudflare AI Gateway o X-TM-Model reporta 'xai/grok-4.5'
-  // (sintaxe author/model do gateway); os restantes aliases cobrem ids xAI
-  // directos caso a config volte a apontar lá.
+  // Grok 4.5 — x.AI directo (2026-08-11). Aliases documentados da x.AI; o id
+  // 'xai/grok-4.5' do antigo gateway Cloudflare saiu com ele.
   'grok-4.5': GROK_4_5,
-  'xai/grok-4.5': GROK_4_5,
   'grok-4.5-latest': GROK_4_5,
   'grok-build-latest': GROK_4_5,
-  // Kimi K3 — Moonshot directo reporta 'kimi-k3'; via Cloudflare AI Gateway
-  // reporta 'moonshotai/kimi-k3'. Mesmo perfil.
-  'kimi-k3': KIMI_K3,
-  'moonshotai/kimi-k3': KIMI_K3,
 }
 
 // Fallback de modelo desconhecido / pré-handshake. Passou de 'mimo-v2.5-pro-1m'

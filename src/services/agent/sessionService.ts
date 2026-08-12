@@ -59,8 +59,78 @@ export function captureByokSnapshot(): ByokSessionSnapshot | null {
   }
 }
 
+/**
+ * Um diff JÁ RESOLVIDO não guarda o conteúdo — nem em disco, nem em memória.
+ *
+ * MEDIDO a 2026-08-12, e é o maior item de todos: `sanitizeMessageForSave`
+ * fazia `...tc` e só truncava o `result`, portanto `diffOldContent` +
+ * `diffNewContent` — DUAS cópias completas do ficheiro por edição — iam
+ * inteiras para o disco. Num ficheiro de sessão de 19,7 MB: **11,9 MB (60%)
+ * eram diffs**, em 185 tool calls, contra 0,6 MB de results (esses truncados).
+ * Total em disco na máquina do developer: **391 MB**. E tudo isso volta a ser
+ * materializado ao ABRIR o projecto — medido: +553 MB de RSS só na abertura.
+ *
+ * PORQUE NÃO CHEGAVA O `releaseResolvedDiff` do chatStore: aquele tem um
+ * limiar de 200 KB POR DIFF, pensado para não estragar o cartão de um diff
+ * normal. A média real são ~64 KB por diff, portanto quase nenhum passa o
+ * limiar — e o problema nunca foi um diff grande, é a SOMA de 185 médios.
+ * Aqui não há limiar: depois de aprovado ou recusado a edição já está (ou não
+ * está) no disco, e as cópias só serviam para re-renderizar um cartão fechado.
+ *
+ * PENDENTE fica intacto, sempre: esse ainda precisa de ser mostrado para o
+ * developer decidir. Degradação graciosa nos resolvidos — `hasDiff` em
+ * ToolCallDisplay testa `diffNewContent !== undefined`, logo um diff sem
+ * conteúdo cai na linha normal de tool call em vez de rebentar.
+ */
+function stripResolvedDiff(tc: ToolCallDisplay): ToolCallDisplay {
+  if (tc.diffStatus !== 'approved' && tc.diffStatus !== 'denied') return tc
+  if (tc.diffOldContent === undefined && tc.diffNewContent === undefined) return tc
+  const next = { ...tc }
+  delete next.diffOldContent
+  delete next.diffNewContent
+  return next
+}
+
 const MAX_SESSIONS_PER_PROJECT = 50
 const MAX_TOOL_RESULT_LENGTH = 2000
+/** Quanto do teto fica reservado ao FIM do output. Ver `truncateToolResult`. */
+const TOOL_RESULT_TAIL_SHARE = 0.4
+
+/**
+ * Corta um tool result para persistência guardando CABEÇA **e** CAUDA.
+ *
+ * PORQUE NÃO É SÓ `slice(0, N)` (auditoria da sessão golive, 2026-08-10)
+ * ────────────────────────────────────────────────────────────────────
+ * Era. E para os outputs que mais interessa auditar — `yarn build`, `firebase
+ * deploy`, `yarn test` — o veredicto vive no FIM: "Deploy complete!", o exit
+ * code, o número de testes que falharam. Guardar os primeiros 2000 chars de um
+ * deploy de 20KB preserva a lista de APIs a serem activadas e deita fora a
+ * única linha que diz se correu bem.
+ *
+ * Na sessão auditada, 28 dos 66 resultados saíram assim — incluindo os quatro
+ * deploys de produção, todos cortados em "hosting: beginning deploy...". O
+ * runtime faz o contrário (guarda a cauda e injecta um `<system-reminder>` com
+ * `read_large_result`), portanto o ficheiro exportado era menos fiável do que o
+ * que o modelo tinha visto — e o export existe precisamente para auditar.
+ *
+ * Guardar as duas pontas custa o mesmo em bytes e mantém o comando E o
+ * resultado. O marcador diz quanto se perdeu, para ninguém ler o meio que não
+ * existe como se fosse contíguo.
+ */
+function truncateToolResult(result: string): string {
+  if (result.length <= MAX_TOOL_RESULT_LENGTH) return result
+
+  const tailChars = Math.floor(MAX_TOOL_RESULT_LENGTH * TOOL_RESULT_TAIL_SHARE)
+  const headChars = MAX_TOOL_RESULT_LENGTH - tailChars
+  const dropped = result.length - MAX_TOOL_RESULT_LENGTH
+
+  return (
+    result.slice(0, headChars) +
+    `\n\n[… ${dropped.toLocaleString()} chars omitidos na persistência — ` +
+    `original ${result.length.toLocaleString()} chars …]\n\n` +
+    result.slice(result.length - tailChars)
+  )
+}
 /** Teto do mentionContext persistido por mensagem (~30K chars ≈ 7.5K tokens).
  *  Display/contexto continua completo em memória; só o disco é capado. */
 const MAX_MENTION_CONTEXT_PERSIST = 30_000
@@ -569,11 +639,14 @@ class SessionService {
     if (!msg.toolCalls?.length) return msg
     return {
       ...msg,
-      toolCalls: msg.toolCalls.map(tc => ({
+      // Também na LEITURA, e não só na escrita: as sessões já gravadas trazem
+      // o conteúdo todo (391 MB em disco na máquina do developer a 12-08), e
+      // sem o strip aqui uma sessão antiga voltava a materializá-lo inteiro
+      // ao abrir o projecto. Com ele, o custo desaparece na abertura e a
+      // gravação seguinte já persiste a forma pequena.
+      toolCalls: msg.toolCalls.map(tc => stripResolvedDiff({
         ...tc,
-        result: tc.result && tc.result.length > MAX_TOOL_RESULT_LENGTH
-          ? tc.result.slice(0, MAX_TOOL_RESULT_LENGTH) + '...'
-          : tc.result,
+        result: tc.result ? truncateToolResult(tc.result) : tc.result,
       })),
     }
   }
@@ -674,11 +747,9 @@ class SessionService {
     }
 
     if (msg.toolCalls?.length) {
-      sanitized.toolCalls = msg.toolCalls.map((tc: ToolCallDisplay) => ({
+      sanitized.toolCalls = msg.toolCalls.map((tc: ToolCallDisplay) => stripResolvedDiff({
         ...tc,
-        result: tc.result && tc.result.length > MAX_TOOL_RESULT_LENGTH
-          ? tc.result.slice(0, MAX_TOOL_RESULT_LENGTH) + '...'
-          : tc.result,
+        result: tc.result ? truncateToolResult(tc.result) : tc.result,
       }))
     }
 

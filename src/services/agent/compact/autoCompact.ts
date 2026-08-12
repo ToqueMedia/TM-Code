@@ -38,7 +38,7 @@ const AUTOCOMPACT_BREAKER_COOLDOWN_MS = 90_000
 
 // The "unknown window" fallback (FALLBACK_CONTEXT_WINDOW = 200K) lives in
 // utils/contextWindow.ts so the pill, the status line, the admin Select and this
-// decision all share ONE value. resolveThreshold() routes it through the same
+// decision all share ONE value. resolveAutoCompactThreshold() routes it through the same
 // real math — no duplicate constants or hardcoded 1M threshold here anymore.
 
 // ── Types ──
@@ -95,8 +95,15 @@ function hasRealWindow(limits?: AutoCompactLimits): limits is AutoCompactLimits 
  * Threshold tokens that trigger compaction. Always routed through the single
  * source of truth (utils/contextWindow.ts): the real window when known, the
  * conservative FALLBACK_CONTEXT_WINDOW otherwise (never a 1M assumption).
+ *
+ * EXPORTADA (2026-08-07) porque o orçamento de tool results em modo `trigger`
+ * se posiciona em relação a ESTE número. Se cada um calculasse o seu, o portão
+ * do orçamento e o limiar da compactação divergiriam em silêncio no dia em que
+ * um deles mudasse — e a hipótese que o modo `trigger` testa é precisamente a
+ * distância entre os dois. Ver a nota de `resolveContextWindow` em
+ * utils/contextWindow.ts: a mesma cadeia escrita quatro vezes já custou caro.
  */
-function resolveThreshold(limits?: AutoCompactLimits): number {
+export function resolveAutoCompactThreshold(limits?: AutoCompactLimits): number {
   return hasRealWindow(limits)
     ? getRealAutoCompactThreshold(limits.contextWindow, limits.maxOutputTokens)
     : getRealAutoCompactThreshold(FALLBACK_CONTEXT_WINDOW)
@@ -236,7 +243,7 @@ export function shouldAutoCompact(
   limits?: AutoCompactLimits,
 ): boolean {
   const tokenCount = resolveOccupancy(messages, snipTokensFreed, limits)
-  const threshold = resolveThreshold(limits)
+  const threshold = resolveAutoCompactThreshold(limits)
   const isAboveAutoCompactThreshold = tokenCount >= threshold
 
   if (isAboveAutoCompactThreshold) {

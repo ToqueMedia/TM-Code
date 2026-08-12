@@ -15,6 +15,7 @@ import { useAgentStore } from '../../stores/agentStore'
 import { useBillingStore } from '../../stores/billingStore'
 import { useChatStore } from '../../stores/chatStore'
 import { resolveContextWindow, type ResolvedContextWindow } from '../../utils/contextWindow'
+import { recallServedWindow } from './servedWindowMemory'
 
 export interface ActiveContextWindowOptions {
   /** Janela BYOK do RUN, quando o chamador a conhece (agentService congela o
@@ -35,12 +36,18 @@ export function getActiveContextWindow(
   const knownProfile = modelName ? MODEL_PROFILES[modelName] : undefined
   const profile = knownProfile ?? getProfileForPlan(useBillingStore.getState().plan)
 
+  // O que o servidor já disse sobre ESTA config (provider+modelo). Cobre o 1º
+  // turno de cada arranque, antes de o header chegar — ver servedWindowMemory.
+  const learned = recallServedWindow(agent.modelProvider, modelName)
+
   const resolved = resolveContextWindow({
     byokContextWindow: options.byokContextWindow ?? byokSnapshot?.contextWindow ?? null,
     headerContextWindow: agent.modelContextWindow,
     personaContextWindow: getPersonaFallbackContextWindow(),
+    learnedContextWindow: learned?.contextWindow ?? null,
     profileContextWindow: knownProfile?.contextWindow ?? null,
     headerMaxOutputTokens: agent.modelMaxOutputTokens,
+    learnedMaxOutputTokens: learned?.maxOutputTokens ?? null,
     profileMaxOutputTokens: profile.maxOutputTokens ?? null,
   })
 
