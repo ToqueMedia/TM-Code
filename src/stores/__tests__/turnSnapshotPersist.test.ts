@@ -101,28 +101,44 @@ describe('turn snapshot: o persist nunca apaga a última janela conhecida', () =
     expect(snapshotGetter()()).toBeNull()
   })
 
-  it('o header vivo manda sobre o persistido', () => {
+  it('o header vivo manda sobre o persistido — mas a ocupação é da sessão', () => {
     seedSession({ promptTokens: 1, responseTokens: 1, contextWindow: 200_000, modelName: 'antigo' })
     useAgentStore.setState({ modelContextWindow: 1_000_000, modelName: 'glm-5.2' })
-    useChatStore.setState({ currentPromptTokens: 42, currentResponseTokens: 7 })
+    // Pico de OUTRA conversa no store — não pode ir para o snapshot.
+    useChatStore.setState({ currentPromptTokens: 401_657, currentResponseTokens: 7 })
 
-    expect(snapshotGetter()()).toEqual({
-      promptTokens: 42,
-      responseTokens: 7,
-      contextWindow: 1_000_000,
-      modelName: 'glm-5.2',
-    })
+    const out = snapshotGetter()()
+    expect(out?.contextWindow).toBe(1_000_000)
+    expect(out?.modelName).toBe('glm-5.2')
+    expect(out?.promptTokens).toBe(1)
+    expect(out?.responseTokens).toBe(1)
   })
 
-  it('com tokens vivos mas SEM header, herda a janela persistida', () => {
-    // O caso exacto do incidente: o run continua (há tokens deste turno) mas o
-    // header desapareceu do store. Antes, isto persistia contextWindow: null.
+  it('com tokens vivos no store mas SEM lastPromptTokens, herda o snapshot — nunca o pico do processo', () => {
     seedSession({ promptTokens: 10, responseTokens: 2, contextWindow: 1_000_000, modelName: 'glm-5.2' })
     useChatStore.setState({ currentPromptTokens: 453_100, currentResponseTokens: 29_300 })
 
     const out = snapshotGetter()()
     expect(out?.contextWindow).toBe(1_000_000)
     expect(out?.modelName).toBe('glm-5.2')
-    expect(out?.promptTokens).toBe(453_100)
+    expect(out?.promptTokens).toBe(10)
+    expect(out?.responseTokens).toBe(2)
+  })
+
+  it('a ocupação da sessão ganha ao pico do store (export 2026-08-14)', () => {
+    const id = seedSession({ promptTokens: 10, responseTokens: 2, contextWindow: 262_144, modelName: 'glm-5.2' })
+    const sessions = new Map(useChatStore.getState().sessions)
+    const sess = sessions.get(id)!
+    sessions.set(id, { ...sess, lastPromptTokens: 85_033, lastResponseTokens: 480 })
+    useChatStore.setState({
+      sessions,
+      currentPromptTokens: 401_657,
+      currentResponseTokens: 480,
+    })
+    useAgentStore.setState({ modelContextWindow: 262_144, modelName: 'glm-5.2' })
+
+    const out = snapshotGetter()()
+    expect(out?.promptTokens).toBe(85_033)
+    expect(out?.responseTokens).toBe(480)
   })
 })

@@ -14,7 +14,7 @@ import FirebaseAuthService from '../auth/firebaseAuth'
 import { registerTaskTools } from './toolExecutor/taskOps'
 import { registerMemoryTools } from './toolExecutor/memoryOps'
 import { createPermissionAwareTimeout } from './toolExecutor/permissionAwareTimeout'
-import { formatSearchResultsByFile, matchesAnyGlob } from './toolExecutor/searchFormatters'
+import { formatSearchResultsByFile, matchesAnyGlob, resolveGrepHeadLimit } from './toolExecutor/searchFormatters'
 import { registerInteractionTools } from './toolExecutor/interactionOps'
 import type { ToolRegistrationContext } from './toolExecutor/context'
 import {
@@ -2096,11 +2096,6 @@ class ToolExecutor {
         const m = (f as Record<string, unknown>)?.matches
         return sum + (Array.isArray(m) ? m.length : 0)
       }, 0)
-      // `matchCount` é o que foi DEVOLVIDO, não o que existe: o Rust corta em
-      // MAX_MATCHES_PER_FILE (10) por ficheiro. Dizer "Found 10 matches" sobre
-      // um ficheiro com 60 fazia o modelo concluir que havia 10 usos e decidir
-      // com base nisso (auditoria 2026-07-29). O `capped_at_file_limit` diz
-      // quais ficheiros ficaram a meio.
       const cappedFiles = files.filter((f) => {
         const o = f as Record<string, unknown>
         return o.capped_at_file_limit === true || o.cappedAtFileLimit === true
@@ -2111,9 +2106,9 @@ class ToolExecutor {
       lines.push(cappedFiles > 0 || globalTruncated ? `${header} (PARTIAL)` : header)
       if (cappedFiles > 0) {
         lines.push(
-          `⚠ ${cappedFiles} file${cappedFiles === 1 ? '' : 's'} hit the 10-matches-per-file cap — `
+          `⚠ ${cappedFiles} file${cappedFiles === 1 ? '' : 's'} were cut mid-file by the global head_limit — `
           + `the counts above are what was returned, NOT how many matches exist. `
-          + `Use outputMode:"count" for true per-file totals, or narrow the query.`,
+          + `Raise maxResults/head_limit (0 = unlimited) or use outputMode:"count".`,
         )
       }
       if (globalTruncated) {
@@ -4226,7 +4221,7 @@ ${preview}
     this.tools.set('search_files', {
       definition: {
         name: 'search_files',
-        description: `Search for text patterns across files in a directory using ripgrep. Returns up to 50 matching lines with file paths and line numbers. Set contextLines (1-10) when you need a few surrounding lines; for deeper inspection, follow a match with read_around or ${READ_ALIAS} offset/limit. If you need more results, narrow your search with includePatterns. For an OPEN-ENDED search that will need several rounds of grep/glob to answer ("where does X live", "what implements Y", mapping an unfamiliar area), call ${TASK_ALIAS} with subagent_type "Explore" instead — one call returns the answer and keeps the intermediate output out of your context.`,
+        description: `Search for text patterns across files in a directory using ripgrep. Returns matching lines with file paths and line numbers (default 250; pass maxResults/head_limit=0 for unlimited). Set contextLines (1-10) when you need a few surrounding lines; for deeper inspection, follow a match with read_around or ${READ_ALIAS} offset/limit. If you need more results, raise maxResults or narrow with includePatterns. For an OPEN-ENDED search that will need several rounds of grep/glob to answer ("where does X live", "what implements Y", mapping an unfamiliar area), call ${TASK_ALIAS} with subagent_type "Explore" instead — one call returns the answer and keeps the intermediate output out of your context.`,
         input_schema: {
           type: 'object',
           properties: {
@@ -4236,8 +4231,8 @@ ${preview}
             useRegex: { type: 'boolean', description: 'Interpret query as regex. Default: false for this tool (the Grep alias defaults to TRUE instead — same engine, different default).' },
             includePatterns: { type: 'array', items: { type: 'string' }, description: 'Glob patterns to include (e.g., ["*.tsx", "*.ts"])' },
             contextLines: { type: 'number', description: 'Number of lines before and after each match to include. Default: 0, max: 10.' },
-            outputMode: { type: 'string', enum: ['content', 'files_with_matches', 'count'], description: 'content (default): matching lines. files_with_matches: only file paths — use for broad "where is X used" sweeps. count: per-file match counts. The compact modes cover up to 500 matches; content is capped at maxResults.' },
-            maxResults: { type: 'number', description: 'Max matching lines in content mode across ALL files. Default: 50, max: 200. Independently, each file returns at most 10 matches — so a single file with 60 hits shows 10 and the result says so. When results are truncated, narrow with includePatterns, or switch to count (true per-file totals) or files_with_matches.' },
+            outputMode: { type: 'string', enum: ['content', 'files_with_matches', 'count'], description: 'content (default): matching lines. files_with_matches: only file paths — use for broad "where is X used" sweeps. count: per-file match counts. All modes honour maxResults/head_limit.' },
+            maxResults: { type: 'number', description: 'Limit output to first N lines/entries across ALL files (like "| head -N"). Default: 250. Pass 0 for unlimited. There is no per-file cap.' },
             includeIgnored: { type: 'boolean', description: 'Search .gitignore\'d paths too. Default: false — build output (compiled JS, bundles) is excluded, because the project declares there what is generated rather than authored. Set true only when the generated code is itself the subject, e.g. debugging a broken build. Same flag as glob.' },
           },
           required: ['query', 'directory']
@@ -4251,16 +4246,11 @@ ${preview}
         }
         await this.requirePathAccess(input.directory as string)
         const directory = this.resolveToAbsolute(input.directory as string)
-        // Modos compactos (auditoria 2026-07-28 — paridade Grep do claude-vaz):
-        // files_with_matches/count devolvem ~uma linha por FICHEIRO, portanto
-        // podem varrer até ao teto global do Rust (500) sem inundar o contexto.
-        // O modo content mantém o cap por chamada, agora ajustável até 200.
+        // Paridade cli-vaz: default 250, 0 = sem tecto, sem corte por ficheiro.
         const outputMode = (input.outputMode === 'files_with_matches' || input.outputMode === 'count')
           ? input.outputMode as 'files_with_matches' | 'count'
           : 'content'
-        const maxResults = outputMode === 'content'
-          ? Math.min(Math.max(1, Math.floor(Number(input.maxResults) || 50)), 200)
-          : 500
+        const maxResults = resolveGrepHeadLimit(input.maxResults)
         const options = {
           case_sensitive: (input.caseSensitive as boolean) || false,
           whole_word: false,

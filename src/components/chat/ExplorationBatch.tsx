@@ -1,6 +1,8 @@
 import { memo, useState } from 'react'
-import { Box, Flex, Text } from '@chakra-ui/react'
-import { FiCheck, FiChevronDown, FiChevronRight, FiLoader } from 'react-icons/fi'
+import { Box, Text } from '@chakra-ui/react'
+import { VscLoading, VscSearch } from 'react-icons/vsc'
+import { ExpandReveal } from './ExpandReveal'
+import { TranscriptToggle } from './TranscriptToggle'
 import type { ToolCallDisplay as ToolCallDisplayType } from '../../types/chat'
 import {
   explorationCounts,
@@ -19,11 +21,10 @@ import type { TranslationKey } from '@/i18n/translations'
 /**
  * Consolidated row for a run of adjacent read-only exploration calls —
  * file reads, searches, globs, directory listings, output reads, web
- * fetches, guide loads. One sentence tells the story:
+ * fetches, guide loads. Compact header:
  *
- *   while running:  ⟳ A ler 3 ficheiros, a pesquisar 1 padrão…
- *                     ⎿ src/stores/chatStore.ts
- *   when complete:  ✓ Leu 3 ficheiros, pesquisou 1 padrão
+ *   🔍 Explore · 1 file
+ *   🔍 Explore · 3 files · 1 search
  *
  * Expanding reveals the individual rows (each keeps its own output
  * expander), with paginated-read streaks rendered by ReadOutputBatch —
@@ -39,60 +40,13 @@ interface ExplorationBatchProps {
   calls: ToolCallDisplayType[]
 }
 
-/** Literal-key lookup (t() takes a typed TranslationKey — no template
- *  string keys). live = gerund while any call runs; done = past tense. */
-const PHRASE_KEYS: Record<ExplorationCategory, {
-  live: { one: TranslationKey; many: TranslationKey }
-  done: { one: TranslationKey; many: TranslationKey }
-}> = {
-  files: {
-    live: { one: 'explore.live.files.one', many: 'explore.live.files.many' },
-    done: { one: 'explore.done.files.one', many: 'explore.done.files.many' },
-  },
-  searches: {
-    live: { one: 'explore.live.searches.one', many: 'explore.live.searches.many' },
-    done: { one: 'explore.done.searches.one', many: 'explore.done.searches.many' },
-  },
-  dirs: {
-    live: { one: 'explore.live.dirs.one', many: 'explore.live.dirs.many' },
-    done: { one: 'explore.done.dirs.one', many: 'explore.done.dirs.many' },
-  },
-  outputs: {
-    live: { one: 'explore.live.outputs.one', many: 'explore.live.outputs.many' },
-    done: { one: 'explore.done.outputs.one', many: 'explore.done.outputs.many' },
-  },
-  web: {
-    live: { one: 'explore.live.web.one', many: 'explore.live.web.many' },
-    done: { one: 'explore.done.web.one', many: 'explore.done.web.many' },
-  },
-  guides: {
-    live: { one: 'explore.live.guides.one', many: 'explore.live.guides.many' },
-    done: { one: 'explore.done.guides.one', many: 'explore.done.guides.many' },
-  },
-}
-
-/** Render one "{verb} {count} {noun}" segment with the count emphasised
- *  (bold, primary colour) — mirrors the terminal-mode styling the user
- *  pointed at. Splits the template around {count} so translations stay
- *  free to place the number anywhere. */
-function CountPhrase({ template, count, capitalize }: {
-  template: string
-  count: number
-  capitalize?: boolean
-}) {
-  const [pre = '', post = ''] = template.split('{count}')
-  const preText = capitalize && pre.length > 0
-    ? pre.charAt(0).toUpperCase() + pre.slice(1)
-    : pre
-  return (
-    <>
-      {preText}
-      <Text as="span" fontWeight="700" color={tokens.colors.text.primary}>
-        {count}
-      </Text>
-      {post}
-    </>
-  )
+const COUNT_KEYS: Record<ExplorationCategory, { one: TranslationKey; many: TranslationKey }> = {
+  files: { one: 'explore.count.files.one', many: 'explore.count.files.many' },
+  searches: { one: 'explore.count.searches.one', many: 'explore.count.searches.many' },
+  dirs: { one: 'explore.count.dirs.one', many: 'explore.count.dirs.many' },
+  outputs: { one: 'explore.count.outputs.one', many: 'explore.count.outputs.many' },
+  web: { one: 'explore.count.web.one', many: 'explore.count.web.many' },
+  guides: { one: 'explore.count.guides.one', many: 'explore.count.guides.many' },
 }
 
 function ExplorationBatchComponent({ calls }: ExplorationBatchProps) {
@@ -103,7 +57,6 @@ function ExplorationBatchComponent({ calls }: ExplorationBatchProps) {
   const items = foldExplorationItems(calls)
   const counts = explorationCounts(calls)
   const isRunning = calls.some(c => c.status === 'running')
-  const tense = isRunning ? 'live' : 'done'
 
   // Live target — the newest running call, shown as a sub-line so the user
   // sees WHAT is being read right now without expanding. Uses the same
@@ -126,29 +79,16 @@ function ExplorationBatchComponent({ calls }: ExplorationBatchProps) {
   }
 
   return (
-    <Box
-      my={1.5}
-      borderRadius="8px"
-      border={`1px solid ${isRunning ? 'rgba(240, 192, 0, 0.12)' : 'rgba(255, 255, 255, 0.04)'}`}
-      bg={isRunning ? 'rgba(240, 192, 0, 0.03)' : 'rgba(255, 255, 255, 0.015)'}
-      transition="all 0.15s"
-    >
-      {/* Header — status icon + sentence + chevron. Whole row toggles. */}
-      <Flex
-        align="flex-start"
-        gap={2}
-        px={3}
-        py="8px"
-        cursor="pointer"
-        _hover={{ bg: 'rgba(255, 255, 255, 0.02)' }}
-        transition="background 0.1s"
-        onClick={() => setExpanded(!expanded)}
+    <Box my={1.5}>
+      <TranscriptToggle
+        expanded={expanded}
+        onToggle={() => setExpanded(v => !v)}
+        busy={isRunning}
       >
         {isRunning ? (
           <Box
             color={tokens.colors.toolCall.runningText}
             flexShrink={0}
-            mt="2px"
             css={{
               animation: 'toolSpin 1s linear infinite',
               '@keyframes toolSpin': {
@@ -157,59 +97,56 @@ function ExplorationBatchComponent({ calls }: ExplorationBatchProps) {
               },
             }}
           >
-            <FiLoader size={12} />
+            <VscLoading size={13} />
           </Box>
         ) : (
-          <Box color={tokens.colors.accent.green} flexShrink={0} mt="2px">
-            <FiCheck size={12} />
+          <Box color={tokens.colors.text.muted} flexShrink={0}>
+            <VscSearch size={13} />
           </Box>
         )}
 
-        <Box flex="1" minW={0}>
-          <Text
-            fontSize="12px"
-            fontFamily={tokens.fontFamily.mono}
-            color={tokens.colors.text.secondary}
-            lineHeight="1.5"
-          >
-            {counts.map((entry, idx) => {
-              const form = entry.count === 1 ? 'one' : 'many'
-              const template = t(PHRASE_KEYS[entry.category][tense][form])
-              return (
-                <Text as="span" key={entry.category}>
-                  {idx > 0 && ', '}
-                  <CountPhrase template={template} count={entry.count} capitalize={idx === 0} />
-                </Text>
-              )
-            })}
-            {isRunning && '…'}
+        <Text
+          fontSize={tokens.fontSize.md}
+          fontFamily={tokens.fontFamily.ui}
+          color={tokens.colors.text.secondary}
+          lineHeight="1.4"
+          minW={0}
+          overflow="hidden"
+          textOverflow="ellipsis"
+          whiteSpace="nowrap"
+        >
+          <Text as="span" color={tokens.colors.text.secondary}>
+            {t('explore.label')}
           </Text>
+          {counts.map(entry => {
+            const form = entry.count === 1 ? 'one' : 'many'
+            return (
+              <Text as="span" key={entry.category} color={tokens.colors.text.muted}>
+                {' · '}
+                {t(COUNT_KEYS[entry.category][form]).replace('{count}', String(entry.count))}
+              </Text>
+            )
+          })}
+        </Text>
+      </TranscriptToggle>
 
-          {/* Current target while running — "⎿ path/to/file.ts" */}
-          {isRunning && liveTarget && (
-            <Text
-              fontSize="11px"
-              fontFamily={tokens.fontFamily.mono}
-              color={tokens.colors.text.disabled}
-              overflow="hidden"
-              textOverflow="ellipsis"
-              whiteSpace="nowrap"
-              mt="2px"
-            >
-              {'⎿ '}{liveTarget}
-            </Text>
-          )}
-        </Box>
+      {isRunning && liveTarget && !expanded && (
+        <Text
+          fontSize={tokens.fontSize.xs}
+          fontFamily={tokens.fontFamily.mono}
+          color={tokens.colors.text.disabled}
+          overflow="hidden"
+          textOverflow="ellipsis"
+          whiteSpace="nowrap"
+          pl="30px"
+          pb="2px"
+        >
+          {liveTarget}
+        </Text>
+      )}
 
-        <Box color={tokens.colors.text.disabled} flexShrink={0} mt="2px">
-          {expanded ? <FiChevronDown size={13} /> : <FiChevronRight size={13} />}
-        </Box>
-      </Flex>
-
-      {/* Expanded — the individual rows, chronological. Each keeps its own
-          output expander; read streaks reuse the dedicated batch row. */}
-      {expanded && (
-        <Box px={2} pb={1.5} pt={0.5} borderTop="1px solid rgba(255,255,255,0.04)">
+      <ExpandReveal open={expanded}>
+        <Box pl="30px" pt={1}>
           {items.map(item =>
             item.kind === 'large_read_streak' ? (
               <ReadOutputBatch key={item.calls[0].id} calls={item.calls} />
@@ -218,7 +155,7 @@ function ExplorationBatchComponent({ calls }: ExplorationBatchProps) {
             ),
           )}
         </Box>
-      )}
+      </ExpandReveal>
     </Box>
   )
 }

@@ -30,7 +30,7 @@ import { preprocessHashtags } from '../../services/agent/hashtagRegistry'
 import { useHashtagMenu } from './useHashtagMenu'
 import { t } from '@/i18n'
 import { runDesignFlow } from '../../services/agent/commands/authCommand'
-import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, resolveImageToDataUri } from '../../services/attachmentService'
+import { createAttachmentFromPath, createImageAttachmentFromClipboard, resolveAttachments, resolveDescribedAttachments, resolveImageToDataUri } from '../../services/attachmentService'
 import { resolveMentionContext, collectChangedFileContext, applyMentionResolution } from '../../services/agent/atMentions'
 import {
   enqueue as enqueueMessage,
@@ -49,6 +49,7 @@ import {
 // useSettingsStore removed — agentModel no longer in settings
 import { getQueryGuard } from '../../services/agent/queryGuard'
 import { isAtBlockingLimit, resolveContextWindow, totalContextTokens } from '../../utils/contextWindow'
+import { resolveSessionOccupancy } from '../../utils/sessionOccupancy'
 import { enqueueSerializedRun } from '../../services/agent/agentRunner'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
 import type { ConversationMessage } from '../../types/chat'
@@ -154,13 +155,13 @@ export function usePromptBar() {
   // uma sessão sem turno registado tem mesmo ocupação zero.
   const currentPromptTokens = useChatStore(s => {
     if (!s.activeSessionId) return 0
-    const persisted = s.sessions.get(s.activeSessionId)?.lastPromptTokens
-    return typeof persisted === 'number' ? persisted : 0
+    const session = s.sessions.get(s.activeSessionId)
+    return session ? resolveSessionOccupancy(session).promptTokens : 0
   })
   const currentResponseTokens = useChatStore(s => {
     if (!s.activeSessionId) return 0
-    const persisted = s.sessions.get(s.activeSessionId)?.lastResponseTokens
-    return typeof persisted === 'number' ? persisted : 0
+    const session = s.sessions.get(s.activeSessionId)
+    return session ? resolveSessionOccupancy(session).responseTokens : 0
   })
   const headerContextWindow = useAgentStore(s => s.modelContextWindow)
   const modelMaxOutputTokens = useAgentStore(s => s.modelMaxOutputTokens)
@@ -694,6 +695,20 @@ export function usePromptBar() {
     if (!skipUserMessage) {
       const blocks = typeof content === 'string' ? undefined : content
       chatStore.addUserMessage(display.text, display.attachments, blocks)
+      // Chat path was missing the disk cache that agentRunner already has.
+      // Without it, pasted images persist with path:'' and lose base64 on
+      // save — follow-up turns (and a reload) cannot re-resolve pixels.
+      if (display.attachments.some(a => a.type === 'image' && !a.path && a.base64)) {
+        const sid = chatStore.activeSessionId
+        if (sid) {
+          void import('../../services/imageCacheService').then(async ({ storeSessionImages }) => {
+            const paths = await storeSessionImages(sid, display.attachments)
+            if (Object.keys(paths).length > 0) {
+              useChatStore.getState().setAttachmentPathsOnLastUserMessage(paths)
+            }
+          }).catch(() => { /* cache miss → falls back to re-send behaviour */ })
+        }
+      }
     }
 
     let tmsPreflight: TmsPreflightResult | null = null
@@ -789,11 +804,14 @@ export function usePromptBar() {
         } else {
           const description = await describeImagesViaSidecar(parts)
           if (description) {
-            const textOnly = await buildAugmentedPrompt(content, promptResolvers)
+            const textOnly = await buildAugmentedPrompt(content, {
+              ...promptResolvers,
+              resolveAttachmentXml: resolveDescribedAttachments,
+            })
             userContent = `${textOnly}\n\n<image_description source="image-analysis">\n${description}\n</image_description>`
+          } else {
+            chatStore.addSystemMessage(t('chat.imageSidecarFailed'), 'warn')
           }
-          // description null → userContent stays null → honest XML text
-          // fallback below.
         }
       }
     }

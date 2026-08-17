@@ -20,7 +20,7 @@ import type { OpenAIContentPart } from './types'
 import ToolExecutor from './toolExecutor'
 import { browserSession } from '../browserSessionManager'
 import { getProjectSessionsDir } from '../projectStatePaths'
-import { resolveAttachments, resolveImageToDataUri } from '../attachmentService'
+import { resolveAttachments, resolveDescribedAttachments, resolveImageToDataUri } from '../attachmentService'
 import { buildAugmentedPrompt, buildContentParts, downgradeHistoryToText } from './promptValueHelpers'
 import { describeImagesViaSidecar } from './visionSidecar'
 // joinPromptValues: agora só usado pelo steering em mainDispatch (F2).
@@ -440,6 +440,14 @@ async function runAgentInternal(
   // content would never reach the model.
   const billingPlan = useBillingStore.getState().plan
   const supportsMultimodal = billingPlan !== 'explorer'
+  const runnerModelName = useAgentStore.getState().modelName
+  const runnerProfile = runnerModelName && MODEL_PROFILES[runnerModelName]
+    ? MODEL_PROFILES[runnerModelName]
+    : getProfileForPlan(billingPlan)
+  const activeModelSupportsImageParts = effectiveCapability(
+    useAgentStore.getState().modelSupportsVision,
+    runnerProfile.supportsAttachments,
+  )
   const hasAnyAttachments = (userMessageAttachments?.length ?? 0) > 0
   const hasImageAttachments = userMessageAttachments?.some(a => a.type === 'image') ?? false
 
@@ -464,27 +472,21 @@ async function runAgentInternal(
     // para modelos com visão, descrição auxiliar para os restantes.
     let visionDescribed = false
     if (hasImageAttachments && supportsMultimodal) {
-      const modelName = useAgentStore.getState().modelName
-      const activeProfile = modelName && MODEL_PROFILES[modelName]
-        ? MODEL_PROFILES[modelName]
-        : getProfileForPlan(billingPlan)
-
       const parts = await buildContentParts(blocksForModel, promptResolvers)
       // Capacidade declarada pelo data-plane vence o perfil local — ver
       // effectiveCapability. Antes, um modelo desconhecido herdava a visão do
       // perfil de fallback e recebia imagens que não sabe ler.
-      const supportsAttachments = effectiveCapability(
-        useAgentStore.getState().modelSupportsVision,
-        activeProfile.supportsAttachments,
-      )
-      if (parts && supportsAttachments) {
+      if (parts && activeModelSupportsImageParts) {
         userContent = parts
       } else if (parts) {
         // Modelo ativo sem visão → uma descrição auxiliar vira texto para o
         // agente principal. Indisponível → null → fallback XML honesto.
         const description = await describeImagesViaSidecar(parts)
         if (description) {
-          const textOnly = await buildAugmentedPrompt(blocksForModel, promptResolvers)
+          const textOnly = await buildAugmentedPrompt(blocksForModel, {
+            ...promptResolvers,
+            resolveAttachmentXml: resolveDescribedAttachments,
+          })
           userContent =
             `${textOnly}\n\n<image_description source="image-analysis">\n${description}\n</image_description>`
           visionDescribed = true
@@ -574,8 +576,8 @@ async function runAgentInternal(
     // FUSÃO F2: callbacks do loop no NÚCLEO ÚNICO (buildMainLoopCallbacks). O
     // objeto inline viveu aqui e no Chat e divergiu em 9 pontos; a união dos
     // melhores comportamentos vive em mainDispatch.ts. Slash/auto-wake não
-    // fazem steer de imagens — supportsMultimodal (plano) chega para ambos os
-    // flags de imagem deste caminho.
+    // fazem steer de imagens — o plano autoriza o pipeline; a visão nativa
+    // decide se o steer manda image_url ou passa pelo sidecar.
     await agentService.runAgentLoop(userContent, history, {
       dispatchGeneration,
       ...buildMainLoopCallbacks({
@@ -584,7 +586,7 @@ async function runAgentInternal(
         bootstrapOnly,
         initialPromptEstimate,
         planAllowsImagePipeline: supportsMultimodal,
-        activeModelSupportsImageParts: supportsMultimodal,
+        activeModelSupportsImageParts,
       }),
     })
 

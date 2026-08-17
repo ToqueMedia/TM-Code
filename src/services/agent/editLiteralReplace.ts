@@ -14,10 +14,9 @@ import { READ_FILE, WRITE_FILE } from './toolNames'
  *      "add more context" hint that sent the model into a loop).
  *   - `editFileReplaceAll` → variante replace_all (rename de símbolo em 1 call).
  *   - (removido 2026-07-28) `sanitizeDiffForModel` (Bug #3, file-echo bloat) —
- *     ficou sem callers: o resultado NO-TURNO inclui agora o excerto
- *     pós-edição (changedFileSnippet.buildPostEditResultText) e o rebuild de
- *     histórico usa a sua cópia inline de uma linha (chatStore) — correto lá:
- *     turnos históricos não precisam de excerto.
+ *     ficou sem callers: o resultado no turno é a confirmação concisa de
+ *     changedFileSnippet.buildAppliedEditResultText e o rebuild de histórico
+ *     usa a sua cópia inline de uma linha (chatStore).
  *
  * Pure functions, no Tauri / no React / no store imports — safe to unit
  * test in isolation without webview / project-store mocks.

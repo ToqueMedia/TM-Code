@@ -1,7 +1,7 @@
 import { memo, useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react'
 import { Flex, Box, HStack, Text, VStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiShield, FiCheck, FiAlertCircle, FiEye, FiMoreHorizontal, FiClock } from 'react-icons/fi'
+import { VscShield, VscCheck, VscWarning, VscEye, VscEllipsis, VscHistory, VscClose, VscChevronDown, VscTerminal } from 'react-icons/vsc'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { useChatStore } from '../../stores/chatStore'
 import { useProjectStore } from '../../stores/projectStore'
@@ -15,7 +15,6 @@ import { useCheckpointStore } from '../../stores/checkpointStore'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import { useByokState } from '../../hooks/useByokState'
 import MessageBubble from '../chat/MessageBubble'
-import ContextWindowIndicator from '../chat/ContextWindowIndicator'
 import { useMessageWindow } from '../../hooks/useMessageWindow'
 import AgentActivityIndicator from '../chat/AgentActivityIndicator'
 import PostCompactSurvey from '../chat/PostCompactSurvey'
@@ -295,8 +294,8 @@ function ChatView() {
         whiteSpace: 'normal',
       },
       '& [data-chat-toolbar]': {
-        minHeight: '52px',
-        maxHeight: '52px',
+        minHeight: '44px',
+        maxHeight: '44px',
         overflow: 'visible',
       },
       '& [data-chat-toolbar] :is(button, [role="button"])': {
@@ -314,19 +313,11 @@ function ChatView() {
       // share / Preview). The old 1180px collapse fired way too early for that —
       // it only needs to fold into the "…" menu when the chat column is genuinely
       // tight (side drawer open + narrow window). Collapse only near collision.
-      // Context pill lives inside the wide-only cluster next to Preview; when
-      // that cluster collapses, show the fallback pill so pressure stays visible.
-      '& [data-chat-toolbar-ctx-fallback]': {
-        display: 'none',
-      },
       '@container (max-width: 480px)': {
         '& [data-chat-toolbar-wide-only]': {
           display: 'none !important',
         },
         '& [data-chat-toolbar-overflow-trigger]': {
-          display: 'flex !important',
-        },
-        '& [data-chat-toolbar-ctx-fallback]': {
           display: 'flex !important',
         },
       },
@@ -350,14 +341,14 @@ function ChatView() {
           justify="space-between"
           gap={2}
           px={4}
-          py={2}
+          py={1.5}
           borderBottom={`1px solid ${tokens.colors.border.sidebarPanel}`}
+          bg={tokens.colors.bg.whiteMicro}
           flexShrink={0}
           position="relative"
         >
-        <Flex align="center" gap={2} minW={0} flex="1" overflow="visible">
+        <Flex align="center" gap={1.5} minW={0} overflow="visible">
           {/* Sessions + New Chat moved UP to the MinimalTitleBar. */}
-          <Box flex={1} minW={0} />
           {/* In preview/sidebar mode the right-hand indicator cluster (which
               normally hosts the team controls) is hidden, so the user loses
               the Live Preview + Chat affordances. Surface them here, next to
@@ -368,6 +359,7 @@ function ChatView() {
               liga o isSidebarMode. Sem esta segunda montagem, abrir o drawer
               fazia desaparecer o próprio botão que o fecha. */}
           {isSidebarMode && <CheckpointsToolbarButton />}
+          {isSidebarMode && <TerminalToolbarButton />}
           {isSidebarMode && <CollabShareControls compact previewOnly />}
         </Flex>
 
@@ -381,7 +373,7 @@ function ChatView() {
               {/* TM Speed / model indicators moved UP to the MinimalTitleBar. */}
               {sandboxEnabled && (
                 <IsolationPill
-                  icon={FiShield}
+                  icon={VscShield}
                   label={t('chat.sandboxMode')}
                   color={tokens.colors.accent.orange}
                   onClick={() => useLayoutStore.getState().setViewMode('settings')}
@@ -391,6 +383,7 @@ function ChatView() {
               {/* Checkpoints — mudou da linha de acções do prompt para aqui
                   (07-08), à ESQUERDA do Live Preview e do Preview. */}
               <CheckpointsToolbarButton />
+              <TerminalToolbarButton />
               {/* Project-scoped Live Preview share only — chat/presence moved to
                   the persistent WelcomeSidebar team section (previewOnly). */}
               <CollabShareControls previewOnly />
@@ -413,27 +406,12 @@ function ChatView() {
                 aria-label={t('view.preview')}
                 title={isSharingLivePreview ? t('team.previewBlockedBySharing') : t('view.preview')}
               >
-                <FiEye size={13} />
+                <VscEye size={13} />
                 <Text data-chat-toolbar-secondary-label fontSize="11px" fontWeight="500">{t('view.preview')}</Text>
               </Box>
-              {/* Next to Live Preview + Preview (wide toolbar). */}
-              <Box flexShrink={0} overflow="visible">
-                <ContextWindowIndicator popoverPlacement="bottom" />
-              </Box>
             </HStack>
-            {/* When wide-only collapses (≤480px container), still show ctx. */}
-            <Box data-chat-toolbar-ctx-fallback flexShrink={0} overflow="visible" alignItems="center">
-              <ContextWindowIndicator popoverPlacement="bottom" />
-            </Box>
             <HeaderOverflowMenu />
           </>
-        )}
-
-        {/* Sidebar / preview mode: wide cluster unmounted — keep the pill. */}
-        {isSidebarMode && (
-          <Box flexShrink={0} overflow="visible">
-            <ContextWindowIndicator popoverPlacement="bottom" />
-          </Box>
         )}
 
         {/* Credits / model indicators moved UP to the MinimalTitleBar. */}
@@ -479,12 +457,12 @@ function ChatView() {
               )}
               {scaffoldPhase === 'ready' && (
                 <Box color={tokens.colors.accent.green} flexShrink={0}>
-                  <FiCheck size={14} />
+                  <VscCheck size={14} />
                 </Box>
               )}
               {scaffoldPhase === 'error' && (
                 <Box color={tokens.colors.accent.red} flexShrink={0}>
-                  <FiAlertCircle size={14} />
+                  <VscWarning size={14} />
                 </Box>
               )}
               <Text
@@ -527,7 +505,7 @@ function ChatView() {
           borderBottom="1px solid rgba(248, 81, 73, 0.25)"
         >
           <Box flexShrink={0} color={tokens.colors.accent.red}>
-            <FiAlertCircle size={14} />
+            <VscWarning size={14} />
           </Box>
           <Text fontSize="12px" color={tokens.colors.accent.red} fontWeight={500} flex={1} lineClamp={2}>
             {agentError}
@@ -544,14 +522,14 @@ function ChatView() {
             opacity={0.7}
             cursor="pointer"
             transition={`all ${tokens.transition.fast}`}
-            _hover={{ opacity: 1, bg: 'rgba(248, 81, 73, 0.12)' }}
+            _hover={{ opacity: 1, bg: tokens.colors.accent.redSubtle }}
             onClick={() => {
               useAgentStore.getState().setError(null)
               useAgentStore.getState().setStatus('idle')
             }}
             aria-label={t('chat.dismissError')}
           >
-            <Text fontSize="14px" lineHeight="1">×</Text>
+            <VscClose size={12} />
           </Box>
         </Flex>
       )}
@@ -651,7 +629,7 @@ function ChatView() {
                 maxW="980px"
                 mx="auto"
                 w="100%"
-                py={4}
+                py={5}
                 data-selectable="true"
                 data-chat-transcript
               >
@@ -674,18 +652,13 @@ function ChatView() {
                     color={tokens.colors.text.muted}
                     py={2}
                     px={4}
-                    borderRadius="6px"
-                    bg={tokens.colors.bg.hoverSubtle}
-                    border={`1px solid ${tokens.colors.border.panel}`}
+                    mb={1}
                     cursor="pointer"
-                    transition={`all ${tokens.transition.fast}`}
-                    _hover={{
-                      color: tokens.colors.text.primary,
-                      borderColor: tokens.colors.border.glass,
-                    }}
+                    transition={`color ${tokens.transition.fast}`}
+                    _hover={{ color: tokens.colors.text.primary }}
                     onClick={() => setRevealPreBoundary(true)}
                   >
-                    Show earlier history ({preBoundaryCount} message{preBoundaryCount === 1 ? '' : 's'} before the last compaction)
+                    {t('chat.showEarlierHistory').replace('{count}', String(preBoundaryCount))}
                   </Box>
                 )}
                 {canLoadMore && (
@@ -697,22 +670,15 @@ function ChatView() {
                     fontSize={tokens.fontSize.xs}
                     fontWeight="500"
                     color={tokens.colors.text.muted}
-                    py={2.5}
+                    py={2}
                     px={4}
-                    mb={2}
-                    borderRadius="6px"
-                    bg={tokens.colors.bg.hoverSubtle}
-                    border={`1px solid ${tokens.colors.border.panel}`}
+                    mb={3}
                     cursor="pointer"
-                    transition={`all ${tokens.transition.fast}`}
-                    _hover={{
-                      color: tokens.colors.text.primary,
-                      borderColor: tokens.colors.border.glass,
-                      bg: tokens.colors.bg.overlay,
-                    }}
+                    transition={`color ${tokens.transition.fast}`}
+                    _hover={{ color: tokens.colors.text.primary }}
                     onClick={() => loadMore()}
                   >
-                    ↑ Load earlier messages — {hiddenCount} hidden
+                    {t('chat.loadEarlier').replace('{count}', String(hiddenCount))}
                   </Box>
                 )}
                 {visibleItems.map(msg => (
@@ -735,30 +701,35 @@ function ChatView() {
 
         {/* Scroll-to-bottom anchor button — shows when user scrolls up */}
         {!isAtBottom && (
-          <Box
+          <Flex
             as="button"
             position="absolute"
-            bottom="8px"
+            bottom="10px"
             left="50%"
             transform="translateX(-50%)"
+            align="center"
+            gap={1.5}
             px={3}
-            py="6px"
+            h="28px"
             borderRadius="full"
             bg={tokens.colors.bg.overlay}
-            border="1px solid"
-            borderColor={tokens.colors.border.panel}
+            border={`1px solid ${tokens.colors.border.panel}`}
             color={tokens.colors.text.secondary}
-            fontSize="11px"
-            fontWeight="600"
+            fontSize={tokens.fontSize.xs}
+            fontWeight="500"
             cursor="pointer"
-            boxShadow="0 4px 12px rgba(0,0,0,0.3)"
+            boxShadow={tokens.shadow.toolbar}
             transition={`all ${tokens.transition.fast}`}
             _hover={{ bg: tokens.colors.bg.hoverSubtle, color: tokens.colors.text.primary }}
             onClick={() => scrollToBottom('instant')}
             zIndex={10}
+            aria-label={t('chat.jumpToLatest')}
           >
-            ↓
-          </Box>
+            <VscChevronDown size={13} />
+            <Text fontSize={tokens.fontSize.xs} fontWeight="500" whiteSpace="nowrap">
+              {t('chat.jumpToLatest')}
+            </Text>
+          </Flex>
         )}
         </Box>
 
@@ -775,15 +746,14 @@ function ChatView() {
  * Checkpoints — mudou da linha de acções do PromptBar para a toolbar do chat
  * (07-08), à esquerda do Live Preview e do Preview.
  *
- * Fecha o terminal ao abrir (o drawer de checkpoints e o painel PTY disputam
- * o mesmo espaço lateral) — comportamento herdado tal e qual do botão antigo.
+ * O terminal passou para o fundo da janela — já não disputa a coluna
+ * lateral com este drawer, portanto abrir checkpoints NÃO o fecha.
  * O contador de checkpoints só aparece quando há algum.
  */
 function CheckpointsToolbarButton() {
   const checkpointCount = useCheckpointStore(s => s.checkpoints.length)
   const isCheckpointDrawerOpen = useLayoutStore(s => s.isCheckpointDrawerOpen)
   const toggleCheckpointDrawer = useLayoutStore(s => s.toggleCheckpointDrawer)
-  const closeTerminal = useTerminalPanelStore(s => s.close)
 
   return (
     <Box
@@ -806,13 +776,12 @@ function CheckpointsToolbarButton() {
       }}
       onClick={event => {
         event.stopPropagation()
-        closeTerminal()
         toggleCheckpointDrawer()
       }}
       aria-label={t('checkpoint.title')}
       title={t('checkpoint.title')}
     >
-      <FiClock size={13} />
+      <VscHistory size={13} />
       <Text data-chat-toolbar-secondary-label fontSize="11px" fontWeight="500">{t('checkpoint.title')}</Text>
       {checkpointCount > 0 && (
         <Text
@@ -824,6 +793,42 @@ function CheckpointsToolbarButton() {
           {checkpointCount}
         </Text>
       )}
+    </Box>
+  )
+}
+
+function TerminalToolbarButton() {
+  const isOpen = useTerminalPanelStore(s => s.isOpen)
+  const toggle = useTerminalPanelStore(s => s.toggle)
+
+  return (
+    <Box
+      as="button"
+      data-chat-toolbar-action
+      display="flex"
+      alignItems="center"
+      gap="5px"
+      px="8px"
+      h="28px"
+      flexShrink={0}
+      borderRadius="6px"
+      color={isOpen ? tokens.colors.accent.primary : tokens.colors.text.secondary}
+      bg={isOpen ? tokens.colors.accent.primarySubtle : 'transparent'}
+      cursor="pointer"
+      transition={`all ${tokens.transition.fast}`}
+      _hover={{
+        bg: isOpen ? tokens.colors.accent.primarySubtle : tokens.colors.bg.hoverSubtle,
+        color: tokens.colors.text.primary,
+      }}
+      onClick={event => {
+        event.stopPropagation()
+        toggle()
+      }}
+      aria-label={t('prompt.toggleTerminal')}
+      title={t('prompt.toggleTerminal')}
+    >
+      <VscTerminal size={13} />
+      <Text data-chat-toolbar-secondary-label fontSize="11px" fontWeight="500">{t('activity.terminal')}</Text>
     </Box>
   )
 }
@@ -879,7 +884,7 @@ function HeaderOverflowMenu() {
         aria-expanded={isOpen}
         aria-haspopup="menu"
       >
-        <FiMoreHorizontal size={16} />
+        <VscEllipsis size={16} />
       </Box>
 
       {isOpen && (
@@ -904,15 +909,21 @@ function HeaderOverflowMenu() {
               para a toolbar tornava os Checkpoints INACESSÍVEIS com a coluna
               de chat estreita — no PromptBar ele só perdia a etiqueta. */}
           <ToolbarMenuItem
-            icon={<FiClock size={14} />}
+            icon={<VscHistory size={14} />}
             label={checkpointCount > 0 ? `${t('checkpoint.title')} (${checkpointCount})` : t('checkpoint.title')}
             onClick={() => runAndClose(() => {
-              useTerminalPanelStore.getState().close()
               useLayoutStore.getState().toggleCheckpointDrawer()
             })}
           />
           <ToolbarMenuItem
-            icon={<FiEye size={14} />}
+            icon={<VscTerminal size={14} />}
+            label={t('activity.terminal')}
+            onClick={() => runAndClose(() => {
+              useTerminalPanelStore.getState().toggle()
+            })}
+          />
+          <ToolbarMenuItem
+            icon={<VscEye size={14} />}
             label={t('view.preview')}
             disabled={isSharingLivePreview}
             hint={isSharingLivePreview ? t('team.previewBlockedBySharing') : undefined}
@@ -923,7 +934,7 @@ function HeaderOverflowMenu() {
           />
           {sandboxEnabled && (
             <ToolbarMenuItem
-              icon={<FiShield size={14} />}
+              icon={<VscShield size={14} />}
               label={t('chat.sandboxMode')}
               onClick={() => runAndClose(() => useLayoutStore.getState().setViewMode('settings'))}
             />
@@ -1008,7 +1019,7 @@ function PlanExpiryNotice() {
       borderBottom="1px solid rgba(247, 127, 0, 0.25)"
     >
       <Box flexShrink={0} color={tokens.colors.accent.orange}>
-        <FiAlertCircle size={14} />
+        <VscWarning size={14} />
       </Box>
       <Text fontSize="12px" color={tokens.colors.accent.orange} fontWeight={500} flex={1} lineClamp={2}>
         {t('chat.planExpiresSoon').replace('{days}', String(daysLeft))}
@@ -1049,7 +1060,7 @@ function PlanExpiryNotice() {
         onClick={() => setDismissed(true)}
         aria-label={t('chat.dismissError')}
       >
-        <Text fontSize="14px" lineHeight="1">×</Text>
+        <VscClose size={12} />
       </Box>
     </Flex>
   )
@@ -1068,22 +1079,25 @@ function IsolationPill({ icon: Icon, label, color, onClick }: {
   onClick?: () => void
 }) {
   return (
-    <HStack
-      gap={1}
-      px={2}
-      py="3px"
-      borderRadius="9999px"
-      border="1px solid rgba(255, 255, 255, 0.08)"
+    <Flex
+      as="button"
+      align="center"
+      gap={1.5}
+      px="8px"
+      h="28px"
+      borderRadius="6px"
+      color={color}
       cursor="pointer"
-      transition="all 0.15s"
-      _hover={{ bg: 'rgba(255, 255, 255, 0.08)', borderColor: 'rgba(255, 255, 255, 0.12)' }}
+      transition={`all ${tokens.transition.fast}`}
+      _hover={{ bg: tokens.colors.bg.hoverSubtle }}
       onClick={onClick}
+      aria-label={label}
     >
-      <Icon size={10} color={color} />
-      <Text fontSize="10px" color={color} fontWeight="600" fontFamily={tokens.fontFamily.mono}>
+      <Icon size={12} color={color} />
+      <Text fontSize={tokens.fontSize.xs} color={color} fontWeight="500">
         {label}
       </Text>
-    </HStack>
+    </Flex>
   )
 }
 

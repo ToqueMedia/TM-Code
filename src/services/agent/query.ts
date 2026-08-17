@@ -73,7 +73,9 @@ import {
   shouldRemindTaskTracker,
   buildTaskTrackerReminderText,
 } from "./turnEfficiency";
-import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
+import { buildAppliedEditResultText } from "./toolExecutor/changedFileSnippet";
+import { markProjectEdited, collectNewDiagnostics } from "./editDiagnostics";
+import { formatFinalTypecheckReminder, hasTypeErrors } from "./finalTypecheckGate";
 import { DESTRUCTIVE_TOOLS } from "./toolPolicy";
 import { canonicalToolName } from "./toolNames";
 import { beginWriteBatch, endWriteBatch } from "./writeBatch";
@@ -131,7 +133,7 @@ function retryAfterMs(error: unknown): number | null {
 function sanitizeToolResultForModel(content: string): string {
   try {
     const parsed = JSON.parse(content) as Record<string, unknown>
-    if (parsed?.type === 'diff') return buildPostEditResultText(parsed)
+    if (parsed?.type === 'diff') return buildAppliedEditResultText(parsed)
   } catch {
     // Non-JSON tool result.
   }
@@ -459,6 +461,21 @@ export interface QueryParams {
     boundary: 'post_tool' | 'stop',
   ) => Promise<QueuedSteeringContent | null>;
   /**
+   * Ocupação real do último pedido DESTA conversa.
+   *
+   * "continue" depois de um Stop NÃO é um comando e NÃO é um prato novo:
+   * é uma mensagem a dizer ao agente para seguir onde parou. O query()
+   * seguinte é outra invocação (o loop morreu com o Stop), mas o histórico
+   * é o mesmo. Sem isto, lastTurnRealOccupancy nascia undefined e o
+   * primeiro shouldAutoCompact media o prato outra vez — ou pior, com a
+   * estimativa inflacionada. Paridade cli-vaz: conta-se o mesmo `messages`
+   * que vai para o modelo; aqui a âncora é o último usage real + o delta
+   * das mensagens novas (o follow-up).
+   */
+  initialRealOccupancyTokens?: number | null;
+  /** Mensagens que `initialRealOccupancyTokens` já cobre. */
+  initialRealOccupancyMessageCount?: number | null;
+  /**
    * Live active-model limits for the auto-compact decision. Called fresh each
    * loop iteration because the active model (and thus its context window) is
    * injected server-side and learned from the response's X-Model-Context-Window
@@ -506,6 +523,13 @@ export interface QueryParams {
   auxiliarySelection?: import('./contextBuilder/auxiliaryRegistry').AuxiliarySelection;
   /** Execution phase for bootstrap/original-task telemetry and guardrails. */
   executionPhase?: 'project_bootstrap' | 'original_task';
+  /**
+   * Raiz do projeto para o gate de typecheck FINAL. Resolvida pelo
+   * `toolExecutor.getProjectRootForDiagnostics()` no agentService e passada
+   * só ao main agent (lightweight não a passa). Ausente/vazia = o gate
+   * não corre (sub-agentes, runs sem projeto TS).
+   */
+  projectRoot?: string;
   /** Returns telemetry from the last delegate call, or null if delegate
    *  wasn't called this run. Populated by the ToolExecutor bridge. */
   getDelegateTelemetry?: () => {
@@ -1220,10 +1244,21 @@ export async function* query(
   // Real provider occupancy from the previous turn (prompt_tokens +
   // completion_tokens), fed into the auto-compact decision so it tracks the
   // active model's real window instead of a hardcoded 1M char-estimate.
-  // Undefined until the first response is recorded.
-  let lastTurnRealOccupancy: number | undefined;
+  // Sem semente: undefined até ao primeiro usage. Com semente: o último
+  // pedido REAL desta conversa — um Stop + "continue" não esvazia o prato.
+  const seededOccupancy =
+    typeof params.initialRealOccupancyTokens === 'number'
+    && params.initialRealOccupancyTokens > 0
+      ? params.initialRealOccupancyTokens
+      : undefined;
+  const seededOccupancyCount =
+    typeof params.initialRealOccupancyMessageCount === 'number'
+    && params.initialRealOccupancyMessageCount > 0
+      ? params.initialRealOccupancyMessageCount
+      : undefined;
+  let lastTurnRealOccupancy: number | undefined = seededOccupancy;
   /** Nº de mensagens do pedido que produziu `lastTurnRealOccupancy`. */
-  let lastTurnRealOccupancyMessageCount: number | undefined;
+  let lastTurnRealOccupancyMessageCount: number | undefined = seededOccupancyCount;
   /** Como a ocupação foi resolvida no turno corrente — vai para o usage log.
    *  Sem isto, uma sessão em que a âncora nunca se aplica (e portanto corre
    *  com o estimador inflacionado) é indistinguível de uma em que se aplica
@@ -1279,6 +1314,11 @@ export async function* query(
    *  task-reconciliation guardrail at the stop path. */
   let runTouchedTaskTracker = false;
   let taskGuardCount = 0;
+  /** Gate de typecheck FINAL: quantas rondas de correção forçadas na saída.
+   *  Uma só (limite 1) — se o modelo não corrigir, o run termina com os erros
+   *  por resolver. Ver o bloco do gate no caminho de paragem e
+   *  `finalTypecheckGate.ts`. */
+  let finalTypecheckGuardCount = 0;
   const taskTrackerReminderState = createTaskTrackerReminderState();
   let lastTaskTrackerUpdateTurn = 0;
   let writesSinceTaskTrackerUpdate = 0;
@@ -3149,6 +3189,62 @@ export async function* query(
       // feito, a reconciliação é legítima; e o texto passa a admitir que as
       // linhas podem ser de antes, que é uma resolução válida em vez de um
       // convite a inventar progresso.
+
+      // ── Final typecheck gate (uma ronda de correção forçada na saída) ──
+      // O `editDiagnostics` entrega o delta NO-TURNO via `<system-reminder>`,
+      // mas (a) o `<system-reminder>` é um canal que o modelo PODE ignorar e
+      // (b) no TURNO TERMINAL (modelo para sem tool calls) o
+      // `collectInterTurnContext` NÃO corre — o `dirty` fica por avaliar. O
+      // caso falhado medido: o modelo introduz `VStack is not defined`
+      // (TS2304) e diz "done" sem nunca ver o erro, porque não há ronda de
+      // tool results para o levar a vê-lo.
+      //
+      // RODA UMA VEZ: `markProjectEdited()` põe o `dirty` do editDiagnostics
+      // (a última recolha inter-turno já o limpou) e `collectNewDiagnostics`
+      // devolve o delta vs baseline — NÃO reporta erros PRÉ-EXISTENTES do
+      // projeto do developer. Se houver erros, injeta uma USER MESSAGE
+      // directa (não `<system-reminder>` — não ignorável) e faz `continue`
+      // para forçar UMA ronda de correção. Se o modelo não corrigir, o run
+      // termina na passagem seguinte (o guard já contou).
+      //
+      // `params.enableTaskTrackerReminder` discrimina o MAIN agent: os
+      // sub-agentes partilham este loop com a baseline PRÓPRIA e o seu
+      // typecheck final seria ruído (correm num checkout isolado). O
+      // `runHasEdited` garante que só se paga `tsc` depois de escritas.
+      if (
+        finalTypecheckGuardCount < 1 &&
+        runHasEdited &&
+        !readOnlyRun &&
+        params.enableTaskTrackerReminder &&
+        params.projectRoot
+      ) {
+        try {
+          markProjectEdited();
+          const found = await collectNewDiagnostics(params.projectRoot);
+          if (hasTypeErrors(found)) {
+            finalTypecheckGuardCount++;
+            // eslint-disable-next-line no-console
+            console.debug(
+              `[query] final typecheck gate · ${found.filter((d) => d.severity === 'error').length} error(s) introduced this run — forcing a correction round`,
+            );
+            state = {
+              ...state,
+              messages: [
+                ...updatedMessages,
+                {
+                  role: "user",
+                  content: formatFinalTypecheckReminder(found, params.projectRoot),
+                },
+              ],
+              continuationCount: 0,
+            };
+            continue;
+          }
+        } catch {
+          // Best-effort — nunca parte o caminho de paragem.
+        }
+      }
+
       if (taskGuardCount < 1 && !runTouchedTaskTracker && writeActionCount > 0) {
         try {
           const { useAgentStore } = await import("../../stores/agentStore");
@@ -3599,9 +3695,11 @@ export async function* query(
     // ── Periodic task-tracker reconciliation ──
     // The end-of-run guard catches a contradictory completion claim, but a
     // long implementation needs a gentle, structural reminder before that
-    // point. Read the live tracker only after successful mutations and use a
-    // throttled pure decision function so no reminder becomes prompt noise.
-    if (params.enableTaskTrackerReminder && writesSinceTaskTrackerUpdate > 0) {
+    // point. Read the live tracker and use a throttled pure decision function
+    // so no reminder becomes prompt noise. Two cadences: with unreconciled
+    // writes (faster) and without (slower — nudges long read-only sessions
+    // whose tracker may be stale too).
+    if (params.enableTaskTrackerReminder) {
       try {
         const { useAgentStore } = await import("../../stores/agentStore");
         const unfinishedTaskCount = useAgentStore.getState().tasks

@@ -12,6 +12,7 @@ import { hashProjectPath, decryptSession } from '../../utils/crypto'
 import { useByokStore } from '../../stores/byokStore'
 import { getProjectSessionsDir } from '../projectStatePaths'
 import { READ_ALIAS } from './toolNames'
+import { countDiffLineStats } from '../../utils/diffStats'
 
 /** Snapshot the current BYOK selection so the session uses the same provider
  *  and model for its entire lifetime, even if the user later switches the
@@ -78,14 +79,23 @@ export function captureByokSnapshot(): ByokSessionSnapshot | null {
  * está) no disco, e as cópias só serviam para re-renderizar um cartão fechado.
  *
  * PENDENTE fica intacto, sempre: esse ainda precisa de ser mostrado para o
- * developer decidir. Degradação graciosa nos resolvidos — `hasDiff` em
- * ToolCallDisplay testa `diffNewContent !== undefined`, logo um diff sem
- * conteúdo cai na linha normal de tool call em vez de rebentar.
+ * developer decidir. As contagens `diffAdded`/`diffRemoved` FICAM — o header
+ * compacto precisa delas depois de reabrir o projecto. Sem conteúdo o corpo
+ * do diff não expande; os +N −M continuam visíveis.
  */
 function stripResolvedDiff(tc: ToolCallDisplay): ToolCallDisplay {
   if (tc.diffStatus !== 'approved' && tc.diffStatus !== 'denied') return tc
   if (tc.diffOldContent === undefined && tc.diffNewContent === undefined) return tc
   const next = { ...tc }
+  if (next.diffAdded === undefined && next.diffRemoved === undefined) {
+    const stats = countDiffLineStats(
+      next.diffOldContent || '',
+      next.diffNewContent || '',
+      next.isNewFile === true,
+    )
+    next.diffAdded = stats.added
+    next.diffRemoved = stats.removed
+  }
   delete next.diffOldContent
   delete next.diffNewContent
   return next
@@ -393,7 +403,7 @@ class SessionService {
       // even though it isn't a formal ChatSession field — the chatStore
       // loader reads it via type assertion to restore the context-window
       // indicator without requiring a parallel return value.
-      const out = {
+      const out: ChatSession = {
         id: persisted.id,
         projectPath: persisted.projectPath,
         messages,
@@ -404,8 +414,11 @@ class SessionService {
         sessionMemory: persisted.sessionMemory,
         planResumePending: persisted.planResumePending ?? null,
         requestUsageLog: persisted.requestUsageLog,
-      } as ChatSession & { lastTurnSnapshot?: SessionTurnSnapshot }
-      if (persisted.lastTurnSnapshot) out.lastTurnSnapshot = persisted.lastTurnSnapshot
+        lastTurnSnapshot: persisted.lastTurnSnapshot,
+        lastPromptTokens: persisted.lastPromptTokens,
+        lastResponseTokens: persisted.lastResponseTokens,
+        peakPromptTokens: persisted.peakPromptTokens,
+      }
       if (persisted.isParallelTask) {
         out.isParallelTask = true
         // Um 'running' persistido é órfão (crash/quit a meio do run — o
@@ -455,6 +468,9 @@ class SessionService {
         sessionMemory: session.sessionMemory,
         planResumePending: session.planResumePending ?? null,
         requestUsageLog: session.requestUsageLog,
+        lastPromptTokens: session.lastPromptTokens,
+        lastResponseTokens: session.lastResponseTokens,
+        peakPromptTokens: session.peakPromptTokens,
         // Tarefas paralelas: flag + estado persistem para as rows da
         // sidebar/ProjectMenu sobreviverem a reload (o chat da tarefa fica
         // consultável a qualquer momento — pedido do user 2026-07-16).

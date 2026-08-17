@@ -5,7 +5,16 @@ import { resolveByokNativeVision } from '../../byokVision'
 import { getProfileForPlan } from '../../modelProfiles'
 
 jest.mock('../../../attachmentService', () => ({
-  resolveAttachments: jest.fn(async () => '<file path="x.ts" />'),
+  resolveAttachments: jest.fn(async (atts: Array<{ type: string; name?: string; path?: string }>) =>
+    atts.map(a => a.type === 'image'
+      ? `<attached_image name="${a.name}">[An image was attached but could not be delivered with this request. Tell the user the image did not reach you this time.]</attached_image>`
+      : `<file path="${a.path ?? 'x.ts'}" />`).join('\n'),
+  ),
+  resolveDescribedAttachments: jest.fn(async (atts: Array<{ type: string; name?: string; path?: string }>) =>
+    atts.map(a => a.type === 'image'
+      ? `<attached_image name="${a.name}">[Image attached. A visual description follows in <image_description>]</attached_image>`
+      : `<file path="${a.path ?? 'x.ts'}" />`).join('\n'),
+  ),
   resolveImageToDataUri: jest.fn(async (att: { base64?: string; path?: string }) => {
     if (att.base64) return att.base64
     if (att.path) return `data:image/png;base64,FROM_PATH_${att.path}`
@@ -157,6 +166,7 @@ describe('steerContent / ParallelSteerItem', () => {
     expect(typeof out).toBe('string')
     expect(out as string).toContain('image_description')
     expect(out as string).toContain('red button')
+    expect(out as string).not.toContain('could not be delivered')
     expect(describeImagesViaSidecar).toHaveBeenCalled()
   })
 

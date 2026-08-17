@@ -6,6 +6,8 @@ import {
   URL_REGEX_GLOBAL,
   PORT_REGEX,
   PORT_FAILURE_REGEX,
+  extractBlockedPort,
+  formatPortInUseMessage,
   resolveIsWrapper,
   extractScriptName,
   classifyProbedUrl,
@@ -57,10 +59,8 @@ interface InternalSlot {
   backendUrlMirrored: boolean
   /** Framework-default ports for this command, resolved THROUGH npm/yarn/pnpm
    *  script indirection at start() time (so `npm run dev` → `vite` → 5173).
-   *  Used for preemptive port cleanup, the stop()-time backup kill when no URL
-   *  was ever detected, and early port-guarding. The EADDRINUSE restart budget
-   *  is NOT here — it lives on the manager so it survives the slot rebuild a
-   *  restart performs (see `eaddrinuseRestarts`). */
+   *  Used for the stop()-time backup kill when no URL was ever detected, and
+   *  for early port-guarding once the server is up. */
   frameworkPorts: number[]
   /** One-shot flag: set after the first cross-origin "Script error. (:0)" hint
    *  is emitted to the console. Prevents the helper text from repeating on
@@ -83,10 +83,6 @@ export interface StartOptions {
    *  set, a probed URL on this port is treated as frontend regardless of
    *  what the server returned. Most projects do not need it. */
   frontendPortHint?: number
-  /** @internal Set ONLY by the EADDRINUSE auto-recovery restart so the
-   *  per-operation restart budget (`eaddrinuseRestarts`) is preserved instead
-   *  of reset to zero. External callers must never pass this. */
-  autoRestart?: boolean
 }
 
 interface DevServerOutputPayload {
@@ -159,12 +155,6 @@ class DevServerManager {
    */
   private slots = new Map<string, InternalSlot>()
   private focusedPath: string | null = null
-  /** EADDRINUSE auto-restart budget for the CURRENT bring-up operation. Lives
-   *  on the manager (not the slot) because each restart builds a fresh slot —
-   *  a per-slot counter reset to 0 every restart, making the "max 2" cap an
-   *  unbounded thrash loop. Reset to 0 only on a user-initiated start(); the
-   *  auto-recovery restart passes `autoRestart: true` to preserve it. */
-  private eaddrinuseRestarts = 0
   private unlistenOutput: UnlistenFn | null = null
   private unlistenExit: UnlistenFn | null = null
 
@@ -257,27 +247,15 @@ class DevServerManager {
     const projectKind: ProjectKind = opts.projectKind ?? 'frontend'
     const frontendPortHint = opts.frontendPortHint
 
-    // Reset the EADDRINUSE restart budget on a user-initiated start. The auto-
-    // recovery restart passes `autoRestart: true` so the budget keeps counting
-    // down across the stop→start cycle instead of resetting every time.
-    if (!opts.autoRestart) this.eaddrinuseRestarts = 0
-
     // F5: only stop THIS project's slot — other open projects keep running.
     await this.stop(projectPath)
 
-    // Preemptive port cleanup for known framework defaults.
-    // If a zombie process from a previous TM Code crash (or another app)
-    // holds a well-known port, kill it before the dev server tries to bind.
-    // This avoids the EADDRINUSE → retry → restart cycle for the common case.
-    // resolveFrameworkPorts FOLLOWS npm/yarn/pnpm script indirection, so the
-    // most common command (`npm run dev`, whose `dev` script is really `vite`)
-    // now yields [5173] and gets cleaned — previously guessFrameworkPorts only
-    // string-matched the literal "npm run dev", returned [], and an orphaned
-    // server on the port could be recovered ONLY by the fragile EADDRINUSE loop.
+    // Resolve the framework-default ports this command will bind (following
+    // npm/yarn/pnpm script indirection: `npm run dev` → `vite` → 5173). These
+    // are NOT freed here — a port held by another process is the user's to
+    // resolve. We keep the list for the stop()-time backup and for port-guarding
+    // once the server is actually up.
     const knownPorts = await this.resolveFrameworkPorts(devCommand, projectPath)
-    if (knownPorts.length > 0) {
-      await Promise.allSettled(knownPorts.map(p => invoke('kill_port', { port: p })))
-    }
 
     // Resolve wrapper status NOW (may inspect package.json asynchronously).
     const isWrapper = await isFullstackWrapper(devCommand, projectPath)
@@ -423,51 +401,25 @@ class DevServerManager {
         })
       }
 
-      // EADDRINUSE auto-recovery — capped restart budget on the MANAGER so it
-      // survives the slot rebuild each restart performs (see eaddrinuseRestarts).
-      const eaddrinuse = line.match(/EADDRINUSE.*(?:port|address)[:\s]*(\d+)/i)
-        || line.match(/EADDRINUSE.*:::(\d+)/i)
-        || line.match(/EADDRINUSE.*:(\d+)/i)
-        || line.match(/address already in use\s+(?:::)?(\d+)/i)
-        || line.match(/listen\s+EADDRINUSE\s+\S+:(\d+)/i)
-      const MAX_EADDRINUSE_RETRIES = 2
-      if (eaddrinuse) {
-        const blockedPort = parseInt(eaddrinuse[1], 10)
-        if (blockedPort > 0) {
-          const { projectPath, command, projectKind, frontendPortHint: hint } = slot
-          if (this.eaddrinuseRestarts < MAX_EADDRINUSE_RETRIES) {
-            this.eaddrinuseRestarts++
-            // Flush whatever we have collected so far before the restart so
-            // the user sees the EADDRINUSE line and the recovery message.
-            const coalescedSoFar = coalesceLogLines(lines).map((e) => ({ text: e.text, level: e.level }))
-            coalescedSoFar.push({
-              text: `Port ${blockedPort} in use — killing and restarting (attempt ${this.eaddrinuseRestarts}/${MAX_EADDRINUSE_RETRIES})...`,
-              level: 'warn',
-            })
-            if (coalescedSoFar.length > 0) layoutStore?.addDevServerLogs(coalescedSoFar)
-            // Preserve frontendPortHint across the auto-restart (matches
-            // restart()); `autoRestart` keeps the budget from resetting.
-            this.stop(projectPath).then(async () => {
-              try { await invoke('kill_port', { port: blockedPort }) } catch {}
-              await new Promise(r => setTimeout(r, 800))
-              await this.start(projectPath, command, { projectKind, frontendPortHint: hint, autoRestart: true }).catch(() => {})
-            })
-            return
-          }
-          // Budget exhausted. Stop cleanly so the slot is cleared —
-          // otherwise the dead/looping slot stays non-null and
-          // activatePreview()'s isActive() guard silently refuses to start on
-          // the next preview-open ("dev server doesn't run again"). A clean
-          // stop lets the next open retry from scratch with a fresh budget.
-          const giveUp = coalesceLogLines(lines).map((e) => ({ text: e.text, level: e.level }))
-          giveUp.push({
-            text: `Port ${blockedPort} still in use after ${MAX_EADDRINUSE_RETRIES} attempts. Close whatever is using it, then reopen the preview to retry.`,
-            level: 'error',
-          })
-          if (giveUp.length > 0) layoutStore?.addDevServerLogs(giveUp)
-          void this.stop(projectPath)
-          return
-        }
+      // EADDRINUSE — the dev server could not bind because the port is held by
+      // another process. We do NOT free the port automatically (that would kill
+      // a process the user may need). Inform the user and stop cleanly so the
+      // slot is cleared for the next preview-open; the user frees the port (or
+      // changes the dev command's port) and reopens.
+      const blockedPort = extractBlockedPort(line)
+      if (blockedPort !== null) {
+        const { projectPath } = slot
+        const giveUp = coalesceLogLines(lines).map((e) => ({ text: e.text, level: e.level }))
+        giveUp.push({
+          text: formatPortInUseMessage(blockedPort),
+          level: 'error',
+        })
+        if (giveUp.length > 0) layoutStore?.addDevServerLogs(giveUp)
+        // Clean stop clears the slot — otherwise the dead slot stays non-null
+        // and activatePreview()'s isActive() guard silently refuses to start
+        // on the next preview-open ("dev server doesn't run again").
+        void this.stop(projectPath)
+        return
       }
 
       // URL detection — skip entirely for failure lines (EADDRINUSE, retrying).

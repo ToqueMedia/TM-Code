@@ -99,9 +99,42 @@ export async function createImageAttachmentFromClipboard(blob: Blob): Promise<At
 // (utils/mentionParser.ts) is unchanged — it drives autocomplete only.
 
 /**
- * Resolves all attachments into a context string to append to the user prompt.
+ * Image XML when pixels were NOT delivered (no image_url, sidecar failed or
+ * never ran). The model MUST be told this delivery failed — otherwise it
+ * invents what the screenshot contained.
+ *
+ * NÃO afirmar "this model is text-only": este fallback dispara por razões
+ * transitórias (gate de plano, cap de bytes, falha de leitura) e o modelo
+ * PARAFRASEAVA a frase de volta ao utilizador como limitação permanente
+ * do produto (visto em produção 2026-06-12, Gemini multimodal a negar a
+ * própria visão). O texto diz só a verdade local: ESTA imagem não chegou
+ * NESTE pedido.
  */
-export async function resolveAttachments(attachments: Attachment[]): Promise<string> {
+export const IMAGE_UNDELIVERED_BODY =
+  '[An image was attached but the vision pipeline could not deliver pixels or a description with this request. Tell the developer the image did not reach you this time, then offer alternatives: they can describe what they see, attach the file by path, or retry. Do NOT claim that you or this environment cannot process images in general.]'
+
+/**
+ * Image XML when a sidecar description WAS delivered. The undelivered body
+ * must NOT be used here — the model treated that instruction as overriding
+ * the description and told the user the image never arrived (sessão
+ * 2026-08-14, pasted-image.png + GLM-5.2 cego + sidecar).
+ */
+export const IMAGE_DESCRIBED_BODY =
+  '[Image attached. A visual description follows in <image_description> — treat that description as what you see. Do not tell the user the image failed to arrive.]'
+
+export type ImageXmlMode = 'undelivered' | 'described'
+
+/**
+ * Resolves all attachments into a context string to append to the user prompt.
+ *
+ * `imageMode: 'described'` is for the sidecar-success path: images become a
+ * metadata marker plus a follow-up `<image_description>`. Default
+ * `'undelivered'` is the honest fallback when pixels never left the client.
+ */
+export async function resolveAttachments(
+  attachments: Attachment[],
+  options?: { imageMode?: ImageXmlMode },
+): Promise<string> {
   if (attachments.length === 0) return ''
 
   const parts = await Promise.all(attachments.map(async (att): Promise<string> => {
@@ -126,14 +159,10 @@ export async function resolveAttachments(attachments: Attachment[]): Promise<str
       } else if (att.type === 'image') {
         const size = att.sizeBytes ? `${Math.round(att.sizeBytes / 1024)}KB` : 'unknown size'
         const source = att.path ? `path="${att.path}"` : 'source="clipboard"'
-        // NÃO afirmar "this model is text-only": este fallback dispara por
-        // razões transitórias (gate de plano, cap de bytes, falha de
-        // leitura) e o modelo PARAFRASEAVA a frase de volta ao utilizador
-        // como limitação permanente do produto — "esta superfície do TM
-        // Code não processa imagens" (visto em produção 2026-06-12, Gemini
-        // multimodal a negar a própria visão). O texto agora diz só a
-        // verdade local: ESTA imagem não chegou NESTE pedido.
-        return `<attached_image name="${att.name}" mime="${att.mimeType || 'image/png'}" ${source} size="${size}">\n[An image was attached but could not be delivered with this request. Tell the user the image did not reach you this time — do NOT claim that you or this environment cannot process images in general.]\n</attached_image>`
+        const body = options?.imageMode === 'described'
+          ? IMAGE_DESCRIBED_BODY
+          : IMAGE_UNDELIVERED_BODY
+        return `<attached_image name="${att.name}" mime="${att.mimeType || 'image/png'}" ${source} size="${size}">\n${body}\n</attached_image>`
       }
       return ''
     } catch {
@@ -143,6 +172,11 @@ export async function resolveAttachments(attachments: Attachment[]): Promise<str
 
   const filtered = parts.filter(Boolean)
   return filtered.length > 0 ? '\n\n<attachments>\n' + filtered.join('\n') + '\n</attachments>' : ''
+}
+
+/** Resolver for the sidecar-success path — images are described, not lost. */
+export function resolveDescribedAttachments(attachments: Attachment[]): Promise<string> {
+  return resolveAttachments(attachments, { imageMode: 'described' })
 }
 
 /**

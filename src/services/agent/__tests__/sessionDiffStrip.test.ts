@@ -19,7 +19,8 @@ describe('strip de diffs resolvidos na persistência', () => {
     sanitizeMessage: (m: ChatMessage) => ChatMessage
   }
 
-  const big = 'linha de conteudo do ficheiro\n'.repeat(2_000)
+  const bigOld = 'linha antiga do ficheiro\n'.repeat(2_000)
+  const bigNew = 'linha nova do ficheiro\n'.repeat(2_000)
 
   function msgCom(diffStatus: ToolCallDisplay['diffStatus']): ChatMessage {
     return {
@@ -27,7 +28,7 @@ describe('strip de diffs resolvidos na persistência', () => {
       toolCalls: [{
         id: 'tc1', toolName: 'Edit', input: {}, status: 'completed',
         timestamp: 1, diffStatus,
-        diffOldContent: big, diffNewContent: big,
+        diffOldContent: bigOld, diffNewContent: bigNew,
       } as ToolCallDisplay],
     } as ChatMessage
   }
@@ -42,6 +43,21 @@ describe('strip de diffs resolvidos na persistência', () => {
       expect(out.diffNewContent).toBeUndefined()
     })
 
+    it('aprovado conserva +N/−M para o header depois de reabrir o projecto', () => {
+      const out = tc(svc.sanitizeMessageForSave(msgCom('approved')))
+      expect(out.diffAdded).toBeGreaterThan(0)
+      expect(out.diffRemoved).toBeGreaterThan(0)
+    })
+
+    it('não pisa contagens já gravadas', () => {
+      const m = msgCom('approved')
+      m.toolCalls![0].diffAdded = 4
+      m.toolCalls![0].diffRemoved = 2
+      const out = tc(svc.sanitizeMessageForSave(m))
+      expect(out.diffAdded).toBe(4)
+      expect(out.diffRemoved).toBe(2)
+    })
+
     it('recusado também', () => {
       const out = tc(svc.sanitizeMessageForSave(msgCom('denied')))
       expect(out.diffNewContent).toBeUndefined()
@@ -49,8 +65,8 @@ describe('strip de diffs resolvidos na persistência', () => {
 
     it('PENDENTE fica intacto — ainda tem de ser mostrado para decidir', () => {
       const out = tc(svc.sanitizeMessageForSave(msgCom('pending')))
-      expect(out.diffOldContent).toBe(big)
-      expect(out.diffNewContent).toBe(big)
+      expect(out.diffOldContent).toBe(bigOld)
+      expect(out.diffNewContent).toBe(bigNew)
     })
 
     it('SEM limiar de tamanho — o problema é a soma, não o diff grande', () => {
@@ -70,11 +86,13 @@ describe('strip de diffs resolvidos na persistência', () => {
       // até cada sessão ser re-gravada.
       const out = tc(svc.sanitizeMessage(msgCom('approved')))
       expect(out.diffOldContent).toBeUndefined()
+      // Mas as contagens nascem do conteúdo ainda presente, para o header.
+      expect(out.diffAdded).toBeGreaterThan(0)
     })
 
     it('e um pendente restaurado continua a poder ser decidido', () => {
       const out = tc(svc.sanitizeMessage(msgCom('pending')))
-      expect(out.diffNewContent).toBe(big)
+      expect(out.diffNewContent).toBe(bigNew)
     })
   })
 })

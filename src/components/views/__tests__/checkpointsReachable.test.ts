@@ -33,17 +33,21 @@ describe('Checkpoints — alcançável em todos os estados da toolbar', () => {
     expect(jsxStart).toBeGreaterThan(-1)
     const wide = SRC.slice(jsxStart, SRC.indexOf('</HStack>', jsxStart))
     const checkpoint = wide.indexOf('<CheckpointsToolbarButton />')
+    const terminal = wide.indexOf('<TerminalToolbarButton />')
     const share = wide.indexOf('<CollabShareControls previewOnly />')
     const preview = wide.indexOf("t('view.preview')")
     expect(checkpoint).toBeGreaterThan(-1)
+    expect(terminal).toBeGreaterThan(-1)
     expect(share).toBeGreaterThan(-1)
     expect(preview).toBeGreaterThan(-1)
-    expect(checkpoint).toBeLessThan(share)
+    expect(checkpoint).toBeLessThan(terminal)
+    expect(terminal).toBeLessThan(share)
     expect(checkpoint).toBeLessThan(preview)
   })
 
   it('existe TAMBÉM em sidebar mode — senão abrir o drawer escondia o botão que o fecha', () => {
     expect(SRC).toMatch(/isSidebarMode && <CheckpointsToolbarButton \/>/)
+    expect(SRC).toMatch(/isSidebarMode && <TerminalToolbarButton \/>/)
   })
 
   it('existe no menu overflow — a saída para a coluna estreita', () => {
@@ -53,6 +57,7 @@ describe('Checkpoints — alcançável em todos os estados da toolbar', () => {
     const menu = SRC.slice(SRC.indexOf('function HeaderOverflowMenu'))
     expect(menu).toMatch(/label=\{checkpointCount > 0/)
     expect(menu).toMatch(/toggleCheckpointDrawer\(\)/)
+    expect(menu).toMatch(/useTerminalPanelStore\.getState\(\)\.toggle\(\)/)
   })
 
   it('o breakpoint que esconde o cluster continua a revelar o menu', () => {
@@ -63,13 +68,14 @@ describe('Checkpoints — alcançável em todos os estados da toolbar', () => {
     expect(query).toMatch(/data-chat-toolbar-overflow-trigger[\s\S]*display: 'flex !important'/)
   })
 
-  it('abrir Checkpoints fecha o terminal (disputam o mesmo espaço lateral)', () => {
+  it('abrir Checkpoints NÃO fecha o terminal — o PTY passou para o fundo', () => {
     const btn = SRC.slice(SRC.indexOf('function CheckpointsToolbarButton'))
-    expect(btn).toMatch(/closeTerminal\(\)/)
+    expect(btn).not.toMatch(/closeTerminal\(\)/)
   })
 
   it('já não vive na linha de acções do prompt', () => {
     expect(PROMPT_ACTIONS).not.toMatch(/toggleCheckpointDrawer/)
     expect(PROMPT_ACTIONS).not.toMatch(/checkpointCount/)
+    expect(PROMPT_ACTIONS).not.toMatch(/toggleTerminal/)
   })
 })

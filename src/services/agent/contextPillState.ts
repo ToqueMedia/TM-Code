@@ -28,6 +28,7 @@ import type { ChatSession } from '../../types/chat'
 import { useChatStore } from '../../stores/chatStore'
 import { getActiveContextWindow } from './activeContextWindow'
 import { getAutoCompactThreshold, getWarningThreshold } from '../../utils/contextWindow'
+import { resolveSessionOccupancy } from '../../utils/sessionOccupancy'
 
 export interface ContextPillState {
   sessionLastPromptTokens: number | null
@@ -47,12 +48,12 @@ export function captureContextPillState(session: ChatSession): ContextPillState 
   })
   const window = resolved.contextWindow > 0 ? resolved.contextWindow : null
 
-  const peak = (session as ChatSession & { peakPromptTokens?: number }).peakPromptTokens
+  const occ = resolveSessionOccupancy(session)
 
   return {
-    sessionLastPromptTokens: session.lastPromptTokens ?? null,
-    sessionLastResponseTokens: session.lastResponseTokens ?? null,
-    sessionPeakPromptTokens: typeof peak === 'number' ? peak : null,
+    sessionLastPromptTokens: occ.source === 'empty' ? (session.lastPromptTokens ?? null) : occ.promptTokens,
+    sessionLastResponseTokens: occ.source === 'empty' ? (session.lastResponseTokens ?? null) : occ.responseTokens,
+    sessionPeakPromptTokens: occ.peakTokens > 0 ? occ.peakTokens : null,
     storeCurrentPromptTokens: chat.currentPromptTokens ?? null,
     storeCurrentResponseTokens: chat.currentResponseTokens ?? null,
     resolvedContextWindow: window,

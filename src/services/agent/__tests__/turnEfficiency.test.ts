@@ -234,21 +234,56 @@ describe('task-tracker reconciliation reminder', () => {
     })).toBe(true)
   })
 
-  it('does not remind read-only work or a tracker with no unfinished tasks', () => {
+  it('does not remind a tracker with no unfinished tasks', () => {
     const state = createTaskTrackerReminderState()
-    expect(shouldRemindTaskTracker(state, {
-      turnCount: 20,
-      lastTaskUpdateTurn: 0,
-      unreconciledWritesStartedTurn: null,
-      writesSinceTaskUpdate: 0,
-      unfinishedTaskCount: 3,
-    })).toBe(false)
+    // With writes but no unfinished tasks — nothing to reconcile.
     expect(shouldRemindTaskTracker(state, {
       turnCount: 20,
       lastTaskUpdateTurn: 0,
       unreconciledWritesStartedTurn: 0,
       writesSinceTaskUpdate: 2,
       unfinishedTaskCount: 0,
+    })).toBe(false)
+    // Without writes and no unfinished tasks — still nothing to reconcile.
+    expect(shouldRemindTaskTracker(state, {
+      turnCount: 40,
+      lastTaskUpdateTurn: 0,
+      unreconciledWritesStartedTurn: null,
+      writesSinceTaskUpdate: 0,
+      unfinishedTaskCount: 0,
+    })).toBe(false)
+  })
+
+  it('reminds long read-only sessions at the slower no-writes cadence', () => {
+    const state = createTaskTrackerReminderState()
+    // Just below the no-writes cadence — no nudge yet.
+    expect(shouldRemindTaskTracker(state, {
+      turnCount: TASK_TRACKER_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS_NO_WRITES - 1,
+      lastTaskUpdateTurn: 0,
+      unreconciledWritesStartedTurn: null,
+      writesSinceTaskUpdate: 0,
+      unfinishedTaskCount: 2,
+    })).toBe(false)
+    // At the cadence — nudge fires even with zero writes.
+    expect(shouldRemindTaskTracker(state, {
+      turnCount: TASK_TRACKER_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS_NO_WRITES,
+      lastTaskUpdateTurn: 0,
+      unreconciledWritesStartedTurn: null,
+      writesSinceTaskUpdate: 0,
+      unfinishedTaskCount: 2,
+    })).toBe(true)
+  })
+
+  it('does not nag read-only sessions at the faster with-writes cadence', () => {
+    const state = createTaskTrackerReminderState()
+    // A with-writes session would fire here (10 turns), but a read-only one
+    // waits for the slower no-writes cadence.
+    expect(shouldRemindTaskTracker(state, {
+      turnCount: TASK_TRACKER_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS,
+      lastTaskUpdateTurn: 0,
+      unreconciledWritesStartedTurn: null,
+      writesSinceTaskUpdate: 0,
+      unfinishedTaskCount: 2,
     })).toBe(false)
   })
 
@@ -283,6 +318,17 @@ describe('task-tracker reconciliation reminder', () => {
     expect(text.trimEnd().endsWith('</system-reminder>')).toBe(true)
     expect(text).toContain('2 file mutations')
     expect(text).toContain('3 unfinished tasks remain')
+    expect(text).toContain('never mention this reminder')
+  })
+
+  it('no-writes reminder reports the investigation, not file mutations', () => {
+    const text = buildTaskTrackerReminderText(0, 2)
+    expect(text.startsWith('<system-reminder>')).toBe(true)
+    expect(text.trimEnd().endsWith('</system-reminder>')).toBe(true)
+    // Does NOT claim a count of file mutations — there were none.
+    expect(text).not.toMatch(/\d+ file mutation/)
+    expect(text).toContain('2 unfinished tasks remain')
+    expect(text).toContain('investigation')
     expect(text).toContain('never mention this reminder')
   })
 

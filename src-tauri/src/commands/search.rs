@@ -47,9 +47,6 @@ const BUILTIN_EXCLUDES: &[&str] = &[
 
 /// Ficheiros acima disto não são procurados (paridade com `--max-filesize 1M`).
 const MAX_SEARCH_FILESIZE: u64 = 1024 * 1024;
-/// Máximo de matches por ficheiro, para os resultados abrangerem mais
-/// ficheiros em vez de serem inundados por um só (paridade com `--max-count`).
-const MAX_MATCHES_PER_FILE: usize = 10;
 
 fn build_matcher(query: &str, options: &SearchOptions) -> Result<RegexMatcher, String> {
     let pattern = if options.use_regex {
@@ -185,26 +182,20 @@ fn build_walker(root: &Path, options: &SearchOptions) -> Result<ignore::Walk, St
 ///
 /// O `replace_in_files` só quer saber QUE ficheiros contêm o padrão — o
 /// `--files-with-matches` do rg era exactamente isto. Sem o modo, um
-/// "substituir em todo o projecto" carregava o texto de até 10 linhas por
-/// ficheiro para as deitar fora a seguir.
+/// "substituir em todo o projecto" carregava o texto de cada acerto para
+/// o deitar fora a seguir.
 #[derive(Clone, Copy, PartialEq)]
 enum SearchDepth {
     /// Linhas, colunas e texto do match (a busca que a UI e o agente mostram).
     Content,
     /// Só o primeiro acerto por ficheiro; nada é guardado.
     PathsOnly,
-    /// CONTA todos os acertos de cada ficheiro, sem guardar texto nenhum e sem
-    /// o tecto por ficheiro.
-    ///
-    /// Existe porque o `outputMode: "count"` do agente reportava o `total_matches`
-    /// do modo Content — ou seja, a contagem já LIMITADA a 10 por ficheiro
-    /// (auditoria 2026-07-29). Um ficheiro com 60 usos aparecia como 10 e o
-    /// modelo decidia com base nisso. Contar é barato quando não se guarda
-    /// texto: é a mesma passagem do ripgrep, sem alocações.
+    /// CONTA todos os acertos de cada ficheiro, sem guardar texto nenhum.
+    /// Mais barato que o modo Content quando só interessa o total.
     CountOnly,
 }
 
-/// Recolhe os matches de UM ficheiro, com teto por ficheiro e teto global.
+/// Recolhe os matches de UM ficheiro, com tecto global (sem tecto por ficheiro).
 struct MatchSink<'a> {
     matcher: &'a RegexMatcher,
     matches: Vec<SearchMatch>,
@@ -214,13 +205,8 @@ struct MatchSink<'a> {
     matched_any: bool,
     /// Acertos contados em CountOnly (sem tecto, sem texto guardado).
     counted: usize,
-    /// A leitura deste ficheiro parou por causa do MAX_MATCHES_PER_FILE?
-    ///
-    /// Sem isto, `total_matches` de um ficheiro com 60 acertos era 10 — o
-    /// número LIMITADO, servido como se fosse o total. O modelo lia
-    /// "10 matches" e concluía que havia 10 usos (auditoria 2026-07-29).
-    /// Distinguir "acabou o ficheiro" de "acabou a cota" é o mínimo para o
-    /// número deixar de mentir.
+    /// A leitura deste ficheiro parou porque o `head_limit` global esgotou
+    /// a meio — não porque haja um tecto por ficheiro.
     capped: bool,
 }
 
@@ -237,11 +223,10 @@ impl Sink for MatchSink<'_> {
             self.matched_any = true;
             return Ok(true); // continua: o objectivo é o total real
         }
-        if self.matches.len() >= MAX_MATCHES_PER_FILE {
-            self.capped = true;
-            return Ok(false);
-        }
+        // Sem tecto por ficheiro (paridade Grep do cli-vaz). O único corte
+        // em modo content é o `head_limit` global (`remaining_global`).
         if self.remaining_global == 0 {
+            self.capped = true;
             return Ok(false);
         }
         let bytes = mat.bytes();
@@ -368,6 +353,12 @@ fn run_search_with_depth(
             capped_at_file_limit: sink.capped,
             matches: sink.matches,
         });
+        // Cortar a meio do ficheiro significa que ainda havia acertos — o
+        // `truncated` tem de o dizer mesmo quando este era o último da lista.
+        if sink.capped {
+            truncated = true;
+            break;
+        }
     }
 
     Ok((files, total_matches, truncated, skipped_too_large))
@@ -450,7 +441,8 @@ pub struct FileSearchResult {
     pub matches: Vec<SearchMatch>,
     /// Acertos DEVOLVIDOS, não acertos existentes. Ver `capped_at_file_limit`.
     pub total_matches: usize,
-    /// `true` quando a leitura parou no MAX_MATCHES_PER_FILE — há mais acertos
+    /// `true` quando a leitura parou porque o tecto GLOBAL esgotou a meio
+    /// deste ficheiro — há mais acertos
     /// neste ficheiro que ninguém contou. Quem formata tem de o dizer.
     #[serde(default)]
     pub capped_at_file_limit: bool,
@@ -483,8 +475,17 @@ pub struct SearchResult {
     pub skipped_too_large: usize,
 }
 
-/// Global hard cap on total matches to prevent IPC/UI explosion.
+/// Tecto quando `max_results` não vem (UI / replace). O agente envia sempre
+/// um número: default 250, `0` = sem tecto (`resolve_global_limit`).
 const GLOBAL_MAX_MATCHES: usize = 500;
+
+fn resolve_global_limit(max_results: Option<usize>) -> usize {
+    match max_results {
+        Some(0) => usize::MAX,
+        Some(m) => m,
+        None => GLOBAL_MAX_MATCHES,
+    }
+}
 /// Max line length sent to frontend (longer lines are truncated).
 const MAX_LINE_LENGTH: usize = 500;
 /// Max before/after context lines per match. Keeps agent/UI payloads bounded.
@@ -607,10 +608,10 @@ pub async fn search_in_files(
         }
     }
 
-    let global_limit = options
-        .max_results
-        .map(|m| m.min(GLOBAL_MAX_MATCHES))
-        .unwrap_or(GLOBAL_MAX_MATCHES);
+    // `max_results: 0` = sem tecto (paridade cli-vaz `head_limit=0`).
+    // Sem valor = o tecto de segurança da UI (500). O agente envia sempre
+    // um número (default 250).
+    let global_limit = resolve_global_limit(options.max_results);
 
     // O walk e a leitura são bloqueantes (I/O + CPU): fora da thread do
     // runtime, para não travar os outros comandos durante uma busca grande.
@@ -631,7 +632,7 @@ pub async fn search_in_files(
 
     if !truncated {
         if let Some(max) = max_results {
-            if total_matches >= max {
+            if max > 0 && total_matches >= max {
                 truncated = true;
             }
         }
@@ -1115,17 +1116,13 @@ mod tests {
         );
     }
 
-    /// O `outputMode: "count"` do agente tem de dar o total REAL.
-    ///
-    /// O modo Content corta em MAX_MATCHES_PER_FILE (10) e reportava esse 10
-    /// como `total_matches` — um ficheiro com 25 usos aparecia com 10 e o
-    /// modelo decidia com base nisso. CountOnly conta tudo, sem guardar texto.
+    /// Content já não tem tecto por ficheiro (paridade cli-vaz). CountOnly
+    /// continua a contar sem guardar texto.
     #[test]
-    fn count_only_reports_true_totals_above_the_per_file_cap() {
+    fn content_returns_all_hits_in_one_file_count_only_skips_text() {
         let dir = std::env::temp_dir().join(format!("tm_count_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // 25 acertos num único ficheiro — bem acima do tecto de 10.
         let body = (0..25)
             .map(|i| format!("let needle{} = 1;", i))
             .collect::<Vec<_>>()
@@ -1134,21 +1131,16 @@ mod tests {
         let root = canonicalize_path(&dir).unwrap();
         let root = root.as_path();
 
-        // Content: limitado a 10, e diz que ficou limitado.
         let (content_files, content_total, _, _) =
             run_search("needle", root, &opts(None), GLOBAL_MAX_MATCHES).unwrap();
         assert_eq!(content_files.len(), 1);
-        assert_eq!(
-            content_files[0].total_matches, MAX_MATCHES_PER_FILE,
-            "Content corta em 10 por ficheiro"
-        );
+        assert_eq!(content_files[0].total_matches, 25);
         assert!(
-            content_files[0].capped_at_file_limit,
-            "o corte tem de ser SINALIZADO — era isto que faltava"
+            !content_files[0].capped_at_file_limit,
+            "sem tecto por ficheiro, 25 < 500 não corta"
         );
-        assert_eq!(content_total, MAX_MATCHES_PER_FILE);
+        assert_eq!(content_total, 25);
 
-        // CountOnly: o total real.
         let mut counting = opts(None);
         counting.count_only = true;
         let (count_files, count_total, _, _) =
@@ -1169,7 +1161,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tm_paths_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // 30 acertos num so ficheiro — acima do teto de 10 por ficheiro.
+        // 30 acertos num só ficheiro — acima do antigo tecto de 10/ficheiro.
         std::fs::write(dir.join("many.ts"), "MARKER\n".repeat(30)).unwrap();
         let root = canonicalize_path(&dir).unwrap();
 
@@ -1188,10 +1180,44 @@ mod tests {
             "nao pode guardar texto de linhas"
         );
 
-        // O modo Content continua a devolver detalhe, com o teto por ficheiro.
         let (content, _, _, _) =
             run_search("MARKER", &root, &opts(None), GLOBAL_MAX_MATCHES).unwrap();
-        assert_eq!(content[0].matches.len(), MAX_MATCHES_PER_FILE);
+        assert_eq!(content[0].matches.len(), 30);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_global_limit_matches_cli_vaz() {
+        assert_eq!(resolve_global_limit(None), GLOBAL_MAX_MATCHES);
+        assert_eq!(resolve_global_limit(Some(250)), 250);
+        assert_eq!(resolve_global_limit(Some(0)), usize::MAX);
+        assert_eq!(resolve_global_limit(Some(10)), 10);
+    }
+
+    /// O único corte em content é o head_limit GLOBAL: 25 acertos com
+    /// limite 10 devolvem 10 e marcam o ficheiro como cortado a meio.
+    #[test]
+    fn content_global_head_limit_cuts_mid_file_not_at_ten() {
+        let dir = std::env::temp_dir().join(format!("tm_head_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.ts"), "needle\n".repeat(25)).unwrap();
+        let root = canonicalize_path(&dir).unwrap();
+
+        let (files, total, truncated, _) =
+            run_search("needle", &root, &opts(None), 10).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].matches.len(), 10);
+        assert_eq!(total, 10);
+        assert!(files[0].capped_at_file_limit);
+        assert!(truncated);
+
+        let (all_files, all_total, _, _) =
+            run_search("needle", &root, &opts(None), usize::MAX).unwrap();
+        assert_eq!(all_files[0].matches.len(), 25);
+        assert_eq!(all_total, 25);
+        assert!(!all_files[0].capped_at_file_limit);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

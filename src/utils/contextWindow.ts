@@ -406,3 +406,58 @@ export function calculateContextPercentages(
     remaining: 100 - clampedUsed,
   }
 }
+
+/**
+ * Números que o hover do pill mostra. Uma função para o indicador e os
+ * testes não inventarem denominadores diferentes (bruta vs. útil).
+ *
+ * `used` / `usedPct` / `free` são contra a janela ÚTIL — a mesma que pinta
+ * o círculo. A janela bruta do modelo fica em `rawWindow`; a reserva do
+ * sumário é `reserved`.
+ */
+export interface ContextOccupancyDetails {
+  used: number
+  prompt: number
+  response: number
+  peak: number
+  rawWindow: number
+  effective: number
+  reserved: number
+  threshold: number
+  usedPct: number
+  free: number
+  untilCompact: number
+  atThreshold: boolean
+  hasUsage: boolean
+}
+
+export function buildContextOccupancyDetails(input: {
+  promptTokens: number
+  responseTokens: number
+  peakTokens: number
+  rawWindow: number
+  maxOutputTokens?: number | null
+}): ContextOccupancyDetails {
+  const prompt = Math.max(0, input.promptTokens)
+  const response = Math.max(0, input.responseTokens)
+  const used = totalContextTokens(prompt, response)
+  const effective = getEffectiveContextWindowSize(input.rawWindow, input.maxOutputTokens)
+  const threshold = getAutoCompactThreshold(input.rawWindow, input.maxOutputTokens)
+  const reserved = Math.max(0, input.rawWindow - effective)
+  const usedPct = effective > 0 ? Math.min(100, Math.round((used / effective) * 100)) : 0
+  return {
+    used,
+    prompt,
+    response,
+    peak: Math.max(0, input.peakTokens),
+    rawWindow: input.rawWindow,
+    effective,
+    reserved,
+    threshold,
+    usedPct,
+    free: Math.max(0, effective - used),
+    untilCompact: Math.max(0, threshold - used),
+    atThreshold: used >= threshold && used > 0,
+    hasUsage: used > 0,
+  }
+}

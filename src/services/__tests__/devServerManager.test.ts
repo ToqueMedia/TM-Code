@@ -2,6 +2,8 @@ import {
   URL_REGEX_GLOBAL,
   PORT_REGEX,
   PORT_FAILURE_REGEX,
+  extractBlockedPort,
+  formatPortInUseMessage,
   commandLooksLikeWrapper,
   classifyProbedUrl,
   extractScriptName,
@@ -94,6 +96,36 @@ describe('PORT_FAILURE_REGEX', () => {
   it('does NOT match healthy startup lines', () => {
     expect(PORT_FAILURE_REGEX.test('Server ready at http://localhost:7773')).toBe(false)
     expect(PORT_FAILURE_REGEX.test('Listening on port 7777')).toBe(false)
+  })
+})
+
+describe('extractBlockedPort — EADDRINUSE port extraction', () => {
+  it('extracts the port from a Vite-style EADDRINUSE line', () => {
+    expect(extractBlockedPort('Error: listen EADDRINUSE: address already in use :::5173')).toBe(5173)
+  })
+
+  it('extracts the port from "address already in use"', () => {
+    expect(extractBlockedPort('Error: listen EADDRINUSE address already in use :::3000')).toBe(3000)
+  })
+
+  it('extracts the port from "EADDRINUSE: port N"', () => {
+    expect(extractBlockedPort('EADDRINUSE: port 8080 already in use')).toBe(8080)
+  })
+
+  it('returns null for a healthy startup line', () => {
+    expect(extractBlockedPort('Server ready at http://localhost:5173')).toBeNull()
+  })
+})
+
+describe('formatPortInUseMessage — user-facing port-in-use message', () => {
+  it('names the port and tells the user to free it or change it', () => {
+    const msg = formatPortInUseMessage(5173)
+    expect(msg).toContain('5173')
+    expect(msg).toContain('in use by another process')
+    // Does NOT claim any automatic recovery — the user must act.
+    expect(msg.toLowerCase()).not.toContain('killing')
+    expect(msg.toLowerCase()).not.toContain('restarting')
+    expect(msg).toContain('reopen the preview')
   })
 })
 

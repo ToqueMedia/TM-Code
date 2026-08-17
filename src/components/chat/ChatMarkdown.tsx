@@ -7,7 +7,7 @@
  *
  * O PORQUÊ da memoização vive nos comentários de cada componente abaixo.
  */
-import React, { memo, useCallback, useMemo, useState } from 'react'
+import { memo, useCallback, useMemo, useState, isValidElement, type ReactNode, type ReactElement, type MouseEvent, type ComponentProps } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
 import { FiCopy, FiCheck } from 'react-icons/fi'
 import ReactMarkdown from 'react-markdown'
@@ -46,7 +46,7 @@ function CopyButton({ code }: { code: string }) {
       transition="all 0.15s ease"
       _hover={{ bg: 'rgba(255,255,255,0.06)', color: tokens.colors.text.secondary, borderColor: 'rgba(255,255,255,0.14)', transform: 'translateY(-1px)' }}
       _active={{ transform: 'translateY(0) scale(0.98)' }}
-      onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleCopy() }}
+      onClick={(e: MouseEvent) => { e.stopPropagation(); handleCopy() }}
       aria-label={copied ? t('chat.copied') : t('chat.copy')}
     >
       {copied ? <FiCheck size={11} /> : <FiCopy size={11} />}
@@ -67,7 +67,7 @@ function CopyButton({ code }: { code: string }) {
  *  pelo render Prism (blocos estáveis) e pelo render plano (fence em
  *  CRESCIMENTO na cauda do streaming), para a transição plain→colorido não
  *  saltar um pixel. */
-function CodeFrame({ language, code, children }: { language: string; code: string; children: React.ReactNode }) {
+function CodeFrame({ language, code, children }: { language: string; code: string; children: ReactNode }) {
   return (
     <Box
       borderRadius="12px"
@@ -157,7 +157,82 @@ function PlainFencedCode({ language, code }: { language: string; code: string })
   )
 }
 
-export const markdownComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
+/**
+ * Texto plano de um nó React (filhos do blockquote). Sem isto o clipboard
+ * levaria o DOM — e a barra vermelha entra na selecção do browser.
+ */
+export function plainTextFromNode(node: ReactNode): string {
+  if (node == null || typeof node === 'boolean') return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(plainTextFromNode).join('')
+  if (isValidElement(node)) {
+    const el = node as ReactElement<{ children?: ReactNode }>
+    const inner = plainTextFromNode(el.props.children)
+    const type = el.type
+    if (type === 'br') return '\n'
+    if (type === 'p' || type === 'div' || type === 'li') return inner.replace(/\s*$/, '\n')
+    return inner
+  }
+  return ''
+}
+
+function QuoteBlock({ children }: { children?: ReactNode }) {
+  const text = useMemo(
+    () => plainTextFromNode(children).replace(/\n{3,}/g, '\n\n').trim(),
+    [children],
+  )
+  return (
+    <Box as="blockquote" position="relative" pr="36px">
+      {text ? (
+        <Box
+          position="absolute"
+          top="2px"
+          right="0"
+          userSelect="none"
+        >
+          <QuoteCopyButton text={text} />
+        </Box>
+      ) : null}
+      {children}
+    </Box>
+  )
+}
+
+function QuoteCopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(text).catch(() => {})
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }, [text])
+  return (
+    <Box
+      as="button"
+      display="flex"
+      alignItems="center"
+      justifyContent="center"
+      w="22px"
+      h="22px"
+      borderRadius="5px"
+      bg="transparent"
+      color={copied ? tokens.colors.accent.green : tokens.colors.text.disabled}
+      cursor="pointer"
+      opacity={0.55}
+      transition="all 0.15s"
+      _hover={{ opacity: 1, bg: 'rgba(255,255,255,0.06)', color: tokens.colors.text.secondary }}
+      onClick={(e: MouseEvent) => { e.stopPropagation(); handleCopy() }}
+      aria-label={copied ? t('chat.copied') : t('chat.copy')}
+      title={copied ? t('chat.copied') : t('chat.copy')}
+    >
+      {copied ? <FiCheck size={12} /> : <FiCopy size={12} />}
+    </Box>
+  )
+}
+
+export const markdownComponents: ComponentProps<typeof ReactMarkdown>['components'] = {
+  blockquote({ children }) {
+    return <QuoteBlock>{children}</QuoteBlock>
+  },
   code({ className, children, ...props }) {
     const match = /language-(\w+)/.exec(className || '')
     const codeString = String(children).replace(/\n$/, '')
@@ -240,7 +315,10 @@ export function splitMarkdownForStreaming(text: string): { stable: string[]; tai
 }
 
 /** Componentes da CAUDA: fences renderizam planos (sem tokenização). */
-const streamingTailComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
+const streamingTailComponents: ComponentProps<typeof ReactMarkdown>['components'] = {
+  blockquote({ children }) {
+    return <QuoteBlock>{children}</QuoteBlock>
+  },
   code({ className, children, ...props }) {
     const match = /language-(\w+)/.exec(className || '')
     const codeString = String(children).replace(/\n$/, '')

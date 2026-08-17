@@ -64,6 +64,7 @@ function resetStore() {
     isStreaming: false,
     isLoadingSession: false,
     streamingMessageId: null,
+    streamingSessionId: null,
     error: null,
     conversationHistory: [],
     currentTurnCount: 0,
@@ -699,9 +700,20 @@ describe('ocupação do contexto: real vs estimativa', () => {
     useChatStore.getState().addEstimatedTokenUsage(40_000, 800, true)
     expect(useChatStore.getState().sessions.get(sessionId)?.lastPromptTokens).toBe(98_000)
 
-    // Acima do real: aí sim, é informação nova.
+    // Acima do real TAMBÉM não mexe: o acumulador do run não é ocupação.
+    // Medido no export 2026-08-14-14-36-54 — o pill ia a vermelho (limiar)
+    // e o autoCompact lia 140k e não compactava.
     useChatStore.getState().addEstimatedTokenUsage(101_000, 900, true)
-    expect(useChatStore.getState().sessions.get(sessionId)?.lastPromptTokens).toBe(101_000)
+    expect(useChatStore.getState().sessions.get(sessionId)?.lastPromptTokens).toBe(98_000)
+  })
+
+  it('estimativa a 235k não pinta limiar quando o real é 140k', () => {
+    const store = useChatStore.getState()
+    const sessionId = store.createSession('/test/project')
+    useChatStore.setState({ activeSessionId: sessionId, streamingSessionId: sessionId })
+    useChatStore.getState().addTokenUsage(140_060, 866, true)
+    useChatStore.getState().addEstimatedTokenUsage(235_000, 7_000, true)
+    expect(useChatStore.getState().sessions.get(sessionId)?.lastPromptTokens).toBe(140_060)
   })
 
   it('o usage REAL manda sempre, mesmo para baixo (o histórico encolheu)', () => {

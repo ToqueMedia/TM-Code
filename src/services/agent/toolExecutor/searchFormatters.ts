@@ -1,9 +1,20 @@
+/** Paridade cli-vaz `DEFAULT_HEAD_LIMIT`. `0` = sem tecto. */
+export const GREP_DEFAULT_HEAD_LIMIT = 250
+
+/** Resolve maxResults/head_limit: default 250, 0 = unlimited. */
+export function resolveGrepHeadLimit(raw: unknown): number {
+  if (raw === 0 || raw === '0') return 0
+  const n = typeof raw === 'number' ? raw : Number(raw)
+  if (Number.isFinite(n) && n > 0) return Math.floor(n)
+  return GREP_DEFAULT_HEAD_LIMIT
+}
+
 /**
  * Modos compactos do search (outputMode files_with_matches | count) —
  * auditoria 2026-07-28, paridade com o Grep do claude-vaz.
  *
- * Uma linha por FICHEIRO é o que torna honesto varrer até ao teto global do
- * Rust (500 matches) sem inundar o contexto; o modo content não conseguiria.
+ * Uma linha por FICHEIRO é o que torna honesto varrer até ao head_limit
+ * global (default 250; 0 = sem tecto) sem inundar o contexto.
  *
  * Módulo puro (sem Tauri/React/stores) — o padrão editLiteralReplace: produção
  * e testes importam daqui, e o teste não precisa da mock-suite do executor.
@@ -23,21 +34,19 @@ export function formatSearchResultsByFile(result: unknown, mode: 'files_with_mat
     total += count
     lines.push(mode === 'count' ? `${filePath}: ${count}` : filePath)
   }
-  // `count` recebe agora os totais REAIS do Rust (SearchDepth::CountOnly, sem
-  // tecto por ficheiro). Antes lia o `total_matches` do modo Content — já
-  // limitado a 10 por ficheiro — e um ficheiro com 60 usos aparecia com 10.
-  // O `capped_at_file_limit` fica como rede: se algum dia voltar a chegar
-  // limitado, o resultado di-lo em vez de o esconder.
+  // `count` recebe os totais REAIS do Rust (SearchDepth::CountOnly).
+  // `capped_at_file_limit` agora significa: o head_limit GLOBAL esgotou a
+  // meio deste ficheiro — já não há tecto de 10 por ficheiro.
   const capped = files.filter((f) => f.capped_at_file_limit === true).length
   const header = mode === 'count'
     ? `${total} match${total === 1 ? '' : 'es'} across ${files.length} file${files.length === 1 ? '' : 's'} (true totals):`
     : `${files.length} file${files.length === 1 ? '' : 's'} with matches:`
   const footer = [
     truncated
-      ? `\n[truncated at the global match cap — narrow the query or includePatterns to see the rest]`
+      ? `\n[truncated at the global match cap — raise maxResults/head_limit (0 = unlimited) or narrow the query]`
       : '',
     capped > 0
-      ? `\n[${capped} file${capped === 1 ? '' : 's'} hit the per-file cap: the counts above are what was returned, not what exists]`
+      ? `\n[${capped} file${capped === 1 ? '' : 's'} were cut mid-file by the global head_limit — the counts above are what was returned, not what exists]`
       : '',
     typeof obj.skipped_too_large === 'number' && obj.skipped_too_large > 0
       ? `\n[${obj.skipped_too_large} file(s) over 1 MB were NOT searched (size cap) — read them directly if the answer could live in a bundle or generated file]`

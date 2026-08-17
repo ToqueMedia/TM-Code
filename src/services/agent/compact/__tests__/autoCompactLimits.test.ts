@@ -140,6 +140,26 @@ describe('shouldAutoCompact — real window limits', () => {
     expect(shouldAutoCompact([msgOfTokens(50_000)], 0, limits)).toBe(false)
   })
 
+  it('um "continue" depois de Stop soma só o follow-up ao real — não recomeça o prato', () => {
+    const threshold = getAutoCompactThreshold(262_144, 16_384)
+    const lastReal = 145_608 + 1_039
+    expect(lastReal).toBeLessThan(threshold)
+    const history = [msgOfTokens(400_000)]
+    const afterContinue = [...history, { role: 'user' as const, content: 'continue' }]
+    const limits: AutoCompactLimits = {
+      contextWindow: 262_144,
+      maxOutputTokens: 16_384,
+      realOccupancyTokens: lastReal,
+      realOccupancyMessageCount: history.length,
+    }
+    expect(shouldAutoCompact(afterContinue, 0, limits)).toBe(false)
+    // Sem âncora, o estimador do histórico sozinho já passava o limiar.
+    expect(shouldAutoCompact(afterContinue, 0, {
+      contextWindow: 262_144,
+      maxOutputTokens: 16_384,
+    })).toBe(true)
+  })
+
   it('threshold respects the real window: a 1M model tolerates far more than a 200K one', () => {
     const messages = [msgOfTokens(300_000)]
     expect(shouldAutoCompact(messages, 0, { contextWindow: 200_000, maxOutputTokens: 16_384 })).toBe(true)

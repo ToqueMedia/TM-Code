@@ -13,6 +13,7 @@
 
 import type OpenAI from 'openai'
 import type { ContentBlockAPI, RequestUsageEntry } from '../../types/chat'
+import { resolveSeedMessageCount } from '../../utils/sessionOccupancy'
 import {
   query,
   type QueryMessage,
@@ -95,6 +96,12 @@ export interface QueryEngineOptions {
   ) => Promise<QueuedSteeringContent | null>
   /** Live active-model limits for auto-compact — see QueryParams.getContextLimits. */
   getContextLimits?: () => { contextWindow: number | null; maxOutputTokens: number | null }
+  /**
+   * Última ocupação REAL desta conversa. Um follow-up ("continue") depois
+   * de Stop é a mesma conversa — ver QueryParams.initialRealOccupancyTokens.
+   */
+  initialRealOccupancyTokens?: number | null
+  initialRealOccupancyMessageCount?: number | null
   /** Arquivo do transcript pré-compactação — ver QueryParams.archivePreCompact. */
   archivePreCompact?: (older: { role: 'user' | 'assistant'; content: unknown }[]) => Promise<string | null>
   /** Recuperação do estado de trabalho pós-compactação — ver QueryParams.buildPostCompactRecovery. */
@@ -199,8 +206,21 @@ export class QueryEngine {
       content: userMessage as string | ContentBlockAPI[],
     })
 
+    // O histórico É o prato. Sem contagem persistida, a âncora cobre esse
+    // prefixo e só a mensagem nova (o "continue") passa pelo estimador.
+    const hasPlate = conversationHistory.length > 0
+    const seededTokens = hasPlate ? this.options.initialRealOccupancyTokens : undefined
+    const seededCount = typeof seededTokens === 'number' && seededTokens > 0
+      ? resolveSeedMessageCount(
+          this.options.initialRealOccupancyMessageCount,
+          conversationHistory.length,
+        )
+      : undefined
+
     const params: QueryParams = {
       messages,
+      initialRealOccupancyTokens: seededTokens,
+      initialRealOccupancyMessageCount: seededCount,
       systemPrompt: this.options.systemPrompt,
       getSystemPrompt: this.options.getSystemPrompt,
       getExtraHeaders: this.options.getExtraHeaders,
@@ -265,8 +285,14 @@ export class QueryEngine {
     parent: QueryEngine,
     overrides: Partial<QueryEngineOptions>,
   ): QueryEngine {
+    // Sub-agentes têm o seu próprio histórico — não herdam o prato do main.
+    const {
+      initialRealOccupancyTokens: _parentOccupancy,
+      initialRealOccupancyMessageCount: _parentOccupancyCount,
+      ...parentOpts
+    } = parent.options
     return new QueryEngine({
-      ...parent.options,
+      ...parentOpts,
       ...overrides,
     })
   }

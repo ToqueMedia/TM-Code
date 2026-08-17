@@ -182,6 +182,13 @@ export interface ToolCallDisplay {
   isNewFile?: boolean
   diffStatus?: 'pending' | 'approved' | 'denied'
   diffResultId?: string
+  /**
+   * Linhas +N / −M do diff. Sobrevivem ao strip do conteúdo (aprovado /
+   * recusado) para o header compacto continuar a mostrar os números depois
+   * de reabrir o projecto.
+   */
+  diffAdded?: number
+  diffRemoved?: number
   /** Live progress text shown while tool is running (e.g., sub-agent status). */
   progressText?: string
   /** Accumulated log output from streaming commands (build, test, install, scripts).
@@ -496,6 +503,17 @@ export interface ChatSession {
    *  a char-based estimate from the message history. */
   lastPromptTokens?: number
   lastResponseTokens?: number
+  /**
+   * true quando `lastPromptTokens` veio de usage do provider. A estimativa
+   * do run não pode voltar a escrever o campo — o acumulador cresce acima
+   * do real e o pill ficava vermelho enquanto o autoCompact não disparava
+   * (export 2026-08-14-14-36-54).
+   */
+  lastPromptFromUsage?: boolean
+  /** Snapshot do último turno — persistido no JSON. O load lê daqui quando
+   *  `lastPromptTokens` não veio no ficheiro (campo que durante muito tempo
+   *  só existia em memória). */
+  lastTurnSnapshot?: SessionTurnSnapshot
   /** Maior prompt já visto nesta sessão. Existe SÓ como informação secundária
    *  no tooltip do pill — nunca como o valor que desenha a barra.
    *
@@ -1002,6 +1020,9 @@ export interface PersistedSession {
   context?: SessionContext
   tokenUsage?: SessionTokenUsage
   lastTurnSnapshot?: SessionTurnSnapshot
+  lastPromptTokens?: number
+  lastResponseTokens?: number
+  peakPromptTokens?: number
   byokSnapshot?: ByokSessionSnapshot | null
   sessionMemory?: string
   planResumePending?: PlanResumePending | null

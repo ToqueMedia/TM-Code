@@ -198,6 +198,7 @@ export default function DiffApprovalPanel() {
             newContent={selected.newContent}
             isNewFile={selected.isNewFile}
             status="pending"
+            hideHeader
           />
         </Box>
       </Flex>

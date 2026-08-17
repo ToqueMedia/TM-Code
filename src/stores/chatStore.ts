@@ -10,7 +10,7 @@ import { usePermissionStore } from './permissionStore'
 import { useToastStore } from './toastStore'
 import { getPersonaFallbackModelId } from './activeModelStore'
 import { useReasoningEffortStore } from './reasoningEffortStore'
-import { resolveEffortModelId, resolveEffortTurnStamp } from '../services/agent/reasoningEffortModels'
+import { currentPublishedEffortOptions, resolveEffortModelId, resolveEffortTurnStamp } from '../services/agent/reasoningEffortModels'
 import { clearCommandQueue as clearMessageQueue } from '../services/agent/messageQueue'
 import { clearMentionContextTracker } from '../services/agent/mentionContextTracker'
 import { endWriteBatch } from '../services/agent/writeBatch'
@@ -18,6 +18,8 @@ export { clearMessageQueue }
 import { setQueueLogContext } from '../services/agent/queueOperationLog'
 import { logger } from '../utils/logger'
 import { t } from '../i18n'
+import { countDiffLineStats } from '../utils/diffStats'
+import { resolveSessionOccupancy, withResolvedOccupancy } from '../utils/sessionOccupancy'
 
 interface ChatState {
   sessions: Map<string, ChatSession>
@@ -431,38 +433,8 @@ export function generateId(prefix: string): string {
  *     real usage header replaces the estimate.
  */
 function hydrateTokenCountsFromSession(session: ChatSession): { promptTokens: number; responseTokens: number } {
-  if (typeof session.lastPromptTokens === 'number' && session.lastPromptTokens >= 0) {
-    return {
-      promptTokens: session.lastPromptTokens,
-      responseTokens: session.lastResponseTokens ?? 0,
-    }
-  }
-  // Legacy fallback — empty session shows 0%, non-empty shows an estimate.
-  if (!session.messages || session.messages.length === 0) {
-    return { promptTokens: 0, responseTokens: 0 }
-  }
-  let totalChars = 0
-  for (const msg of session.messages) {
-    const content: unknown = msg.content
-    if (typeof content === 'string') {
-      totalChars += content.length
-    } else if (Array.isArray(content)) {
-      for (const part of content as Array<{ type: string; text?: string }>) {
-        if (part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string') {
-          totalChars += part.text.length
-        }
-      }
-    }
-    if (msg.contentBlocks) {
-      for (const block of msg.contentBlocks) {
-        if (block.type === 'text' || block.type === 'reasoning') {
-          totalChars += block.text.length
-        }
-      }
-    }
-  }
-  const estimate = Math.round(totalChars / 4)
-  return { promptTokens: estimate, responseTokens: 0 }
+  const occ = resolveSessionOccupancy(session)
+  return { promptTokens: occ.promptTokens, responseTokens: occ.responseTokens }
 }
 
 // === Project-scope epoch ===
@@ -1211,17 +1183,22 @@ function userMessageToContentParts(msg: ChatMessage): ContentPart[] | null {
         }
       } else {
         const att = block.attachment
-        if (att.type === 'image' && att.base64) {
-          parts.push({ type: 'image_url', image_url: { url: att.base64 } })
+        // Prefer the block's own base64; if persist stripped it, reuse the
+        // sibling `attachments[]` entry that rehydrateSessionImages patched.
+        const dataUri = att.base64 || msg.attachments?.find(a => a.id === att.id)?.base64
+        if (att.type === 'image' && dataUri) {
+          parts.push({ type: 'image_url', image_url: { url: dataUri } })
           hasImage = true
         }
       }
     }
-    if (!hasImage) return null
-    if (!hasNonEmptyText) {
-      parts.unshift({ type: 'text', text: t('prompt.fallbackAnalyzeImages') })
+    if (hasImage) {
+      if (!hasNonEmptyText) {
+        parts.unshift({ type: 'text', text: t('prompt.fallbackAnalyzeImages') })
+      }
+      return parts
     }
-    return parts
+    // Blocks exist but no image survived — fall through to attachments[].
   }
 
   // === Fallback path ===
@@ -1680,12 +1657,16 @@ async function rehydrateSessionImages(sessionId: string): Promise<void> {
       const messages = sess.messages.map(m => {
         if (m.role !== 'user' || !m.attachments?.length) return m
         let changed = false
-        const attachments = m.attachments.map(a => {
+        const patch = (a: Attachment): Attachment => {
           const b64 = resolved.get(a.id)
           if (b64 && !a.base64) { changed = true; return { ...a, base64: b64 } }
           return a
-        })
-        return changed ? { ...m, attachments } : m
+        }
+        const attachments = m.attachments.map(patch)
+        const promptBlocks = m.promptBlocks?.map(b =>
+          b.type === 'attachment' ? { ...b, attachment: patch(b.attachment) } : b,
+        )
+        return changed ? { ...m, attachments, ...(promptBlocks ? { promptBlocks } : {}) } : m
       })
       const sessions = new Map(s.sessions)
       sessions.set(sessionId, { ...sess, messages })
@@ -1712,16 +1693,30 @@ async function rehydrateSessionImages(sessionId: string): Promise<void> {
  *
  * TECTO E NÃO CORTE CEGO: só se liberta acima de 200 KB combinados. A esmagadora
  * maioria dos ficheiros fica muito abaixo disso e mantém o cartão de diff
- * intacto; só os grandes é que degradam. `hasDiff` em ToolCallDisplay testa
- * `diffNewContent !== undefined`, portanto um diff libertado cai na linha
- * normal de tool call — degradação graciosa, sem crash.
+ * intacto; só os grandes é que degradam. As contagens `diffAdded` /
+ * `diffRemoved` ficam no tool call para o header compacto sobreviver.
  */
 const MAX_RETAINED_DIFF_CHARS = 200_000
 
-function releaseResolvedDiff<T extends { diffOldContent?: string; diffNewContent?: string }>(tc: T): T {
+function releaseResolvedDiff<T extends {
+  diffOldContent?: string
+  diffNewContent?: string
+  isNewFile?: boolean
+  diffAdded?: number
+  diffRemoved?: number
+}>(tc: T): T {
   const size = (tc.diffOldContent?.length ?? 0) + (tc.diffNewContent?.length ?? 0)
   if (size <= MAX_RETAINED_DIFF_CHARS) return tc
   const next = { ...tc }
+  if (next.diffAdded === undefined && next.diffRemoved === undefined) {
+    const stats = countDiffLineStats(
+      next.diffOldContent || '',
+      next.diffNewContent || '',
+      next.isNewFile === true,
+    )
+    next.diffAdded = stats.added
+    next.diffRemoved = stats.removed
+  }
   delete next.diffOldContent
   delete next.diffNewContent
   return next
@@ -1763,14 +1758,19 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     // PRÉ-compactação — reabrir a sessão devolvia o pico de uma conversa que
     // já não existe, que é o sintoma que addCompactBoundaryMessage corrigiu em
     // memória (auditoria 06-08, a entrar pela porta da persistência).
-    const livePrompt = active?.lastPromptTokens ?? c.currentPromptTokens
-    const liveResponse = active?.lastResponseTokens ?? c.currentResponseTokens
-    if (livePrompt === 0 && liveResponse === 0 && a.modelContextWindow == null) {
+    // NUNCA cair em `currentPromptTokens`. Esse campo é um máximo do
+    // processo (Math.max entre sessões no caminho do Chat) e foi o que
+    // pôs o pill a 0% com 85k de ocupação real (export 2026-08-14: store
+    // 401 657 contra limiar 229 144 duma janela de 256k). Sem valor na
+    // sessão, o snapshot JÁ persistido é a única fonte honesta.
+    const occ = resolveSessionOccupancy(active)
+    const hasLiveOccupancy = occ.source !== 'empty'
+    if (!hasLiveOccupancy && a.modelContextWindow == null) {
       return persisted
     }
     return {
-      promptTokens: livePrompt ?? persisted?.promptTokens ?? 0,
-      responseTokens: liveResponse ?? persisted?.responseTokens ?? 0,
+      promptTokens: hasLiveOccupancy ? occ.promptTokens : (persisted?.promptTokens ?? 0),
+      responseTokens: hasLiveOccupancy ? occ.responseTokens : (persisted?.responseTokens ?? 0),
       // Só quando existe: um `peakPromptTokens: 0` em cada snapshot é ruído no
       // ficheiro, e a ausência já significa "sem pico" para o tooltip.
       ...(() => {
@@ -1988,6 +1988,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           useAgentStore.getState().modelName,
         ),
         useReasoningEffortStore.getState().selected,
+        currentPublishedEffortOptions(),
       )
       const message: ChatMessage = {
         id: messageId,
@@ -2095,7 +2096,25 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       // counts; fall back to a char-based estimate for legacy sessions
       // saved before v0.6.2 (no lastPromptTokens field on disk).
       const hydrated = session ? hydrateTokenCountsFromSession(session) : null
-      set({
+      const occ = session ? resolveSessionOccupancy(session) : null
+      const needsStamp = !!(session && occ && (
+        session.lastPromptTokens !== occ.promptTokens
+        || session.lastResponseTokens !== occ.responseTokens
+        || session.peakPromptTokens !== occ.peakTokens
+      ))
+      set((state) => {
+        let sessions = state.sessions
+        if (needsStamp && session && occ) {
+          sessions = new Map(state.sessions)
+          sessions.set(sessionId, {
+            ...session,
+            lastPromptTokens: occ.promptTokens,
+            lastResponseTokens: occ.responseTokens,
+            peakPromptTokens: occ.peakTokens,
+          })
+        }
+        return {
+        sessions,
         activeSessionId: sessionId,
         // Keep the model-facing history in lock-step with the visible session.
         // Historically switches only happened via disk loads (which rebuild)
@@ -2112,6 +2131,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         draftInput: '',
         draftAttachments: [],
         planResumePending: session?.planResumePending ?? null,
+        }
       })
       // Re-scope the queue log to the newly-active session.
       if (session) setQueueLogContext(session.projectPath, sessionId)
@@ -2323,11 +2343,17 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         const target = session.messages[idx]
         if (!target.attachments?.length) return state
 
-        const attachments = target.attachments.map(a =>
-          paths[a.id] && !a.path ? { ...a, path: paths[a.id] } : a,
+        const stamp = (a: Attachment): Attachment =>
+          paths[a.id] && !a.path ? { ...a, path: paths[a.id] } : a
+        const attachments = target.attachments.map(stamp)
+        // promptBlocks carry their own attachment copies — stamping only
+        // `attachments` left the block path empty, so rebuild preferred the
+        // block path and dropped the cached file after reload.
+        const promptBlocks = target.promptBlocks?.map(b =>
+          b.type === 'attachment' ? { ...b, attachment: stamp(b.attachment) } : b,
         )
         const messages = [...session.messages]
-        messages[idx] = { ...target, attachments }
+        messages[idx] = { ...target, attachments, ...(promptBlocks ? { promptBlocks } : {}) }
 
         const updatedSessions = new Map(sessions)
         updatedSessions.set(activeSessionId, { ...session, messages, updatedAt: Date.now() })
@@ -2677,6 +2703,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           lastPromptTokens: 0,
           lastResponseTokens: 0,
           peakPromptTokens: 0,
+          lastPromptFromUsage: true,
           updatedAt: Date.now(),
         }
 
@@ -3167,6 +3194,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             let diffStatus: 'pending' | 'approved' | 'denied' | undefined
             let diffResultId: string | undefined
             let diffPath: string | undefined
+            let diffAdded: number | undefined
+            let diffRemoved: number | undefined
 
             try {
               const parsed = JSON.parse(result)
@@ -3175,6 +3204,13 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
                 diffOldContent = parsed.oldContent
                 diffNewContent = parsed.newContent
                 isNewFile = parsed.isNewFile
+                const stats = countDiffLineStats(
+                  parsed.oldContent || '',
+                  parsed.newContent || '',
+                  parsed.isNewFile === true,
+                )
+                diffAdded = stats.added
+                diffRemoved = stats.removed
                 // Cwd-scoped execution writes directly to disk and marks the diff as
                 // alreadyApplied — skip the approval queue entirely. Project
                 // diff flow starts pending and waits for user approval.
@@ -3232,6 +3268,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
                 isNewFile: isNewFile ?? false,
                 // O conteúdo vive em diffOldContent/diffNewContent.
                 contentInDiffFields: true,
+                added: diffAdded ?? 0,
+                removed: diffRemoved ?? 0,
               })
               : result
 
@@ -3246,6 +3284,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
               ...(isNewFile !== undefined && { isNewFile }),
               ...(diffStatus !== undefined && { diffStatus }),
               ...(diffResultId !== undefined && { diffResultId }),
+              ...(diffAdded !== undefined && { diffAdded }),
+              ...(diffRemoved !== undefined && { diffRemoved }),
             }
             break
           }
@@ -3817,6 +3857,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
               lastPromptTokens: 0,
               lastResponseTokens: 0,
               peakPromptTokens: 0,
+              lastPromptFromUsage: true,
             })
           }
         }
@@ -3838,10 +3879,6 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       }
 
       set(state => {
-        const nextPrompt =
-          inputTokens > 0
-            ? Math.max(state.currentPromptTokens, Math.ceil(inputTokens))
-            : state.currentPromptTokens
         const nextResponse =
           outputTokens > 0
             ? Math.max(state.currentResponseTokens, Math.ceil(outputTokens))
@@ -3863,44 +3900,18 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         if (isForeground && targetSessionId && (estimateForSession > 0 || nextResponse > 0)) {
           const active = state.sessions.get(targetSessionId)
           if (active) {
+            // Com usage real no campo, a estimativa NÃO mexe. O acumulador do
+            // run cresce acima do prompt_tokens (raciocínio + deltas) e o
+            // Math.max pintava o pill a vermelho (limiar) enquanto o
+            // autoCompact lia o real e não compactava.
+            const lockedToUsage = active.lastPromptFromUsage === true
             nextSessions = new Map(state.sessions)
             nextSessions.set(targetSessionId, {
               ...active,
-              // O pico NÃO se mexe por estimativa: é irreversível até à
-              // próxima compactação, e uma estimativa alta fixava um pico que
-              // nunca existiu. Só usage REAL o move (auditoria 06-08).
-              //
-              // ── CAUSA RAIZ do pill a balançar (2026-08-07) ────────────────
-              // `estimateForSession` e `lastPromptTokens` são GRANDEZAS
-              // DIFERENTES e estavam a partilhar o mesmo campo:
-              //
-              //   lastPromptTokens  = tamanho REAL do último prompt enviado —
-              //                       a conversa TODA (98K, p.ex.)
-              //   estimateForSession = acumulador do mainDispatch que arranca
-              //                       em ZERO a cada run e conta só os deltas
-              //                       DESTE run (~2K nos primeiros chunks)
-              //
-              // Consequência, a cada mensagem nova: o real ficava em 98K (86%),
-              // o primeiro delta estimado escrevia 2K e a barra CAÍA para 2%,
-              // subia enquanto os deltas acumulavam, e SALTAVA de volta aos 86%
-              // quando o usage real aterrava no message_stop. Era o "vai para a
-              // frente e recua" — e explica porque é que o requestUsageLog
-              // (só valores reais) crescia monotonicamente enquanto a barra
-              // dançava: os dados nunca estiveram errados, o campo é que tinha
-              // dois donos.
-              //
-              // MONÓTONO por sessão: a ocupação de um prompt só desce quando o
-              // histórico encolhe, e as DUAS quedas legítimas — auto-compactação
-              // e reset manual — já põem este campo a 0 explicitamente (ver
-              // `lastPromptTokens: 0` nos dois sítios). Nada mais tem razão para
-              // o baixar, e uma estimativa parcial de um run novo é exactamente
-              // o que nunca deve baixá-lo.
-              ...(estimateForSession > 0
+              ...(!lockedToUsage && estimateForSession > 0
                 ? {
-                    lastPromptTokens: Math.max(
-                      active.lastPromptTokens ?? 0,
-                      estimateForSession,
-                    ),
+                    lastPromptTokens: estimateForSession,
+                    lastPromptFromUsage: false,
                   }
                 : {}),
               lastResponseTokens: nextResponse,
@@ -3909,8 +3920,15 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           }
         }
 
+        const sessionPrompt = targetSessionId
+          ? nextSessions.get(targetSessionId)?.lastPromptTokens
+          : undefined
         return {
-          currentPromptTokens: nextPrompt,
+          currentPromptTokens: isForeground && typeof sessionPrompt === 'number'
+            ? sessionPrompt
+            : isForeground && inputTokens > 0
+              ? Math.max(state.currentPromptTokens, Math.ceil(inputTokens))
+              : state.currentPromptTokens,
           currentResponseTokens: nextResponse,
           sessions: nextSessions,
         }
@@ -3991,8 +4009,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       // unconditionally.
       set(state => {
         const nextPrompt =
-          input > 0
-            ? Math.max(state.currentPromptTokens, input)
+          isForeground && input > 0
+            ? input
             : state.currentPromptTokens
         const nextResponse = output
         // The ctx pill reads `lastPromptTokens`/`lastResponseTokens` and
@@ -4034,6 +4052,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
               ...(input > 0
                 ? {
                     lastPromptTokens: input,
+                    lastPromptFromUsage: true,
                     peakPromptTokens: Math.max(active.peakPromptTokens ?? 0, input),
                   }
                 : {}),
@@ -4257,28 +4276,11 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         // Read persisted token snapshot before the set() so we can restore
         // the indicator state in one shot rather than firing a second update
         // (the bar would otherwise tween from 0% on every session open).
-        const snapshot = (session as ChatSession & { lastTurnSnapshot?: import('../types/chat').SessionTurnSnapshot }).lastTurnSnapshot ?? null
+        const snapshot = session.lastTurnSnapshot ?? null
 
-        // Mirror the snapshot values onto the session record itself so the
-        // ContextWindowIndicator's fallback (currentPromptTokens === 0 →
-        // session.lastPromptTokens) works on the very first turn after load.
-        // Without this, `resetTokenUsage` (fired by agentRunner at the start
-        // of every new request) zeros currentPromptTokens, the fallback hits
-        // an undefined session field, and the pill collapses to 0% until the
-        // new turn's message_start lands — the exact symptom reported on a
-        // freshly-opened session with history.
-        const sessionWithTokens: ChatSession =
-          snapshot
-            ? {
-                ...session,
-                lastPromptTokens: snapshot.promptTokens,
-                lastResponseTokens: snapshot.responseTokens,
-                // Sessões gravadas antes de 2026-08-05 não têm pico: o campo
-                // fica indefinido e a linha do tooltip apenas não aparece —
-                // preferível a inventar um pico a partir da ocupação.
-                peakPromptTokens: snapshot.peakPromptTokens,
-              }
-            : session
+        // lastPromptTokens quase nunca vinha no JSON — só o lastTurnSnapshot
+        // e o requestUsageLog. Sem isto o pill lia 0 ao reabrir o projecto.
+        const sessionWithTokens = withResolvedOccupancy(session)
 
         set(() => {
           // Only keep the loaded session in memory to avoid unbounded growth
@@ -4290,8 +4292,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             conversationHistory,
             currentTurnCount: 0,
             totalTokensUsed: { input: 0, output: 0 },
-            currentPromptTokens: snapshot?.promptTokens ?? 0,
-            currentResponseTokens: snapshot?.responseTokens ?? 0,
+            currentPromptTokens: sessionWithTokens.lastPromptTokens ?? 0,
+            currentResponseTokens: sessionWithTokens.lastResponseTokens ?? 0,
             pendingDiffs: [],
             planResumePending: sessionWithTokens.planResumePending ?? null,
           }
@@ -4380,23 +4382,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         // out of the persisted snapshot so the ContextWindowIndicator
         // doesn't flash 0% on the boot path (which goes through
         // restoreLastSession from App.tsx, NOT loadSessionFromDisk).
-        const bootSnapshot = (session as ChatSession & { lastTurnSnapshot?: import('../types/chat').SessionTurnSnapshot }).lastTurnSnapshot ?? null
-
-        const restoredSession: ChatSession =
-          bootSnapshot
-            ? {
-                ...session,
-                lastPromptTokens: bootSnapshot.promptTokens,
-                lastResponseTokens: bootSnapshot.responseTokens,
-                // Faltava — e o caminho de ARRANQUE é este, não o
-                // loadSessionFromDisk. Sem isto o pico ficava `undefined` a
-                // cada reinício, o primeiro addTokenUsage punha-o igual à
-                // ocupação, e o getter regravava esse valor: o pico da sessão
-                // perdia-se em silêncio sempre que a app reiniciava
-                // (auditoria 06-08).
-                peakPromptTokens: bootSnapshot.peakPromptTokens,
-              }
-            : session
+        const bootSnapshot = session.lastTurnSnapshot ?? null
+        const restoredSession = withResolvedOccupancy(session)
 
         set((prev) => {
           // F2 MDI: merge the restored project session ON TOP of any parked
@@ -4411,8 +4398,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
             conversationHistory,
             currentTurnCount: 0,
             totalTokensUsed: { input: 0, output: 0 },
-            currentPromptTokens: bootSnapshot?.promptTokens ?? 0,
-            currentResponseTokens: bootSnapshot?.responseTokens ?? 0,
+            currentPromptTokens: restoredSession.lastPromptTokens ?? 0,
+            currentResponseTokens: restoredSession.lastResponseTokens ?? 0,
             // Do not wipe pendingDiffs / streaming* — they belong to a parked
             // background run when preserveLiveRuns left them intact.
             planResumePending: restoredSession.planResumePending ?? null,

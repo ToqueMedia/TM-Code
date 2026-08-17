@@ -144,11 +144,19 @@ export function explorationCounts(calls: ToolCallDisplay[]): ExplorationCount[] 
   return order.map(category => ({ category, count: distinctKeys.get(category)!.size }))
 }
 
-/** Group threshold: at least two ITEMS. A single action reads better as its
- *  existing dedicated row ("A ler resultado src/foo.ts") than as a vague
- *  group-of-one ("Explorou — 1 ficheiro"). */
+/** Group threshold.
+ *
+ *  ≥2 items — o caso clássico (várias leituras/pesquisas numa só linha).
+ *  1 leitura de ficheiro — o utilizador quer o mesmo visual da imagem
+ *  (`Explore · 1 file`), expandível, em vez da linha genérica de tool.
+ *  Um search/list/web isolado continua na linha dedicada (o rótulo
+ *  "Explore · 1 file" mentiria). Um streak paginado fica no ReadOutputBatch. */
 function isGroupWorthy(items: ExplorationItem[]): boolean {
-  return items.length >= 2
+  if (items.length >= 2) return true
+  if (items.length === 1 && items[0].kind === 'call') {
+    return explorationCategoryOf(items[0].call) === 'files'
+  }
+  return false
 }
 
 /**
@@ -170,8 +178,9 @@ function isGroupWorthy(items: ExplorationItem[]): boolean {
  * request from the read_large_result era, now applied to the whole run).
  * The run then downgrades gracefully:
  *   ≥2 items → exploration group;
+ *   1 file read → Explore · 1 file (same visual as a group);
  *   1 item that is a read streak → the original ReadOutputBatch;
- *   1 plain call → normal row (a group of one is worse than the row).
+ *   1 plain non-file call → normal row.
  *
  * What breaks a run: a `text` block (real assistant prose), any
  * non-exploration tool (writes, shell, cards), a FAILED call (must pop out

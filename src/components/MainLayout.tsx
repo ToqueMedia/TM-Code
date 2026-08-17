@@ -394,8 +394,10 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
     >
       {!embedded && <MinimalTitleBar />}
 
-      {/* Main area below title bar */}
-      <Flex flex="1" overflow="hidden">
+      {/* Main area below title bar: chat row on top, terminal docked at the
+          bottom (VS Code / Cursor). The terminal used to be a right-hand
+          drawer and stole width from the transcript. */}
+      <Flex flex="1" direction="column" overflow="hidden">
 
         {/* Content + prompt area — row flex with PlanViewerPanel on the right.
             The column wrapper holds content + prompt; the plan panel is a
@@ -568,11 +570,11 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
           {/* Plan Viewer side panel — 600px, full height, pushes everything left */}
           <PlanViewerPanel />
           <CheckpointDrawerPanel />
-          <TerminalDrawerPanel />
           {/* Ephemeral team chat (P2P) — drawer like the terminal, toggled
               from the Source Control header. Only while the team plan is active. */}
           {teamCollabActive && <TeamChatPanel />}
         </Flex>
+        <TerminalDrawerPanel />
       </Flex>
 
       {/* Template selector removed — all projects start from scratch */}

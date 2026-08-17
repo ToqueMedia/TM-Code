@@ -217,6 +217,10 @@ export function formatDiagnosticsReminder(found: EditDiagnostic[], projectRoot =
   )
 }
 
+// O gate FINAL de typecheck vive em `finalTypecheckGate.ts` (formatFinalTypecheckReminder),
+// separado deste reminder inter-turno: não é um <system-reminder> (não ignorável),
+// filtra só errors e roda uma vez na saída do run. Ver query.ts (~3188).
+
 /**
  * `tsc --noEmit --incremental` no projecto. Devolve `null` quando o projecto
  * não tem TypeScript utilizável — o caller desliga-se para o resto do run.

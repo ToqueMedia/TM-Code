@@ -236,9 +236,18 @@ describe('computeContentBlockBatches — exploration groups', () => {
     expect(out[2].kind).toBe('batch_member')
   })
 
-  it('a single plain exploration call renders normally (no group of one)', () => {
+  it('a single file read uses the Explore · 1 file row', () => {
     const blocks = [block('tool_call', 'c1'), block('text')]
     const calls = new Map([['c1', readFile('/p/a.ts', 'c1')]])
+    const out = computeContentBlockBatches(blocks, id => calls.get(id))
+    expect(out[0].kind).toBe('exploration_start')
+    if (out[0].kind === 'exploration_start') expect(out[0].calls).toHaveLength(1)
+    expect(out[1].kind).toBe('render')
+  })
+
+  it('a single search stays a dedicated row (Explore · 1 file would lie)', () => {
+    const blocks = [block('tool_call', 'c1'), block('text')]
+    const calls = new Map([['c1', tc({ id: 'c1', toolName: 'glob', input: { pattern: '**/*.ts' } })]])
     const out = computeContentBlockBatches(blocks, id => calls.get(id))
     expect(out[0].kind).toBe('render')
   })
@@ -260,7 +269,7 @@ describe('computeContentBlockBatches — exploration groups', () => {
     expect(out[0].kind).toBe('exploration_start')
     if (out[0].kind === 'exploration_start') expect(out[0].calls.map(c => c.id)).toEqual(['c1', 'c2'])
     expect(out[2].kind).toBe('render') // failed call: own red row
-    expect(out[3].kind).toBe('render') // single trailing read: no group of one
+    expect(out[3].kind).toBe('exploration_start') // lone trailing read → Explore · 1 file
   })
 
   it('sub-agent children (spawnedBy) never group', () => {
@@ -311,7 +320,7 @@ describe('computeContentBlockBatches — exploration groups', () => {
 })
 
 describe('groupExplorationRuns — legacy toolCalls path', () => {
-  it('groups runs with ≥2 items and leaves boundaries as singles', () => {
+  it('groups runs with ≥2 items and lone file reads as Explore rows', () => {
     const calls = [
       readFile('/p/a.ts', 'c1'),
       tc({ id: 'c2', toolName: 'glob', input: { pattern: '*' } }),
@@ -319,7 +328,7 @@ describe('groupExplorationRuns — legacy toolCalls path', () => {
       readFile('/p/b.ts', 'c4'),
     ]
     const out = groupExplorationRuns(calls)
-    expect(out.map(g => g.kind)).toEqual(['exploration', 'single', 'single'])
+    expect(out.map(g => g.kind)).toEqual(['exploration', 'single', 'exploration'])
   })
 
   it('a lone read streak keeps the dedicated large_read_batch rendering', () => {
@@ -339,7 +348,7 @@ describe('groupExplorationRuns — legacy toolCalls path', () => {
       readFile('/p/b.ts', 'c3'),
     ]
     const out = groupExplorationRuns(calls)
-    expect(out.map(g => g.kind)).toEqual(['single', 'single', 'single'])
+    expect(out.map(g => g.kind)).toEqual(['exploration', 'single', 'exploration'])
   })
 })
 

@@ -11,7 +11,7 @@
  */
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { Box, Flex, HStack, Text, Input } from '@chakra-ui/react'
-import { FiPlus } from 'react-icons/fi'
+import { VscAdd, VscChromeClose } from 'react-icons/vsc'
 import { invoke } from '@/utils/invokeMetrics'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Terminal } from '@xterm/xterm'
@@ -20,6 +20,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import { logger } from '../../utils/logger'
 import { TerminalAutocomplete } from './TerminalAutocomplete'
@@ -27,7 +28,6 @@ import { useTerminalAutocomplete } from './useTerminalAutocomplete'
 
 interface TerminalPanelProps {
   projectPath: string
-  widthPx: number
   onReady?: () => void
   showBorder?: boolean
 }
@@ -524,13 +524,14 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
 
 // ─── Terminal Panel ─────────────────────────────────────────────────────────
 
-export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx, onReady, showBorder = true }: TerminalPanelProps) {
+export const TerminalPanel = memo(function TerminalPanel({ projectPath, onReady, showBorder = true }: TerminalPanelProps) {
   const instances = useTerminalPanelStore(s => s.instances)
   const activeInstanceId = useTerminalPanelStore(s => s.activeInstanceId)
   const addTerminal = useTerminalPanelStore(s => s.addTerminal)
   const removeTerminal = useTerminalPanelStore(s => s.removeTerminal)
   const renameTerminal = useTerminalPanelStore(s => s.renameTerminal)
   const closeAll = useTerminalPanelStore(s => s.closeAll)
+  const closePanel = useTerminalPanelStore(s => s.close)
   const setActiveTerminal = useTerminalPanelStore(s => s.setActiveTerminal)
 
   // Context menu state
@@ -633,11 +634,12 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
   return (
     <Flex
       direction="column"
-      width={`${widthPx}px`}
+      width="100%"
+      flex="1"
       flexShrink={0}
       height="100%"
       bg={tokens.colors.terminal.background}
-      borderLeft={showBorder ? '1px solid rgba(255,255,255,0.08)' : 'none'}
+      borderTop={showBorder ? `1px solid ${tokens.colors.border.panel}` : 'none'}
       minH={0}
     >
       {/* Tab bar */}
@@ -649,7 +651,17 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
         borderBottom="1px solid rgba(255,255,255,0.05)"
         data-tauri-drag-region
       >
-        <HStack gap={0} h="100%" overflow="hidden" flex="1" minW={0}>
+        <HStack gap={0} h="100%" overflow="hidden" flex="1" minW={0} pl={3}>
+          <Text
+            fontSize="12px"
+            fontWeight="500"
+            color={tokens.colors.text.secondary}
+            mr={2}
+            flexShrink={0}
+            userSelect="none"
+          >
+            {t('activity.terminal')}
+          </Text>
           {instances.map((inst) =>
             renamingId === inst.id ? (
               <Flex key={inst.id} align="center" px={2} h="100%" flexShrink={0} data-tauri-drag-region={false}>
@@ -708,7 +720,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
               transition="color 0.15s ease, background 0.15s ease"
               flexShrink={0}
             >
-              <FiPlus size={13} />
+              <VscAdd size={13} />
               <Text
                 fontSize="10px"
                 fontFamily={tokens.fontFamily.mono}
@@ -736,6 +748,23 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, widthPx,
             {shellInfo.kind}
           </Flex>
         )}
+        <Box
+          as="button"
+          onClick={closePanel}
+          aria-label={t('misc.close')}
+          title={t('misc.close')}
+          w="32px"
+          h="100%"
+          display="flex"
+          alignItems="center"
+          justifyContent="center"
+          color={tokens.colors.text.disabled}
+          flexShrink={0}
+          _hover={{ color: tokens.colors.text.primary, bg: 'rgba(255,255,255,0.06)' }}
+          data-tauri-drag-region={false}
+        >
+          <VscChromeClose size={14} />
+        </Box>
       </Flex>
 
       {/* Context menu */}

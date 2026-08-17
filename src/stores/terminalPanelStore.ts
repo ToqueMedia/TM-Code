@@ -10,7 +10,8 @@ interface TerminalInstance {
 
 interface TerminalPanelState {
   isOpen: boolean
-  widthPx: number
+  /** Altura do painel inferior (VS Code / Cursor). */
+  heightPx: number
   instances: TerminalInstance[]
   activeInstanceId: string | null
   _nextTerminalNum: number
@@ -22,7 +23,7 @@ interface TerminalPanelActions {
   open: () => void
   close: () => void
   killAll: () => void
-  setWidth: (px: number) => void
+  setHeight: (px: number) => void
 
   addTerminal: () => void
   removeTerminal: (id: string) => void
@@ -36,23 +37,23 @@ interface TerminalPanelActions {
 
 // ── Helpers ──
 
-const DEFAULT_WIDTH_PX = 480
-const MIN_WIDTH_PX = 320
-const MAX_WIDTH_PX = 900
+const DEFAULT_HEIGHT_PX = 260
+const MIN_HEIGHT_PX = 140
+const MAX_HEIGHT_PX = 560
 const MAX_TERMINALS = 5
 
-function clampWidth(px: number): number {
-  return Math.max(MIN_WIDTH_PX, Math.min(MAX_WIDTH_PX, px))
+function clampHeight(px: number): number {
+  return Math.max(MIN_HEIGHT_PX, Math.min(MAX_HEIGHT_PX, px))
 }
 
-export { MIN_WIDTH_PX as TERMINAL_PANEL_MIN_WIDTH }
+export { MIN_HEIGHT_PX as TERMINAL_PANEL_MIN_HEIGHT }
 
 // ── Store ──
 
 export const useTerminalPanelStore = create<TerminalPanelState & TerminalPanelActions>()((set, get) => ({
   // ── State ──
   isOpen: false,
-  widthPx: DEFAULT_WIDTH_PX,
+  heightPx: DEFAULT_HEIGHT_PX,
   instances: [],
   activeInstanceId: null,
   _nextTerminalNum: 1,
@@ -104,7 +105,7 @@ export const useTerminalPanelStore = create<TerminalPanelState & TerminalPanelAc
     set({ isOpen: false, instances: [], activeInstanceId: null })
   },
 
-  setWidth: (px) => set({ widthPx: clampWidth(px) }),
+  setHeight: (px) => set({ heightPx: clampHeight(px) }),
 
   // ── Terminal instance management ──
   addTerminal: () => {

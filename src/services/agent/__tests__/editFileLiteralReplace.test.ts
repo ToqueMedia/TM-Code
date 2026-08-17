@@ -237,10 +237,9 @@ describe('Bug #2: improved error message on non-unique old_string', () => {
   })
 })
 
-// O describe do Bug #3 (sanitizeDiffForModel) saiu com a própria função
-// (auditoria 2026-07-28): o caminho vivo no-turno é buildPostEditResultText
-// (changedFileSnippet) e o slim-down do histórico é a cópia inline do
-// chatStore — este export já não tinha callers.
+// O describe do Bug #3 (sanitizeDiffForModel) saiu com a própria função.
+// O caminho vivo no-turno é buildAppliedEditResultText (changedFileSnippet)
+// e o slim-down do histórico é a cópia inline do chatStore.
 
 describe('replace_all: editFileReplaceAll (rename de símbolo em 1 call)', () => {
   it('substitui TODAS as ocorrências, literalmente', () => {

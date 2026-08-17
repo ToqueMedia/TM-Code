@@ -16,6 +16,32 @@ export const PORT_REGEX = /(?:listening on (?:port )?|running (?:on|at) (?:port 
 /** Log lines that signal port failure — we skip URL detection entirely. */
 export const PORT_FAILURE_REGEX = /EADDRINUSE|address already in use|already in use|port (?:in use|is (?:busy|taken|occupied)|unavailable)|retrying on port|trying port \d+/i
 
+/**
+ * Extracts the blocked port from an EADDRINUSE log line. Returns null when the
+ * line isn't a port-in-use failure (so the caller can fall through to URL
+ * detection). The variants cover Vite (`:::5173`), Next/Express
+ * (`address already in use :::3000`), and the bare `EADDRINUSE: port 8080`.
+ */
+export function extractBlockedPort(line: string): number | null {
+  const m = line.match(/EADDRINUSE.*(?:port|address)[:\s]*(\d+)/i)
+    || line.match(/EADDRINUSE.*:::(\d+)/i)
+    || line.match(/EADDRINUSE.*:(\d+)/i)
+    || line.match(/address already in use\s+(?:::)?(\d+)/i)
+    || line.match(/listen\s+EADDRINUSE\s+\S+:(\d+)/i)
+  if (!m) return null
+  const port = parseInt(m[1], 10)
+  return port > 0 ? port : null
+}
+
+/**
+ * User-facing message for a port-in-use failure. The dev server manager does
+ * NOT free the port automatically — it informs the user and stops cleanly, so
+ * the user can free the port (or change the dev command) and reopen.
+ */
+export function formatPortInUseMessage(port: number): string {
+  return `Port ${port} is in use by another process. The dev server could not start. Free the port (or change the port in your dev command) and reopen the preview to retry.`
+}
+
 const WRAPPER_KEYWORDS = [
   'concurrently',
   'npm-run-all',

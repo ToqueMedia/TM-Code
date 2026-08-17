@@ -68,7 +68,7 @@ import {
 } from './promptValueHelpers'
 import { drainSteerableMessages, joinPromptValues } from './messageQueue'
 import { describeImagesViaSidecar } from './visionSidecar'
-import { resolveAttachments, resolveImageToDataUri } from '../attachmentService'
+import { resolveAttachments, resolveDescribedAttachments, resolveImageToDataUri } from '../attachmentService'
 import { getTmsTurnTelemetry } from './tmsContext'
 
 export interface MCPToolSummaryLite {
@@ -562,7 +562,10 @@ export function buildMainLoopCallbacks(
             if (parts) {
               const description = await describeImagesViaSidecar(parts)
               if (description) {
-                const textOnly = await buildAugmentedPrompt(merged, resolvers)
+                const textOnly = await buildAugmentedPrompt(merged, {
+                  ...resolvers,
+                  resolveAttachmentXml: resolveDescribedAttachments,
+                })
                 return withDeliveries(`${textOnly}\n\n<image_description source="image-analysis">\n${description}\n</image_description>`)
               }
             }

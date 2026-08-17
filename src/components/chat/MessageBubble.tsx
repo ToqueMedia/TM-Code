@@ -92,24 +92,24 @@ export const markdownStyles = {
   wordBreak: 'break-word' as const,
 
   '& p': {
-    margin: '0 0 10px 0',
-    lineHeight: '1.75',
-    fontSize: '13.5px',
+    margin: '0 0 8px 0',
+    lineHeight: '1.65',
+    fontSize: tokens.fontSize.lg,
     color: tokens.colors.text.primary,
     letterSpacing: '0',
   },
   '& p:last-child': { marginBottom: 0 },
-  '& strong': { color: '#ffffff', fontWeight: 600 },
+  '& strong': { color: tokens.colors.text.inverse, fontWeight: 600 },
   '& em': { color: tokens.colors.markdown.emphasis, fontStyle: 'italic' },
   '& ul, & ol': {
-    margin: '6px 0 10px 0',
+    margin: '4px 0 8px 0',
     paddingLeft: '20px',
-    fontSize: '13.5px',
+    fontSize: tokens.fontSize.lg,
     color: tokens.colors.text.primary,
   },
   '& li': {
-    marginBottom: '4px',
-    lineHeight: '1.75',
+    marginBottom: '3px',
+    lineHeight: '1.65',
     '&::marker': { color: tokens.colors.text.disabled },
   },
   '& a': {
@@ -120,13 +120,13 @@ export const markdownStyles = {
     '&:hover': { borderColor: tokens.colors.accent.primary },
   },
   '& code': {
-    background: 'rgba(255, 255, 255, 0.07)',
-    borderRadius: '5px',
-    padding: '2px 7px',
-    fontSize: '12px',
+    background: tokens.colors.bg.codeInline,
+    borderRadius: tokens.radius.md,
+    padding: '1px 6px',
+    fontSize: tokens.fontSize.sm,
     fontFamily: tokens.fontFamily.mono,
-    color: '#e6a1c0',
-    border: '1px solid rgba(255, 255, 255, 0.05)',
+    color: tokens.colors.terminal.inlineCode,
+    border: `1px solid ${tokens.colors.border.subtle}`,
   },
   '& pre': { margin: 0, padding: 0 },
   '& pre code': {
@@ -137,18 +137,20 @@ export const markdownStyles = {
     borderRadius: 0,
   },
   '& h1, & h2, & h3, & h4': {
-    color: '#ffffff',
+    color: tokens.colors.text.inverse,
     fontWeight: 600,
-    letterSpacing: '0',
+    letterSpacing: '-0.01em',
   },
-  '& h1': { fontSize: '20px', margin: '20px 0 10px' },
-  '& h2': { fontSize: '17px', margin: '18px 0 8px' },
-  '& h3': { fontSize: '15px', margin: '14px 0 6px' },
-  '& h4': { fontSize: '13.5px', margin: '12px 0 4px' },
+  '& h1': { fontSize: tokens.fontSize.xxl, margin: '16px 0 8px' },
+  '& h2': { fontSize: '17px', margin: '14px 0 6px' },
+  '& h3': { fontSize: tokens.fontSize.xl, margin: '12px 0 4px' },
+  '& h4': { fontSize: tokens.fontSize.lg, margin: '10px 0 4px' },
+  '& :is(h1, h2, h3, h4):first-child': { marginTop: 0 },
   '& blockquote': {
     borderLeft: `3px solid ${tokens.colors.accent.primaryMuted}`,
     margin: '10px 0',
     paddingLeft: '14px',
+    paddingRight: '36px',
     color: tokens.colors.text.secondary,
     fontStyle: 'italic',
   },
@@ -188,7 +190,7 @@ export const markdownStyles = {
  * pela mesma razão.
  */
 const BUBBLE_PX = { base: 2, md: 3 } as const
-const BUBBLE_CONTENT_PL = { base: '0px', md: '36px' } as const
+const BUBBLE_CONTENT_PL = { base: '0px', md: '28px' } as const
 
 function CopyMessageButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
@@ -513,15 +515,21 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
 
     return (
       <Flex
-        py={1.5}
+        py={level === 'error' || level === 'warn' ? 2 : 1.5}
         px={3}
-        mb={1}
+        mb={1.5}
         align="flex-start"
         gap={2}
+        borderRadius={tokens.radius.xl}
+        bg={
+          level === 'error' ? tokens.colors.accent.redSubtle
+          : level === 'warn' ? tokens.colors.accent.orangeSubtle
+          : 'transparent'
+        }
       >
-        <Box w="4px" h="4px" borderRadius="full" bg={dotColor} flexShrink={0} mt="7px" />
+        <Box w="5px" h="5px" borderRadius="full" bg={dotColor} flexShrink={0} mt="6px" />
         <Text
-          fontSize="12px"
+          fontSize={tokens.fontSize.sm}
           color={textColor}
           fontFamily={tokens.fontFamily.ui}
           lineHeight="1.5"
@@ -535,44 +543,36 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
 
   return (
     <Box
-      py={isUser ? 3 : 4}
+      py={isUser ? 2.5 : 3.5}
       px={BUBBLE_PX}
-      bg={isUser ? 'rgba(255, 255, 255, 0.025)' : 'transparent'}
-      border={isUser ? '1px solid rgba(255, 255, 255, 0.055)' : '1px solid transparent'}
-      borderRadius="10px"
-      mb={2}
+      mb={isUser ? 3 : 1}
       className="group"
       minW={0}
       overflow="hidden"
-      transition="background 0.15s ease, border-color 0.15s ease"
-      _hover={isUser ? { bg: 'rgba(255, 255, 255, 0.035)', borderColor: 'rgba(255, 255, 255, 0.08)' } : undefined}
     >
       {/* Role header */}
-      <Flex align="center" gap={2.5} mb={isUser ? 1.5 : 2.5}>
+      <Flex align="center" gap={2} mb={isUser ? 1.5 : 2}>
         {isUser ? (
           <Flex
-            w="24px"
-            h="24px"
-            borderRadius="7px"
-            bg="rgba(254, 16, 99, 0.1)"
-            border="1px solid rgba(254, 16, 99, 0.18)"
+            w="20px"
+            h="20px"
+            borderRadius="6px"
+            bg={tokens.colors.bg.whiteSubtle}
             align="center"
             justify="center"
             flexShrink={0}
           >
-            <FiUser size={12} color={tokens.colors.accent.primary} />
+            <FiUser size={11} color={tokens.colors.text.secondary} />
           </Flex>
         ) : (
-          <AgentLogo size={24} glow />
+          <AgentLogo size={20} />
         )}
         <Text
-          fontSize="12px"
-          fontWeight="700"
-          color={isUser ? tokens.colors.accent.primary : tokens.colors.text.primary}
-          letterSpacing="0.02em"
-          textTransform={isUser ? 'uppercase' : 'none'}
+          fontSize={tokens.fontSize.sm}
+          fontWeight={isUser ? '500' : '600'}
+          color={isUser ? tokens.colors.text.secondary : tokens.colors.text.primary}
         >
-          {isUser ? 'You' : 'TM Code'}
+          {isUser ? t('chat.you') : t('chat.assistantName')}
         </Text>
         {/* Effort carimbado neste turno — prova visual de que o seletor
             chegou à mensagem (e se o header saiu: · sent / · not sent). */}
@@ -619,7 +619,18 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
       </Flex>
 
       {/* Content area */}
-      <Box pl={BUBBLE_CONTENT_PL}>
+      <Box
+        pl={BUBBLE_CONTENT_PL}
+        {...(isUser
+          ? {
+              bg: tokens.colors.bg.card,
+              border: `1px solid ${tokens.colors.border.panel}`,
+              borderRadius: '10px',
+              px: 3.5,
+              py: 2.5,
+            }
+          : {})}
+      >
         {/* No bare "thinking dots" placeholder here on purpose. Whenever this
             branch would fire (streaming, no content/tools yet) the inline
             AgentActivityIndicator below the transcript is ALREADY showing the
@@ -725,7 +736,7 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                 // inteiro (1 parse final, Prism em tudo).
                 const isActiveStreamingText = isStreaming === true && isLastBlock
                 return (
-                  <Box key={`text-${idx}`} css={markdownStyles} mb={isLastBlock ? 0 : 3}>
+                  <Box key={`text-${idx}`} css={markdownStyles} mb={isLastBlock ? 0 : 2}>
                     {isActiveStreamingText
                       ? <StreamingMarkdown text={block.text} />
                       : <MemoMarkdown text={block.text} />}
@@ -829,9 +840,9 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
                       pl={hasPreview ? 0 : 2}
                       pr={3}
                       py={hasPreview ? 0 : '4px'}
-                      bg="rgba(255, 255, 255, 0.035)"
-                      border="1px solid rgba(255, 255, 255, 0.075)"
-                      borderRadius="8px"
+                      bg={tokens.colors.bg.whiteMicro}
+                      border={`1px solid ${tokens.colors.border.panel}`}
+                      borderRadius={tokens.radius.xl}
                       maxW="280px"
                       overflow="hidden"
                     >
@@ -898,7 +909,16 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             session (messages + tool calls + reasoning + attachments metadata)
             as JSON or Markdown via the browser's save-as dialog. */}
         {!isUser && !isSystem && !isStreaming && copyableText() && (
-          <Flex mt={2} justify="flex-end" gap={1} align="center">
+          <Flex
+            mt={2}
+            justify="flex-end"
+            gap={0.5}
+            align="center"
+            opacity={copyMenuOpen || exportMenuOpen ? 1 : 0}
+            _groupHover={{ opacity: 1 }}
+            _groupFocusWithin={{ opacity: 1 }}
+            transition={`opacity ${tokens.transition.fast}`}
+          >
             {/* Copy — opens a small menu so the user picks scope:
                 "Copiar conversa" → just this assistant reply
                 "Copiar sessão"   → full transcript as Markdown */}
@@ -1141,29 +1161,6 @@ function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           </Flex>
         )}
 
-        {/* Activity indicator — shown during tool execution */}
-        {isStreaming && !isUser && message.toolCalls?.some(tc => tc.status === 'running') && (
-          <Flex align="center" gap={2} py={2} mt={2}>
-            <Flex gap="4px" align="center">
-              {[0, 1, 2].map(i => (
-                <Box
-                  key={i}
-                  w="6px"
-                  h="6px"
-                  borderRadius="full"
-                  bg={tokens.colors.accent.primary}
-                  css={{
-                    animation: `activityPulse 1.4s ease-in-out ${i * 0.2}s infinite`,
-                    '@keyframes activityPulse': {
-                      '0%, 80%, 100%': { opacity: 0.15, transform: 'scale(0.7)' },
-                      '40%': { opacity: 1, transform: 'scale(1)' },
-                    },
-                  }}
-                />
-              ))}
-            </Flex>
-          </Flex>
-        )}
       </Box>
     </Box>
   )

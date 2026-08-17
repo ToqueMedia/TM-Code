@@ -1,13 +1,18 @@
 import { memo, useState, useMemo } from 'react'
 import { Box, Flex, Text, Image } from '@chakra-ui/react'
 import {
-  FiFolder, FiSearch, FiTerminal,
-  FiGlobe, FiTool, FiChevronRight, FiChevronDown,
-  FiCheck, FiX, FiLoader, FiClock,
-} from 'react-icons/fi'
+  VscFolder, VscSearch, VscTerminal,
+  VscGlobe, VscTools, VscChevronRight, VscChevronDown,
+  VscCheck, VscClose, VscLoading, VscWatch, VscEdit,
+} from 'react-icons/vsc'
 import { ToolCallDisplay as ToolCallDisplayType } from '../../types/chat'
+import { countDiffLineStats } from '@/utils/diffStats'
+import { resolveWritePreview } from '@/utils/writePreview'
 import InlineDiff from './InlineDiff'
+import { ExpandReveal } from './ExpandReveal'
+import { TranscriptToggle } from './TranscriptToggle'
 import { useProjectStore } from '../../stores/projectStore'
+import { useChatStore } from '../../stores/chatStore'
 import { getFileIconUrl } from '@/utils/fileIcons'
 import { relativeToProjectPath } from '@/utils/platform'
 import { tokens } from '@/theme/tokens'
@@ -21,15 +26,15 @@ interface ToolCallDisplayProps {
 }
 
 const TOOL_ICONS: Record<string, React.ComponentType<{ size?: number | string }>> = {
-  list_directory: FiFolder,
-  search_files: FiSearch,
-  glob: FiSearch,
-  execute_command: FiTerminal,
-  execute_command_background: FiTerminal,
-  create_directory: FiFolder,
-  web_fetch: FiGlobe,
-  check_background_agents: FiSearch,
-  check_background_commands: FiSearch,
+  list_directory: VscFolder,
+  search_files: VscSearch,
+  glob: VscSearch,
+  execute_command: VscTerminal,
+  execute_command_background: VscTerminal,
+  create_directory: VscFolder,
+  web_fetch: VscGlobe,
+  check_background_agents: VscSearch,
+  check_background_commands: VscSearch,
 }
 
 /** Tools where we show a file-extension icon instead of the generic tool icon. */
@@ -114,11 +119,37 @@ const OUTPUT_LINE_TEXT_STYLE = {
   lineHeight: '18px',
 } as const
 
+const WRITE_WORKING_ICON = {
+  animation: 'writePulse 1.1s ease-in-out infinite',
+  '@keyframes writePulse': {
+    '0%, 100%': { opacity: 0.35 },
+    '50%': { opacity: 1 },
+  },
+} as const
+
+const WRITE_WORKING_LABEL = {
+  backgroundImage: `linear-gradient(90deg, ${tokens.colors.text.disabled} 0%, ${tokens.colors.text.primary} 45%, ${tokens.colors.text.disabled} 90%)`,
+  backgroundSize: '220% 100%',
+  backgroundClip: 'text',
+  WebkitBackgroundClip: 'text',
+  color: 'transparent',
+  animation: 'writeShimmer 1.5s ease-in-out infinite',
+  '@keyframes writeShimmer': {
+    '0%': { backgroundPosition: '100% 0' },
+    '100%': { backgroundPosition: '-100% 0' },
+  },
+} as const
+
 function describeSkill(name: string): string {
   return SKILL_DESCRIPTIONS[name] || t('toolLabel.genericGuide')
 }
 
-function getToolLabel(toolName: string): string {
+function getToolLabel(toolName: string, completed = false): string {
+  if (completed) {
+    if (toolName === 'edit_file') return t('toolLabel.edited')
+    if (toolName === 'write_file') return t('toolLabel.written')
+    if (toolName === 'create_file') return t('toolLabel.created')
+  }
   return TOOL_LABELS[toolName] || toolName
 }
 
@@ -254,12 +285,16 @@ function isWriteTool(toolName: string): boolean {
 
 function ToolCallDisplayComponent({ toolCall }: ToolCallDisplayProps) {
   const [expanded, setExpanded] = useState(false)
+  const [diffExpanded, setDiffExpanded] = useState(false)
   const projectPath = useProjectStore(s => s.currentProject?.path || '')
+  const pendingMatch = useChatStore(s =>
+    s.pendingDiffs.find(d => d.toolCallId === toolCall.id),
+  )
   const displayToolName = canonicalToolName(toolCall.toolName)
   const displayInput = normalizeToolInputForCanonical(toolCall.toolName, toolCall.input)
   const filePath = (displayInput?.file_path || displayInput?.path || displayInput?.oldPath || '') as string
   const useFileIcon = FILE_TOOLS.has(displayToolName) && !!filePath
-  const IconComponent = TOOL_ICONS[displayToolName] || FiTool
+  const IconComponent = TOOL_ICONS[displayToolName] || VscTools
   const inputSummary = getInputSummary(displayToolName, displayInput, toolCall.result, projectPath)
   // A tool call streams in with status:'running', but the serial tool loop
   // starts calls one at a time and can pause on each diff approval. `started`
@@ -271,6 +306,28 @@ function ToolCallDisplayComponent({ toolCall }: ToolCallDisplayProps) {
   const isFailed = toolCall.status === 'failed'
   const isCompleted = toolCall.status === 'completed'
   const isNested = !!toolCall.spawnedBy
+  const writePreview = useMemo(() => {
+    if (!isWriteTool(displayToolName)) return null
+    return resolveWritePreview({
+      diffOld: toolCall.diffOldContent ?? pendingMatch?.originalContent,
+      diffNew: toolCall.diffNewContent ?? pendingMatch?.newContent,
+      isNewFile: toolCall.isNewFile ?? pendingMatch?.isNewFile,
+      args: displayInput,
+    })
+  }, [
+    displayToolName,
+    displayInput.old_string,
+    displayInput.oldString,
+    displayInput.old_text,
+    displayInput.new_string,
+    displayInput.newString,
+    displayInput.new_text,
+    displayInput.content,
+    toolCall.diffOldContent,
+    toolCall.diffNewContent,
+    toolCall.isNewFile,
+    pendingMatch,
+  ])
 
   if (isShellTool(toolCall.toolName)) {
     return (
@@ -282,7 +339,7 @@ function ToolCallDisplayComponent({ toolCall }: ToolCallDisplayProps) {
     )
   }
 
-  const hasDiff = toolCall.diffNewContent !== undefined && isWriteTool(displayToolName)
+  const hasDiffContent = toolCall.diffNewContent !== undefined
 
   // Result text (moved before hooks to avoid conditional hook calls)
   const resultText = toolCall.result || ''
@@ -294,69 +351,162 @@ function ToolCallDisplayComponent({ toolCall }: ToolCallDisplayProps) {
     return highlightLines(resultText, readFileLang)
   }, [readFileLang, resultText])
 
+  // Diff stats (+N / −M). Prefer the persisted counts — after reload the
+  // file contents are stripped. Fall back to computing from content, then
+  // to the compact result JSON written alongside the counts.
+  const diffStats = useMemo(() => {
+    if (toolCall.diffAdded !== undefined || toolCall.diffRemoved !== undefined) {
+      return { added: toolCall.diffAdded ?? 0, removed: toolCall.diffRemoved ?? 0 }
+    }
+    if (hasDiffContent) {
+      return countDiffLineStats(
+        toolCall.diffOldContent || '',
+        toolCall.diffNewContent || '',
+        toolCall.isNewFile === true,
+      )
+    }
+    if (resultText) {
+      try {
+        const parsed = JSON.parse(resultText) as { type?: string; added?: number; removed?: number }
+        if (parsed?.type === 'diff' && (typeof parsed.added === 'number' || typeof parsed.removed === 'number')) {
+          return { added: parsed.added ?? 0, removed: parsed.removed ?? 0 }
+        }
+      } catch { /* not the compact diff JSON */ }
+    }
+    return { added: 0, removed: 0 }
+  }, [hasDiffContent, resultText, toolCall.diffAdded, toolCall.diffRemoved, toolCall.diffOldContent, toolCall.diffNewContent, toolCall.isNewFile])
+
   // Sub-agent tool calls carry a spawnedBy id — nest them visually under the
   // research/verify/bg launcher so the user sees the full activity hierarchy.
   const nestedProps = isNested
     ? { ml: 4, pl: 2, borderLeft: `2px solid ${tokens.colors.accent.purple}` } as const
     : {}
 
-  // Render inline diff for write tools
-  if (isCompleted && hasDiff) {
+  // Compact file-change row (running + done). While the agent writes we
+  // keep the same line as the finished header — verb in the gerund
+  // ("A escrever" / "A editar") with a shimmer — and only unlock expand
+  // after the diff exists.
+  if (isWriteTool(displayToolName) && filePath && (isQueued || isRunning || isCompleted || isFailed)) {
+    const fileName = filePath.split('/').pop() || filePath
+    const relPath = relativeToProjectPath(filePath, projectPath)
+    const dirPath = relPath.includes('/')
+      ? relPath.slice(0, relPath.lastIndexOf('/'))
+      : ''
+    const isPending = toolCall.diffStatus === 'pending'
+    const isWorking = isQueued || isRunning
+    const oldContent = writePreview?.oldContent ?? ''
+    const newContent = writePreview?.newContent ?? ''
+    const canShowDiff = writePreview !== null
+    // Expand sempre que há preview: ficheiro, hunk do Edit, ou content
+    // a fazer stream. Queued (ainda não começou) fica fechado.
+    const canToggle = !isQueued && canShowDiff
+    const liveStats = writePreview && isWorking
+      ? countDiffLineStats(oldContent, newContent, writePreview.isNewFile)
+      : null
+    const shownAdded = liveStats?.added ?? diffStats.added
+    const shownRemoved = liveStats?.removed ?? diffStats.removed
+
     return (
-      <Box my={2} data-tool-call-id={toolCall.id} {...nestedProps}>
-        <Flex align="center" gap={2} mb={1.5} px={1}>
-          <Box color={tokens.colors.accent.green} flexShrink={0}>
-            <FiCheck size={12} />
+      <Box my={1.5} data-tool-call-id={toolCall.id} {...nestedProps}>
+        <TranscriptToggle
+          expanded={diffExpanded}
+          onToggle={canToggle ? () => setDiffExpanded(v => !v) : undefined}
+          disabled={!canToggle}
+          busy={isWorking}
+        >
+          <Box
+            color={isFailed ? tokens.colors.accent.red : tokens.colors.text.muted}
+            flexShrink={0}
+            css={isWorking && !isQueued ? WRITE_WORKING_ICON : undefined}
+          >
+            {isQueued ? <VscWatch size={13} /> : isFailed ? <VscClose size={13} /> : <VscEdit size={13} />}
           </Box>
+          <Text
+            color={tokens.colors.text.secondary}
+            fontSize={tokens.fontSize.md}
+            flexShrink={0}
+            css={isWorking && !isQueued ? WRITE_WORKING_LABEL : undefined}
+          >
+            {getToolLabel(displayToolName, isCompleted && !isFailed)}
+          </Text>
           {useFileIcon ? (
-            <Image src={getFileIconUrl(filePath)} w="14px" h="14px" flexShrink={0} />
+            <Image src={getFileIconUrl(filePath)} alt="" w="14px" h="14px" flexShrink={0} />
           ) : (
             <Box color={tokens.colors.text.muted} flexShrink={0}>
               <IconComponent size={13} />
             </Box>
           )}
           <Text
-            color={tokens.colors.text.secondary}
+            color={tokens.colors.text.primary}
             fontFamily={tokens.fontFamily.mono}
-            fontSize="12px"
+            fontSize={tokens.fontSize.md}
+            fontWeight="500"
+            flexShrink={0}
           >
-            {getToolLabel(displayToolName)}
+            {fileName}
           </Text>
-          <Text
-            color={tokens.colors.text.disabled}
-            fontSize="11px"
-            overflow="hidden"
-            textOverflow="ellipsis"
-            whiteSpace="nowrap"
-            flex="1"
-            fontFamily={tokens.fontFamily.mono}
-          >
-            {inputSummary}
-          </Text>
-        </Flex>
-        {/* Enquanto a decisão está PENDENTE, o diff vive no painel de
-            aprovação (DiffApprovalPanel), com a lista de ficheiros e os
-            botões. Repeti-lo aqui mostrava o MESMO diff duas vezes no ecrã e
-            empurrava o painel para fora da vista. Decidido, o cartão volta a
-            ser o registo permanente no transcript. */}
-        {toolCall.diffStatus === 'pending' ? (
-          <Text
-            px={1}
-            fontSize="11px"
-            color={tokens.colors.text.disabled}
-            fontFamily={tokens.fontFamily.mono}
-          >
-            {t('diffBar.underReview')}
-          </Text>
-        ) : (
-          <InlineDiff
-            filePath={filePath}
-            oldContent={toolCall.diffOldContent || ''}
-            newContent={toolCall.diffNewContent || ''}
-            isNewFile={toolCall.isNewFile || false}
-            status={toolCall.diffStatus || 'pending'}
-          />
-        )}
+          {dirPath && (
+            <Text
+              color={tokens.colors.text.disabled}
+              fontSize={tokens.fontSize.sm}
+              overflow="hidden"
+              textOverflow="ellipsis"
+              whiteSpace="nowrap"
+              fontFamily={tokens.fontFamily.mono}
+            >
+              {dirPath}
+            </Text>
+          )}
+          {(shownAdded > 0 || shownRemoved > 0) && (
+            <Flex align="center" gap={1.5} flexShrink={0}>
+              {shownAdded > 0 && (
+                <Text
+                  fontSize={tokens.fontSize.sm}
+                  color={tokens.colors.diff.addedText}
+                  fontFamily={tokens.fontFamily.mono}
+                  fontWeight="500"
+                  lineHeight="1"
+                >
+                  +{shownAdded}
+                </Text>
+              )}
+              {shownRemoved > 0 && (
+                <Text
+                  fontSize={tokens.fontSize.sm}
+                  color={tokens.colors.diff.removedText}
+                  fontFamily={tokens.fontFamily.mono}
+                  fontWeight="500"
+                  lineHeight="1"
+                >
+                  −{shownRemoved}
+                </Text>
+              )}
+            </Flex>
+          )}
+          {!isWorking && isPending && (
+            <Text
+              fontSize={tokens.fontSize.xs}
+              fontWeight="500"
+              color={tokens.colors.accent.primary}
+              lineHeight="1"
+              flexShrink={0}
+            >
+              {t('diffBar.underReview')}
+            </Text>
+          )}
+        </TranscriptToggle>
+        <ExpandReveal open={diffExpanded && canToggle}>
+          <Box pt={1}>
+            <InlineDiff
+              filePath={filePath}
+              oldContent={oldContent}
+              newContent={newContent}
+              isNewFile={writePreview?.isNewFile ?? false}
+              status={isWorking ? 'pending' : (toolCall.diffStatus || 'pending')}
+              hideHeader
+            />
+          </Box>
+        </ExpandReveal>
       </Box>
     )
   }
@@ -410,7 +560,7 @@ function ToolCallDisplayComponent({ toolCall }: ToolCallDisplayProps) {
           // Waiting for the serial executor — static clock, no spinner, so it
           // reads as queued rather than actively editing now.
           <Box color={tokens.colors.text.disabled} flexShrink={0}>
-            <FiClock size={12} />
+            <VscWatch size={12} />
           </Box>
         ) : isRunning ? (
           <Box
@@ -424,15 +574,15 @@ function ToolCallDisplayComponent({ toolCall }: ToolCallDisplayProps) {
               },
             }}
           >
-            <FiLoader size={12} />
+            <VscLoading size={12} />
           </Box>
         ) : isFailed ? (
           <Box color={tokens.colors.accent.red} flexShrink={0}>
-            <FiX size={12} />
+            <VscClose size={12} />
           </Box>
         ) : (
           <Box color={tokens.colors.accent.green} flexShrink={0}>
-            <FiCheck size={12} />
+            <VscCheck size={12} />
           </Box>
         )}
 
@@ -455,7 +605,9 @@ function ToolCallDisplayComponent({ toolCall }: ToolCallDisplayProps) {
           flexShrink={0}
           fontWeight="500"
         >
-          {isQueued ? `${t('toolLabel.queued')} · ${getToolLabel(displayToolName)}` : getToolLabel(displayToolName)}
+          {isQueued
+            ? `${t('toolLabel.queued')} · ${getToolLabel(displayToolName)}`
+            : getToolLabel(displayToolName, isCompleted)}
         </Text>
 
         {/* Summary */}
@@ -474,7 +626,7 @@ function ToolCallDisplayComponent({ toolCall }: ToolCallDisplayProps) {
         {/* Expand chevron */}
         {canExpand && (
           <Box color={tokens.colors.text.disabled} flexShrink={0} transition="transform 0.15s">
-            {expanded ? <FiChevronDown size={13} /> : <FiChevronRight size={13} />}
+            {expanded ? <VscChevronDown size={13} /> : <VscChevronRight size={13} />}
           </Box>
         )}
       </Flex>

@@ -11,7 +11,7 @@ import {
   extractDisplayFromValue,
 } from '../promptValueHelpers'
 import type { PromptValue } from '../../../types/messageQueueTypes'
-import { resolveAttachments, resolveImageToDataUri } from '../../attachmentService'
+import { resolveAttachments, resolveDescribedAttachments, resolveImageToDataUri } from '../../attachmentService'
 import { describeImagesViaSidecar } from '../visionSidecar'
 import { useBillingStore } from '../../../stores/billingStore'
 import { useAgentStore } from '../../../stores/agentStore'
@@ -88,7 +88,10 @@ export async function resolveSteerItemsToContent(
     if (parts) {
       const description = await describeImagesViaSidecar(parts)
       if (description) {
-        const textOnly = await buildAugmentedPrompt(merged, resolvers)
+        const textOnly = await buildAugmentedPrompt(merged, {
+          ...resolvers,
+          resolveAttachmentXml: resolveDescribedAttachments,
+        })
         return `${textOnly}\n\n<image_description source="image-analysis">\n${description}\n</image_description>`
       }
     }

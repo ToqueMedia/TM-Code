@@ -137,10 +137,11 @@ describe('ocupação de contexto (pill)', () => {
     useChatStore.getState().addTokenUsage(120_000, 800, true)
     expect(activeSession().lastPromptTokens).toBe(120_000)
 
-    // Estimativa do run em curso (bem menor que o pico vivo de 500K).
+    // Estimativa do run em curso. O contador vivo tem de seguir a sessão,
+    // não o máximo do processo — senão o pill lê 0% com uma conversa pequena.
     useChatStore.getState().addEstimatedTokenUsage(130_000, 200, true)
-    expect(activeSession().lastPromptTokens).toBe(130_000)
-    expect(useChatStore.getState().currentPromptTokens).toBe(500_000) // vivo continua máximo
+    expect(activeSession().lastPromptTokens).toBe(120_000)
+    expect(useChatStore.getState().currentPromptTokens).toBe(120_000)
   })
 
   it('um run sem histórico do chat (/review) não sequestra a ocupação', () => {

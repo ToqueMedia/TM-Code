@@ -1,15 +1,14 @@
 import { memo, useMemo, type MouseEvent, type ReactNode } from 'react'
 import { Box, Flex, IconButton, Text } from '@chakra-ui/react'
-import { FiSend, FiSquare, FiCode, FiImage, FiTerminal, FiServer, FiFastForward } from 'react-icons/fi'
+import { FiSend, FiSquare, FiCode, FiImage, FiServer, FiFastForward } from 'react-icons/fi'
 import { useBillingStore } from '../../stores/billingStore'
 import { usePermissionStore } from '../../stores/permissionStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useByokStore } from '../../stores/byokStore'
 import { useAgentStore } from '../../stores/agentStore'
-import { useLayoutStore } from '../../stores/layoutStore'
-import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import { EffortSelector } from './EffortSelector'
 import { PersonaSelector } from './PersonaSelector'
+import ContextWindowIndicator from '../chat/ContextWindowIndicator'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 
@@ -53,10 +52,6 @@ function PromptActions({
   const billingPlan = useBillingStore(s => s.plan)
   const autoModePermissions = usePermissionStore(st => st.autoModePermissions)
   const setAutoModePermissions = usePermissionStore(st => st.setAutoModePermissions)
-  const setCheckpointDrawerOpen = useLayoutStore(s => s.setCheckpointDrawerOpen)
-  const setPlanViewerOpen = useLayoutStore(s => s.setPlanViewerOpen)
-  const isTerminalOpen = useTerminalPanelStore(s => s.isOpen)
-  const toggleTerminal = useTerminalPanelStore(s => s.toggle)
 
   // ── Paperclip gate ──
   //
@@ -222,24 +217,8 @@ function PromptActions({
           onClick={onToggleEditor}
         />
 
-        {/* Checkpoints: saiu desta linha (07-08) para a toolbar do ChatView,
-            à esquerda do Live Preview / Preview (ver ChatView.tsx). */}
-
-        <PromptToolButton
-          icon={<FiTerminal size={14} />}
-          label={t('activity.terminal')}
-          active={isTerminalOpen}
-          ariaLabel={t('prompt.toggleTerminal')}
-          title={t('prompt.toggleTerminal')}
-          onClick={event => {
-            event.stopPropagation()
-            if (!isTerminalOpen) {
-              setCheckpointDrawerOpen(false)
-              setPlanViewerOpen(false)
-            }
-            toggleTerminal()
-          }}
-        />
+        {/* Checkpoints + Terminal: saíram desta linha para a toolbar do
+            ChatView (Checkpoints 07-08; Terminal 08-14). */}
 
         <PromptToolButton
           icon={<FiServer size={14} />}
@@ -260,7 +239,8 @@ function PromptActions({
 
       {/* Send / Stop / Queue — context-window pill lives in ChatView toolbar
           next to Live Preview / Preview. */}
-      <Flex align="center" gap={2} flexShrink={0}>
+      <Flex align="center" gap={1.5} flexShrink={0}>
+        <ContextWindowIndicator />
         {/* F3: Steer/Task toggle removed — one agent per project; Enter while
             busy always steers/queues the same run (no concurrent asTask). */}
         {(isStreaming || viewedTaskBusy) && hasInput ? (

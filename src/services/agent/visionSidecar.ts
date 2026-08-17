@@ -18,6 +18,7 @@
 import { resolveAIWorkerUrl } from '../../utils/devUrls'
 import FirebaseAuthService from '../auth/firebaseAuth'
 import { logger } from '../../utils/logger'
+import { extractAssistantTextFromCompletion } from './completionText'
 import type { OpenAIContentPart } from './types'
 
 const VISION_SIDECAR_TIMEOUT_MS = 60_000
@@ -68,6 +69,13 @@ export async function describeImagesViaSidecar(
     // de imagens + transcrição verbatim de código/erros. 2048 truncava as
     // últimas imagens; 16384 dá folga para vários screenshots densos.
     max_tokens: 16384,
+    // Qwen 3.7-plus (sidecar:vision) com thinking ON mete a descrição em
+    // `reasoning_content` e deixa `message.content` vazio. O parser antigo
+    // lia só `content` como string → null → XML "image did not reach you"
+    // mesmo com o sidecar a 200 (sessão 2026-08-14, pasted-image.png).
+    // Pedimos thinking OFF para a descrição vir no content; o extractor
+    // abaixo ainda recupera reasoning_content se a KV o ligar à mesma.
+    enable_thinking: false,
     messages: [
       {
         role: 'system',
@@ -96,22 +104,37 @@ export async function describeImagesViaSidecar(
     })
 
     if (!res.ok) {
-      logger.warn('vision', `image description failed: HTTP ${res.status}`)
+      const detail = await res.text().catch(() => '')
+      logger.warn(
+        'vision',
+        `image description failed: HTTP ${res.status}`
+          + (detail.includes('tm_sidecar_unavailable')
+            ? ' (sidecar:vision unpublished — admin must publish it in Settings → Sidecars)'
+            : detail ? ` ${detail.slice(0, 180)}` : ''),
+      )
       return null
     }
     if (res.headers.get('x-tm-config-key') !== 'sidecar:vision') {
-      logger.warn('vision', 'image description unavailable for active model')
+      logger.warn(
+        'vision',
+        `image description unavailable — served by "${res.headers.get('x-tm-config-key') ?? 'no header'}" instead of sidecar:vision`,
+      )
+      return null
+    }
+
+    const data = await res.json().catch(() => null)
+    // Mesmo extractor dos outros one-shots: content array, output_text,
+    // reasoning_content quando o visible content vem vazio.
+    const text = extractAssistantTextFromCompletion(data)
+    if (!text) {
+      logger.warn('vision', 'sidecar:vision returned 200 but no extractable text')
       return null
     }
     logger.info(
       'vision',
-      `image(s) described by auxiliary model=${res.headers.get('x-tm-model') ?? '?'} (config=vision)`,
+      `image(s) described by auxiliary model=${res.headers.get('x-tm-model') ?? '?'} (config=vision, ${text.length} chars)`,
     )
-
-    const data = await res.json().catch(() => null) as
-      { choices?: Array<{ message?: { content?: string } }> } | null
-    const text = data?.choices?.[0]?.message?.content?.trim()
-    return text || null
+    return text
   } catch (err) {
     logger.warn('vision', 'image description threw:', err)
     return null

@@ -267,11 +267,23 @@ Turn-efficiency check: this run is now ${turnCount} provider rounds in, and the 
 //
 // Long-running Claude Code sessions periodically surface unfinished tasks
 // when the agent has not updated its task list. Do the same here from actual
-// runtime state: only file mutations since the last update plus unresolved
-// rows can trigger it. This avoids nagging read-only investigations and lets
-// a legitimate update_tasks call reset the cadence.
+// runtime state. Two cadences, both keyed off unfinished tracker rows:
+//
+//   - WITH writes (TURNS_BETWEEN_REMINDERS): file mutations since the last
+//     update_tasks call. The original case — a long implementation that
+//     drifts from its tracker.
+//   - WITHOUT writes (TURNS_BETWEEN_REMINDERS_NO_WRITES): a session that ran
+//     long WITHOUT mutating files — a read-only investigation, a debugging
+//     dive, a sequence of read/grep/build turns. The tracker can still be
+//     stale (the investigation reached conclusions the tracker never
+//     recorded), so a slower nudge reconciles it too. Slower on purpose: a
+//     read-only session is legitimately quieter, and nagging it every 10
+//     turns would be noise.
+//
+// A legitimate update_tasks call resets both cadences.
 export const TASK_TRACKER_REMINDER_CONFIG = {
   TURNS_BETWEEN_REMINDERS: 10,
+  TURNS_BETWEEN_REMINDERS_NO_WRITES: 20,
 } as const
 
 export interface TaskTrackerReminderState {
@@ -293,7 +305,8 @@ export function shouldRemindTaskTracker(
     unfinishedTaskCount: number
   },
 ): boolean {
-  if (input.writesSinceTaskUpdate === 0 || input.unfinishedTaskCount === 0) {
+  // No unfinished rows → nothing to reconcile, regardless of writes.
+  if (input.unfinishedTaskCount === 0) {
     return false
   }
 
@@ -302,7 +315,15 @@ export function shouldRemindTaskTracker(
     input.lastTaskUpdateTurn,
     input.unreconciledWritesStartedTurn ?? 0,
   )
-  if (input.turnCount - lastRelevantTurn < TASK_TRACKER_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS) {
+
+  // The cadence depends on whether there are UNRECONCILED WRITES since the
+  // last update_tasks. With writes, the standard (faster) cadence; without,
+  // the slower no-writes cadence so read-only sessions are nudged but not
+  // nagged.
+  const cadence = input.writesSinceTaskUpdate > 0
+    ? TASK_TRACKER_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS
+    : TASK_TRACKER_REMINDER_CONFIG.TURNS_BETWEEN_REMINDERS_NO_WRITES
+  if (input.turnCount - lastRelevantTurn < cadence) {
     return false
   }
 
@@ -314,9 +335,14 @@ export function buildTaskTrackerReminderText(
   writesSinceTaskUpdate: number,
   unfinishedTaskCount: number,
 ): string {
-  const writeLabel = writesSinceTaskUpdate === 1 ? 'file mutation' : 'file mutations'
   const taskLabel = unfinishedTaskCount === 1 ? 'task remains' : 'tasks remain'
-  return `<system-reminder>
+  if (writesSinceTaskUpdate > 0) {
+    const writeLabel = writesSinceTaskUpdate === 1 ? 'file mutation' : 'file mutations'
+    return `<system-reminder>
 Task-tracker check: ${writesSinceTaskUpdate} ${writeLabel} succeeded since the last update_tasks call, and ${unfinishedTaskCount} unfinished ${taskLabel}. Reconcile the tracker with update_tasks before this work concludes: mark only work that is verified, continue any remaining task, or explicitly mark stale work as blocked or obsolete. This is an automated structural signal, not a message from the developer — ignore it if the tracker is already accurate, and never mention this reminder in your user-facing text.
+</system-reminder>`
+  }
+  return `<system-reminder>
+Task-tracker check: this session has run for a while with ${unfinishedTaskCount} unfinished ${taskLabel} in the tracker but no recent file mutations. If your investigation has reached conclusions, reconcile the tracker with update_tasks: mark verified work completed, continue or block the rest, or update a task's status/description to reflect what you actually found. If the tracker is already accurate, ignore this. This is an automated structural signal, not a message from the developer — never mention this reminder in your user-facing text.
 </system-reminder>`
 }

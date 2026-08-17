@@ -3,6 +3,7 @@ import { Box, Flex, Text, Image } from '@chakra-ui/react'
 import { diffLines } from 'diff'
 import { getFileIconUrl } from '@/utils/fileIcons'
 import { tokens } from '@/theme/tokens'
+import { t } from '@/i18n'
 import { detectLanguage, highlightLines, type HighlightedLine } from '@/utils/syntaxHighlight'
 
 const CONTEXT_LINES = 3
@@ -14,6 +15,10 @@ interface InlineDiffProps {
   newContent: string
   isNewFile: boolean
   status: 'pending' | 'approved' | 'denied'
+  /** Saltar o header (icon + filename + stats + status) quando o diff é
+   *  embutido num cartão que JÁ mostra essa informação no seu próprio header
+   *  compacto. Evita dois headers empilhados para o mesmo ficheiro. */
+  hideHeader?: boolean
 }
 
 interface DiffLine {
@@ -98,6 +103,7 @@ function InlineDiff({
   newContent,
   isNewFile,
   status,
+  hideHeader = false,
 }: InlineDiffProps) {
   const [showFull, setShowFull] = useState(false)
   const fileName = filePath.split('/').pop() || filePath
@@ -143,13 +149,10 @@ function InlineDiff({
   const addedCount = allLines.filter(l => l.type === 'added').length
   const removedCount = allLines.filter(l => l.type === 'removed').length
   const diffBorderColor = status === 'approved'
-    ? 'rgba(46, 160, 67, 0.28)'
+    ? tokens.colors.toolCall.successBorder
     : status === 'denied'
-      ? 'rgba(248, 81, 73, 0.24)'
-      : 'rgba(254, 16, 99, 0.22)'
-  const diffShadow = status === 'pending'
-    ? '0 18px 42px rgba(0,0,0,0.34), 0 0 0 1px rgba(254,16,99,0.04)'
-    : '0 12px 30px rgba(0,0,0,0.22)'
+      ? tokens.colors.toolCall.failedBorder
+      : tokens.colors.border.panel
 
   // Unified-diff style hunks with CONTEXT_LINES of surrounding context
   // around each changed block. Overlapping or adjacent ranges are merged
@@ -231,42 +234,31 @@ function InlineDiff({
 
   return (
     <Box
-      border={`1px solid ${diffBorderColor}`}
-      borderRadius="12px"
+      border={hideHeader ? 'none' : `1px solid ${diffBorderColor}`}
+      borderTop={hideHeader ? `1px solid ${tokens.colors.border.subtle}` : undefined}
+      borderRadius={hideHeader ? '0' : tokens.radius.xl}
       overflow="hidden"
-      my={2}
-      bg="rgba(10, 10, 10, 0.94)"
-      boxShadow={diffShadow}
-      transition="border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease"
+      my={hideHeader ? 0 : 1.5}
+      bg={tokens.colors.bg.codeBlock}
     >
+      {!hideHeader && (
       <Flex
         align="center"
         justify="space-between"
-        gap={3}
-        px={{ base: 3, md: 4 }}
-        minH="44px"
-        py="8px"
-        bg="linear-gradient(180deg, rgba(255,255,255,0.052), rgba(255,255,255,0.022))"
-        borderBottom="1px solid rgba(255, 255, 255, 0.075)"
+        gap={2}
+        px={3}
+        minH="32px"
+        py="6px"
+        bg={tokens.colors.bg.codeBlockHeader}
+        borderBottom={`1px solid ${tokens.colors.border.subtle}`}
       >
-        <Flex align="center" gap={2.5} minW={0}>
-          <Flex
-            w="26px"
-            h="26px"
-            align="center"
-            justify="center"
-            borderRadius="7px"
-            bg="rgba(255,255,255,0.045)"
-            border="1px solid rgba(255,255,255,0.07)"
-            flexShrink={0}
-          >
-            <Image src={getFileIconUrl(filePath)} alt="" w="15px" h="15px" flexShrink={0} />
-          </Flex>
+        <Flex align="center" gap={2} minW={0}>
+          <Image src={getFileIconUrl(filePath)} alt="" w="14px" h="14px" flexShrink={0} />
           <Text
-            fontSize={{ base: '12px', md: '13px' }}
+            fontSize={tokens.fontSize.sm}
             color={tokens.colors.text.primary}
             fontFamily={tokens.fontFamily.mono}
-            fontWeight="600"
+            fontWeight="500"
             overflow="hidden"
             textOverflow="ellipsis"
             whiteSpace="nowrap"
@@ -275,8 +267,8 @@ function InlineDiff({
           </Text>
           {changedRange && !isNewFile && (
             <Text
-              fontSize="10px"
-              color={tokens.colors.text.muted}
+              fontSize={tokens.fontSize.xs}
+              color={tokens.colors.text.disabled}
               fontFamily={tokens.fontFamily.mono}
               flexShrink={0}
               whiteSpace="nowrap"
@@ -286,33 +278,23 @@ function InlineDiff({
           )}
           {isNewFile && (
             <Text
-              fontSize="10px"
+              fontSize={tokens.fontSize.xs}
               color={tokens.colors.accent.green}
-              fontWeight="700"
-              bg="rgba(46, 160, 67, 0.12)"
-              border="1px solid rgba(46, 160, 67, 0.22)"
-              px="7px"
-              py="2px"
-              borderRadius="999px"
-              textTransform="uppercase"
+              fontWeight="600"
+              fontFamily={tokens.fontFamily.mono}
               lineHeight="1"
             >
-              new
+              {t('chat.diff.newFile')}
             </Text>
           )}
           {!isNewFile && (
             <Flex align="center" gap={1.5}>
               {addedCount > 0 && (
                 <Text
-                  fontSize="10px"
+                  fontSize={tokens.fontSize.xs}
                   color={tokens.colors.diff.addedText}
                   fontFamily={tokens.fontFamily.mono}
-                  fontWeight="700"
-                  bg="rgba(46, 160, 67, 0.105)"
-                  border="1px solid rgba(46, 160, 67, 0.18)"
-                  px="6px"
-                  py="2px"
-                  borderRadius="999px"
+                  fontWeight="600"
                   lineHeight="1"
                 >
                   +{addedCount}
@@ -320,39 +302,30 @@ function InlineDiff({
               )}
               {removedCount > 0 && (
                 <Text
-                  fontSize="10px"
+                  fontSize={tokens.fontSize.xs}
                   color={tokens.colors.diff.removedText}
                   fontFamily={tokens.fontFamily.mono}
-                  fontWeight="700"
-                  bg="rgba(248, 81, 73, 0.105)"
-                  border="1px solid rgba(248, 81, 73, 0.18)"
-                  px="6px"
-                  py="2px"
-                  borderRadius="999px"
+                  fontWeight="600"
                   lineHeight="1"
                 >
-                  -{removedCount}
+                  −{removedCount}
                 </Text>
               )}
             </Flex>
           )}
           {isResolved && (
             <Text
-              fontSize="10px"
+              fontSize={tokens.fontSize.xs}
               fontWeight="600"
               color={status === 'approved' ? tokens.colors.accent.green : tokens.colors.accent.red}
-              bg={status === 'approved' ? 'rgba(46, 160, 67, 0.12)' : 'rgba(248, 81, 73, 0.12)'}
-              border={status === 'approved' ? '1px solid rgba(46, 160, 67, 0.2)' : '1px solid rgba(248, 81, 73, 0.2)'}
-              px="7px"
-              py="2px"
-              borderRadius="999px"
               lineHeight="1"
             >
-              {status === 'approved' ? 'accepted' : 'rejected'}
+              {status === 'approved' ? t('chat.diff.accepted') : t('chat.diff.rejected')}
             </Text>
           )}
         </Flex>
       </Flex>
+      )}
 
       {/* Diff content — editor-like grid. Long lines wrap inside the code
           column, while fixed gutter columns keep line numbers aligned. */}
@@ -361,7 +334,7 @@ function InlineDiff({
         fontSize={{ base: '11.5px', md: '12px' }}
         fontFamily={tokens.fontFamily.mono}
         lineHeight="21px"
-        bg="rgba(0,0,0,0.16)"
+        bg={tokens.colors.bg.terminal}
         css={{
           '&::-webkit-scrollbar': { width: '4px', height: '4px' },
           '&::-webkit-scrollbar-thumb': { background: 'rgba(255,255,255,0.14)', borderRadius: '2px' },
@@ -381,8 +354,8 @@ function InlineDiff({
       >
         {displayHunks.length === 0 ? (
           <Flex px={3} py="10px" align="center">
-            <Text fontSize="11px" color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
-              No changes.
+            <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono}>
+              {t('chat.diff.noChanges')}
             </Text>
           </Flex>
         ) : (
@@ -483,39 +456,40 @@ function InlineDiff({
         )}
       </Box>
 
-      {/* Show more — when truncated */}
       {shouldTruncate && (
         <Box
           px={3}
-          py="8px"
-          borderTop="1px solid rgba(255, 255, 255, 0.065)"
-          bg="rgba(255, 255, 255, 0.025)"
+          py="6px"
+          borderTop={`1px solid ${tokens.colors.border.subtle}`}
+          bg={tokens.colors.bg.codeBlockHeader}
         >
           <Text
             as="button"
-            fontSize="11px"
-            color={tokens.colors.accent.primary}
+            fontSize={tokens.fontSize.xs}
+            color={tokens.colors.text.secondary}
             cursor="pointer"
-            fontWeight="600"
-            _hover={{ color: '#ff4f8c' }}
+            fontWeight="500"
+            fontFamily={tokens.fontFamily.ui}
+            _hover={{ color: tokens.colors.text.primary }}
             onClick={() => setShowFull(true)}
           >
-            Show {totalDisplayLines - MAX_LINES} more lines
+            {t('chat.diff.showMore').replace('{count}', String(totalDisplayLines - MAX_LINES))}
           </Text>
         </Box>
       )}
 
-      {/* File path footer */}
-      <Box
-        px={{ base: 3, md: 4 }}
-        py="7px"
-        bg="rgba(255, 255, 255, 0.018)"
-        borderTop="1px solid rgba(255, 255, 255, 0.055)"
-      >
-        <Text fontSize="10px" color="rgba(255,255,255,0.28)" fontFamily={tokens.fontFamily.mono} truncate>
-          {filePath}
-        </Text>
-      </Box>
+      {!hideHeader && (
+        <Box
+          px={3}
+          py="5px"
+          bg={tokens.colors.bg.codeBlockHeader}
+          borderTop={`1px solid ${tokens.colors.border.subtle}`}
+        >
+          <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled} fontFamily={tokens.fontFamily.mono} truncate>
+            {filePath}
+          </Text>
+        </Box>
+      )}
     </Box>
   )
 }
