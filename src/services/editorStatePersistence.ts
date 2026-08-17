@@ -15,7 +15,7 @@
  * setting `isDirty: false` for everything. The unsaved edits are gone with
  * no warning.
  *
- * Storage: app per-project state dir (`~/.toquemedia-studio/projects/<id>/`)
+ * Storage: app per-project state dir (`~/.tmcode/projects/<id>/`)
  * with the shape:
  *   { schemaVersion, updatedAt, dirty: { [filePath]: content } }
  *

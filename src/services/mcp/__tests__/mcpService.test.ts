@@ -81,7 +81,7 @@ describe('MCPService', () => {
         if (cmd === 'get_home_directory') return '/home/user'
         if (cmd === 'read_file') {
           const path = (args as Record<string, unknown>)?.path as string
-          if (path === '/home/user/.toquemedia-studio/mcp.json') {
+          if (path === '/home/user/.tmcode/mcp.json') {
             return JSON.stringify({
               mcpServers: {
                 'global-server': { transport: 'stdio', command: 'echo', args: [] },

@@ -3,7 +3,7 @@
  *
  * Ported from claude-vaz's `memdir/`. Two scopes coexist:
  *
- *   - **User memory** (`~/.toquemedia-studio/memory/`) — cross-project facts:
+ *   - **User memory** (`~/.tmcode/memory/`) — cross-project facts:
  *     who the developer is, validated approaches, IDE-wide preferences.
  *     Survives project switches. Holds `user_*.md` and `feedback_*.md`
  *     entries (and the global `MEMORY.md` index).

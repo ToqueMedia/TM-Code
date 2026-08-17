@@ -11,6 +11,7 @@ import { logger } from '../../../utils/logger'
 import { t } from '../../../i18n'
 import { GLOB_ALIAS, GREP_ALIAS, LS_ALIAS, READ_ALIAS } from '../toolNames'
 import { onAgentStopRequested } from '../host/hostBus'
+import { appHomePath } from '../../../utils/appHomeDir'
 
 /**
  * Cap on how many files we ask the sub-agent to review when scope is
@@ -309,7 +310,7 @@ export async function executeReview(
 }
 
 /**
- * Saves the assistant's final report to ~/.toquemedia-studio/reviews/{hash}/{ts}.md.
+ * Saves the assistant's final report to ~/.tmcode/reviews/{hash}/{ts}.md.
  * Returns the absolute path on success, throws on disk failure. Adds a
  * minimal frontmatter so the file is self-describing if opened weeks later
  * without context. Project hash uses the path's last segment plus a short
@@ -330,7 +331,7 @@ async function persistReport(args: {
 
   const home = await invoke<string>('get_home_directory')
   const projectKey = projectKeyFor(projectPath)
-  const dir = `${home}/.toquemedia-studio/reviews/${projectKey}`
+  const dir = appHomePath(home, 'reviews', projectKey)
   await invoke('create_directories_all', { path: dir }).catch(() => {})
 
   const ts = new Date().toISOString().replace(/[:.]/g, '-')

@@ -3,6 +3,7 @@ import { useMcpStore, McpToolInfo } from '../../stores/mcpStore'
 import { discoverRemoteTools as discoverRemote, callRemoteTool as callRemote } from './remoteTransport'
 import { serializeStructuredForPromptDetailed } from '@/services/agent/promptSerialize'
 import { t } from '@/i18n'
+import { appHomePath, legacyAppHomePath } from '../../utils/appHomeDir'
 
 // === Types ===
 
@@ -429,7 +430,8 @@ class MCPService {
     const configPaths: string[] = []
     try {
       const homeDir = await invoke<string>('get_home_directory')
-      configPaths.push(`${homeDir}/.toquemedia-studio/mcp.json`)
+      configPaths.push(appHomePath(homeDir, 'mcp.json'))
+      configPaths.push(legacyAppHomePath(homeDir, 'mcp.json'))
     } catch { /* */ }
     if (_projectPath) {
       configPaths.push(`${_projectPath}/.tms/mcp.json`)
@@ -620,9 +622,19 @@ class MCPService {
 
     try {
       const homeDir = await invoke<string>('get_home_directory')
-      const globalConfigPath = `${homeDir}/.toquemedia-studio/mcp.json`
-      const globalRaw = await invoke<string>('read_file', { path: globalConfigPath })
-      configs.push(JSON.parse(globalRaw) as MCPConfigFile)
+      let globalRaw: string | null = null
+      try {
+        globalRaw = await invoke<string>('read_file', { path: appHomePath(homeDir, 'mcp.json') })
+      } catch {
+        try {
+          globalRaw = await invoke<string>('read_file', { path: legacyAppHomePath(homeDir, 'mcp.json') })
+        } catch {
+          globalRaw = null
+        }
+      }
+      if (globalRaw) {
+        configs.push(JSON.parse(globalRaw) as MCPConfigFile)
+      }
     } catch {
       // No global config
     }

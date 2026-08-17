@@ -116,7 +116,7 @@ in the IDE's billing memories.)
 | Rule | Behaviour |
 |------|-----------|
 | **1 window = 1 OS process = 1 focused project** | `open_new_instance --open-project`; no shared runtime Zustand between windows |
-| **Cross-window bus = disk only** | Under `~/.toquemedia-studio/projects/<id>/` |
+| **Cross-window bus = disk only** | Under `~/.tmcode/projects/<id>/` |
 | **`agent-status.json`** | Writer heartbeats while running (focused: ~3s; background: 30s); **reader** polls ~1.5s focused / 3s background (+ immediate on focus); readers treat `running` older than 90s as crashed |
 | **`window-lock.json`** | Double-open **warning** (not a hard lock); staleness handles dead owners |
 | **`task-stop-requests.json`** | Stop request from another window; owner aborts on turn boundary or heartbeat |
@@ -203,7 +203,7 @@ The long phase log that follows (Fase 1–6, “trono”, worktrees default-on d
 (`open_new_instance` → `--open-project <dir>`, lib.rs); instances share **nothing at runtime**
 (each has its own Rust state, Zustand stores, MCP processes — only Firebase auth is shared via
 the user-data dir). The only cross-window channel is **disk**, under the project's app-managed
-state dir (`~/.toquemedia-studio/projects/<id>/`):
+state dir (`~/.tmcode/projects/<id>/`):
 
 - **`agent-status.json`** — the window running the agent mirrors its run state
   (`running`/`done`/`error` + task label). Writer heartbeat: **~3s when the window is focused**,

@@ -70,15 +70,15 @@ describe('SkillService', () => {
       expect(skills[0].name).toBe('general-coding')
     })
 
-    it('loads project skills from .toquemedia-studio/skills/', async () => {
+    it('loads project skills from .tmcode/skills/', async () => {
       mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
         if (cmd === 'list_skills_bundled') return []
         if (cmd === 'get_home_directory') return '/home/user'
         if (cmd === 'create_directories_all') return undefined
         if (cmd === 'glob_files') {
           const dir = (args as Record<string, unknown>)?.directory as string
-          if (dir === '/project/.toquemedia-studio/skills') {
-            return ['/project/.toquemedia-studio/skills/my-rules/SKILL.md']
+          if (dir === '/project/.tmcode/skills') {
+            return ['/project/.tmcode/skills/my-rules/SKILL.md']
           }
           return []
         }
@@ -96,14 +96,14 @@ describe('SkillService', () => {
     })
 
     // v1.0.1 skills-discovery fix: canonical dir + flat single-file + lowercase skill.md.
-    it('loads project skills from the canonical .toquemedia-studio/skills/', async () => {
+    it('loads project skills from the canonical .tmcode/skills/', async () => {
       mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
         if (cmd === 'list_skills_bundled') return []
         if (cmd === 'get_home_directory') return '/home/user'
         if (cmd === 'glob_files') {
           const { directory, pattern } = args as { directory: string; pattern: string }
-          if (directory === '/project/.toquemedia-studio/skills' && pattern === '*/*.md') {
-            return ['/project/.toquemedia-studio/skills/deploy/SKILL.md']
+          if (directory === '/project/.tmcode/skills' && pattern === '*/*.md') {
+            return ['/project/.tmcode/skills/deploy/SKILL.md']
           }
           return []
         }
@@ -121,8 +121,8 @@ describe('SkillService', () => {
         if (cmd === 'get_home_directory') return '/home/user'
         if (cmd === 'glob_files') {
           const { directory, pattern } = args as { directory: string; pattern: string }
-          if (directory === '/project/.toquemedia-studio/skills' && pattern === '*.md') {
-            return ['/project/.toquemedia-studio/skills/my-skill.md']
+          if (directory === '/project/.tmcode/skills' && pattern === '*.md') {
+            return ['/project/.tmcode/skills/my-skill.md']
           }
           return []
         }
@@ -134,7 +134,7 @@ describe('SkillService', () => {
       expect(proj).toHaveLength(1)
       expect(proj[0].name).toBe('my-skill')
       // A single-file skill's path must be the file itself so deleteSkill never nukes the dir.
-      expect(proj[0].path).toBe('/project/.toquemedia-studio/skills/my-skill.md')
+      expect(proj[0].path).toBe('/project/.tmcode/skills/my-skill.md')
     })
 
     it('discovers a nested skill with lowercase skill.md (case-insensitive)', async () => {
@@ -143,8 +143,8 @@ describe('SkillService', () => {
         if (cmd === 'get_home_directory') return '/home/user'
         if (cmd === 'glob_files') {
           const { directory, pattern } = args as { directory: string; pattern: string }
-          if (directory === '/home/user/.toquemedia-studio/skills' && pattern === '*/*.md') {
-            return ['/home/user/.toquemedia-studio/skills/foo/skill.md']
+          if (directory === '/home/user/.tmcode/skills' && pattern === '*/*.md') {
+            return ['/home/user/.tmcode/skills/foo/skill.md']
           }
           return []
         }
@@ -343,8 +343,8 @@ license: MIT
       await service.createProjectSkill('/project', 'My Conventions', '# Rules')
 
       expect(writtenPaths).toHaveLength(1)
-      // Canonical project-skill dir mirrors the global ~/.toquemedia-studio/skills.
-      expect(writtenPaths[0]).toBe('/project/.toquemedia-studio/skills/my-conventions/SKILL.md')
+      // Canonical project-skill dir mirrors the global ~/.tmcode/skills.
+      expect(writtenPaths[0]).toBe('/project/.tmcode/skills/my-conventions/SKILL.md')
     })
 
     it('sanitizes skill name', async () => {
@@ -386,11 +386,11 @@ license: MIT
       })
 
       await service.deleteSkill({
-        id: 'project:rules', name: 'rules', description: 'Project rules', path: '/project/.toquemedia-studio/skills/rules',
+        id: 'project:rules', name: 'rules', description: 'Project rules', path: '/project/.tmcode/skills/rules',
         content: '', references: [], scope: 'project',
       })
 
-      expect(deletedPath).toBe('/project/.toquemedia-studio/skills/rules')
+      expect(deletedPath).toBe('/project/.tmcode/skills/rules')
     })
   })
 })

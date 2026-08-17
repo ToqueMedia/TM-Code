@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use super::{canonicalize_path, normalize_path_for_frontend};
 
-const APP_STATE_DIR: &str = ".toquemedia-studio";
+const APP_STATE_DIR: &str = ".tmcode";
+const LEGACY_APP_STATE_DIR: &str = ".toquemedia-studio";
 const PROJECTS_DIR: &str = "projects";
 const PROJECT_ID_FILE: &str = ".toquemedia-id";
 const AGENT_STATUS_FILE: &str = "agent-status.json";
@@ -132,9 +133,17 @@ fn state_base_dir() -> Result<PathBuf, String> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        Ok(dirs::home_dir()
-            .ok_or_else(|| "Failed to resolve home directory".to_string())?
-            .join(APP_STATE_DIR))
+        let home = dirs::home_dir()
+            .ok_or_else(|| "Failed to resolve home directory".to_string())?;
+        let current = home.join(APP_STATE_DIR);
+        let legacy = home.join(LEGACY_APP_STATE_DIR);
+        // One-shot: take over ~/.toquemedia-studio so sessions/checkpoints
+        // keep working under ~/.tmcode. Leave the old name if rename fails
+        // (e.g. both dirs already exist) — readers still prefer .tmcode.
+        if !current.exists() && legacy.exists() {
+            let _ = std::fs::rename(&legacy, &current);
+        }
+        Ok(current)
     }
 }
 

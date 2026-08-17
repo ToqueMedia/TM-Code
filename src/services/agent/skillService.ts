@@ -1,5 +1,6 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { parseSkillFrontmatter } from './skillFrontmatter'
+import { appHomePath, legacyAppHomePath } from '../../utils/appHomeDir'
 
 // Re-export so existing imports (`import { parseSkillFrontmatter } from './skillService'`) keep working.
 export { parseSkillFrontmatter } from './skillFrontmatter'
@@ -36,7 +37,7 @@ interface SkillCache {
   mode: PromptMode
   /** Filesystem version captured when the cache was filled. Cache misses when
    *  the global fsVersion advances — i.e., any write happened since. Catches
-   *  the project-level skill edits (.toquemedia-studio/skills/*.md) without
+   *  the project-level skill edits (.tmcode/skills/*.md) without
    *  needing a path-specific watcher. */
   fsVersion: number
 }
@@ -52,14 +53,12 @@ const CACHE_TTL_MS = 30_000 // 30 seconds
 const MAX_SKILL_INDEX_CHARS = 6000
 
 // Project-level skill directories, scanned in priority order (first occurrence
-// of a given skill name wins). `.toquemedia-studio/skills` is canonical — it
-// mirrors the global `~/.toquemedia-studio/skills` so the project and global
-// names match. `.tms/skills` (the old hard-coded path) was REMOVED — project
-// skills live in `.toquemedia-studio/skills`, not `.tms`. `.toquemedia/skills`
-// stays only as a legacy fallback for the name older docs once used. Layout-
-// tolerant matching (nested SKILL.md or flat *.md, any case) is in
-// loadSkillsFromDirectory.
-const PROJECT_SKILL_DIRS = ['.toquemedia-studio/skills', '.toquemedia/skills'] as const
+// of a given skill name wins). `.tmcode/skills` is canonical — it
+// mirrors the global `~/.tmcode/skills` so the project and global
+// names match. `.toquemedia-studio/skills` and `.toquemedia/skills`
+// stay as legacy fallbacks. Layout-tolerant matching (nested SKILL.md
+// or flat *.md, any case) is in loadSkillsFromDirectory.
+const PROJECT_SKILL_DIRS = ['.tmcode/skills', '.toquemedia-studio/skills', '.toquemedia/skills'] as const
 
 // Canonical location for newly-created project skills (must be one of PROJECT_SKILL_DIRS).
 const CANONICAL_PROJECT_SKILL_DIR = PROJECT_SKILL_DIRS[0]
@@ -408,7 +407,7 @@ ${lines.join('\n')}`
    */
   async createGlobalSkill(name: string, content: string): Promise<void> {
     const homeDir = await invoke<string>('get_home_directory')
-    const skillDir = `${homeDir}/.toquemedia-studio/skills`
+    const skillDir = appHomePath(homeDir, 'skills')
     await this.ensureDirectory(skillDir)
 
     const sanitized = this.sanitizeName(name)
@@ -468,13 +467,19 @@ ${lines.join('\n')}`
   private async loadGlobalSkills(): Promise<Skill[]> {
     try {
       const homeDir = await invoke<string>('get_home_directory')
-      const skillsDir = `${homeDir}/.toquemedia-studio/skills`
+      const skillsDir = appHomePath(homeDir, 'skills')
+      const legacyDir = legacyAppHomePath(homeDir, 'skills')
       // Ensure the global skills dir EXISTS so users always have a discoverable
       // place to drop skills. It was only ever created lazily by createGlobalSkill
       // (when a skill is made through the app), so a user who wants to add global
       // skills by hand had no folder to put them in. ensureDirectory is idempotent.
       await this.ensureDirectory(skillsDir)
-      return await this.loadSkillsFromDirectory(skillsDir, 'global')
+      const [current, legacy] = await Promise.all([
+        this.loadSkillsFromDirectory(skillsDir, 'global'),
+        this.loadSkillsFromDirectory(legacyDir, 'global'),
+      ])
+      const seen = new Set(current.map(s => s.name))
+      return [...current, ...legacy.filter(s => !seen.has(s.name))]
     } catch {
       return []
     }

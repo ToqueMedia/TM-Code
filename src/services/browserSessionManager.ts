@@ -5,6 +5,7 @@ import { useLayoutStore, type ViewMode } from '../stores/layoutStore'
 import { ensureTestBrowser } from './e2eService'
 import { logger } from '../utils/logger'
 import { t } from '@/i18n'
+import { appHomePath } from '../utils/appHomeDir'
 
 /**
  * On-demand lifecycle for the agent's headless browser session.
@@ -200,7 +201,7 @@ class BrowserSessionManager {
   private async ensureConfigFile(): Promise<string> {
     if (this.configPath) return this.configPath
     const home = await invoke<string>('get_home_directory')
-    const root = `${home}/.toquemedia-studio`
+    const root = appHomePath(home)
     const userDataDir = `${root}/browser-profile`
     // Both dirs are idempotent — create_directories_all is a no-op if they
     // already exist. The profile dir survives between sessions so cookies

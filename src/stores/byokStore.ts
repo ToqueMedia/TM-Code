@@ -434,7 +434,7 @@ interface ByokState {
    *  whether resolveActive returns them. Cloud providers should ignore this. */
   markConfigured: (providerId: string, configured: boolean) => void
   /** Read every local-provider's catalog from the cross-project disk
-   *  cache (~/.toquemedia-studio/byok-dynamic-cache.json) and seed the
+   *  cache (~/.tmcode/byok-dynamic-cache.json) and seed the
    *  in-memory `perProviderConfig.{provider}.dynamicCatalog` entries.
    *  Idempotent — only overwrites entries older than the cached one. */
   hydrateLocalModelsFromCache: () => Promise<void>

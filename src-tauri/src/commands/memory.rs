@@ -6,7 +6,7 @@
 //!     and `reference_*` entries
 //!     that describe ongoing work, repo conventions, where to look up X.
 //!
-//!   - **User memory**: `~/.toquemedia-studio/memory/` — cross-project,
+//!   - **User memory**: `~/.tmcode/memory/` — cross-project,
 //!     scoped to this IDE installation. Holds `user_*` (who the developer is)
 //!     and `feedback_*` (corrections / validated approaches) entries that
 //!     should apply regardless of which project is open.
@@ -26,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::project_state::project_state_root;
 
 /// Memory scope — `Project` is app-managed per-project state, `User` is
-/// `~/.toquemedia-studio/memory/`. The TS layer picks the scope per file.
+/// `~/.tmcode/memory/`. The TS layer picks the scope per file.
 #[derive(Debug, Clone, Copy)]
 enum MemoryScope {
     Project,
@@ -101,7 +101,13 @@ fn memory_root(
                 return Err("User-scope memory does not support subdirectory (sub-agents are project-bound)".to_string());
             }
             let home = dirs::home_dir().ok_or("Could not determine home directory")?;
-            Ok(home.join(".toquemedia-studio").join("memory"))
+            let current = home.join(".tmcode").join("memory");
+            let legacy = home.join(".toquemedia-studio").join("memory");
+            if !current.exists() && legacy.exists() {
+                Ok(legacy)
+            } else {
+                Ok(current)
+            }
         }
     }
 }

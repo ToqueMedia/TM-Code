@@ -33,6 +33,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type { MemoryProposal } from './memoryExtractor'
 import type { MemoryScope } from './memdir'
 import { getProjectStateDir } from '../projectStatePaths'
+import { appHomePath } from '../../utils/appHomeDir'
 
 const PROPOSED_LOG_FILENAME = '_proposed.jsonl'
 const PROPOSED_ACTIVE_FILENAME = '_proposed-active.json'
@@ -81,8 +82,7 @@ async function resolvePath(
     return `${await getProjectStateDir(projectPath)}/memory/${filename}`
   }
   const home = await invoke<string>('get_home_directory')
-  const normalized = home.replace(/\\/g, '/').replace(/\/$/, '')
-  return `${normalized}/.toquemedia-studio/memory/${filename}`
+  return appHomePath(home, 'memory', filename)
 }
 
 /**

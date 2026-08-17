@@ -8,7 +8,7 @@
  * network round-trip even though the user's local model list rarely
  * changes between launches.
  *
- * The cache lives at `~/.toquemedia-studio/byok-dynamic-cache.json` —
+ * The cache lives at `~/.tmcode/byok-dynamic-cache.json` —
  * per-user-machine (NOT per-project), because the models exposed by
  * Ollama on this machine apply to every project that uses BYOK against
  * Ollama. A user pulling a new model via `ollama pull` will see it after
@@ -26,6 +26,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import type { ByokModel } from '../stores/byokStore'
+import { appHomePath, legacyAppHomePath } from '../utils/appHomeDir'
 
 const CACHE_FILENAME = 'byok-dynamic-cache.json'
 const MAX_CACHE_AGE_MS = 30 * 60 * 1000 // 30 minutes
@@ -45,8 +46,16 @@ interface ByokCacheFileV1 {
 
 async function cachePath(): Promise<string> {
   const home = await invoke<string>('get_home_directory')
-  const normalized = home.replace(/\\/g, '/').replace(/\/$/, '')
-  return `${normalized}/.toquemedia-studio/${CACHE_FILENAME}`
+  return appHomePath(home, CACHE_FILENAME)
+}
+
+async function readCacheRaw(): Promise<string> {
+  const home = await invoke<string>('get_home_directory')
+  try {
+    return await invoke<string>('read_file', { path: appHomePath(home, CACHE_FILENAME) })
+  } catch {
+    return await invoke<string>('read_file', { path: legacyAppHomePath(home, CACHE_FILENAME) })
+  }
 }
 
 /**
@@ -59,8 +68,7 @@ async function cachePath(): Promise<string> {
  */
 export async function loadByokDynamicCache(): Promise<Record<string, ByokCacheEntry>> {
   try {
-    const path = await cachePath()
-    const raw = await invoke<string>('read_file', { path })
+    const raw = await readCacheRaw()
     const parsed = JSON.parse(raw) as Partial<ByokCacheFileV1>
     if (!parsed || parsed.schemaVersion !== 1 || !parsed.catalogs) return {}
     const now = Date.now()

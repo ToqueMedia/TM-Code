@@ -338,7 +338,7 @@ const SAFE_TOOLS = new Set([
   // capture_url_design boots a sandboxed Playwright Chrome profile (not the
   // user's real browser) to screenshot a URL for design-copy. Prompting per
   // paste would kill the "see this URL and copy it" flow; the profile is
-  // isolated under ~/.toquemedia-studio/browser-profile.
+  // isolated under ~/.tmcode/browser-profile.
   'capture_url_design',
   // read_skill loads bundled/global/project markdown — pure read, no
   // side effects. Without this, /review and any agent that consults

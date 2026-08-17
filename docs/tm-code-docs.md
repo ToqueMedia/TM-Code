@@ -95,10 +95,10 @@ Se algo estiver em falta ou desactualizado, o TM Code mostra um diálogo com lin
 
 - **Configurações globais**: `~/.config/toquemedia-studio/settings.json`
 - **Metadados de projectos**: `~/.config/toquemedia-studio/projects/`
-- **Sessões de chat**: `~/.toquemedia-studio/sessions/{projectHash}/`
-- **Browser profile** (para `/te2e`): `~/.toquemedia-studio/browser-profile/`
+- **Sessões de chat**: `~/.tmcode/projects/{projectId}/sessions/`
+- **Browser profile** (para `/te2e`): `~/.tmcode/browser-profile/`
 
-> Os identificadores internos usam ainda o nome antigo `toquemedia-studio` por compatibilidade. O nome visível em todo o lado é "TM Code".
+> O estado da app vive em `~/.tmcode`. O bundle e o identifier Tauri ainda usam `toquemedia-studio` por compatibilidade. O nome visível é "TM Code".
 
 ---
 
@@ -512,8 +512,8 @@ O agente tem ferramentas para interagir com o teu projecto. Algumas são automá
 Skills são **recipes em markdown** que o agente carrega para resolver problemas com qualidade conhecida. Há três níveis:
 
 - **Bundled** — fornecidos pelo TM Code (auth-email-password, auth-google, frontend-design, etc.)
-- **Global** — em `~/.toquemedia-studio/skills/` (a tua biblioteca pessoal)
-- **Project-local** — em `.toquemedia-studio/skills/` (específicos do projecto, vão para git). Também é aceite `.toquemedia/skills/` por retrocompatibilidade.
+- **Global** — em `~/.tmcode/skills/` (a tua biblioteca pessoal)
+- **Project-local** — em `.tmcode/skills/` (específicos do projecto, vão para git). Também é aceite `.toquemedia-studio/skills/` e `.toquemedia/skills/` por retrocompatibilidade.
 
 Cada skill pode ser um ficheiro único `<nome>.md` ou uma pasta `<nome>/SKILL.md` (com `references/*.md` opcionais). O nome do ficheiro `SKILL.md` é reconhecido em qualquer capitalização.
 
@@ -534,7 +534,7 @@ O TM Code:
 
 ### Como criar um skill
 
-Cria `.toquemedia-studio/skills/meu-skill.md`:
+Cria `.tmcode/skills/meu-skill.md`:
 
 ```markdown
 ---
@@ -650,7 +650,7 @@ Em momento nenhum os valores aparecem em texto livre, no histórico do chat, ou 
 
 ## 11. Checkpoints e desfazer
 
-**Cada acção que escreve ou apaga ficheiros** dispara um checkpoint automático. Ficam guardados em `~/.toquemedia-studio/sessions/{projecto}/checkpoints/`.
+**Cada acção que escreve ou apaga ficheiros** dispara um checkpoint automático. Ficam guardados em `~/.tmcode/projects/{projectId}/checkpoints/`.
 
 ### Como reverter
 
@@ -874,7 +874,7 @@ A partir da Welcome Screen → "CMD mode". Ou via flag de arranque (em desenvolv
 
 ### Configurar
 
-Cria `~/.config/toquemedia-studio/mcp.json` (global) ou `.toquemedia/mcp.json` (project-local):
+Cria `~/.tmcode/mcp.json` (global) ou `.tms/mcp.json` (project-local):
 
 ```json
 {
@@ -1162,7 +1162,7 @@ arranja o bug do logout: ao clicar, o user fica em loop infinite redirect entre 
 
 - Usa `#auth-google` em vez de copiar instruções de auth a cada projecto
 - Cria skills pessoais para patterns que repetes
-- Para o teu projecto, cria skills em `.toquemedia-studio/skills/` e versiona em git
+- Para o teu projecto, cria skills em `.tmcode/skills/` e versiona em git
 
 ### Token efficiency
 
@@ -1198,7 +1198,7 @@ arranja o bug do logout: ao clicar, o user fica em loop infinite redirect entre 
 Se mataste o IDE forçadamente, o profile fica lockado. O TM Code limpa automaticamente locks órfãos no próximo arranque. Se persistir:
 
 ```bash
-rm ~/.toquemedia-studio/browser-profile/Singleton*
+rm ~/.tmcode/browser-profile/Singleton*
 ```
 
 ### "Mensagens em queue não aparecem no chat"

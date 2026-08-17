@@ -335,7 +335,7 @@ function SkillsTab(): React.ReactElement {
       {/* Global */}
       <Box>
         <Text fontSize="sm" fontWeight="600" color={tokens.colors.text.primary} mb={2}>
-          Global (~/.toquemedia-studio/skills/)
+          Global (~/.tmcode/skills/)
         </Text>
         {globalSkills.length === 0 ? (
           <Text fontSize="12px" color={tokens.colors.text.muted}>{t("misc.noGlobalSkills")}</Text>
@@ -358,7 +358,7 @@ function SkillsTab(): React.ReactElement {
       {/* Project */}
       <Box>
         <Text fontSize="sm" fontWeight="600" color={tokens.colors.text.primary} mb={2}>
-          Project (.toquemedia-studio/skills/)
+          Project (.tmcode/skills/)
         </Text>
         {projectSkills.length === 0 ? (
           <Text fontSize="12px" color={tokens.colors.text.muted}>{t("misc.noProjectSkills")}</Text>
@@ -584,7 +584,7 @@ function McpTab(): React.ReactElement {
             No MCP servers configured
           </Text>
           <Text fontSize="11px" color={tokens.colors.text.disabled}>
-            Add servers in <code>.tms/mcp.json</code> (project) or <code>~/.toquemedia-studio/mcp.json</code> (global)
+            Add servers in <code>.tms/mcp.json</code> (project) or <code>~/.tmcode/mcp.json</code> (global)
           </Text>
         </Box>
       ) : (
