@@ -295,6 +295,37 @@ test('omits X-Model-Context-Window when the active config declares no window', a
   assert.equal(res.headers.get('x-model-context-window'), null)
 })
 
+test('emits X-Model-Reasoning-Efforts from the published thinking shape', async () => {
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const res = await handleRequest(
+    request('/v1/chat/completions', { stream: true }),
+    env({
+      ACTIVE_AI_CONFIG_JSON: JSON.stringify({
+        ...activeConfig,
+        thinking: { param: 'reasoning_effort', options: ['low', 'medium', 'high'], default: 'high' },
+      }),
+    }),
+    { fetcher },
+  )
+
+  assert.equal(res.status, 200)
+  assert.equal(
+    res.headers.get('x-model-reasoning-efforts'),
+    'param=reasoning_effort;default=high;options=low,medium,high',
+  )
+  assert.match(
+    res.headers.get('access-control-expose-headers') ?? '',
+    /X-Model-Reasoning-Efforts/,
+  )
+})
+
+test('omits X-Model-Reasoning-Efforts when the config has no thinking shape', async () => {
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const res = await handleRequest(request('/v1/chat/completions', { stream: true }), env(), { fetcher })
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-model-reasoning-efforts'), null)
+})
+
 test('emits X-Model-Context-Window from the active config window', async () => {
   const fetcher = fakeFetcher(Response.json({ ok: true }))
   const res = await handleRequest(

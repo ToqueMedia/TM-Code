@@ -119,6 +119,7 @@ jest.mock('../../../stores/activeModelStore', () => ({
   },
   getPersonaFallbackModelId: () => mockActiveModelId,
   getPersonaFallbackContextWindow: () => null,
+  getPersonaFallbackThinking: () => null,
 }))
 
 let mockAgentModelName: string | null = null
@@ -127,6 +128,7 @@ jest.mock('../../../stores/agentStore', () => ({
     getState: () => ({
       status: 'idle',
       modelName: mockAgentModelName,
+      reasoningEffortOptions: null,
       setModelInfo: jest.fn(),
       setByokActive: jest.fn(),
       setWorkerStatus: jest.fn(),

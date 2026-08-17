@@ -9,6 +9,9 @@ compatibility_date = "2026-06-02"
 [observability]
 enabled = true
 
+# `preview_id` é o KV do `wrangler dev`. Tem de coincidir com o do
+# control-plane (toquemedia-studio-api/wrangler.toml) para o persist
+# local partilhado em `.wrangler/shared-state` ser o mesmo sítio.
 [[kv_namespaces]]
 binding = "ACTIVE_AI_CONFIG"
 id = "b4052457452a4e84aedf332e055c4b1a"

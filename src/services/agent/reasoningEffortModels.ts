@@ -1,4 +1,7 @@
 import type { ReasoningEffortOptions } from '../../stores/reasoningEffortStore'
+import { usePersonaStore } from '../../stores/personaStore'
+import { useActiveModelStore } from '../../stores/activeModelStore'
+import { useAgentStore } from '../../stores/agentStore'
 
 /**
  * Mapa FRONTEND de reasoning-effort por modelo (decisão 2026-07-23: TUDO no
@@ -133,13 +136,37 @@ export function normalizeEffortModelId(
   return bare
 }
 
+export function isPublishedEffortOptions(
+  value: unknown,
+): value is ReasoningEffortOptions {
+  if (!value || typeof value !== 'object') return false
+  const v = value as Partial<ReasoningEffortOptions>
+  const paramOk =
+    v.param === 'reasoning_effort' ||
+    v.param === 'enable_thinking' ||
+    v.param === 'thinking_object'
+  return (
+    paramOk &&
+    Array.isArray(v.options) &&
+    v.options.length > 0 &&
+    v.options.every((o) => typeof o === 'string' && o.length > 0) &&
+    typeof v.default === 'string' &&
+    v.options.includes(v.default)
+  )
+}
+
 /**
- * Resolve as opções de effort para o modelo ativo. Desconhecido/não-mapeado →
- * default (GLM). Nunca devolve null — o controlo está sempre disponível.
+ * Resolve as opções de effort para o modelo ativo.
+ * `published` (Firestore da persona / header X-Model-Reasoning-Efforts) manda —
+ * é o que permite um modelo novo no catálogo mostrar o seletor sem entrar
+ * neste mapa. Sem published: mapa local, ou default GLM só para DISPLAY
+ * (o seletor esconde-se via shouldSendEffort).
  */
 export function getEffortOptionsForModel(
   modelId: string | null | undefined,
+  published?: ReasoningEffortOptions | null,
 ): ReasoningEffortOptions {
+  if (isPublishedEffortOptions(published)) return published
   const key = normalizeEffortModelId(modelId)
   if (key && EFFORT_BY_MODEL[key]) return EFFORT_BY_MODEL[key]
   return DEFAULT_EFFORT
@@ -157,8 +184,9 @@ export function getEffortOptionsForModel(
 export function resolveEffectiveEffort(
   modelId: string | null | undefined,
   selected: string | null,
+  published?: ReasoningEffortOptions | null,
 ): string {
-  const opts = getEffortOptionsForModel(modelId)
+  const opts = getEffortOptionsForModel(modelId, published)
   if (!selected) return opts.default
 
   const key = normalizeEffortModelId(modelId)
@@ -202,7 +230,11 @@ export function resolveEffortModelId(
  * - mapeado (incl. aliases) → sim
  * - não-mapeado → não (evita 400 em providers sem reasoning_effort)
  */
-export function shouldSendEffort(modelId: string | null | undefined): boolean {
+export function shouldSendEffort(
+  modelId: string | null | undefined,
+  published?: ReasoningEffortOptions | null,
+): boolean {
+  if (isPublishedEffortOptions(published)) return true
   if (modelId == null || modelId.trim() === '') return false
   const key = normalizeEffortModelId(modelId)
   return key != null && key in EFFORT_BY_MODEL
@@ -237,11 +269,59 @@ export interface EffortTurnStamp {
 export function resolveEffortTurnStamp(
   modelId: string | null | undefined,
   selected: string | null,
+  published?: ReasoningEffortOptions | null,
 ): EffortTurnStamp {
   return {
-    effort: resolveEffectiveEffort(modelId, selected),
-    sent: shouldSendEffort(modelId),
+    effort: resolveEffectiveEffort(modelId, selected, published),
+    sent: shouldSendEffort(modelId, published),
   }
+}
+
+/**
+ * Parse do header `X-Model-Reasoning-Efforts`.
+ * Formato do data-plane: `param=reasoning_effort;default=high;options=low,medium,high`.
+ * Também aceita JSON (`{param,options,default}`) por se o worker um dia mudar.
+ */
+export function parseReasoningEffortsHeader(
+  raw: string | null | undefined,
+): ReasoningEffortOptions | null {
+  if (raw == null) return null
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown
+      return isPublishedEffortOptions(parsed) ? parsed : null
+    } catch {
+      return null
+    }
+  }
+  const map = new Map<string, string>()
+  for (const pair of trimmed.split(';')) {
+    const eq = pair.indexOf('=')
+    if (eq < 0) continue
+    map.set(pair.slice(0, eq).trim().toLowerCase(), pair.slice(eq + 1).trim())
+  }
+  const param = map.get('param')
+  const options = (map.get('options') ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const def = map.get('default') ?? ''
+  const candidate = { param, options, default: def }
+  return isPublishedEffortOptions(candidate) ? candidate : null
+}
+
+/**
+ * Shape publicada da persona selecionada, senão a do último header servido.
+ * Sem stores disponíveis (testes isolados) devolve null.
+ */
+export function currentPublishedEffortOptions(): ReasoningEffortOptions | null {
+  const persona = usePersonaStore.getState().selected
+  const fromPersona = useActiveModelStore.getState().personaModels[persona]?.thinking ?? null
+  if (isPublishedEffortOptions(fromPersona)) return fromPersona
+  const fromHeader = useAgentStore.getState().reasoningEffortOptions
+  return isPublishedEffortOptions(fromHeader) ? fromHeader : null
 }
 
 /** Label curta para UI (High, Max, xHigh, None…). */

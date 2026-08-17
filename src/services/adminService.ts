@@ -10,6 +10,8 @@ export interface AdminModel {
   providerLabel: string
   category: ModelCategory
   activeConfig: ActiveAIConfigInput
+  updatedAt?: string
+  updatedBy?: string
 }
 
 export type ActiveAIConfigInput = Omit<ActiveAIConfig, 'updatedAt' | 'updatedBy'>
@@ -29,10 +31,12 @@ async function authHeaders(): Promise<Record<string, string>> {
 export interface ActiveAIConfig {
   provider: string
   model: string
+  /** Modelo alternativo quando o pedido traz X-TM-Speed. */
+  speedModel?: string
   baseUrl: string
   chatCompletionsPath: string
   authHeader: string
-  authScheme: 'Bearer' | 'none'
+  authScheme: 'Bearer' | 'none' | 'google_oauth'
   apiKeyEnv: string
   enabled: boolean
   /** Janela de contexto real (tokens) escolhida pelo admin no Select. Emitida
@@ -45,6 +49,16 @@ export interface ActiveAIConfig {
   /** Multiplicador de custo da persona (só nas configs `persona:*`): o
    *  data-plane fatura billableTokenTotal (cache já a 50%) × este valor. */
   costMultiplier?: number
+  thinking?: {
+    param: 'reasoning_effort' | 'enable_thinking' | 'thinking_object'
+    options: string[]
+    default: string
+  }
+  supportsVision?: boolean
+  supportsSearch?: boolean
+  thinkingMode?: 'toggleable' | 'mandatory' | 'none'
+  maxOutputTokens?: number
+  imagePricing?: { output1k?: number; output2k?: number; input?: number }
   updatedAt?: string
   updatedBy?: string
 }
@@ -90,6 +104,8 @@ export interface SidecarModel {
   providerLabel: string
   roles: SidecarType[]
   activeConfig: ActiveAIConfigInput
+  updatedAt?: string
+  updatedBy?: string
 }
 
 export interface SidecarsResponse {
@@ -146,9 +162,9 @@ export async function disableSidecar(type: SidecarType): Promise<void> {
 
 // ─── Personas (Escolha do Modelo, 2026-08-04) ───────────────────────────────
 // O selector do utilizador expõe Standard/Expert/Master sem revelar modelos;
-// o admin atribui aqui um modelo do catálogo coder + um costMultiplier a cada
-// persona. O control-plane publica `persona:*` no KV do data-plane, que fatura
-// billableTokenTotal (cache já a 50%) × multiplier.
+// o admin atribui aqui um modelo do catálogo coder e a janela de contexto a
+// cada persona. O campo costMultiplier continua obrigatório no control-plane
+// por compatibilidade, mas o data-plane já não o aplica (metering 30/70).
 
 export type PersonaType = 'standard' | 'expert' | 'master'
 
@@ -175,13 +191,19 @@ export async function fetchPersonas(): Promise<PersonasResponse> {
 export async function setPersona(
   persona: PersonaType,
   modelId: string,
-  costMultiplier: number,
   contextWindow?: number,
 ): Promise<ActiveAIConfig> {
   const res = await tauriFetch(`${resolveWorkerUrl()}/v1/admin/ai/personas`, {
     method: 'PUT',
     headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ persona, modelId, costMultiplier, ...(contextWindow ? { contextWindow } : {}) }),
+    body: JSON.stringify({
+      persona,
+      modelId,
+      // Compatibilidade com o endpoint actual; não representa uma escolha de
+      // consumo e é ignorado pelo data-plane.
+      costMultiplier: 1,
+      ...(contextWindow ? { contextWindow } : {}),
+    }),
   })
   if (!res.ok) {
     if (res.status === 403) throw new Error('FORBIDDEN')
@@ -208,4 +230,125 @@ export async function disablePersona(persona: PersonaType): Promise<void> {
     if (res.status === 403) throw new Error('FORBIDDEN')
     throw new Error(`Failed to disable persona (${res.status})`)
   }
+}
+
+// ─── Catálogo KV (CRUD) ─────────────────────────────────────────────────────
+// Adicionar/remover um modelo é uma edição de dados. As constantes compiladas
+// no control-plane são só seed de primeiro boot; depois disto o KV
+// (`catalog:coder` / `catalog:sidecar`) é a fonte de verdade. Um apiKeyEnv
+// NOVO exige `wrangler secret put` no data-plane — não um deploy de código.
+
+export type AdminModelInput = {
+  id: string
+  name: string
+  providerLabel: string
+  activeConfig: ActiveAIConfigInput
+}
+
+export type SidecarModelInput = {
+  id: string
+  name: string
+  providerLabel: string
+  roles: SidecarType[]
+  activeConfig: ActiveAIConfigInput
+}
+
+async function catalogRequest<T>(
+  path: string,
+  init: { method: string; body?: string },
+  failLabel: string,
+): Promise<T> {
+  const res = await tauriFetch(`${resolveWorkerUrl()}${path}`, {
+    method: init.method,
+    body: init.body,
+    headers: {
+      ...(await authHeaders()),
+      ...(init.body != null ? { 'Content-Type': 'application/json' } : {}),
+    },
+  })
+  if (!res.ok) {
+    if (res.status === 403) throw new Error('FORBIDDEN')
+    const raw = await res.text().catch(() => '')
+    let human = raw
+    try {
+      const parsed = JSON.parse(raw) as { error?: string }
+      human = parsed.error || raw
+    } catch { /* keep raw */ }
+    throw new Error(human || `${failLabel} (${res.status})`)
+  }
+  return await res.json() as T
+}
+
+export async function fetchModelCatalog(): Promise<AdminModel[]> {
+  const data = await catalogRequest<{ models?: AdminModel[] }>(
+    '/v1/admin/models',
+    { method: 'GET' },
+    'Failed to load model catalog',
+  )
+  return data.models ?? []
+}
+
+export async function createModel(entry: AdminModelInput): Promise<AdminModel> {
+  const data = await catalogRequest<{ model?: AdminModel }>(
+    '/v1/admin/models',
+    { method: 'POST', body: JSON.stringify(entry) },
+    'Failed to create model',
+  )
+  if (!data.model) throw new Error('Failed to create model: missing model in response')
+  return data.model
+}
+
+export async function updateModel(id: string, entry: AdminModelInput): Promise<AdminModel> {
+  const data = await catalogRequest<{ model?: AdminModel }>(
+    `/v1/admin/models/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: JSON.stringify(entry) },
+    'Failed to update model',
+  )
+  if (!data.model) throw new Error('Failed to update model: missing model in response')
+  return data.model
+}
+
+export async function deleteModel(id: string): Promise<void> {
+  await catalogRequest<{ deleted?: string }>(
+    `/v1/admin/models/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
+    'Failed to delete model',
+  )
+}
+
+export async function fetchSidecarCatalog(): Promise<SidecarModel[]> {
+  const data = await catalogRequest<{ models?: SidecarModel[] }>(
+    '/v1/admin/sidecar-models',
+    { method: 'GET' },
+    'Failed to load sidecar catalog',
+  )
+  return data.models ?? []
+}
+
+export async function createSidecarModel(entry: SidecarModelInput): Promise<SidecarModel> {
+  const data = await catalogRequest<{ model?: SidecarModel }>(
+    '/v1/admin/sidecar-models',
+    { method: 'POST', body: JSON.stringify(entry) },
+    'Failed to create sidecar model',
+  )
+  if (!data.model) throw new Error('Failed to create sidecar model: missing model in response')
+  return data.model
+}
+
+export async function updateSidecarModel(id: string, entry: SidecarModelInput): Promise<SidecarModel> {
+  const data = await catalogRequest<{ model?: SidecarModel }>(
+    `/v1/admin/sidecar-models/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: JSON.stringify(entry) },
+    'Failed to update sidecar model',
+  )
+  if (!data.model) throw new Error('Failed to update sidecar model: missing model in response')
+  return data.model
+}
+
+export async function deleteSidecarModel(id: string): Promise<void> {
+  await catalogRequest<{ deleted?: string }>(
+    `/v1/admin/sidecar-models/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
+    'Failed to delete sidecar model',
+  )
 }

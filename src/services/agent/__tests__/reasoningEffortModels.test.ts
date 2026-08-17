@@ -2,12 +2,18 @@ import {
   EFFORT_BY_MODEL,
   effortDisplayLabel,
   getEffortOptionsForModel,
+  isPublishedEffortOptions,
   normalizeEffortModelId,
+  parseReasoningEffortsHeader,
+  currentPublishedEffortOptions,
   resolveEffectiveEffort,
   resolveEffortModelId,
   resolveEffortTurnStamp,
   shouldSendEffort,
 } from '../reasoningEffortModels'
+import { usePersonaStore } from '../../../stores/personaStore'
+import { useActiveModelStore } from '../../../stores/activeModelStore'
+import { useAgentStore } from '../../../stores/agentStore'
 
 /**
  * Mapa FRONTEND de effort por modelo + resolução do valor EFETIVO.
@@ -247,5 +253,85 @@ describe('GLM-5.2 multi-provider — escala de effort por VIA', () => {
 
   it('continua a enviar o header — a chave está mapeada', () => {
     expect(shouldSendEffort(CF)).toBe(true)
+  })
+})
+
+const DEEPSEEK_PUBLISHED = {
+  param: 'reasoning_effort' as const,
+  options: ['low', 'medium', 'high'],
+  default: 'high',
+}
+
+describe('shape publicada (catálogo / header) — modelo fora do mapa local', () => {
+  it('isPublishedEffortOptions rejeita blocos incompletos', () => {
+    expect(isPublishedEffortOptions(DEEPSEEK_PUBLISHED)).toBe(true)
+    expect(isPublishedEffortOptions({ param: 'reasoning_effort', options: [], default: 'high' })).toBe(false)
+    expect(isPublishedEffortOptions({ param: 'nope', options: ['low'], default: 'low' })).toBe(false)
+  })
+
+  it('um modelo desconhecido COM thinking publicado mostra essa escala e envia o header', () => {
+    expect(getEffortOptionsForModel('deepseek-v4-flash', DEEPSEEK_PUBLISHED)).toEqual(DEEPSEEK_PUBLISHED)
+    expect(shouldSendEffort('deepseek-v4-flash', DEEPSEEK_PUBLISHED)).toBe(true)
+    expect(resolveEffectiveEffort('deepseek-v4-flash', null, DEEPSEEK_PUBLISHED)).toBe('high')
+    expect(resolveEffectiveEffort('deepseek-v4-flash', 'low', DEEPSEEK_PUBLISHED)).toBe('low')
+    expect(resolveEffectiveEffort('deepseek-v4-flash', 'max', DEEPSEEK_PUBLISHED)).toBe('high')
+    expect(resolveEffortTurnStamp('deepseek-v4-flash', 'medium', DEEPSEEK_PUBLISHED)).toEqual({
+      effort: 'medium',
+      sent: true,
+    })
+  })
+
+  it('sem shape publicada, um modelo desconhecido continua a NÃO enviar o header', () => {
+    expect(shouldSendEffort('deepseek-v4-flash')).toBe(false)
+    expect(resolveEffortTurnStamp('deepseek-v4-flash', 'high').sent).toBe(false)
+  })
+
+  it('a shape publicada vence o mapa local (admin pode encolher a escala do GLM)', () => {
+    const published = { param: 'reasoning_effort' as const, options: ['high', 'max'], default: 'max' }
+    expect(getEffortOptionsForModel('glm-5.2', published).options).toEqual(['high', 'max'])
+    expect(resolveEffectiveEffort('glm-5.2', 'none', published)).toBe('max')
+  })
+})
+
+describe('parseReasoningEffortsHeader', () => {
+  it('lê o formato k=v do data-plane', () => {
+    expect(parseReasoningEffortsHeader('param=reasoning_effort;default=high;options=low,medium,high'))
+      .toEqual(DEEPSEEK_PUBLISHED)
+  })
+
+  it('lê JSON', () => {
+    expect(parseReasoningEffortsHeader(JSON.stringify(DEEPSEEK_PUBLISHED))).toEqual(DEEPSEEK_PUBLISHED)
+  })
+
+  it('ausente / inválido → null', () => {
+    expect(parseReasoningEffortsHeader(null)).toBeNull()
+    expect(parseReasoningEffortsHeader('')).toBeNull()
+    expect(parseReasoningEffortsHeader('param=nope;default=x;options=x')).toBeNull()
+    expect(parseReasoningEffortsHeader('param=reasoning_effort;default=max;options=low,high')).toBeNull()
+  })
+})
+
+describe('currentPublishedEffortOptions', () => {
+  it('prefere o thinking da persona selecionada ao header servido', () => {
+    usePersonaStore.setState({ selected: 'expert' })
+    useActiveModelStore.setState({
+      personaModels: {
+        expert: { modelId: 'deepseek-v4-flash', thinking: DEEPSEEK_PUBLISHED },
+      },
+    })
+    useAgentStore.setState({
+      reasoningEffortOptions: { param: 'enable_thinking', options: ['off', 'on'], default: 'on' },
+    })
+    expect(currentPublishedEffortOptions()).toEqual(DEEPSEEK_PUBLISHED)
+
+    useActiveModelStore.setState({ personaModels: {} })
+    expect(currentPublishedEffortOptions()).toEqual({
+      param: 'enable_thinking',
+      options: ['off', 'on'],
+      default: 'on',
+    })
+
+    useAgentStore.setState({ reasoningEffortOptions: null })
+    expect(currentPublishedEffortOptions()).toBeNull()
   })
 })

@@ -93,6 +93,19 @@ export interface ActiveAIConfig {
     thinking?: 'toggleable' | 'mandatory' | 'none'
   }
   /**
+   * Shape do seletor de reasoning-effort, publicado no KV (`thinking` no
+   * catálogo / persona). O worker serializa-o em `X-Model-Reasoning-Efforts`
+   * para a IDE renderizar o seletor sem conhecer o modelo, e usa-o para
+   * validar `X-TM-Reasoning-Effort` + aplicar o `param` nativo. Ausente → a
+   * IDE cai no mapa local (só modelos já mapeados) e o worker nas regras
+   * por família.
+   */
+  thinking?: {
+    param: 'reasoning_effort' | 'enable_thinking' | 'thinking_object'
+    options: string[]
+    default: string
+  }
+  /**
    * Campos extra de request específicos do provider, merged no corpo de
    * CADA pedido (depois do model, antes do stream_options). Config-driven
    * para o worker continuar provider-agnóstico — ex.: DashScope

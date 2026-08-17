@@ -108,6 +108,19 @@ function assertString(value: unknown, field: keyof ActiveAIConfig): string {
   return value.trim()
 }
 
+function parseThinkingParamConfig(value: unknown): ActiveAIConfig['thinking'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const v = value as { param?: unknown; options?: unknown; default?: unknown }
+  const paramOk = v.param === 'reasoning_effort' || v.param === 'enable_thinking' || v.param === 'thinking_object'
+  if (!paramOk || !Array.isArray(v.options)) return undefined
+  const options = v.options
+    .filter((o): o is string => typeof o === 'string' && o.trim() !== '')
+    .map((o) => o.trim())
+  if (options.length === 0) return undefined
+  const def = typeof v.default === 'string' && options.includes(v.default) ? v.default : options[0]
+  return { param: v.param, options, default: def }
+}
+
 function parseActiveConfig(raw: string): ActiveAIConfig {
   let parsed: unknown
   try {
@@ -213,10 +226,17 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     || capabilities.search !== undefined
     || capabilities.thinking !== undefined
 
+  // Shape do seletor de effort (`thinking` no JSON publicado). Irmão do
+  // thinkingMode: aquele vai em X-Model-Capabilities; este vai em
+  // X-Model-Reasoning-Efforts. Sem ele, um modelo novo só existia no KV e a
+  // IDE escondia o seletor (mapa local). Tolerante: bloco inválido → omitido.
+  const thinking = parseThinkingParamConfig(obj.thinking)
+
   return {
     provider: assertString(obj.provider, 'provider'),
     model: assertString(obj.model, 'model'),
     capabilities: hasCapabilities ? capabilities : undefined,
+    ...(thinking ? { thinking } : {}),
     speedModel,
     baseUrl: assertString(obj.baseUrl, 'baseUrl').replace(/\/+$/, ''),
     chatCompletionsPath: assertString(obj.chatCompletionsPath, 'chatCompletionsPath'),

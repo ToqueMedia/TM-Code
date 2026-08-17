@@ -9,6 +9,7 @@ import { usePersonaStore } from '../../stores/personaStore'
 import { useReasoningEffortStore } from '../../stores/reasoningEffortStore'
 import {
   getEffortOptionsForModel,
+  isPublishedEffortOptions,
   resolveEffectiveEffort,
   resolveEffortModelId,
   effortDescriptionKey,
@@ -17,10 +18,9 @@ import {
 import { t } from '@/i18n'
 
 /**
- * Seletor de reasoning-effort. As opções vêm de um MAPA FRONTEND por modelo
- * (reasoningEffortModels.ts). O modelo ativo é o do ADMIN, lido em tempo-real
- * do activeModelStore (Firestore onSnapshot) com fallback ao header X-TM-Model.
- * Ao trocar de modelo, a lista muda e o effort volta ao default do novo modelo.
+ * Seletor de reasoning-effort. As opções vêm da shape publicada (`thinking`
+ * em system/aiPersonas, depois X-Model-Reasoning-Efforts). O mapa local
+ * (reasoningEffortModels.ts) é só fallback para modelos já conhecidos.
  *
  * O dropdown é PORTALADO para document.body — o rodapé do prompt tem
  * overflow:hidden, que cortava um popover posicionado por dentro (parecia que o
@@ -50,15 +50,19 @@ export function EffortSelector({ disabled = false }: { disabled?: boolean }) {
   // re-renderizam este componente).
   const persona = usePersonaStore((s) => s.selected)
   const fsModel = useActiveModelStore((s) => s.personaModels[persona]?.modelId ?? null)
+  const personaThinking = useActiveModelStore((s) => s.personaModels[persona]?.thinking ?? null)
+  const headerThinking = useAgentStore((s) => s.reasoningEffortOptions)
   const headerModel = useAgentStore((s) => s.modelName)
   const modelId = resolveEffortModelId(fsModel, headerModel)
-  const options = getEffortOptionsForModel(modelId)
+  const published = isPublishedEffortOptions(personaThinking)
+    ? personaThinking
+    : isPublishedEffortOptions(headerThinking)
+      ? headerThinking
+      : null
+  const options = getEffortOptionsForModel(modelId, published)
   // HONESTIDADE do controlo (auditoria 2026-07-28): para modelos fora do mapa
-  // de efforts, o header nunca é enviado (shouldSendEffort=false) — mas o
-  // seletor aparecia na mesma, com escala GLM, e o utilizador escolhia
-  // valores que morriam no cliente com um carimbo `sent:false`. Um controlo
-  // que não controla nada é pior do que nenhum: esconde-se.
-  const effortReachesProvider = shouldSendEffort(modelId)
+  // E sem shape publicada, o header nunca é enviado — o seletor esconde-se.
+  const effortReachesProvider = shouldSendEffort(modelId, published)
   const selected = useReasoningEffortStore((s) => s.selected)
   const setSelected = useReasoningEffortStore((s) => s.setSelected)
   const [open, setOpen] = useState(false)
@@ -100,7 +104,7 @@ export function EffortSelector({ disabled = false }: { disabled?: boolean }) {
   // Valor ativo (exibido) = efetivo: a preferência do user se válida p/ ESTE
   // modelo, senão o default do modelo — a MESMA função que decide o que se envia
   // (buildExtraHeaders), por isso o que se vê é o que se aplica.
-  const activeValue = resolveEffectiveEffort(modelId, selected)
+  const activeValue = resolveEffectiveEffort(modelId, selected, published)
 
   if (!effortReachesProvider) return null
 

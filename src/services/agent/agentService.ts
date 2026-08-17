@@ -29,6 +29,8 @@ import { useBillingStore } from "../../stores/billingStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { getPersonaFallbackModelId, getPersonaFallbackContextWindow } from "../../stores/activeModelStore";
 import {
+  currentPublishedEffortOptions,
+  parseReasoningEffortsHeader,
   resolveEffectiveEffort,
   resolveEffortModelId,
   resolveEffortTurnStamp,
@@ -59,12 +61,16 @@ import { buildByokClientFromSnapshot, buildByokThinkingConfig, resolveByokSnapsh
 import { getActiveContextWindow } from "./activeContextWindow";
 import { contentAsText } from "./promptValueHelpers";
 import { QueryEngine, toQueryMessages } from "./queryEngine";
+import {
+  resolveQueryOccupancySeed,
+  resolveSeedMessageCount,
+} from "../../utils/sessionOccupancy";
 import { TOOL_SEARCH_NAME, toolSearchDefinition, searchDeferredTools } from "./toolPolicy";
 import { emitAgentStopRequested } from "./host/hostBus";
 import { windowBudgetHooks } from "./host/windowHost";
 import { getAgentHost } from "./host/agentHost";
 import { processRegistry } from "./processRegistry";
-import { buildPostEditResultText } from "./toolExecutor/changedFileSnippet";
+import { buildAppliedEditResultText } from "./toolExecutor/changedFileSnippet";
 import type { QueryStreamEvent, QueryTerminal, ToolExecutorFn } from "./query";
 import { classifyExecuteCommandPurpose, convertShellReadCommand } from "./commandPurpose";
 import { canonicalToolName } from "./toolNames";
@@ -241,9 +247,10 @@ class AgentService {
           getPersonaFallbackModelId(),
           useAgentStore.getState().modelName,
         );
-        if (shouldSendEffort(modelId)) {
+        const published = currentPublishedEffortOptions();
+        if (shouldSendEffort(modelId, published)) {
           const selected = useReasoningEffortStore.getState().selected;
-          const effort = resolveEffectiveEffort(modelId, selected);
+          const effort = resolveEffectiveEffort(modelId, selected, published);
           return effort !== "none" && effort !== "minimal";
         }
         // Id ainda null → seletor usa fallback GLM; assume thinking ON até
@@ -278,7 +285,7 @@ class AgentService {
         useAgentStore.getState().modelName,
       );
       const selected = useReasoningEffortStore.getState().selected;
-      return resolveEffortTurnStamp(modelId, selected);
+      return resolveEffortTurnStamp(modelId, selected, currentPublishedEffortOptions());
     } catch {
       return null;
     }
@@ -914,6 +921,23 @@ class AgentService {
           byokContextWindow: this.byokSnapshot?.contextWindow ?? null,
         });
       },
+      // Mesmo prato: um follow-up ("continue") depois de Stop não zera o
+      // medidor. Sub-agentes ficam de fora — o histórico deles é outro.
+      ...(!this.lightweightOptions
+        ? (() => {
+            const seed = resolveQueryOccupancySeed(
+              useChatStore.getState().getActiveSession(),
+            );
+            if (!seed) return {};
+            return {
+              initialRealOccupancyTokens: seed.tokens,
+              initialRealOccupancyMessageCount: resolveSeedMessageCount(
+                seed.messageCount,
+                conversationHistory.length,
+              ),
+            };
+          })()
+        : {}),
       // ── Compactação: arquivo + recuperação (paridade claude-vaz) ──
       // Ambos vivem aqui porque o loop (query.ts) não conhece stores nem o
       // SessionState — e não deve. Sub-agentes ficam de fora dos dois: escrevem
@@ -1370,13 +1394,15 @@ class AgentService {
       // managed-path turn clears the indicator.
       const teamByokRaw = headers.get("X-TM-Team-Byok");
 
+      const effortsRaw = headers.get("X-Model-Reasoning-Efforts");
       const hasModelInfo =
         modelName !== null ||
         modelProvider !== null ||
         thinkingModeRaw !== null ||
         contextWindowRaw !== null ||
         maxOutputRaw !== null ||
-        capabilitiesRaw !== null;
+        capabilitiesRaw !== null ||
+        effortsRaw !== null;
 
       if (hasModelInfo) {
         const parsedContext =
@@ -1418,6 +1444,7 @@ class AgentService {
         // janela errada até o header chegar. Best-effort, nunca bloqueia.
         rememberServedWindow(modelProvider, modelName, contextWindow, maxOutputTokens);
 
+        const parsedEfforts = parseReasoningEffortsHeader(effortsRaw);
         useAgentStore.getState().setModelInfo(
           modelName,
           modelProvider,
@@ -1427,6 +1454,7 @@ class AgentService {
           declaredCapabilities
             ? { vision: declaredCapabilities.vision, search: declaredCapabilities.search }
             : undefined,
+          parsedEfforts,
         );
         // O modelo SERVIDO vive só no agentStore.modelName (setModelInfo acima)
         // — desde 05-08 é ele que manda no resolveEffortModelId (served-first);
@@ -1435,10 +1463,6 @@ class AgentService {
           this.sessionState.setContextWindowSize(contextWindow);
         }
       }
-
-      // (Removido) parse do header X-Model-Reasoning-Efforts: as opções de effort
-      // são agora definidas no FRONTEND (reasoningEffortModels.ts), não anunciadas
-      // pelo backend. Ver decisão 2026-07-23.
 
       if (byokActiveRaw !== null) {
         useAgentStore.getState().setByokActive(byokActiveRaw.toLowerCase() === "true");
@@ -1481,9 +1505,10 @@ class AgentService {
         getPersonaFallbackModelId(),
         useAgentStore.getState().modelName,
       );
-      if (shouldSendEffort(modelId)) {
+      const published = currentPublishedEffortOptions();
+      if (shouldSendEffort(modelId, published)) {
         const selected = useReasoningEffortStore.getState().selected;
-        headers["X-TM-Reasoning-Effort"] = resolveEffectiveEffort(modelId, selected);
+        headers["X-TM-Reasoning-Effort"] = resolveEffectiveEffort(modelId, selected, published);
       }
     }
     return Object.keys(headers).length > 0 ? headers : undefined;
@@ -1842,10 +1867,9 @@ class AgentService {
                 );
               }
               return {
-                // Mesmo formato do caminho direto (query.ts) — inclui o
-                // excerto numerado do resultado, para o modelo não re-ler o
-                // ficheiro que acabou de editar.
-                content: buildPostEditResultText(parsedDiff),
+                // Mesmo formato do caminho directo (query.ts). O diff já está
+                // disponível na UI; não repetir o ficheiro no transcript.
+                content: buildAppliedEditResultText(parsedDiff),
                 isError: false,
               };
             }

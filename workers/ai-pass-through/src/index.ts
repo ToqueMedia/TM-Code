@@ -162,6 +162,11 @@ async function bodyWithActiveModel(
   isGoogleOAuth = false,
   bodyTimeoutMs = 0,
   requestType: string | null = null,
+  thinking?: {
+    param: 'reasoning_effort' | 'enable_thinking' | 'thinking_object'
+    options: string[]
+    default: string
+  },
 ): Promise<PreparedBody> {
   let parsed: unknown
   // O timer TEM de ser limpo no caminho feliz. Sem o clearTimeout ficava armado
@@ -219,13 +224,14 @@ async function bodyWithActiveModel(
   // do Gemini nunca chegava à IDE enquanto os outros modelos apareciam.
   if (isGoogleOAuth) ensureGeminiThoughtSummaries(merged)
 
-  // Effort do utilizador — valor NATIVO do frontend (reasoningEffortModels.ts).
-  // DEPOIS do merge do extraBody. applyReasoningEffort escreve reasoning_effort
-  // e os companions por provider (DashScope enable_thinking, z.AI thinking.type;
-  // limpa thinking em Kimi/Grok). Ver applyReasoningEffort.ts + docs oficiais.
-  const effortHeader = request.headers.get('X-TM-Reasoning-Effort')?.trim()
-  if (effortHeader) {
-    applyReasoningEffort(merged, effortHeader, { provider, baseUrl, model })
+  // Effort do utilizador — valor NATIVO (header X-TM-Reasoning-Effort) ou o
+  // default da shape publicada no KV (`thinking`). DEPOIS do merge do extraBody.
+  // Sem `thinking` no KV e sem header, as regras por família em
+  // applyReasoningEffort.ts mantêm o comportamento anterior (extraBody manda
+  // num sidecar sem shape, p.ex. utility com enable_thinking:false).
+  const effortHeader = request.headers.get('X-TM-Reasoning-Effort')?.trim() ?? ''
+  if (effortHeader || thinking) {
+    applyReasoningEffort(merged, effortHeader, { provider, baseUrl, model, thinking })
   }
 
   // `stream_options.include_usage` garante que providers OpenAI-compatible
@@ -473,6 +479,7 @@ async function handleChatCompletions(
     config.authScheme === 'google_oauth',
     resolveClientBodyTimeout(env),
     requestType,
+    config.thinking,
   )
   const { headers: upstreamHeaders, providerKey } = await buildUpstreamHeaders(request, config, env, fetcher)
 
@@ -768,6 +775,8 @@ async function handleChatCompletions(
       // Capacidades declaradas na config — emitidas em X-Model-Capabilities
       // para a IDE deixar de herdar as flags de outro modelo.
       capabilities: config.capabilities,
+      // Shape do seletor de effort — emitida em X-Model-Reasoning-Efforts.
+      thinking: config.thinking,
       // Estado pré-voo — o updateFromHeaders da IDE consome exatamente estes
       // nomes (billingStore.ts). O pós-commit chega nos headers do PRÓXIMO
       // turno; a IDE cobre o intervalo com a estimativa otimista local.

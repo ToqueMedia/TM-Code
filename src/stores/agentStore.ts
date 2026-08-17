@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { AgentStatus, type CompactPhase } from "../types/agent";
+import type { ReasoningEffortOptions } from "./reasoningEffortStore";
 
 export type AgentTaskStatus =
   | "pending"
@@ -100,6 +101,13 @@ interface AgentState {
   modelSupportsVision: boolean | null;
   modelSupportsSearch: boolean | null;
   /**
+   * Opções de effort DECLARADAS pelo data-plane (`X-Model-Reasoning-Efforts`).
+   * `null` = o servidor não declarou; o seletor cai no `thinking` da persona
+   * (Firestore) e, na falta desse, no mapa local. Limpa-se ao trocar de
+   * persona — o header pertence ao modelo que ACABOU de servir.
+   */
+  reasoningEffortOptions: ReasoningEffortOptions | null;
+  /**
    * Whether the most recent response was actually served via BYOK (the
    * server-side X-BYOK-Active header). This is the authoritative source for
    * the chat-header pill — the byokStore.enabled toggle says what the user
@@ -141,6 +149,7 @@ interface AgentActions {
     contextWindow?: number | null,
     maxOutputTokens?: number | null,
     capabilities?: { vision?: boolean | null; search?: boolean | null },
+    reasoningEffortOptions?: ReasoningEffortOptions | null,
   ) => void;
   setByokActive: (active: boolean) => void;
   setTeamByokActive: (active: boolean) => void;
@@ -179,6 +188,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
   modelMaxOutputTokens: null,
   modelSupportsVision: null,
   modelSupportsSearch: null,
+  reasoningEffortOptions: null,
   byokActive: false,
   teamByokActive: false,
   cumulativeToolCalls: 0,
@@ -200,7 +210,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
     set({ workerStatus });
   },
 
-  setModelInfo: (name, provider, thinkingMode, contextWindow, maxOutputTokens, capabilities) => {
+  setModelInfo: (name, provider, thinkingMode, contextWindow, maxOutputTokens, capabilities, reasoningEffortOptions) => {
     set({
       modelName: name,
       modelProvider: provider,
@@ -224,6 +234,7 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
       // "o servidor não declarou" → perfil local), booleano manda.
       ...(capabilities?.vision !== undefined ? { modelSupportsVision: capabilities.vision } : {}),
       ...(capabilities?.search !== undefined ? { modelSupportsSearch: capabilities.search } : {}),
+      ...(reasoningEffortOptions !== undefined ? { reasoningEffortOptions } : {}),
     });
   },
 
@@ -341,8 +352,9 @@ export const useAgentStore = create<AgentState & AgentActions>()((set, get) => (
       thinkingMode: null,
       modelContextWindow: null,
       modelMaxOutputTokens: null,
-  modelSupportsVision: null,
-  modelSupportsSearch: null,
+      modelSupportsVision: null,
+      modelSupportsSearch: null,
+      reasoningEffortOptions: null,
       byokActive: false,
       teamByokActive: false,
           cumulativeToolCalls: 0,

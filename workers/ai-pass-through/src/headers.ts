@@ -57,6 +57,7 @@ export function buildCorsHeaders(request: Request): Headers {
     'X-Model-Context-Window',
     'X-Model-Max-Output-Tokens',
     'X-Model-Capabilities',
+    'X-Model-Reasoning-Efforts',
     'X-TM-Speed-Applied',
     'X-TM-Upstream-Status',
     'X-TM-Config-Source',
@@ -218,6 +219,8 @@ export function buildResponseHeaders(upstream: Response, meta: {
   /** Capacidades do modelo ativo, vindas da config KV. Mesma semântica de
    *  ausência: sem elas a IDE fica com o perfil local. */
   capabilities?: { vision?: boolean; search?: boolean; thinking?: 'toggleable' | 'mandatory' | 'none' }
+  /** Shape do seletor de effort, serializado em X-Model-Reasoning-Efforts. */
+  thinking?: { param: 'reasoning_effort' | 'enable_thinking' | 'thinking_object'; options: string[]; default: string }
   /** Estado de billing pré-voo (ausente quando o lookup falhou ou billing off). */
   budget?: BudgetHeaderMeta
 }): Headers {
@@ -276,6 +279,16 @@ export function buildResponseHeaders(upstream: Response, meta: {
     if (typeof meta.capabilities.search === 'boolean') parts.push(`search=${meta.capabilities.search ? 1 : 0}`)
     if (meta.capabilities.thinking) parts.push(`thinking=${meta.capabilities.thinking}`)
     if (parts.length > 0) headers.set('x-model-capabilities', parts.join(';'))
+  }
+  // Seletor de effort — o quarto irmão do contextWindow/maxOutput/capabilities.
+  // Sem ele a IDE só conhecia as escalas da tabela local (reasoningEffortModels)
+  // e escondia o controlo para um modelo publicado só no KV. Formato
+  // `param=…;default=…;options=a,b,c` (mesmo estilo k=v do capabilities).
+  if (meta.thinking && meta.thinking.options.length > 0) {
+    headers.set(
+      'x-model-reasoning-efforts',
+      `param=${meta.thinking.param};default=${meta.thinking.default};options=${meta.thinking.options.join(',')}`,
+    )
   }
 
   // Billing pré-voo — nomes exatos que billingStore.updateFromHeaders já

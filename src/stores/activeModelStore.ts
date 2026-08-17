@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { usePersonaStore, type Persona } from './personaStore'
+import type { ReasoningEffortOptions } from './reasoningEffortStore'
 
 /**
  * Atribuições das PERSONAS pelo admin — modelId E janela de contexto por
@@ -18,6 +19,10 @@ export interface PersonaModelEntry {
   /** Multiplicador de consumo DEFINIDO PELO ADMIN (doc aiPersonas) — o
    *  selector mostra este valor; nada hardcoded no cliente. */
   costMultiplier?: number
+  /** Shape de effort publicada no catálogo e espelhada em aiPersonas.
+   *  Fonte pré-primeira-resposta do seletor — um modelo que a tabela local
+   *  não conhece mostra a escala no instante da troca de persona. */
+  thinking?: ReasoningEffortOptions
 }
 
 interface ActiveModelState {
@@ -40,4 +45,10 @@ export function getPersonaFallbackModelId(): string | null {
 export function getPersonaFallbackContextWindow(): number | null {
   const persona = usePersonaStore.getState().selected
   return useActiveModelStore.getState().personaModels[persona]?.contextWindow ?? null
+}
+
+/** Shape de effort da persona SELECIONADA (pre-handshake do seletor). */
+export function getPersonaFallbackThinking(): ReasoningEffortOptions | null {
+  const persona = usePersonaStore.getState().selected
+  return useActiveModelStore.getState().personaModels[persona]?.thinking ?? null
 }

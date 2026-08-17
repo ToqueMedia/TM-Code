@@ -80,7 +80,7 @@ export const usePersonaStore = create<PersonaStoreState>((set) => ({
     // → tudo cai no perfil/fallback da persona até o X-TM-Model real chegar.
     // Import dinâmico para não criar ciclo estático entre stores.
     void import('./agentStore').then(({ useAgentStore }) => {
-      useAgentStore.getState().setModelInfo(null, null, null, null, null, { vision: null, search: null })
+      useAgentStore.getState().setModelInfo(null, null, null, null, null, { vision: null, search: null }, null)
     }).catch(() => {})
   },
 }))

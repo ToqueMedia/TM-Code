@@ -68,8 +68,10 @@ Owns:
 Everything that is **not** the AI request path:
 - Auth (Firebase JWT verify), **App Check** minting (`/v1/appcheck-token`).
 - Deploys / build orchestration, per-project DB & files (R2 / D1 / Turso), device registration.
-- **Admin model *catalog*** — `/v1/admin/models` (the selectable list shown in the IDE admin),
-  `/v1/admin/ai/active-config` (publishes the Data-Plane KV `active` config), sidecars, verify.
+- **Admin model *catalog*** — KV-backed (`catalog:coder` / `catalog:sidecar` in `ACTIVE_AI_CONFIG`).
+  CRUD at `/v1/admin/models` and `/v1/admin/sidecar-models`; personas/sidecars read the same
+  catalog. Compiled constants in `controlPlaneModels.ts` are only the first-boot seed.
+  `/v1/admin/ai/active-config` still publishes the Data-Plane KV `active` config; sidecars, verify.
 - BYOK validation (`/v1/byok/*`).
 - **Billing — read + cycle lifecycle.** `/v1/me` (via `summarizeBilling`) returns state for the
   IDE/Web to display. The same read path (`getUserData`, `firestore.ts`) **also writes**: when it
@@ -83,10 +85,12 @@ model routing. So billing is *split*: Data-Plane meters consumption; Control-Pla
 cycle and serves the read. The Control-Plane's own `commitTokenConsumption` is the runtime-dead
 metering leftover (see below).
 
-> **Nuance (clarified 2026-06-17).** "Control-plane should not handle models" means **runtime
-> routing + streaming** (Data-Plane). The admin model **catalog CRUD** legitimately stays in the
-> Control-Plane — it's the source of `/v1/admin/models`. Two GLM-5.2 entries (one per provider,
-> z.AI + DashScope) would be added there, each with its own `activeConfig`.
+> **Nuance (clarified 2026-06-17, catalog-in-KV 2026-08-16).** "Control-plane should not handle
+> models" means **runtime routing + streaming** (Data-Plane). The admin model **catalog CRUD**
+> legitimately stays in the Control-Plane — it is now a KV-data edit (`catalog:coder` /
+> `catalog:sidecar`), not a code change. Two GLM-5.2 entries (one per provider, z.AI + DashScope)
+> are two catalog rows, each with its own `activeConfig`. A **new provider** is the only remaining
+> one-time exception (`wrangler secret put` on the data-plane).
 >
 > The metering functions `checkCostBudget` and `commitTokenConsumption` in the Control-Plane
 > `billing.ts` are **runtime-dead** (no callers; superseded by the Data-Plane). They are slated for
@@ -443,42 +447,53 @@ cross-project session agents. Stop (single implementation: `stopAgentRun`) drops
   consumption); Control-Plane owns the *cycle lifecycle* (reset/carry-over/anchoring, written
   lazily on the `/v1/me` read path) and serves the read for IDE/Web display. Both patch the same
   Firestore `tokenBudget` map but **different fields**, via per-field `updateMask`.
-- **Model add/remove never edits worker code** — it's KV config (Data-Plane) + catalog
-  (Control-Plane admin).
+- **Model add/remove never edits worker code** — it is a KV-data edit: catalog rows
+  (`catalog:coder` / `catalog:sidecar`) plus the published `persona:*` / `sidecar:*` / `active`
+  snapshots. Compiled constants are only the first-boot seed.
 
 ## Adding / removing a managed model — end-to-end checklist
 
-The recurring confusion: a model lives in **more than one place**. To add a managed model
-(e.g. GLM-5.2 from two providers) so it both *appears* in the admin and *works*:
+Adding a managed model so it both *appears* in the admin and *works* is a **data** change:
 
-1. **Catalog (Control-Plane, `controlPlaneModels.ts`)** — add a `ControlPlaneModel` entry per
-   provider (`{id, name, providerLabel, category:'coder', activeConfig:{provider, model, baseUrl,
-   chatCompletionsPath, authHeader, authScheme, apiKeyEnv, enabled, contextWindow, extraBody}}`).
-   This is what `/v1/admin/models` returns → the IDE admin dropdown. **Two entries with the same
-   `name` but different `providerLabel`** render as "GLM-5.2 (Alibaba US)" / "GLM-5.2 (z.AI)".
-   - Update the catalog-count assertion in `src/__tests__/admin.test.ts` (`body.models.length`).
-2. **Provider secret (Data-Plane)** — the `apiKeyEnv` (e.g. `ZAI_API_KEY`) must exist as a worker
-   secret (`wrangler secret put` in prod; `.dev.vars` locally). Without it the entry still *appears*
-   but fails when selected.
+1. **Catalog (Control-Plane KV)** — in the IDE Admin → Models panel (or `POST /v1/admin/models`
+   / `/v1/admin/sidecar-models`) add an entry
+   (`{id, name, providerLabel, activeConfig:{provider, model, baseUrl, chatCompletionsPath,
+   authHeader, authScheme, apiKeyEnv, contextWindow, extraBody, …}}`). First write seeds KV from
+   the compiled constants in `controlPlaneModels.ts`; after that KV is the source of truth.
+   **Two entries with the same `name` but different `providerLabel`** render as
+   "GLM-5.2 (Alibaba US)" / "GLM-5.2 (z.AI)". Delete is blocked with 409 while a persona/sidecar
+   still references the same `provider`+`model`.
+2. **Provider secret (Data-Plane)** — only if `apiKeyEnv` is **new**. Reusing
+   `DASHSCOPE_API_KEY`, `ZAI_API_KEY`, `MOONSHOT_API_KEY`, `CLOUDFLARE_AI_GATEWAY_TOKEN` or
+   `DASHSCOPE_API_IMAGE` needs nothing. A new env name needs one-time `wrangler secret put`
+   in prod and `.dev.vars` locally. Without the secret the entry still *appears* but fails
+   when selected.
 3. **IDE capability profile (`modelProfiles.ts`)** — needed **only if** the model's capabilities
-   (vision / thinking / maxOutput) differ from the plan fallback. Key it by the name the
-   Data-Plane reports in `X-TM-Model`. (Until the header-driven refactor below, this is the one
-   IDE touch-point.)
-4. **Publish & verify** — selecting the model in the admin calls `/v1/admin/ai/active-config`,
-   which writes the KV `active` config the Data-Plane reads. `thinking`/`reasoning_effort`/
-   `enable_thinking` go in `activeConfig.extraBody` (the IDE never sends them).
+   (vision / thinking / maxOutput) differ from the plan fallback **and** are not declared on the
+   catalog entry (those ride `X-Model-Capabilities`). Key it by the name the Data-Plane reports
+   in `X-TM-Model`.
+4. **Assign & verify** — pick the new catalog row on a persona or sidecar slot. Publishing
+   writes the KV snapshot the Data-Plane reads. Fill `activeConfig.thinking`
+   (`param` + `options` + `default`) so the chat effort selector appears without
+   an IDE binary change; `extraBody` still carries provider companions
+   (`enable_thinking`, `reasoning_effort`, `thinking:{type}`). Republish the
+   persona after editing `thinking` — the Firestore `system/aiPersonas` mirror
+   is what the selector reads before the first turn.
 
-**Local test → prod (the real workflow):** run the Control-Plane (`yarn dev` →
+**Local test → prod:** run the Control-Plane (`yarn dev` →
 `wrangler dev --persist-to ../exodus-ide/.wrangler/shared-state`, port 8787) — it shares KV state
 with the local Data-Plane (`yarn dev:ai-worker`, 8788). The IDE in `yarn tauri dev` reads the local
-catalog. When verified, **deploy the Control-Plane** (`yarn deploy` → `wrangler deploy --env
-production`) so production IDEs see the new catalog, and set any new provider secret in prod.
+catalog. When verified, **no Control-Plane deploy is required** for a catalog edit (KV is shared
+in prod too). Deploy the Control-Plane only if you shipped new catalog *code* (validators/routes).
+Set any new provider secret in prod.
 
-## Known improvement — header-driven IDE (deferred)
+## Header-driven IDE (effort + capabilities)
 
-Today the IDE needs a `modelProfiles.ts` entry for a model **only** because the Data-Plane does not
-emit model *capabilities*, just name + context window. If the Data-Plane also emitted
-`X-Model-Supports-Vision`, `X-Model-Supports-Thinking`, and `X-Model-Max-Output-Tokens`, the IDE
-capability table would collapse to a single default and **adding/removing a model would never touch
-the IDE**. Until then, a new managed model needs a `modelProfiles.ts` entry **iff** its capabilities
-differ from the plan fallback.
+The Data-Plane emits `X-Model-Capabilities`, `X-Model-Context-Window`,
+`X-Model-Max-Output-Tokens`, and `X-Model-Reasoning-Efforts` from the published
+KV snapshot. The IDE effort selector prefers `thinking` on `system/aiPersonas`
+(instant on persona switch), then the reasoning-efforts header, then the local
+`reasoningEffortModels.ts` map (known models only). A catalog model with
+`thinking` filled in does **not** need an IDE binary change for the selector to
+appear. `modelProfiles.ts` remains a fallback for capabilities the headers
+do not declare.

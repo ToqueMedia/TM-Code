@@ -84,6 +84,22 @@ describe('X-Model-Capabilities chega ao store', () => {
 
   it('o header presente conta como informação de modelo', () => {
     // Sem isto, um header de capacidades sozinho (sem X-TM-Model) era ignorado.
-    expect(source).toContain('capabilitiesRaw !== null;')
+    expect(source).toContain('capabilitiesRaw !== null')
+  })
+})
+
+describe('X-Model-Reasoning-Efforts chega ao store', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const realFs = jest.requireActual('fs') as typeof import('fs')
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const realPath = jest.requireActual('path') as typeof import('path')
+  const source = realFs.readFileSync(
+    realPath.resolve(__dirname, '../agentService.ts'),
+    'utf8',
+  )
+
+  it('o header é lido e parseado', () => {
+    expect(source).toContain('headers.get("X-Model-Reasoning-Efforts")')
+    expect(source).toContain('parseReasoningEffortsHeader')
   })
 })

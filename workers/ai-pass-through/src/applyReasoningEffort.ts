@@ -32,6 +32,15 @@ export interface ApplyReasoningEffortCtx {
   provider: string
   baseUrl: string
   model: string
+  /** Shape publicada no KV. Quando presente, é a fonte do default e da
+   *  validação (um valor fora de `options` cai no default). O `param` só
+   *  manda em modelos que as regras por família abaixo NÃO conhecem — GLM /
+   *  Qwen 3.7 / MiMo / Grok / Kimi continuam nos ramos existentes. */
+  thinking?: {
+    param: 'reasoning_effort' | 'enable_thinking' | 'thinking_object'
+    options: string[]
+    default: string
+  }
 }
 
 function lower(s: string): string {
@@ -93,6 +102,7 @@ function isOffEffort(effort: string): boolean {
  * uma API cujo conjunto válido não conhecemos.
  */
 export function defaultEffortFor(ctx: ApplyReasoningEffortCtx): string {
+  if (ctx.thinking?.default) return ctx.thinking.default
   if (isMoonshot(ctx)) return isKimiK3(ctx.model) ? 'max' : ''
   if (isXai(ctx)) return 'high'
   if (isGlmModel(ctx.model) && (isZai(ctx) || isDashScope(ctx))) return 'max'
@@ -141,8 +151,32 @@ export function applyReasoningEffort(
   effortRaw: string,
   ctx: ApplyReasoningEffortCtx,
 ): void {
-  const effort = effortRaw.trim() || defaultEffortFor(ctx)
+  let effort = effortRaw.trim() || defaultEffortFor(ctx)
+  if (ctx.thinking && effort && !ctx.thinking.options.includes(effort)) {
+    // Header de outra escala (troca de persona a meio, cliente antigo) —
+    // nunca mandar um valor que o provider não documenta.
+    effort = ctx.thinking.default
+  }
   if (!effort) return
+
+  // Catálogo: param nativo para um modelo que as regras por família abaixo
+  // não conhecem. Qwen 3.7 / MiMo ficam nos ramos deles (preserve_thinking,
+  // companions). Um DeepSeek/GLM-novo publicado só com `thinking` no KV
+  // passa a aplicar o param certo sem deploy da IDE nem deste ficheiro.
+  if (ctx.thinking?.param === 'thinking_object' && !isMimo(ctx)) {
+    body.thinking = { type: effort === 'off' || isOffEffort(effort) ? 'disabled' : 'enabled' }
+    delete body.enable_thinking
+    delete body.reasoning_effort
+    return
+  }
+  if (ctx.thinking?.param === 'enable_thinking' && !isQwen37(ctx)) {
+    const isOn = effort === 'on'
+    const isOff = effort === 'off' || isOffEffort(effort)
+    if (!isOn && !isOff) return
+    body.enable_thinking = isOn
+    delete body.reasoning_effort
+    return
+  }
 
   // MiMo hospedado (thinking_object on/off, SEM reasoning_effort): traduz o
   // toggle para thinking:{type} e NÃO envia reasoning_effort (param não

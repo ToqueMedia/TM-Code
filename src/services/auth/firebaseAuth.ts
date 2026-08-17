@@ -38,6 +38,8 @@ import { useByokStore } from '../../stores/byokStore'
 import { useTmSpeedStore } from '../../stores/tmSpeedStore'
 import { useProjectStore } from '../../stores/projectStore'
 import { useToastStore } from '../../stores/toastStore'
+import { isPublishedEffortOptions } from '../agent/reasoningEffortModels'
+import type { ReasoningEffortOptions } from '../../stores/reasoningEffortStore'
 import { shouldUseEmulators, EMULATOR_CONFIG } from './emulatorConfig'
 import { tauriFetch, registerHeaderProvider } from '../tauriFetch'
 import { resolveWorkerUrl } from '../../utils/devUrls'
@@ -216,6 +218,18 @@ function connectEmulatorsIfNeeded() {
   } catch {
     // Emulator connection failed — non-fatal, will use production services
   }
+}
+
+function parsePersonaThinking(raw: unknown): ReasoningEffortOptions | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const src = raw as { param?: unknown; options?: unknown; default?: unknown }
+  const options = Array.isArray(src.options)
+    ? src.options.filter((o): o is string => typeof o === 'string' && o.trim() !== '').map((o) => o.trim())
+    : []
+  if (options.length === 0) return undefined
+  const def = typeof src.default === 'string' && options.includes(src.default) ? src.default : options[0]
+  const candidate = { param: src.param, options, default: def }
+  return isPublishedEffortOptions(candidate) ? candidate : undefined
 }
 
 class FirebaseAuthService {
@@ -585,16 +599,24 @@ class FirebaseAuthService {
       (snap) => {
         if (expectedGen !== this.authGeneration) return
         const data = snap.exists() ? snap.data() : null
-        const map: Record<string, { modelId: string; contextWindow?: number; costMultiplier?: number }> = {}
+        const map: Record<string, { modelId: string; contextWindow?: number; costMultiplier?: number; thinking?: ReasoningEffortOptions }> = {}
         for (const persona of ['standard', 'expert', 'master'] as const) {
-          const entry = data?.[persona] as { modelId?: string; enabled?: boolean; contextWindow?: number; costMultiplier?: number } | undefined
+          const entry = data?.[persona] as {
+            modelId?: string
+            enabled?: boolean
+            contextWindow?: number
+            costMultiplier?: number
+            thinking?: unknown
+          } | undefined
           if (entry?.modelId && entry.enabled !== false) {
             const w = Number(entry.contextWindow)
             const cm = Number(entry.costMultiplier)
+            const thinking = parsePersonaThinking(entry.thinking)
             map[persona] = {
               modelId: entry.modelId,
               ...(Number.isFinite(w) && w > 0 ? { contextWindow: w } : {}),
               ...(Number.isFinite(cm) && cm > 0 ? { costMultiplier: cm } : {}),
+              ...(thinking ? { thinking } : {}),
             }
           }
         }

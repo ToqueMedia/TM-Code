@@ -1,4 +1,4 @@
-import { useActiveModelStore, getPersonaFallbackModelId, getPersonaFallbackContextWindow } from '@/stores/activeModelStore'
+import { useActiveModelStore, getPersonaFallbackModelId, getPersonaFallbackContextWindow, getPersonaFallbackThinking } from '@/stores/activeModelStore'
 import { usePersonaStore, DEFAULT_PERSONA } from '@/stores/personaStore'
 import { useReasoningEffortStore } from '@/stores/reasoningEffortStore'
 
@@ -46,5 +46,16 @@ describe('activeModelStore (mapa por persona)', () => {
     useActiveModelStore.getState().setPersonaModels({ standard: { modelId: 'glm-5.2' } })
     useActiveModelStore.getState().setPersonaModels({ standard: { modelId: 'grok-4.5' } })
     expect(useReasoningEffortStore.getState().selected).toBe('max')
+  })
+
+  it('thinking publicado na persona é o fallback imediato do seletor', () => {
+    const thinking = { param: 'reasoning_effort' as const, options: ['low', 'high'], default: 'high' }
+    useActiveModelStore.getState().setPersonaModels({
+      expert: { modelId: 'deepseek-v4-flash', thinking },
+    })
+    usePersonaStore.setState({ selected: 'expert' })
+    expect(getPersonaFallbackThinking()).toEqual(thinking)
+    usePersonaStore.setState({ selected: 'standard' })
+    expect(getPersonaFallbackThinking()).toBeNull()
   })
 })

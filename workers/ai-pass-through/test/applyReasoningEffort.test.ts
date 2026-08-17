@@ -2,6 +2,52 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { applyReasoningEffort } from '../src/applyReasoningEffort'
 
+test('catalog thinking on an unknown model applies reasoning_effort default', () => {
+  const body: Record<string, unknown> = {}
+  applyReasoningEffort(body, '', {
+    provider: 'deepseek',
+    baseUrl: 'https://api.deepseek.com',
+    model: 'deepseek-v4-flash',
+    thinking: { param: 'reasoning_effort', options: ['low', 'medium', 'high'], default: 'high' },
+  })
+  assert.equal(body.reasoning_effort, 'high')
+})
+
+test('catalog thinking rejects an effort outside options and falls back to default', () => {
+  const body: Record<string, unknown> = {}
+  applyReasoningEffort(body, 'max', {
+    provider: 'deepseek',
+    baseUrl: 'https://api.deepseek.com',
+    model: 'deepseek-v4-flash',
+    thinking: { param: 'reasoning_effort', options: ['low', 'medium', 'high'], default: 'high' },
+  })
+  assert.equal(body.reasoning_effort, 'high')
+})
+
+test('catalog enable_thinking on an unknown model does not send reasoning_effort', () => {
+  const body: Record<string, unknown> = {}
+  applyReasoningEffort(body, 'off', {
+    provider: 'acme',
+    baseUrl: 'https://provider.test/v1',
+    model: 'acme-hybrid-1',
+    thinking: { param: 'enable_thinking', options: ['off', 'on'], default: 'on' },
+  })
+  assert.equal(body.enable_thinking, false)
+  assert.equal(body.reasoning_effort, undefined)
+})
+
+test('catalog thinking_object on an unknown model writes thinking.type', () => {
+  const body: Record<string, unknown> = {}
+  applyReasoningEffort(body, 'on', {
+    provider: 'acme',
+    baseUrl: 'https://provider.test/v1',
+    model: 'acme-think-1',
+    thinking: { param: 'thinking_object', options: ['off', 'on'], default: 'on' },
+  })
+  assert.deepEqual(body.thinking, { type: 'enabled' })
+  assert.equal(body.reasoning_effort, undefined)
+})
+
 test('writes reasoning_effort for any provider', () => {
   // Provider genuinamente desconhecido (o MiMo deixou de servir de arquétipo
   // aqui — desde 2026-08-05 tem regras próprias: thinking_object, sem effort).
