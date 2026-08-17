@@ -141,6 +141,8 @@ export interface Env {
   PERSONA_STANDARD_CONFIG_JSON?: string
   PERSONA_EXPERT_CONFIG_JSON?: string
   PERSONA_MASTER_CONFIG_JSON?: string
+  /** Main loop do Estúdio — modelo único com visão (`qwen3.8-max`). */
+  STUDIO_CONFIG_JSON?: string
   AUTH_MODE?: 'firebase_jwt' | 'firebase_emulator' | 'test_static'
   TEST_USER_TOKEN?: string
   FIREBASE_PROJECT_ID?: string

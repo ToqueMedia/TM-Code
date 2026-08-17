@@ -2177,6 +2177,128 @@ test('persona: unpublished/unknown persona degrades silently to the active confi
   }
 })
 
+test('studio: X-TM-Workspace locks the main loop to qwen3.8-max and ignores persona', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({ ok: true }), () => firestoreUserDoc({ plan: 'pro' }))
+  const req = new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer valid-user-token',
+      'Content-Type': 'application/json',
+      'X-TM-Persona': 'expert',
+      'X-TM-Workspace': 'studio',
+    },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  const res = await handleRequest(
+    req,
+    kvEnv({
+      'workspace:studio': JSON.stringify({
+        ...utilitySidecarConfig,
+        model: 'qwen3.8-max',
+        supportsVision: true,
+      }),
+      'persona:expert': JSON.stringify({ ...utilitySidecarConfig, model: 'expert-model' }),
+    }),
+    { fetcher },
+  )
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-tm-config-key'), 'workspace:studio')
+  assert.equal(fetcher.calls[0].body.model, 'qwen3.8-max')
+  assert.match(res.headers.get('x-model-capabilities') ?? '', /vision=1/)
+})
+
+test('studio: a DashScope workspace slot with another Qwen is rewritten to qwen3.8-max', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({ ok: true }), () => firestoreUserDoc({ plan: 'pro' }))
+  const req = new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer valid-user-token',
+      'Content-Type': 'application/json',
+      'X-TM-Workspace': 'studio',
+    },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  const res = await handleRequest(
+    req,
+    kvEnv({
+      'workspace:studio': JSON.stringify({ ...utilitySidecarConfig, model: 'qwen3.7-plus' }),
+    }),
+    { fetcher },
+  )
+  assert.equal(res.status, 200)
+  assert.equal(fetcher.calls[0].body.model, 'qwen3.8-max')
+})
+
+test('studio: overlays qwen3.8-max onto a DashScope persona when the dedicated slot is missing', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({ ok: true }), () => firestoreUserDoc({ plan: 'pro' }))
+  const req = new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer valid-user-token',
+      'Content-Type': 'application/json',
+      'X-TM-Workspace': 'studio',
+    },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  const res = await handleRequest(
+    req,
+    kvEnv({
+      'persona:master': JSON.stringify({ ...utilitySidecarConfig, model: 'qwen3.8-max' }),
+    }),
+    { fetcher },
+  )
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-tm-config-key'), 'workspace:studio')
+  assert.equal(fetcher.calls[0].body.model, 'qwen3.8-max')
+})
+
+test('studio: 503 when no DashScope/qwen3.8-max config exists', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({ ok: true }), () => firestoreUserDoc({ plan: 'pro' }))
+  const req = new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer valid-user-token',
+      'Content-Type': 'application/json',
+      'X-TM-Workspace': 'studio',
+    },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  const res = await handleRequest(req, kvEnv({}), { fetcher })
+  assert.equal(res.status, 503)
+  const body = await res.json() as { error?: { type?: string } }
+  assert.equal(body.error?.type, 'tm_studio_model_unavailable')
+})
+
+test('studio: sidecar request types still win over the workspace lock', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({ ok: true }), () => firestoreUserDoc({ plan: 'pro' }))
+  const req = new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer valid-user-token',
+      'Content-Type': 'application/json',
+      'X-Request-Type': 'summarize',
+      'X-TM-Workspace': 'studio',
+    },
+    body: JSON.stringify({ messages: [] }),
+  })
+  const res = await handleRequest(
+    req,
+    kvEnv({
+      'sidecar:utility': JSON.stringify(utilitySidecarConfig),
+      'workspace:studio': JSON.stringify({ ...utilitySidecarConfig, model: 'qwen3.8-max' }),
+    }),
+    { fetcher },
+  )
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-tm-config-key'), 'sidecar:utility')
+  assert.equal(fetcher.calls[0].body.model, 'qwen3.7-plus')
+})
+
 test('persona: sidecar request types win over the persona header', async () => {
   clearActiveConfigCache()
   const fetcher = fakeFetcher(Response.json({ ok: true }), () => firestoreUserDoc({ plan: 'pro' }))

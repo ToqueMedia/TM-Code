@@ -96,6 +96,85 @@ const PERSONA_ENV_FALLBACK: Record<string, keyof Env> = {
   'persona:master': 'PERSONA_MASTER_CONFIG_JSON',
 }
 
+/**
+ * O Estúdio (TM Code Web) não escolhe persona: o trabalho é 100% visual,
+ * logo o main loop está trancado num modelo que VÊ. `X-TM-Workspace: studio`
+ * pede esta config; o id do modelo é produto, não escolha do admin — se o
+ * slot publicado for DashScope com outro nome, o worker substitui-o.
+ */
+export const STUDIO_MODEL_ID = 'qwen3.8-max'
+export const STUDIO_WORKSPACE_KEY = 'workspace:studio'
+
+export function isStudioWorkspace(value: string | null | undefined): boolean {
+  return (value ?? '').trim().toLowerCase() === 'studio'
+}
+
+function isStudioModelId(model: string): boolean {
+  const bare = model.trim().toLowerCase()
+  const slash = bare.lastIndexOf('/')
+  const name = slash >= 0 ? bare.slice(slash + 1) : bare
+  return name.startsWith(STUDIO_MODEL_ID)
+}
+
+function isDashScopeConfig(config: { provider: string; baseUrl: string }): boolean {
+  const provider = config.provider.trim().toLowerCase()
+  const baseUrl = config.baseUrl.trim().toLowerCase()
+  return (
+    provider === 'dashscope'
+    || provider === 'aliyun'
+    || baseUrl.includes('dashscope')
+    || baseUrl.includes('aliyuncs.com')
+  )
+}
+
+function lockStudioConfig(resolved: ResolvedActiveAIConfig): ResolvedActiveAIConfig | null {
+  if (isStudioModelId(resolved.config.model)) {
+    return {
+      source: resolved.source,
+      key: STUDIO_WORKSPACE_KEY,
+      config: {
+        ...resolved.config,
+        model: resolved.config.model,
+        capabilities: { ...resolved.config.capabilities, vision: true },
+      },
+    }
+  }
+  if (!isDashScopeConfig(resolved.config)) return null
+  return {
+    source: resolved.source,
+    key: STUDIO_WORKSPACE_KEY,
+    config: {
+      ...resolved.config,
+      model: STUDIO_MODEL_ID,
+      capabilities: { ...resolved.config.capabilities, vision: true },
+      thinking: resolved.config.thinking ?? {
+        param: 'reasoning_effort',
+        options: ['low', 'medium', 'xhigh'],
+        default: 'xhigh',
+      },
+    },
+  }
+}
+
+async function resolveStudioConfig(env: Env, now: number): Promise<ResolvedActiveAIConfig | null> {
+  const dedicated = await resolveAuxConfig(env, STUDIO_WORKSPACE_KEY, 'STUDIO_CONFIG_JSON', now)
+  if (dedicated) {
+    const locked = lockStudioConfig(dedicated)
+    if (locked) return locked
+  }
+  for (const persona of ['master', 'expert', 'standard'] as const) {
+    const key = PERSONA_TO_KEY[persona]
+    const resolved = await resolveAuxConfig(env, key, PERSONA_ENV_FALLBACK[key], now)
+    if (!resolved || !isStudioModelId(resolved.config.model)) continue
+    return lockStudioConfig(resolved)
+  }
+  try {
+    return lockStudioConfig(await getActiveConfig(env, now))
+  } catch {
+    return null
+  }
+}
+
 export function sidecarKeyForRequestType(requestType: string | null): string | null {
   if (!requestType) return null
   return REQUEST_TYPE_TO_SIDECAR_KEY[requestType.trim().toLowerCase()] ?? null
@@ -317,15 +396,19 @@ async function resolveAuxConfig(
  * Resolve a config para um pedido, por prioridade:
  *   1. sidecar publicado para o X-Request-Type (auxiliares correm no modelo
  *      barato/especializado independentemente da persona escolhida);
- *   2. persona publicada para o X-TM-Persona (main loop);
- *   3. config ativa.
+ *   2. Estúdio (`X-TM-Workspace: studio`) — modelo único com visão, sem
+ *      persona e sem BYOK;
+ *   3. persona publicada para o X-TM-Persona (main loop);
+ *   4. config ativa.
  * Config auxiliar com JSON inválido ou disabled NUNCA propaga erro — degrada
- * para a ativa com um warn nos logs.
+ * para a ativa com um warn nos logs. O Estúdio é a excepção: sem um
+ * DashScope/`qwen3.8-max` disponível falha alto, para não pintar às cegas.
  */
 export async function getConfigForRequest(
   env: Env,
   requestType: string | null,
   persona: string | null = null,
+  workspace: string | null = null,
   now = Date.now(),
 ): Promise<ResolvedActiveAIConfig> {
   const sidecarKey = sidecarKeyForRequestType(requestType)
@@ -333,6 +416,15 @@ export async function getConfigForRequest(
     const resolved = await resolveAuxConfig(env, sidecarKey, SIDECAR_ENV_FALLBACK[sidecarKey], now)
     if (resolved) return resolved
     return getActiveConfig(env, now)
+  }
+  if (isStudioWorkspace(workspace)) {
+    const studio = await resolveStudioConfig(env, now)
+    if (studio) return studio
+    throw new HttpError(
+      503,
+      'tm_studio_model_unavailable',
+      `Studio requires ${STUDIO_MODEL_ID} (a vision model). Publish workspace:studio or a DashScope config.`,
+    )
   }
   const personaKey = personaKeyFor(persona)
   if (personaKey) {

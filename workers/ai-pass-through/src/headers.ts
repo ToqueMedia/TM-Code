@@ -12,6 +12,7 @@ const DEFAULT_ALLOWED_HEADERS = [
   'X-TM-Speed',
   'X-TM-Reasoning-Effort',
   'X-TM-Persona',
+  'X-TM-Workspace',
   'X-Conversation-Id',
   'x-app',
   'x-stainless-lang',

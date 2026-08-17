@@ -1,4 +1,4 @@
-import { getConfigForRequest, getTeamByokConfig, buildUpstreamUrl, sidecarKeyForRequestType } from './activeConfig'
+import { getConfigForRequest, getTeamByokConfig, buildUpstreamUrl, isStudioWorkspace, sidecarKeyForRequestType } from './activeConfig'
 import { authenticateUser } from './auth'
 import {
   checkCostBudget,
@@ -277,9 +277,13 @@ async function handleChatCompletions(
   // prioridade; persona não publicada degrada para a ativa. (Metering 30/70:
   // a persona decide só o MODELO — o consumo é o custo real do modelo servido.)
   const persona = request.headers.get('x-tm-persona')
+  // Estúdio: um único modelo com visão. O header ignora a persona do Código
+  // e o BYOK da equipa — pintar um vídeo com um modelo cego não é opção.
+  const workspace = request.headers.get('x-tm-workspace')
   // `let` because Team BYOK may override the MAIN-path config after we know the
-  // requester's team (resolved below, post-suspension-gate).
-  let active = await getConfigForRequest(env, requestType, persona)
+  // requester's team (resolved below, post-suspension-gate). Studio never
+  // takes that override.
+  let active = await getConfigForRequest(env, requestType, persona, workspace)
   let config = active.config
 
   // Sidecars ESPECIALIZADOS (vision/web_search/fim) NÃO podem degradar para o
@@ -339,7 +343,8 @@ async function handleChatCompletions(
   // budgetState (lookup falhado) a persona passa. Sidecars não são afetados
   // (persona só se aplica sem X-Request-Type mapeado).
   if (persona && persona.trim().toLowerCase() !== 'standard'
-    && budgetState?.plan === 'explorer' && !requestedSidecar) {
+    && budgetState?.plan === 'explorer' && !requestedSidecar
+    && !isStudioWorkspace(workspace)) {
     const downgraded = await getConfigForRequest(env, requestType, 'standard')
     active = downgraded
     config = downgraded.config
@@ -360,7 +365,7 @@ async function handleChatCompletions(
   // política de plano pago. Config inválida/ausente/desativada → degrada para
   // o modelo gerido (nunca parte o chat).
   let teamByok = false
-  if (budgetState?.team?.teamId && !requestedSidecar) {
+  if (budgetState?.team?.teamId && !requestedSidecar && !isStudioWorkspace(workspace)) {
     const tb = await getTeamByokConfig(env, budgetState.team.teamId)
     if (tb) {
       active = tb
