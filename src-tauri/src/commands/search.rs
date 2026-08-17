@@ -1,7 +1,9 @@
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch};
+use grep_searcher::{
+    BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,
+};
 use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
@@ -45,8 +47,7 @@ const BUILTIN_EXCLUDES: &[&str] = &[
     "!*.tsbuildinfo",
 ];
 
-/// Ficheiros acima disto não são procurados (paridade com `--max-filesize 1M`).
-const MAX_SEARCH_FILESIZE: u64 = 1024 * 1024;
+
 
 fn build_matcher(query: &str, options: &SearchOptions) -> Result<RegexMatcher, String> {
     let pattern = if options.use_regex {
@@ -208,6 +209,9 @@ struct MatchSink<'a> {
     /// A leitura deste ficheiro parou porque o `head_limit` global esgotou
     /// a meio — não porque haja um tecto por ficheiro.
     capped: bool,
+    /// Linhas `Before` ainda não atribuídas a um match (o searcher envia-as
+    /// em streaming, como o `rg -B`).
+    pending_before: Vec<String>,
 }
 
 impl Sink for MatchSink<'_> {
@@ -242,15 +246,44 @@ impl Sink for MatchSink<'_> {
             _ => (0, String::new()),
         };
 
+        let before = std::mem::take(&mut self.pending_before);
         self.matches.push(SearchMatch {
             line_number: mat.line_number().unwrap_or(0) as u32,
             column,
             text: truncate_search_line(line_text),
             match_text,
-            context_before: vec![],
+            context_before: before,
             context_after: vec![],
         });
         self.remaining_global -= 1;
+        Ok(true)
+    }
+
+    fn context(
+        &mut self,
+        _searcher: &Searcher,
+        ctx: &SinkContext<'_>,
+    ) -> Result<bool, Self::Error> {
+        if self.depth != SearchDepth::Content {
+            return Ok(true);
+        }
+        let line = truncate_search_line(
+            String::from_utf8_lossy(ctx.bytes()).trim_end_matches(['\n', '\r']),
+        );
+        match ctx.kind() {
+            SinkContextKind::Before => self.pending_before.push(line),
+            SinkContextKind::After => {
+                if let Some(last) = self.matches.last_mut() {
+                    last.context_after.push(line);
+                }
+            }
+            SinkContextKind::Other => {}
+        }
+        Ok(true)
+    }
+
+    fn context_break(&mut self, _searcher: &Searcher) -> Result<bool, Self::Error> {
+        self.pending_before.clear();
         Ok(true)
     }
 }
@@ -271,7 +304,7 @@ fn run_search(
     run_search_with_depth(query, root, options, global_limit, depth)
 }
 
-/// Devolve `(ficheiros, total_matches, truncated, saltados_por_tamanho)`.
+/// Devolve `(ficheiros, total_matches, truncated, skipped_too_large=0)`.
 fn run_search_with_depth(
     query: &str,
     root: &Path,
@@ -280,17 +313,27 @@ fn run_search_with_depth(
     depth: SearchDepth,
 ) -> Result<(Vec<FileSearchResult>, usize, bool, usize), String> {
     let matcher = build_matcher(query, options)?;
+    let ctx_n = if depth == SearchDepth::Content {
+        requested_context_lines(options)
+    } else {
+        0
+    };
     let mut searcher = SearcherBuilder::new()
         .binary_detection(BinaryDetection::quit(b'\x00'))
         // Números de linha custam uma contagem por ficheiro e o modo
         // PathsOnly não os usa.
         .line_number(depth == SearchDepth::Content)
+        // cli-vaz: `rg -B/-A/-C` faz streaming. Não reler o ficheiro depois.
+        .before_context(ctx_n)
+        .after_context(ctx_n)
         .build();
 
     let mut files: Vec<FileSearchResult> = vec![];
     let mut total_matches = 0usize;
     let mut truncated = false;
-    let mut skipped_too_large = 0usize;
+    // Campo mantido no envelope (clientes antigos). O cli-vaz não aplica
+    // `--max-filesize`; deixámos de saltar ficheiros por tamanho.
+    let skipped_too_large = 0usize;
 
     // Um ficheiro como alvo é dialecto do Grep do Claude Code ("procurar só
     // neste ficheiro") e é pedido explícito — procura-se sem walk nem filtro.
@@ -317,13 +360,6 @@ fn run_search_with_depth(
             truncated = true;
             break;
         }
-        // Corte por tamanho, agora explícito e contado. Um `metadata()` que
-        // falha (ficheiro apagado a meio do walk, permissões) não conta como
-        // "grande" — segue para a busca, que trata o erro dela.
-        if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_SEARCH_FILESIZE) {
-            skipped_too_large += 1;
-            continue;
-        }
         let mut sink = MatchSink {
             matcher: &matcher,
             matches: vec![],
@@ -332,6 +368,7 @@ fn run_search_with_depth(
             matched_any: false,
             counted: 0,
             capped: false,
+            pending_before: vec![],
         };
         // Um ficheiro ilegível (permissões, apagado a meio do walk, UTF-16
         // inválido) não pode abortar a busca inteira — salta-se.
@@ -464,13 +501,8 @@ pub struct SearchResult {
     pub file_name_matches: Vec<FileNameMatch>,
     pub duration_ms: u64,
     pub truncated: bool,
-    /// Ficheiros que existiam e casavam com os filtros mas não foram
-    /// procurados por passarem de MAX_SEARCH_FILESIZE.
-    ///
-    /// O corte existia; o SILÊNCIO era o defeito (auditoria 2026-07-29). Uma
-    /// busca por um símbolo que vive num ficheiro grande — um bundle, um dump
-    /// SQL, um schema gerado — respondia "No matches found" e o modelo concluía
-    /// que o símbolo não existe.
+    /// Sempre 0. O cli-vaz não passa `--max-filesize`; a busca também não
+    /// salta ficheiros por tamanho. Campo mantido no JSON.
     #[serde(default)]
     pub skipped_too_large: usize,
 }
@@ -504,49 +536,6 @@ fn truncate_search_line(text_raw: &str) -> String {
 
 fn requested_context_lines(options: &SearchOptions) -> usize {
     options.context_lines.unwrap_or(0).min(MAX_CONTEXT_LINES)
-}
-
-fn attach_match_context(files: &mut [FileSearchResult], context_lines: usize) {
-    if context_lines == 0 {
-        return;
-    }
-
-    for file in files {
-        let Ok(content) = std::fs::read_to_string(&file.file_path) else {
-            continue;
-        };
-        let lines: Vec<&str> = content.lines().collect();
-        if lines.is_empty() {
-            continue;
-        }
-
-        for m in &mut file.matches {
-            if m.line_number == 0 {
-                continue;
-            }
-            let line_index = (m.line_number - 1) as usize;
-            if line_index >= lines.len() {
-                continue;
-            }
-
-            let before_start = line_index.saturating_sub(context_lines);
-            m.context_before = lines[before_start..line_index]
-                .iter()
-                .map(|line| truncate_search_line(line))
-                .collect();
-
-            let after_start = line_index.saturating_add(1);
-            let after_end = (after_start + context_lines).min(lines.len());
-            m.context_after = if after_start < after_end {
-                lines[after_start..after_end]
-                    .iter()
-                    .map(|line| truncate_search_line(line))
-                    .collect()
-            } else {
-                vec![]
-            };
-        }
-    }
 }
 
 #[tauri::command]
@@ -617,7 +606,6 @@ pub async fn search_in_files(
     // runtime, para não travar os outros comandos durante uma busca grande.
     let query_for_search = query.clone();
     let root = directory_path.clone();
-    let context_lines = requested_context_lines(&options);
     let seal_env_files = options.seal_env_files;
     let max_results = options.max_results;
 
@@ -627,8 +615,6 @@ pub async fn search_in_files(
         })
         .await
         .map_err(|e| format!("Search task failed: {}", e))??;
-
-    attach_match_context(&mut files, context_lines);
 
     if !truncated {
         if let Some(max) = max_results {
@@ -1081,39 +1067,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Um ficheiro grande saltado tem de ser CONTADO, não engolido.
-    ///
-    /// O corte de 1MB (paridade com `--max-filesize 1M`) vivia dentro do
-    /// walker, portanto o ficheiro desaparecia sem rasto: uma busca por um
-    /// símbolo que só existe num bundle, num dump SQL ou num schema gerado
-    /// respondia "No matches found" e o modelo concluía que o símbolo não
-    /// existe (auditoria 2026-07-29).
+    /// cli-vaz não passa `--max-filesize`: um jsonl / dump >1 MB tem de
+    /// devolver o acerto, não "No matches found". O `-C` também vem do
+    /// searcher em streaming — não de reler o ficheiro.
     #[test]
-    fn files_over_the_size_cap_are_counted_not_swallowed() {
+    fn files_over_one_megabyte_are_searched_with_context() {
         let dir = std::env::temp_dir().join(format!("tm_big_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // Ficheiro grande COM o acerto lá dentro.
-        let mut big = String::with_capacity(MAX_SEARCH_FILESIZE as usize + 64);
+        const BIG: usize = 1024 * 1024 + 64;
+        let mut big = String::with_capacity(BIG);
+        big.push_str("LINE_BEFORE_NEEDLE\n");
         big.push_str("NEEDLE_IN_BIG_FILE\n");
-        while big.len() <= MAX_SEARCH_FILESIZE as usize {
+        big.push_str("LINE_AFTER_NEEDLE\n");
+        while big.len() < BIG {
             big.push_str("filler filler filler filler\n");
         }
         std::fs::write(dir.join("bundle.js"), &big).unwrap();
-        // E um pequeno sem o acerto, para o walk não ficar vazio.
         std::fs::write(dir.join("small.ts"), "nothing here\n").unwrap();
         let root = canonicalize_path(&dir).unwrap();
 
+        let mut with_ctx = opts(None);
+        with_ctx.context_lines = Some(1);
         let (files, total, _, skipped) =
-            run_search("NEEDLE_IN_BIG_FILE", &root, &opts(None), GLOBAL_MAX_MATCHES).unwrap();
+            run_search("NEEDLE_IN_BIG_FILE", &root, &with_ctx, GLOBAL_MAX_MATCHES).unwrap();
 
-        assert!(files.is_empty(), "o ficheiro grande nao e procurado");
-        assert_eq!(total, 0);
-        assert_eq!(
-            skipped, 1,
-            "o salto tem de ser CONTADO — era este silencio que fazia o modelo \
-             concluir que o simbolo nao existe"
+        assert_eq!(skipped, 0, "cli-vaz nao salta ficheiros por tamanho");
+        assert_eq!(total, 1);
+        assert_eq!(files.len(), 1);
+        assert!(
+            files[0].file_path.replace('\\', "/").ends_with("bundle.js"),
+            "o acerto vive no ficheiro grande"
         );
+        assert_eq!(
+            files[0].matches[0].context_before,
+            vec!["LINE_BEFORE_NEEDLE".to_string()]
+        );
+        assert_eq!(
+            files[0].matches[0].context_after,
+            vec!["LINE_AFTER_NEEDLE".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Content já não tem tecto por ficheiro (paridade cli-vaz). CountOnly
