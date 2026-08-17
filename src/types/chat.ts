@@ -210,6 +210,8 @@ export interface ToolCallDisplay {
     promptKind?: import('../stores/permissionStore').PromptReason
     denyReason?: string
   }
+  /** Paths of images written by generate_image — UI preview; no base64. */
+  imagePreviews?: { path: string }[]
 }
 
 export interface CredentialFieldDescriptor {
@@ -722,10 +724,8 @@ export interface RequestUsageEntry {
   tmsBootstrapInputTokens?: number
   tmsBootstrapOutputTokens?: number
   tmsBootstrapPhase?: string
-  /** Secções obrigatórias em falta quando tmsBootstrapPhase termina em
-   *  `_invalid` (2026-08-03). O prompt já avisa o modelo ("INCOMPLETE
-   *  (missing: …)"); sem este campo o export dizia "invalid" sem dizer
-   *  PORQUÊ e a auto-análise lia-o como estado contraditório. */
+  /** Reservado ao `/init`. O runtime já não marca TMS.md existente como
+   *  inválido por faltar o template de 12 secções (paridade CLAUDE.md). */
   tmsMissingSections?: string[]
   tmsBootstrapToolset?: string
   tmsWriteAttempted?: boolean

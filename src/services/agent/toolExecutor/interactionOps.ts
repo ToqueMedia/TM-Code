@@ -163,7 +163,7 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
                 },
                 options: {
                   type: 'array',
-                  description: 'The available options. Each has a label (display text, 1-5 words) and optional description (explanation of what this option means). Must have 2-4 options.',
+                  description: 'The available options. Each has a short label and optional description of the trade-off.',
                   items: {
                     type: 'object',
                     properties: {
@@ -173,7 +173,6 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
                     required: ['label']
                   },
                   minItems: 2,
-                  maxItems: 4
                 }
               },
               required: ['question', 'header', 'options']
@@ -199,9 +198,7 @@ export function registerInteractionTools(ctx: ToolRegistrationContext): void {
         if (!q.question || !q.header || !q.options || q.options.length < 2) {
           return t('tool.questionValidation')
         }
-        if (q.options.length > 4) {
-          return `Error: maximum 4 options per question. "${q.header}" has ${q.options.length}.`
-        }
+
       }
 
       const questions = questionsRaw.map(q => ({

@@ -1,11 +1,13 @@
 ---
 name: frontend-design
-description: Polished, production-grade UIs with bold aesthetic direction, design tokens, distinctive typography, asymmetric layouts. Call when the user asks to build a page, component, landing, dashboard, or "make it look good" AND the project does NOT use Chakra UI v3. When `@chakra-ui/react` v3 is in package.json, defer to `chakra-ui-builder` instead — it owns the v3 component API surface, recipes, and tokens.
+description: Polished, production-grade UIs with bold aesthetic direction — pick a distinctive visual voice, any competent stack. Call whenever you are creating or restyling a page, component, landing, or dashboard (do not wait for #design). If the project uses Chakra UI v3, defer to chakra-ui-builder.
 ---
 
 # Frontend Design
 
-Create distinctive, production-grade frontend interfaces. Reject generic AI aesthetics. This skill applies whenever the user asks for UI, a page, a component, a landing, a dashboard, or "make it look good" — **except** when the project uses Chakra UI v3 (`@chakra-ui/react@^3`), in which case `chakra-ui-builder` is the right skill: it has the component-decision-tree, theming recipes, and v3-specific patterns this skill doesn't cover.
+Create distinctive, production-grade frontend interfaces. Reject generic AI aesthetics. The system prompt does **not** lock a UI stack or a timid visual default — this skill is the visual voice. Tailwind + local primitives is one good starting point when nothing else is specified, not a ban on shadcn, Chakra, MUI, or a custom system. Restraint is one valid direction among many, not the house style.
+
+This skill applies whenever you are creating or restyling UI — a page, a component, a landing, a dashboard, or "make it look good". Do not wait for the developer to type `#design`. **Exception:** when the project uses Chakra UI v3 (`@chakra-ui/react@^3`), `chakra-ui-builder` is the right skill: it has the component-decision-tree, theming recipes, and v3-specific patterns this skill doesn't cover.
 
 ## Completion contract
 

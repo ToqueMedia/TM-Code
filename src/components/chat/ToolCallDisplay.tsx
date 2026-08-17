@@ -20,6 +20,7 @@ import { detectLanguage, highlightLines } from '@/utils/syntaxHighlight'
 import { t } from '@/i18n'
 import { isShellTool, ShellCommandBlock } from '../shell/ShellCommandBlock'
 import { canonicalToolName, normalizeToolInputForCanonical } from '@/services/agent/toolNames'
+import { convertFileSrc } from '@tauri-apps/api/core'
 
 interface ToolCallDisplayProps {
   toolCall: ToolCallDisplayType
@@ -38,7 +39,7 @@ const TOOL_ICONS: Record<string, React.ComponentType<{ size?: number | string }>
 }
 
 /** Tools where we show a file-extension icon instead of the generic tool icon. */
-const FILE_TOOLS = new Set(['read_file', 'read_around', 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file'])
+const FILE_TOOLS = new Set(['read_file', 'read_around', 'write_file', 'edit_file', 'create_file', 'delete_file', 'rename_file', 'generate_image'])
 
 /** Human-readable tool labels shown in the chat UI. */
 const TOOL_LABELS: Record<string, string> = {
@@ -65,6 +66,7 @@ const TOOL_LABELS: Record<string, string> = {
   update_tasks: t('toolLabel.updatingTasks'),
   request_thinking: t('toolLabel.activatingReasoning'),
   read_skill: t('toolLabel.loadingGuide'),
+  generate_image: t('toolLabel.generatingImage'),
 }
 
 /**
@@ -262,6 +264,8 @@ export function getInputSummary(
       // provider names and implementation details that aren't useful to
       // surface in the chat. The agent has the body in its context.
       return describeSkill(String(input.name || ''))
+    case 'generate_image':
+      return displayPath(String(input.output_path || ''))
     default: {
       // MCP tools: show just the tool name part
       if (toolName.startsWith('mcp__')) {
@@ -292,7 +296,7 @@ function ToolCallDisplayComponent({ toolCall }: ToolCallDisplayProps) {
   )
   const displayToolName = canonicalToolName(toolCall.toolName)
   const displayInput = normalizeToolInputForCanonical(toolCall.toolName, toolCall.input)
-  const filePath = (displayInput?.file_path || displayInput?.path || displayInput?.oldPath || '') as string
+  const filePath = (displayInput?.file_path || displayInput?.path || displayInput?.oldPath || displayInput?.output_path || '') as string
   const useFileIcon = FILE_TOOLS.has(displayToolName) && !!filePath
   const IconComponent = TOOL_ICONS[displayToolName] || VscTools
   const inputSummary = getInputSummary(displayToolName, displayInput, toolCall.result, projectPath)
@@ -660,6 +664,29 @@ function ToolCallDisplayComponent({ toolCall }: ToolCallDisplayProps) {
             {fullCommand}
           </Text>
         </Box>
+      )}
+
+      {isCompleted && !isFailed && toolCall.imagePreviews && toolCall.imagePreviews.length > 0 && (
+        <Flex
+          px={3}
+          py={2}
+          gap={2}
+          overflowX="auto"
+          borderTop="1px solid rgba(255,255,255,0.04)"
+        >
+          {toolCall.imagePreviews.map((preview) => (
+            <Image
+              key={preview.path}
+              src={convertFileSrc(preview.path)}
+              alt={preview.path.split('/').pop() || 'generated'}
+              maxH="180px"
+              maxW="280px"
+              objectFit="contain"
+              borderRadius="6px"
+              border="1px solid rgba(255,255,255,0.08)"
+            />
+          ))}
+        </Flex>
       )}
 
       {/* Running: progress bar + live status for sub-agents */}

@@ -164,11 +164,13 @@ describe('checkPlanModeAccess', () => {
     test('directs the agent toward PLAN.md instead of retrying the blocked tool', () => {
       const msg = checkPlanModeAccess('execute_command', '', ROOT)
       expect(msg).toContain('PLAN.md')
+      expect(msg).toContain('Files & Phases')
       expect(msg).toContain('Implementation Phases')
     })
 
-    test('write-path rejection mentions File Structure section', () => {
+    test('write-path rejection mentions both plan file-list sections', () => {
       const msg = checkPlanModeAccess('write_file', 'src/main.ts', ROOT)
+      expect(msg).toContain('Files & Phases')
       expect(msg).toContain('File Structure')
     })
   })

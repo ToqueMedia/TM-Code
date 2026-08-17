@@ -68,6 +68,8 @@ export interface GenerateImagesOptions {
   negativePrompt?: string
   /** Reescrita "inteligente" do prompt pelo provider (default DELA é true). */
   promptExtend?: boolean
+  /** Data URIs or already-encoded `{ image }` values for I2I / edit. */
+  referenceDataUris?: string[]
   signal?: AbortSignal
 }
 
@@ -183,10 +185,16 @@ export async function generateImages(opts: GenerateImagesOptions): Promise<Gener
     parameters.negative_prompt = opts.negativePrompt.trim().slice(0, NEGATIVE_PROMPT_MAX)
   }
 
+  const content: Array<{ text?: string; image?: string }> = []
+  for (const uri of opts.referenceDataUris ?? []) {
+    if (uri.trim()) content.push({ image: uri.trim() })
+  }
+  content.push({ text: prompt })
+
   const body = {
     // Placeholder: o worker substitui pelo modelo da config `sidecar:image`.
     model: 'tm-image-model',
-    input: { messages: [{ role: 'user', content: [{ text: prompt }] }] },
+    input: { messages: [{ role: 'user', content }] },
     parameters,
   }
 
@@ -268,6 +276,33 @@ export async function generateImages(opts: GenerateImagesOptions): Promise<Gener
     tier: data?.usage?.output_image_type ?? null,
     model: res.headers.get('x-tm-model'),
   }
+}
+
+export interface GeneratedImageFile {
+  path: string
+  bytes: number
+  width: number
+  height: number
+}
+
+export interface GeneratedImagePayload {
+  type: 'generated_image'
+  files: GeneratedImageFile[]
+  description: string | null
+  tier: string | null
+  model: string | null
+}
+
+export function formatGeneratedImageResult(payload: GeneratedImagePayload): string {
+  const lines = payload.files.map((f, i) => {
+    const kb = `${Math.round(f.bytes / 1024)} KB`
+    const dim = f.width > 0 && f.height > 0 ? `${f.width}x${f.height}` : ''
+    return `${i + 1}. ${f.path}${dim ? ` (${dim}, ${kb})` : ` (${kb})`}`
+  })
+  const seen = payload.description
+    ? `\n\nWhat it looks like:\n${payload.description}`
+    : '\n\nNo visual description was available (vision sidecar unpublished, or BYOK without it). Open the file in the editor, or Read it after publishing sidecar:vision.'
+  return `Generated ${payload.files.length} image(s), tier ${payload.tier ?? 'unknown'}.\n${lines.join('\n')}${seen}`
 }
 
 /**

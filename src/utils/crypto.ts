@@ -66,8 +66,25 @@ async function deriveSessionKey(projectPath: string): Promise<CryptoKey> {
 }
 
 /**
- * Encrypt plaintext and return a JSON envelope (avoids prefix collision with plain JSON).
- * Format: `{"_enc":2,"d":"<base64(iv + ciphertext)>"}`
+ * True for a session file written before 2026-08-06 (AES-GCM envelope).
+ * Current writes are plaintext JSON — never call encryptSession from the
+ * session persist path.
+ */
+export function isEncryptedSession(raw: string): boolean {
+  const trimmed = raw.trimStart()
+  if (trimmed.startsWith('ENC1:')) return true
+  if (!trimmed.startsWith('{')) return false
+  // Envelope v2 is `{ "_enc": 2, "d": "..." }`. A plaintext session starts
+  // with `"id"`. Only look at the first key — never JSON.parse a multi-MB
+  // transcript, and never treat `_enc` inside a message as the envelope.
+  const firstKey = trimmed.replace(/^{\s*/, '').slice(0, 8)
+  return firstKey.startsWith('"_enc"')
+}
+
+/**
+ * Inverse of the pre-2026-08-06 session format
+ * (`ENC1:` or `{"_enc":2,"d":"<base64(iv + ciphertext)>"}`).
+ * Do not use to write new sessions.
  */
 export async function encryptSession(plaintext: string, projectPath: string): Promise<string> {
   const key = await deriveSessionKey(projectPath)
@@ -82,7 +99,7 @@ export async function encryptSession(plaintext: string, projectPath: string): Pr
 
 /**
  * Decrypt a session produced by encryptSession.
- * Returns null for unencrypted (legacy) content or decryption failure.
+ * Returns null for plaintext JSON or decryption failure.
  */
 export async function decryptSession(encrypted: string, projectPath: string): Promise<string | null> {
   // Detect encrypted envelope — both v1 prefix and v2 JSON

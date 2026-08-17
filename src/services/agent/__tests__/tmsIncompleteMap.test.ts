@@ -1,20 +1,8 @@
 import { missingTmsSections } from '../tmsBootstrap'
 
 /**
- * Um mapa de projecto parcial que se apresenta como completo.
- *
- * A validação do TMS.md existia, corria, e o resultado morria numa flag de
- * telemetria (`already_exists_invalid`). `shouldBootstrap` é `false` por decisão
- * de produto — /init é o único caminho de criação, paridade com o claude-vaz —
- * portanto um TMS inválido não é reparado; e como o FICHEIRO existe, o aviso de
- * "/init" (gated em `projectStore.noTmsFile`) também não aparece.
- *
- * Medido na sessão yyyy (momenu-fact, 2026-07-30): o TMS declarava "Firebase
- * Cloud Functions" no enquadramento mas a sua "Visão Geral do Diretório" só
- * listava `src/**`. Faltavam-lhe exactamente as secções que diriam onde vivem as
- * rotas do backend, e o prompt ainda mandava "Follow Agent Rules, Commands, and
- * Confirmed facts below" — três secções inexistentes. O modelo gastou 12 das 20
- * tool calls a redescobrir `functions/src/routes/` à força.
+ * Completeness do template `/init` — não é validade em runtime.
+ * Um TMS.md livre continua a ser memória válida (paridade CLAUDE.md).
  */
 describe('missingTmsSections', () => {
   /** O TMS.md real do momenu-fact, reduzido aos seus cabeçalhos. */

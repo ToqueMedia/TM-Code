@@ -138,7 +138,7 @@ export function buildAiAgentPlatformLine(intent: AiAgentIntent): string | null {
     `(b) backend exposes a chat endpoint that proxies user messages to ${namedModels.length > 0 ? `the ${namedModels.join(' / ')} API` : 'the chosen LLM'}, returning the agent's reply (streamed if the model supports it); ` +
     `(c) LLM API keys stay SERVER-SIDE — the frontend NEVER calls the model directly, only the backend proxy; ` +
     `(d) capture the model name(s) in the Technical Decisions table with rationale (latency, pricing, capabilities); ` +
-    `(e) the Implementation Phases must include a dedicated phase named "Model integration — <model name>" that wires the backend endpoint, error handling, and rate limiting. ` +
+    `(e) the plan's phases (Files & Phases on FEATURE, Implementation Phases on PROJECT) must include a dedicated phase named "Model integration — <model name>" that wires the backend endpoint, error handling, and rate limiting. ` +
     `Do NOT propose: form-based bug submission, frontend-only AI logic, mock responses without a real model call, or omitting the model from the deployment topology.`
   )
 }

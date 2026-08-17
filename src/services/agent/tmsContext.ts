@@ -215,7 +215,7 @@ export function markOriginalTaskWriteStats(writeActionCount: number, firstWriteT
 }
 
 export function markReadBeforeWriteBlocked(
-  tool: 'write_file' | 'edit_file',
+  tool: 'write_file' | 'edit_file' | 'generate_image',
   reason: 'not_read' | 'partial_view' | 'modified_since_read',
 ): void {
   currentTelemetry = {

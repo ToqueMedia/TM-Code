@@ -82,7 +82,7 @@ function AgentActivityIndicator() {
   // Sessão do run em curso — capturada enquanto streama para o fecho do
   // timer saber ONDE o run viveu (streamingSessionId já está null no fim).
   const lastStreamingSessionRef = useRef<string | null>(null);
-  const prevOutputTokensRef = useRef(0);
+  const prevTotalTokensRef = useRef(0);
 
   // Track session start so the "Trabalhou por Xm Ys" closing message reports
   // the real wall-clock duration (not the paused-subtracted display value).
@@ -245,32 +245,17 @@ function AgentActivityIndicator() {
     (status === "compressing"
       ? COMPACT_PHASE_LABELS[compactPhase] || STATUS_LABELS[status] || "Working"
       : STATUS_LABELS[status] || "Working");
-  // chatStore.addTokenUsage:
-  //   - input  is REPLACED with max(prev, newInput) — represents the CURRENT
-  //              context size on the wire (turn N's input already contains
-  //              turns 1..N-1, so summing would double-count massively).
-  //   - output is SUMMED across turns — each turn emits NEW tokens.
-  //
-  // Adding the two together (the previous behaviour) was incoherent: it
-  // mixed "size of conversation in flight" with "tokens emitted so far".
-  // Show them as two distinct directional counters instead.
-  const inputTokens = totalTokensUsed.input;
-  const outputTokens = totalTokensUsed.output;
-
-  // Arrows are STATE INDICATORS — they only appear next to the counter
-  // that is actively accumulating right now.
-  //   'awaiting_response' / 'compressing' → ↑ visible (input is being prepared/sent)
-  //   'reasoning' / 'generating' / 'applying' → ↓ visible (output is streaming back)
-  //   any other state → neither arrow rendered (counter numbers still show)
-  // The previous design rendered both arrows permanently as colored labels;
-  // user feedback was that they read as static text rather than live state.
+  // One number: tokens that went up the wire plus tokens that came back.
+  // The arrow is only a DIRECTION cue for live traffic — not a second counter.
+  //   sending (awaiting_response / compressing / applying) → ↑
+  //   receiving generated text (generating) → ↓
+  //   reasoning → no arrow (thinking is not on the wire)
+  const totalTokens = totalTokensUsed.input + totalTokensUsed.output;
   const isSending = status === "awaiting_response" || status === "compressing";
-  const isReceiving =
-    status === "reasoning" || status === "generating" || status === "applying";
-
-  // Detect output growth so the down-arrow pulses subtly during active receipt.
-  const outputJustGrew = outputTokens > prevOutputTokensRef.current;
-  prevOutputTokensRef.current = outputTokens;
+  const isReceiving = status === "generating";
+  const showArrow = isSending || isReceiving;
+  const totalJustGrew = totalTokens > prevTotalTokensRef.current;
+  prevTotalTokensRef.current = totalTokens;
 
   return (
     <Flex
@@ -330,11 +315,7 @@ function AgentActivityIndicator() {
         )}
       </Text>
 
-      {/* Elapsed time + per-direction token counters. Up-arrow shows context
-          size on the wire (input, the last turn's prompt — ratchets up across
-          turns). Down-arrow shows tokens emitted by the model (output, sums
-          across turns). Mixing the two would be a unit error — they answer
-          different questions. The "live" direction is highlighted by colour. */}
+      {/* Elapsed time + one traffic total. Arrow only while bytes move. */}
       <Text
         fontSize="11.5px"
         color={tokens.colors.text.disabled}
@@ -343,51 +324,32 @@ function AgentActivityIndicator() {
         css={{ fontVariantNumeric: 'tabular-nums' }}
       >
         ({formatElapsed(elapsed)}
-        {inputTokens > 0 && (
+        {totalTokens > 0 && (
           <>
             {" \u00B7 "}
-            {isSending && (
-              <>
-                <Box
-                  as="span"
-                  fontSize="11px"
-                  css={{
-                    display: "inline",
-                    color: tokens.colors.accent.orange,
-                  }}
-                >
-                  {"\u2191"}
-                </Box>{" "}
-              </>
+            {showArrow && (
+              <Box
+                as="span"
+                fontSize="11px"
+                css={{
+                  display: "inline",
+                  color: isSending
+                    ? tokens.colors.accent.orange
+                    : tokens.colors.accent.greenBright,
+                  animation: totalJustGrew
+                    ? "tokenPulse 0.6s ease-out"
+                    : undefined,
+                  "@keyframes tokenPulse": {
+                    "0%": { opacity: 0.4 },
+                    "100%": { opacity: 1 },
+                  },
+                }}
+              >
+                {isSending ? "\u2191" : "\u2193"}
+              </Box>
             )}
-            {formatTokens(inputTokens)}
-          </>
-        )}
-        {outputTokens > 0 && (
-          <>
-            {" \u00B7 "}
-            {isReceiving && (
-              <>
-                <Box
-                  as="span"
-                  fontSize="11px"
-                  css={{
-                    display: "inline",
-                    color: tokens.colors.accent.greenBright,
-                    animation: outputJustGrew
-                      ? "tokenPulse 0.6s ease-out"
-                      : undefined,
-                    "@keyframes tokenPulse": {
-                      "0%": { opacity: 0.4 },
-                      "100%": { opacity: 1 },
-                    },
-                  }}
-                >
-                  {"\u2193"}
-                </Box>{" "}
-              </>
-            )}
-            {formatTokens(outputTokens)}
+            {showArrow ? " " : null}
+            {formatTokens(totalTokens)}
           </>
         )}
         {")"}

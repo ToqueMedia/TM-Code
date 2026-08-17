@@ -1,14 +1,13 @@
 import { invoke } from '@/utils/invokeMetrics'
 import { ChatSession, ChatMessage, PersistedSession, SessionSummary, ToolCallDisplay, ByokSessionSnapshot, SessionTurnSnapshot } from '../../types/chat'
 import { logger } from '../../utils/logger'
-// ENCRIPTAÇÃO REMOVIDA (2026-08-06, a pedido do developer). `decryptSession`
-// fica importado porque as sessões ESCRITAS ANTES continuam encriptadas em
-// disco e têm de abrir — remover a leitura tornava o histórico existente
-// ilegível. A ESCRITA passa a ser JSON simples: as sessões são um artefacto de
-// depuração que o developer lê, exporta e partilha, e cifrá-las com uma chave
-// derivada do caminho do projecto protegia contra nada (a chave está no mesmo
-// disco) enquanto tornava o ficheiro inútil para quem o quisesse inspeccionar.
-import { hashProjectPath, decryptSession } from '../../utils/crypto'
+// Sessões são JSON em claro (pedido do developer, 2026-08-06 e de novo
+// 2026-08-17). São um artefacto de depuração: lêem-se, exportam-se e
+// partilham-se. Cifrá-las com uma chave derivada do caminho do projecto
+// protegia contra nada (a chave está no mesmo disco) e tornava o ficheiro
+// inútil. Ficheiros antigos (ENC1: / {_enc,d}) ainda abrem — decrypt +
+// overwrite in-place — para o disco ficar alinhado com a regra.
+import { hashProjectPath, decryptSession, isEncryptedSession } from '../../utils/crypto'
 import { useByokStore } from '../../stores/byokStore'
 import { getProjectSessionsDir } from '../projectStatePaths'
 import { READ_ALIAS } from './toolNames'
@@ -147,11 +146,10 @@ const MAX_MENTION_CONTEXT_PERSIST = 30_000
 /** Legacy home-dir root for sessions written before project-id based app
  *  state. Kept only as the SOURCE side of the one-shot migration in
  *  `migrateLegacySessions`; nothing else reads from here. */
-const LEGACY_BASE_DIR_NAME = '.toquemedia-studio'
+const LEGACY_BASE_DIR_NAMES = ['.tmcode', '.toquemedia-studio'] as const
 
 class SessionService {
   private static instance: SessionService
-  private basePath: string | null = null
   private autoSaveInterval: ReturnType<typeof setInterval> | null = null
   private dirty = false
   private saving = false
@@ -201,12 +199,10 @@ class SessionService {
 
   /** Legacy home-dir base — used ONLY by `migrateLegacySessions` to locate
    *  the pre-migration data on first init. New writes never touch this. */
-  private async getLegacyBasePath(): Promise<string> {
-    if (this.basePath) return this.basePath
+  private async getLegacyBasePaths(): Promise<string[]> {
     const home = await invoke<string>('get_home_directory')
     const normalized = home.endsWith('/') || home.endsWith('\\') ? home.slice(0, -1) : home
-    this.basePath = `${normalized}/${LEGACY_BASE_DIR_NAME}`
-    return this.basePath
+    return LEGACY_BASE_DIR_NAMES.map(name => `${normalized}/${name}`)
   }
 
   /** Sessions are tool state. They live in the app's per-project state dir,
@@ -216,10 +212,10 @@ class SessionService {
   }
 
   /** Path under the LEGACY home-dir scheme. Used only during migration. */
-  private async getLegacySessionsDir(projectPath: string): Promise<string> {
-    const base = await this.getLegacyBasePath()
+  private async getLegacySessionsDirs(projectPath: string): Promise<string[]> {
+    const bases = await this.getLegacyBasePaths()
     const hash = await hashProjectPath(projectPath)
-    return `${base}/sessions/${hash}`
+    return bases.map(base => `${base}/sessions/${hash}`)
   }
 
   private async getSessionFilePath(projectPath: string, sessionId: string): Promise<string> {
@@ -235,6 +231,64 @@ class SessionService {
   private async getIndexFile(projectPath: string): Promise<string> {
     const dir = await this.getSessionsDir(projectPath)
     return `${dir}/sessions_index.json`
+  }
+
+  /**
+   * If `raw` is a pre-2026-08-06 AES-GCM envelope, decrypt it and overwrite
+   * the file as pretty JSON. Returns the plaintext (rewritten or already
+   * clear). Null means ciphertext that would not decrypt — caller treats
+   * that as an unreadable session, same as a corrupt file.
+   */
+  private async rewritePlaintextIfEncrypted(
+    filePath: string,
+    projectPath: string,
+    raw: string,
+  ): Promise<string | null> {
+    if (!isEncryptedSession(raw)) return raw
+    const decrypted = await decryptSession(raw, projectPath)
+    if (decrypted === null) return null
+    try {
+      const pretty = JSON.stringify(JSON.parse(decrypted), null, 2)
+      await invoke('write_file', { path: filePath, content: pretty })
+      return pretty
+    } catch (error) {
+      logger.warn('session', `Failed to rewrite encrypted session ${filePath} as plaintext:`, error)
+      return decrypted
+    }
+  }
+
+  /** Best-effort scan on project init so leftover ciphertext does not sit on disk. */
+  private async rewriteEncryptedSessionFiles(projectPath: string): Promise<void> {
+    const dir = await this.getSessionsDir(projectPath)
+    const markerPath = `${dir}/.plaintext`
+    try {
+      await invoke<string>('read_file', { path: markerPath })
+      return
+    } catch { /* first pass — scan */ }
+
+    // `list_directory` is NOT a Tauri command (it is an agent tool over
+    // `build_file_tree`). The first version of this scan invoked it and
+    // silently no-op'd on every project open.
+    let paths: string[] = []
+    try {
+      paths = await invoke<string[]>('glob_files', {
+        pattern: 'session_*.json',
+        directory: dir,
+      })
+    } catch {
+      return
+    }
+    for (const filePath of paths) {
+      try {
+        const raw = await invoke<string>('read_file', { path: filePath })
+        await this.rewritePlaintextIfEncrypted(filePath, projectPath, raw)
+      } catch (error) {
+        logger.warn('session', `Failed to inspect session ${filePath} for plaintext rewrite:`, error)
+      }
+    }
+    try {
+      await invoke('write_file', { path: markerPath, content: new Date().toISOString() })
+    } catch { /* next open retries the scan */ }
   }
 
   // === Lifecycle ===
@@ -266,6 +320,13 @@ class SessionService {
       logger.warn('session', 'Legacy session migration failed (non-fatal):', error)
     }
 
+    // After the copy, any leftover AES-GCM envelopes become readable JSON.
+    try {
+      await this.rewriteEncryptedSessionFiles(projectPath)
+    } catch (error) {
+      logger.warn('session', 'Encrypted session rewrite failed (non-fatal):', error)
+    }
+
     // Legacy no-op kept for older frontend/native combinations.
     try {
       await invoke('ensure_toquemedia_gitignore_cmd', { projectPath })
@@ -283,14 +344,15 @@ class SessionService {
 
   /**
    * One-shot best-effort migration of the legacy session tree from
-   * `~/.toquemedia-studio/sessions/{projectHash}/` into the project-id keyed
+   * `~/.tmcode/sessions/{projectHash}/` (or the pre-rename
+   * `~/.toquemedia-studio/sessions/{projectHash}/`) into the project-id keyed
    * sessions directory. Idempotent via a `.migrated` marker file in the new
    * directory — after the first successful run, every
    * subsequent init returns immediately.
    *
    * The migration is intentionally simple: copy every file from legacy
-   * to new (encryption is keyed on `projectPath`, which is unchanged,
-   * so encrypted files keep decrypting fine), then write the marker.
+   * to new, then write the marker. Ciphertext copied here is rewritten
+   * to plaintext by `rewriteEncryptedSessionFiles` on the same init.
    * The legacy tree is LEFT in place — we don't risk data loss if the
    * user rolls back, and the orphan can be cleaned by an admin command
    * later. The legacy dir won't appear in the IDE again because nothing
@@ -306,15 +368,30 @@ class SessionService {
       return
     } catch { /* not migrated yet — continue */ }
 
-    const legacyDir = await this.getLegacySessionsDir(projectPath)
-    // Probe the legacy dir. If it doesn't exist or is empty, write the
-    // marker and exit — there's nothing to migrate, but we still drop
+    const legacyDirs = await this.getLegacySessionsDirs(projectPath)
+    // Probe each historic home-dir layout. If none exist or they are empty,
+    // write the marker and exit — nothing to migrate, but we still drop
     // the marker so future inits don't re-probe.
+    let legacyDir = ''
     let legacyEntries: string[] = []
-    try {
-      legacyEntries = await invoke<string[]>('list_directory', { path: legacyDir })
-    } catch {
-      // Legacy dir missing — fresh install, no migration needed.
+    for (const candidate of legacyDirs) {
+      try {
+        // Same command the rest of the app uses to list a folder — there is
+        // no Tauri `list_directory` (that name is an agent tool).
+        const entries = await invoke<string[]>('glob_files', {
+          pattern: '*',
+          directory: candidate,
+        })
+        if (entries.length > 0) {
+          legacyDir = candidate
+          legacyEntries = entries
+          break
+        }
+      } catch {
+        /* try next historic path */
+      }
+    }
+    if (!legacyDir) {
       try {
         await invoke('write_file', { path: markerPath, content: 'no-legacy' })
       } catch { /* marker write best-effort */ }
@@ -331,8 +408,6 @@ class SessionService {
     // sessions_index.json, queue-operations.jsonl) — no nested traversal needed.
     let migrated = 0
     for (const entry of legacyEntries) {
-      // `list_directory` returns full paths or basenames depending on impl;
-      // be tolerant of both by computing the basename ourselves.
       const basename = entry.split('/').pop() ?? entry
       const srcPath = entry.includes('/') ? entry : `${legacyDir}/${basename}`
       const destPath = `${newDir}/${basename}`
@@ -388,12 +463,8 @@ class SessionService {
     try {
       const filePath = await this.getSessionFilePath(projectPath, sessionId)
       const raw = await invoke<string>('read_file', { path: filePath })
-
-      // Escrita é JSON simples desde 2026-08-06. A leitura continua a tentar
-      // desencriptar primeiro para as sessões antigas continuarem a abrir —
-      // quando a desencriptação falha (ficheiro já em claro), usa-se o cru.
-      let json = await decryptSession(raw, projectPath)
-      if (json === null) json = raw
+      const json = await this.rewritePlaintextIfEncrypted(filePath, projectPath, raw)
+      if (json === null) return null
       const persisted: PersistedSession = JSON.parse(json)
 
       // Truncate tool results that may have been saved with full content
@@ -493,8 +564,8 @@ class SessionService {
 
       const json = JSON.stringify(persisted, null, 2)
       // Re-check the kill switch right before the actual write. Between the
-      // start of this method and now, JSON encoding + crypto have run; the
-      // user may have triggered deletion in that window.
+      // start of this method and now, JSON encoding has run; the user may
+      // have triggered deletion in that window.
       if (this.deletingProjectPath === session.projectPath) return
       await invoke('write_file', { path: filePath, content: json })
       // Restrict file permissions to owner-only (600) to protect sensitive session data
@@ -716,8 +787,8 @@ class SessionService {
     // re-emits it on every follow-up turn (claude-vaz keeps the equivalent
     // attachment messages in the persisted transcript). CAPPED on disk: uma
     // menção pode carregar até 2000 linhas de ficheiro; persistir isso por
-    // mensagem inchava os ficheiros de sessão (encriptar + escrever em cada
-    // autosave). Em memória fica completo durante a sessão; após reload o
+    // mensagem inchava os ficheiros de sessão (escrever em cada autosave).
+    // Em memória fica completo durante a sessão; após reload o
     // modelo vê o prefixo + nota para reler com read_file se precisar.
     if (msg.mentionContext) {
       sanitized.mentionContext = msg.mentionContext.length > MAX_MENTION_CONTEXT_PERSIST
@@ -730,8 +801,8 @@ class SessionService {
     }
 
     // Persist attachment metadata WITHOUT base64. The base64 data URI is
-    // potentially several MB per image and would bloat the encrypted
-    // session file. On reload, attachments come back with only metadata
+    // potentially several MB per image and would bloat the session file.
+    // On reload, attachments come back with only metadata
     // (id, type, name, path, mimeType, sizeBytes) — image base64 is gone,
     // so multimodal reconstruction in rebuildConversationHistory falls
     // back to the text path. Multimodal across app restarts is a known

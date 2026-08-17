@@ -170,7 +170,7 @@ function buildTaskSystemPrompt(
     // (2026-08-03: a tool foi removida do registry de vez — o def já nem viaja.)
     '- You are the ONLY agent on this project. There is no peer-agent messaging: if you need a decision or information only the developer has, use ask_user_question.',
     '- File writes are applied directly and are serialized with the other agents, so keep your edits scoped to YOUR task to avoid stepping on theirs.',
-    '- If you genuinely need the developer (a decision between options, or credentials for a service), use ask_user_question / request_credentials — the developer is notified on your task row and answers in your task chat. Prefer sensible defaults over asking.',
+    '- If you genuinely need the developer (a stack/auth/deploy choice, or credentials for a service), use ask_user_question / request_credentials — the developer is notified on your task row and answers in your task chat. Do not invent a house stack. Minor details: proceed and state the assumption.',
     // Só a metade "alterações não-commitadas do developer" é alcançável hoje
     // (um agente por projecto), e essa TEM imposição real — toolExecutor.ts
     // devolve BLOCKED (file ownership). Nomear a parte viva em vez das duas.

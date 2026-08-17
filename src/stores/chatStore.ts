@@ -20,6 +20,7 @@ import { logger } from '../utils/logger'
 import { t } from '../i18n'
 import { countDiffLineStats } from '../utils/diffStats'
 import { resolveSessionOccupancy, withResolvedOccupancy } from '../utils/sessionOccupancy'
+import { formatGeneratedImageResult, type GeneratedImagePayload } from '../services/agent/imageGeneration'
 
 interface ChatState {
   sessions: Map<string, ChatSession>
@@ -3199,6 +3200,19 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
 
             try {
               const parsed = JSON.parse(result)
+              if (parsed.type === 'generated_image' && Array.isArray(parsed.files)) {
+                const imagePreviews = (parsed.files as Array<{ path?: string }>)
+                  .filter(f => typeof f.path === 'string' && f.path)
+                  .map(f => ({ path: f.path as string }))
+                toolCalls[i] = {
+                  ...toolCalls[i],
+                  result: formatGeneratedImageResult(parsed as GeneratedImagePayload),
+                  isError,
+                  status: isError ? 'failed' : 'completed',
+                  imagePreviews,
+                }
+                break
+              }
               if (parsed.type === 'diff') {
                 diffPath = parsed.path
                 diffOldContent = parsed.oldContent

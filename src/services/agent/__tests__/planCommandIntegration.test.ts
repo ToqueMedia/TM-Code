@@ -276,6 +276,22 @@ describe('executePlan call sequence', () => {
     expect(sysPrompt).toContain('There are NO')
     expect(sysPrompt).toContain('dependencies or deploy artefacts')
     expect(sysPrompt).not.toContain('Stack baseline (the parts the architect still chooses)')
+    // 2026-08-17 — stack/deploy/auth are questions, not a silent pick and
+    // not a §14 paragraph the developer cannot answer before approval.
+    expect(sysPrompt).not.toContain('ASK in §14 Open Questions')
+    expect(sysPrompt).not.toContain('useXxxStore')
+    expect(sysPrompt).toContain('Never put that choice in §14')
+    expect(sysPrompt).toContain('BEFORE writing PLAN.md')
+    expect(sysPrompt).toContain('Scope: FEATURE')
+    expect(sysPrompt).toContain('# FEATURE template')
+    expect(sysPrompt).toContain('# PROJECT template')
+    expect(sysPrompt).toContain('# Output style: Collaborator')
+    expect(sysPrompt).toContain('Files & Phases')
+    expect(sysPrompt).toContain('do not poll')
+    expect(sysPrompt).toContain('form already includes Other')
+    expect(sysPrompt).not.toContain('6–20 tasks')
+    expect(sysPrompt).not.toContain('3 web tool calls')
+    expect(sysPrompt).not.toContain('Ask more than 3 clarifying')
   })
 
   test('resume continues the interrupted plan with architect prompt and same artefact', async () => {
@@ -470,12 +486,11 @@ describe('executePlan call sequence', () => {
       expect(leaks).toEqual([])
     })
 
-    it('o comprimento do resumo final é dito uma só vez', () => {
-      // A sequência scaffold→edit→flip→tasks→resumo→STOP é repetida 4× de
-      // propósito (contramedida à falha observada de despejar o plano no
-      // chat). A repetição só é útil se as cópias CONCORDAREM: havia "3-5
-      // sentence" em duas delas contra "3-sentence" nas outras.
+    it('o resumo final não leva quota numérica', () => {
+      // Quotas ("3-sentence", "3–5 sentence") robotizam o comprimento.
+      // O canal é "short summary" — o modelo decide o tamanho.
       expect(prompt()).not.toMatch(/3[–-]5 sentence/)
+      expect(prompt()).not.toMatch(/3-sentence/)
     })
   })
 })

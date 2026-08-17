@@ -144,20 +144,42 @@ describe('ContextBuilder', () => {
       expect(sel?.omitted.map(o => o.id)).toContain('vision.image_rules')
     })
 
-    // A linha de base de UI vive numa linha SÓ, no lembrete final, sem versão
-    // longa nenhuma — a forma do cli-vaz depois de 2026-08-06. Este teste trava
-    // a promessa: é a única coisa que carrega a regra dos estados vazios.
+    // A linha de base de UI vive na recência (curta) E no auxiliar longo
+    // inline. Este teste trava a regra dos estados vazios — 8 falhas em 10
+    // quando se tentou viver só com a curta (ver a nota em sharedSections.ts).
     it('a linha de base de UI chega ao prompt: curta na recência E longa inline', async () => {
       const prompt = await fullPrompt('/test/project', 'web')
       expect(prompt).toContain('state-first')
       expect(prompt).toContain('Empty states GUIDE')
-      // …e a LONGA também, sem portão nenhum: medido em 8 falhas em 10 quando
-      // se tentou viver só com a curta (ver a nota em sharedSections.ts).
       expect(prompt).toContain('# UI baseline (when generating frontend')
       // `# Taste defaults` foi apagada: 414 tokens de restrição sem nenhum
       // observável que os justifique (duas experiências, 16 corridas verdes
-      // sem ela). A restrição continua na linha curta do lembrete.
+      // sem ela). A 2026-08-17 saiu também o lock de stack/taste da linha
+      // curta — ver o teste seguinte.
       expect(prompt).not.toContain('# Taste defaults (frontend/UI work)')
+    })
+
+    // 2026-08-17 — o prefixo deixou de ser um manual de gosto/processo.
+    // Contrato da IDE (estados vazios, credentials, 0.0.0.0) fica;
+    // "boring-by-default", override do user e "não improvises" saem.
+    it('o prefixo não robotiza: colaborador com julgamento, sem lock de stack/taste', async () => {
+      const prompt = await fullPrompt('/test/project', 'web')
+      expect(prompt).not.toContain('boring-by-default')
+      expect(prompt).not.toContain('unless they explicitly insist')
+      expect(prompt).not.toContain('Improvising violates')
+      expect(prompt).not.toContain('restraint over decoration')
+      expect(prompt).not.toContain('Do not add or consult Chakra, MUI')
+      expect(prompt).not.toContain('pick a widely-adopted default')
+      expect(prompt).not.toContain('2-4 options')
+      expect(prompt).not.toContain('≤25 words')
+      expect(prompt).toContain('highly capable')
+      expect(prompt).toContain("Defer to the developer's judgement")
+      expect(prompt).toContain('collaborator with taste')
+      expect(prompt).toContain('same rule as /plan')
+      expect(prompt).toContain('# Output style: Collaborator')
+      expect(prompt).toContain('form already includes Other')
+      expect(prompt).toContain('state-first')
+      expect(prompt).toContain('Empty states GUIDE')
     })
 
     // Forma `string | null`: a secção do GoLive não pode custar tokens a quem
@@ -235,10 +257,10 @@ describe('ContextBuilder', () => {
         )
         const segundo = await builder.buildSystemPrompt(
           '/test/project', 'web', undefined, undefined, undefined, undefined, undefined,
-          { deferredToolNames: ['WebFetch', 'generate_image'] },
+          { deferredToolNames: ['WebFetch', 'enter_worktree'] },
         )
-        expect(primeiro).not.toContain('generate_image')
-        expect(segundo).toContain('generate_image')
+        expect(primeiro).not.toContain('enter_worktree')
+        expect(segundo).toContain('enter_worktree')
       })
     })
 

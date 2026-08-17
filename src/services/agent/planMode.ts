@@ -104,10 +104,10 @@ export function checkPlanModeAccess(
       READ_ALIAS, READ_AROUND, LS_ALIAS, GLOB_ALIAS, GREP_ALIAS, READ_SKILL,
       UPDATE_TASKS, WEB_SEARCH_ALIAS, WEB_FETCH_ALIAS, CAPTURE_URL_DESIGN, ASK_USER_QUESTION,
     ].join(', ')
-    return `Blocked in /plan architect mode: ${shownName} is an implementation tool. Document what this step would do in ${planLabel}'s Implementation Phases section — the coding agent will run it after the user approves the plan. Allowed in this mode: ${allowedList}, ${WRITE_ALIAS}/${CREATE_FILE}/${EDIT_ALIAS} (${planLabel} or TODO.md only).`
+    return `Blocked in /plan architect mode: ${shownName} is an implementation tool. Document what this step would do in ${planLabel}'s phases (Files & Phases on a FEATURE plan, Implementation Phases on a PROJECT plan) — the coding agent will run it after the user approves the plan. Allowed in this mode: ${allowedList}, ${WRITE_ALIAS}/${CREATE_FILE}/${EDIT_ALIAS} (${planLabel} or TODO.md only).`
   }
   if (WRITE_TOOLS.has(toolName) && !isPlanArtefactAtRoot(filePath, projectRoot, planLabel)) {
-    return `Blocked in /plan architect mode: ${shownName} can only write ${planLabel} or TODO.md at the project root. Tried to write "${filePath}". Source files belong to the implementation phase that follows user approval — describe them in ${planLabel}'s File Structure table instead.`
+    return `Blocked in /plan architect mode: ${shownName} can only write ${planLabel} or TODO.md at the project root. Tried to write "${filePath}". Source files belong to the implementation phase that follows user approval — list them in ${planLabel}'s Files & Phases (FEATURE) or File Structure (PROJECT).`
   }
   return null
 }

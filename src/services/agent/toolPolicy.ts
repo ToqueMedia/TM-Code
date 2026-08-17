@@ -121,7 +121,6 @@ export const SITUATIONAL_DEFERRED_TOOLS: readonly string[] = [
   'request_credentials',
   'update_tasks',
   'collect_results',
-  'generate_image',
   'distill_memory',
   'forget_memory',
   'get_project_state_dir',

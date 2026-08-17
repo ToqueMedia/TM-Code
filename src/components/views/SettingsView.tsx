@@ -249,8 +249,10 @@ function ProfileSection() {
   }
   const appLanguage = useSettingsStore(s => s.appLanguage)
   const agentLanguage = useSettingsStore(s => s.agentLanguage)
+  const agentOutputStyle = useSettingsStore(s => s.agentOutputStyle)
   const setAppLanguage = useSettingsStore(s => s.setAppLanguage)
   const setAgentLanguage = useSettingsStore(s => s.setAgentLanguage)
+  const setAgentOutputStyle = useSettingsStore(s => s.setAgentOutputStyle)
 
   const planKey = plan || 'explorer'
   const planInfo = PLAN_CONFIG[planKey] || PLAN_CONFIG.explorer
@@ -576,6 +578,35 @@ function ProfileSection() {
             <NativeSelect.Indicator />
           </NativeSelect.Root>
         </HStack>
+      </VStack>
+
+      <VStack align="stretch" gap={3}>
+        <Text fontSize="11px" fontWeight="600" color={tokens.colors.text.muted} textTransform="uppercase" letterSpacing="0.06em">
+          {t('settings.agentStyle')}
+        </Text>
+
+        <HStack justify="space-between" align="flex-start" gap={4}>
+          <Box flex="1" minW={0}>
+            <Text color={tokens.colors.text.primary} fontWeight="500" fontSize="13px">{t('settings.agentStyle')}</Text>
+            <Text color={tokens.colors.text.disabled} fontSize="11px">{t('settings.agentStyleDesc')}</Text>
+          </Box>
+          <NativeSelect.Root size="sm" width="180px">
+            <NativeSelect.Field
+              bg={tokens.colors.bg.input} borderColor={tokens.colors.border.input}
+              color={tokens.colors.text.primary} value={agentOutputStyle}
+              onChange={e => setAgentOutputStyle(e.target.value as typeof agentOutputStyle)}
+            >
+              <option value="collaborator">{t('settings.agentStyle.collaborator')}</option>
+              <option value="explanatory">{t('settings.agentStyle.explanatory')}</option>
+              <option value="learning">{t('settings.agentStyle.learning')}</option>
+              <option value="concise">{t('settings.agentStyle.concise')}</option>
+            </NativeSelect.Field>
+            <NativeSelect.Indicator />
+          </NativeSelect.Root>
+        </HStack>
+        <Text color={tokens.colors.text.disabled} fontSize="11px">
+          {t(`settings.agentStyle.${agentOutputStyle}Hint` as 'settings.agentStyle.collaboratorHint')}
+        </Text>
       </VStack>
 
     </VStack>
@@ -1406,7 +1437,7 @@ function SkillsSection() {
         )}
       </SettingsGroup>
 
-      <SettingsGroup title={t("settings.global")} badge={IS_WINDOWS ? '%USERPROFILE%\\.toquemedia-studio\\skills\\' : '~/.toquemedia-studio/skills/'}>
+      <SettingsGroup title={t("settings.global")} badge={IS_WINDOWS ? '%USERPROFILE%\\.tmcode\\skills\\' : '~/.tmcode/skills/'}>
         {globalSkills.length === 0 ? (
           <EmptyState text={t('settings.noGlobalSkills')} />
         ) : (
@@ -1418,7 +1449,7 @@ function SkillsSection() {
         )}
       </SettingsGroup>
 
-      <SettingsGroup title={t("settings.project")} badge={IS_WINDOWS ? '.toquemedia-studio\\skills\\' : '.toquemedia-studio/skills/'}>
+      <SettingsGroup title={t("settings.project")} badge={IS_WINDOWS ? '.tmcode\\skills\\' : '.tmcode/skills/'}>
         {projectSkills.length === 0 ? (
           <EmptyState text={t('settings.noProjectSkills')} />
         ) : (
@@ -1699,7 +1730,7 @@ function validateEntry(name: string, raw: unknown): McpEntry {
 
 async function writeMcpEntries(entries: Record<string, McpEntry>): Promise<void> {
   const homeDir = await invoke<string>('get_home_directory')
-  const configDir = `${homeDir}/.toquemedia-studio`
+  const configDir = `${homeDir}/.tmcode`
   const configPath = `${configDir}/mcp.json`
   let config: { mcpServers: Record<string, unknown> } = { mcpServers: {} }
   try {

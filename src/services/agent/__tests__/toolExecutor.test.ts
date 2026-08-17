@@ -2010,11 +2010,11 @@ describe('I: Tool definitions and metadata', () => {
       const exec = freshExecutor()
       const eager = exec.getToolDefinitions().map(d => d.function.name)
       expect(eager).not.toContain('WebFetch')
-      expect(eager).not.toContain('generate_image')
+      expect(eager).toContain('generate_image')
 
       const { defs, missing } = exec.getDeferredToolDefinitions(['WebFetch', 'generate_image'])
-      expect(missing).toEqual([])
-      expect(defs.map(d => d.function.name).sort()).toEqual(['WebFetch', 'generate_image'])
+      expect(missing).toEqual(['generate_image'])
+      expect(defs.map(d => d.function.name)).toEqual(['WebFetch'])
       expect(defs.every(d => (d.function.description ?? '').length > 0)).toBe(true)
     })
 
@@ -2029,6 +2029,7 @@ describe('I: Tool definitions and metadata', () => {
       expect(eager).not.toContain('WebFetch')
       expect(todas).toContain('WebFetch')
       expect(todas).toContain('generate_image')
+      expect(eager).toContain('generate_image')
       // Superconjunto estrito, sem duplicados.
       expect(todas.length).toBe(eager.length + exec.getDeferredToolIndex().length)
       expect(new Set(todas).size).toBe(todas.length)
@@ -2987,16 +2988,11 @@ describe('delete_file num directório', () => {
 })
 
 // ═══════════════════════════════════════════════════════════════════════
-// agent_shell_write: uma linha, uma ACÇÃO
+// agent_shell_write: regras do cli-vaz Bash
 // ═══════════════════════════════════════════════════════════════════════
 //
-// A descrição sempre proibiu "multiple commands, newlines, &&, ||, semicolons,
-// or pipes"; o código só rejeitava newlines. Duas correcções em direcções
-// opostas: `&&`/`||`/`;` passam a ser rejeitados (numa shell persistente não
-// servem, e partem a atribuição de output — uma resposta com três comandos tem
-// um único shell_status); o PIPE passa a ser permitido, porque `a | b` é um
-// statement com um código de saída e proibi-lo tirava metade da utilidade da
-// shell sem nada em troca.
+// `&&` / `||` / `;` permitidos (passos dependentes). PIPE permitido.
+// Newlines — ok em aspas e heredocs; não separam comandos.
 describe('agent_shell_write: uma acção por chamada', () => {
   type Validate = (data: string) => string
   let validate: Validate
@@ -3015,19 +3011,60 @@ describe('agent_shell_write: uma acção por chamada', () => {
     expect(validate('cat a.log | tail -20 | wc -l')).toContain('wc -l')
   })
 
-  it('rejeita && com uma explicação accionável', () => {
-    expect(() => validate('cd /tmp && ls')).toThrow(/exactly ONE command.*&&/s)
-    // A mensagem tem de dizer PORQUE não é preciso: o estado da shell persiste.
-    expect(() => validate('cd /tmp && ls')).toThrow(/PERSISTENT/)
+  it('aceita && || ; — encadeamento do cli-vaz', () => {
+    expect(validate('cd /tmp && ls')).toBe('cd /tmp && ls')
+    expect(validate('make || echo fail')).toContain('||')
+    expect(validate('cd /tmp; ls')).toBe('cd /tmp; ls')
   })
 
-  it('rejeita || e ;', () => {
-    expect(() => validate('make || echo fail')).toThrow(/exactly ONE command/)
-    expect(() => validate('cd /tmp; ls')).toThrow(/exactly ONE command/)
+  it('rejeita newlines que separam comandos', () => {
+    expect(() => validate('ls\nrm -rf /')).toThrow(/newlines to separate commands/)
   })
 
-  it('rejeita newlines internos', () => {
-    expect(() => validate('ls\nrm -rf /')).toThrow(/exactly one terminal action/)
+  it('aceita newlines dentro de aspas (cli-vaz)', () => {
+    expect(validate("python3 -c 'import json\nfor i in range(1):\n print(i)'")).toContain('import json')
+  })
+
+  it('aceita o heredoc exacto que a sessão 2026-08-17 rejeitou', () => {
+    const fromSession = [
+      "python3 - <<'PYEOF'",
+      'import json',
+      'path = "/Users/ithustle/.grok/sessions/chat_history.jsonl"',
+      'with open(path) as f:',
+      '    for i, line in enumerate(f, 1):',
+      '        try:',
+      '            obj = json.loads(line)',
+      '        except Exception:',
+      '            continue',
+      'PYEOF',
+    ].join('\n')
+    expect(validate(fromSession)).toContain('import json')
+  })
+
+  it('aceita um heredoc (o caso da sessão 2026-08-17)', () => {
+    const heredoc = [
+      "python3 - <<'PYEOF'",
+      'import json',
+      'path = "/tmp/x.jsonl"',
+      'with open(path) as f:',
+      '    for i, line in enumerate(f, 1):',
+      '        print(i)',
+      'PYEOF',
+    ].join('\n')
+    expect(validate(heredoc)).toContain('PYEOF')
+    expect(validate(heredoc)).toContain('import json')
+  })
+
+  it('aceita <<- com tabs no fecho', () => {
+    expect(validate('cat <<-\tEOF\n\thello\n\tEOF')).toContain('hello')
+  })
+
+  it('aceita continuação com barra-invertida + newline', () => {
+    expect(validate('echo hello \\\n--flag')).toContain('--flag')
+  })
+
+  it('rejeita um segundo comando depois do fecho do heredoc', () => {
+    expect(() => validate('cat <<EOF\nhello\nEOF\nrm -rf /')).toThrow(/newlines to separate commands/)
   })
 
   it('NÃO rejeita separadores dentro de aspas', () => {

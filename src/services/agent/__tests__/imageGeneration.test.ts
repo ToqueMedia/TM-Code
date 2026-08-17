@@ -26,7 +26,9 @@ jest.mock('../../../utils/invokeMetrics', () => ({ invoke: (...a: unknown[]) => 
 
 import {
   generateImages, saveImageTo, ImageGenerationError, SIZE_PRESETS, NEGATIVE_PROMPT_MAX,
+  formatGeneratedImageResult,
 } from '../imageGeneration'
+import { isProjectImagePath } from '../imageAssets'
 
 /** Resposta NATIVA do qwen-image (forma confirmada ao vivo 2026-08-08). */
 function nativeResponse(opts: { images?: number; tier?: string } = {}) {
@@ -116,6 +118,19 @@ describe('imageGeneration — contrato com o worker', () => {
     expect(sent.input.messages[0].content[0].text).toBe('hero')
     expect(sent.parameters.size).toBe('1200*630')
     expect(sent.parameters.seed).toBe(7)
+  })
+
+  it('manda referências I2I antes do texto', async () => {
+    const { calls } = mockFetch()
+    await generateImages({
+      prompt: 'keep the can, night lighting',
+      referenceDataUris: ['data:image/png;base64,AAA'],
+    })
+    const sent = JSON.parse(String(calls[0].init!.body))
+    expect(sent.input.messages[0].content).toEqual([
+      { image: 'data:image/png;base64,AAA' },
+      { text: 'keep the can, night lighting' },
+    ])
   })
 
   it('watermark fica sempre OFF e prompt_extend só liga a pedido', async () => {
@@ -214,6 +229,15 @@ describe('imageGeneration — contrato com o worker', () => {
   })
 })
 
+describe('imageAssets', () => {
+  it('reconhece raster do projecto e recusa svg/pdf', () => {
+    expect(isProjectImagePath('/p/hero.jpg')).toBe(true)
+    expect(isProjectImagePath('/p/icon.PNG')).toBe(true)
+    expect(isProjectImagePath('/p/logo.svg')).toBe(false)
+    expect(isProjectImagePath('/p/notes.md')).toBe(false)
+  })
+})
+
 describe('imageGeneration — presets de tamanho', () => {
   it('NENHUM preset promete um escalão de preço', () => {
     // A regressão que isto tranca é uma afirmação minha que a medição derrubou.
@@ -236,6 +260,25 @@ describe('imageGeneration — presets de tamanho', () => {
       expect(`${name}:${w * h >= 512 * 512}`).toBe(`${name}:true`)
       expect(`${name}:${w * h <= 2048 * 2048}`).toBe(`${name}:true`)
     }
+  })
+
+  it('formatGeneratedImageResult lista TODOS os ficheiros e a descrição', () => {
+    const text = formatGeneratedImageResult({
+      type: 'generated_image',
+      files: [
+        { path: '/p/hero.jpg', bytes: 80_000, width: 1600, height: 900 },
+        { path: '/p/hero-2.jpg', bytes: 70_000, width: 1600, height: 900 },
+      ],
+      description: 'A photo of a can on a table.',
+      tier: 'qima_output_1k',
+      model: 'qwen-image',
+    })
+    expect(text).toContain('hero.jpg')
+    expect(text).toContain('hero-2.jpg')
+    expect(text).toContain('78 KB')
+    expect(text).toContain('68 KB')
+    expect(text).toContain('A photo of a can on a table.')
+    expect(text).toContain('qima_output_1k')
   })
 
   it('og é 1.91:1 e hero/portrait são 16:9 nas duas orientações', () => {

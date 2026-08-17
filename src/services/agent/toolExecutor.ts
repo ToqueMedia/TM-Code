@@ -16,6 +16,7 @@ import { registerMemoryTools } from './toolExecutor/memoryOps'
 import { createPermissionAwareTimeout } from './toolExecutor/permissionAwareTimeout'
 import { formatSearchResultsByFile, matchesAnyGlob, resolveGrepHeadLimit } from './toolExecutor/searchFormatters'
 import { registerInteractionTools } from './toolExecutor/interactionOps'
+import { validatePersistentShellInput } from './toolExecutor/shellInput'
 import type { ToolRegistrationContext } from './toolExecutor/context'
 import {
   isEnvFile,
@@ -93,6 +94,7 @@ import { recordReadRange, clearReadRangeTracker } from './toolExecutor/readRange
 import { clearMentionContextTracker } from './mentionContextTracker'
 import { addLineNumbers } from './toolExecutor/lineNumbers'
 import { hasBinaryExtension } from './toolExecutor/binaryExtensions'
+import { isProjectImagePath } from './imageAssets'
 import { getSnippetForTwoFileDiff } from './toolExecutor/changedFileSnippet'
 import { extractReadFilesFromMessages } from './toolExecutor/readStateRecovery'
 import { logger } from '../../utils/logger'
@@ -1027,7 +1029,7 @@ class ToolExecutor {
   }
 
   private recordReadBeforeWriteBlocked(
-    toolName: typeof WRITE_FILE | typeof EDIT_FILE,
+    toolName: typeof WRITE_FILE | typeof EDIT_FILE | 'generate_image',
     reason: 'not_read' | 'partial_view' | 'modified_since_read',
   ): void {
     markReadBeforeWriteBlocked(toolName, reason)
@@ -1428,7 +1430,7 @@ class ToolExecutor {
       // The task list mirrors the plan's Implementation Phases; without a
       // written plan the tasks have no source-of-truth to derive from.
       if (toolName === 'update_tasks' && !this.planFileWritten) {
-        return `Blocked in /plan architect mode: ${toolName} must follow ${WRITE_ALIAS}('${this.planModePlanFileName}'). The task list mirrors ${this.planModePlanFileName}'s Implementation Phases — write the plan first, then derive tasks from its phase structure (one task per coherent unit of work, IDs like "1.1", "1.2", "2.1" matching the phase numbering). Calling update_tasks before ${WRITE_ALIAS} is a contract violation.`
+        return `Blocked in /plan architect mode: ${toolName} must follow ${WRITE_ALIAS}('${this.planModePlanFileName}'). The task list mirrors the plan's phases (Files & Phases on FEATURE, Implementation Phases on PROJECT) — write the plan first, then derive tasks from that structure (one task per coherent unit of work, IDs like "1.1" matching the phase numbering). Calling update_tasks before ${WRITE_ALIAS} is a contract violation.`
       }
       if (toolName === 'update_tasks' && !(await this.isPlanReadyForTaskSeed())) {
         return `Blocked in /plan architect mode: ${toolName} must follow the final edit that flips ${this.planModePlanFileName} to "Status: PENDING APPROVAL". The task list must derive from the completed plan, not from a draft scaffold. Finish every plan section, flip the status, then call update_tasks.`
@@ -1439,7 +1441,7 @@ class ToolExecutor {
       // implementation. The next phase (TODO generation, then execution) runs
       // in a fresh turn after the developer approves the plan card.
       if (this.planFileWritten && this.planTasksSeeded) {
-        return `Blocked in /plan architect mode: ${this.planModePlanFileName} is written and the task tracker is seeded. Your role for this turn is complete. Stop calling tools and end the turn with a 3-sentence chat summary — TODO generation runs after the developer approves the plan card.`
+        return `Blocked in /plan architect mode: ${this.planModePlanFileName} is written and the task tracker is seeded. Your role for this turn is complete. Stop calling tools and end the turn with a short chat summary — TODO generation runs after the developer approves the plan card.`
       }
     }
 
@@ -1600,7 +1602,7 @@ class ToolExecutor {
     // and agentService needs it for approval and readFileTimestamps updates.
     try {
       const parsed = JSON.parse(result)
-      if (parsed?.type === 'diff') return result
+      if (parsed?.type === 'diff' || parsed?.type === 'generated_image') return result
     } catch { /* not JSON — proceed to truncation */ }
     // read_large_result already produced a model-bounded slice (limit ≤ 25000) +
     // a continuation suffix. Passing it through truncateResult would nest a new
@@ -3064,6 +3066,16 @@ ${preview}
    * Prevents false "file modified since read" errors when the model edits
    * a file it just wrote. Called by agentService after diff approval.
    */
+  private async markImageRead(path: string): Promise<void> {
+    let hash = 'image'
+    try {
+      const stat = await invoke<{ size: number; modifiedMs: number | null }>('file_stat', { path })
+      hash = `img:${stat.size}:${stat.modifiedMs ?? 0}`
+    } catch { /* keep fallback */ }
+    this.readFileTimestamps.set(path, { timestamp: Date.now(), hash })
+    bumpFsVersion(`write:${path}`)
+  }
+
   updateReadStateAfterWrite(path: string, newContent: string): void {
     const now = Date.now()
     const hash = this.simpleHash(newContent)
@@ -3284,54 +3296,11 @@ ${preview}
   }
 
   /**
-   * Uma linha, uma ACÇÃO.
-   *
-   * A descrição da tool sempre proibiu "multiple commands, newlines, &&, ||,
-   * semicolons, or pipes" e o código só rejeitava newlines (auditoria
-   * 2026-07-29). Duas correcções, em direcções opostas:
-   *
-   *  · `&&`, `||` e `;` passam a ser REJEITADOS. Numa shell persistente eles
-   *    não servem para nada — o `cd` fica, portanto cada passo pode ser o seu
-   *    próprio write — e partem o que a tool devolve: uma resposta com o output
-   *    de três comandos e um único `shell_status` não diz qual deles falhou.
-   *  · O PIPE passa a ser permitido, e a descrição corrigida. `a | b` é UM
-   *    statement com UM código de saída; proibi-lo tirava à shell metade da
-   *    sua utilidade (`ps aux | grep node`) sem nada em troca.
-   *
-   * O varrimento ignora separadores dentro de aspas: `echo "a && b"` é uma
-   * acção só, e recusá-la seria a mesma classe de erro — uma tool a negar o
-   * gesto certo.
+   * cli-vaz Bash rules: newlines inside quotes / heredocs are data;
+   * `&&` / `;` chain dependent steps. See `validatePersistentShellInput`.
    */
   private validateAgentShellInput(data: string): string {
-    const command = data.replace(/\n+$/g, '').trim()
-    if (!command) throw new Error('Agent shell input cannot be empty.')
-    if (command.includes('\n')) {
-      throw new Error('Agent shell input must contain exactly one terminal action. Send separate agent_shell_write calls for multiple lines.')
-    }
-
-    let quote: string | null = null
-    for (let i = 0; i < command.length; i++) {
-      const ch = command[i]
-      if (quote) {
-        if (ch === '\\' && quote === '"') { i++; continue }
-        if (ch === quote) quote = null
-        continue
-      }
-      if (ch === '"' || ch === "'") { quote = ch; continue }
-      if (ch === '\\') { i++; continue }
-      const two = command.slice(i, i + 2)
-      if (two === '&&' || two === '||') {
-        throw new Error(
-          `Agent shell input must be exactly ONE command; found "${two}". This shell is PERSISTENT — state (cwd, env, an open SSH session) survives between calls, so send each step as its own agent_shell_write and read its output. Chaining hides which step failed: the tool reports one shell_status for the whole line. Pipes (|) are fine — they are one command.`,
-        )
-      }
-      if (ch === ';') {
-        throw new Error(
-          'Agent shell input must be exactly ONE command; found ";". Send each step as its own agent_shell_write — the shell is persistent, so cwd and env carry over. Pipes (|) are fine.',
-        )
-      }
-    }
-    return command
+    return validatePersistentShellInput(data)
   }
 
   private getAgentShellSession(id?: string): AgentShellSession {
@@ -3594,6 +3563,20 @@ ${preview}
         // capacidade aparece sem lhe ensinar mais um nome — e sem ela um PDF
         // era opaco (o texto vive dentro de streams comprimidos).
         const isPdf = /\.pdf$/i.test(filePath)
+        if (isProjectImagePath(filePath)) {
+          const { describeImageFile } = await import('./imageAssets')
+          await this.markImageRead(filePath)
+          const description = await describeImageFile(filePath)
+          if (description) {
+            return `Image file: ${filePath}\n\n${description}`
+          }
+          let sizeKb = ''
+          try {
+            const stat = await invoke<{ size: number }>('file_stat', { path: filePath })
+            sizeKb = ` (${(stat.size / 1024).toFixed(1)} KB)`
+          } catch { /* ignore */ }
+          return `Image file: ${filePath}${sizeKb}.\nThe pixels could not be described (vision sidecar unpublished, or BYOK without it). Open the file in the editor or ask the developer to inspect it.`
+        }
         if (!isPdf && hasBinaryExtension(filePath)) {
           return `Error: ${filePath} is a binary file. ${READ_ALIAS} only supports text files. Use a dedicated tool to inspect binary content.`
         }
@@ -4194,7 +4177,7 @@ ${preview}
     this.tools.set('get_project_state_dir', {
       definition: {
         name: 'get_project_state_dir',
-        description: 'Return TM Code app-managed state directories for the current project. Use this when looking for sessions, checkpoints, saved agent state, permissions, queues, or project metadata. The active location is the global per-project store under ~/.toquemedia-studio/projects/{projectId}; do not search ${project}/.toquemedia unless explicitly investigating legacy migration.',
+        description: 'Return TM Code app-managed state directories for the current project. Use this when looking for sessions, checkpoints, saved agent state, permissions, queues, or project metadata. The active location is the global per-project store under ~/.tmcode/projects/{projectId}; do not search ${project}/.toquemedia unless explicitly investigating legacy migration.',
         input_schema: {
           type: 'object',
           properties: {},
@@ -4313,29 +4296,33 @@ ${preview}
     this.tools.set('generate_image', {
       definition: {
         name: 'generate_image',
-        description: `Generate an image and save it into the project as a real PNG file. Use it for the assets an app actually ships with: hero images, og:image/social previews, favicons and app icons, empty-state illustrations, and placeholder photography for seed data. It replaces missing images and external hotlinks (unsplash/picsum), which break once deployed.
+        description: `Generate an original image and save it into the project as a real PNG/JPEG. Use it for assets an app ships with: hero images, og:image, favicons, empty-state illustrations, seed photography. It replaces missing images and external hotlinks (unsplash/picsum), which break once deployed.
 
-COST — each image costs $0.04 or $0.075 depending on which tier the provider serves. You cannot choose the tier and you cannot predict it from \`size\`: the same request has been observed returning either one. Assume the higher price when deciding whether an image is worth generating, and expect anywhere from ~5 to ~60 seconds.
-Presets: icon/square = 1024*1024, og = 1200*630 (social preview, 1.91:1), hero = 1664*928 (16:9), portrait = 928*1664 (9:16). The provider usually honours the size you ask for, but may return a larger upscaled image — which is why the file is normalised on write (see below).
+To EDIT an existing project image (keep the subject, change lighting/background/text), pass \`reference_path\` (Read that file first if you will overwrite it). The provider bills a small extra fee for each reference.
 
-FILE WEIGHT is handled for you: the image is resized to \`max_width\` (default 1600) before it is written, and \`output_path\` decides the format — end it in \`.jpg\` to re-encode as JPEG (much smaller for photographic heroes) or \`.png\` to keep PNG (right for logos, icons and anything needing transparency).
+COST — each generated image costs $0.04 or $0.075 depending on which tier the provider serves. You cannot choose the tier and you cannot predict it from \`size\`. Assume the higher price, and expect ~5 to ~60 seconds.
+Presets: icon/square = 1024*1024, og = 1200*630 (1.91:1), hero = 1664*928 (16:9), portrait = 928*1664 (9:16).
 
-WRITING GOOD PROMPTS for UI assets: describe style, palette (give hex codes to match the app's theme), composition and negative space. Say "no text" unless you specifically want lettering. Use \`seed\` with the SAME value across a set of assets to keep one visual identity (hero + empty states + icon of the same app), and \`negative_prompt\` to exclude what keeps showing up (max 500 chars).
+FILE WEIGHT: resized to \`max_width\` (default 1600) on write. \`.jpg\` re-encodes as JPEG; \`.png\` keeps PNG (logos, transparency).
 
-DO NOT use this for: architecture diagrams or flowcharts (generated text inside images is unreadable — write SVG or Mermaid instead), UI mockups you then intend to implement (it invents a target that does not match the code), or interface icons (use the project's icon library).
+PROMPTS: style, palette (hex), composition, negative space. Say "no text" unless you want lettering. Reuse \`seed\` across a set. \`negative_prompt\` max 500 chars.
 
-Only call this when the developer asked for imagery, or when an asset is genuinely missing from something they asked you to build. Never generate images speculatively.`,
+DO NOT use for architecture diagrams (write SVG/Mermaid), UI mockups you then implement, or interface icons (use the project's icon library).
+
+Only call when the developer asked for imagery, or an asset is genuinely missing from something they asked you to build. Never generate speculatively. After it writes, the result includes a visual description — do not skip it. To inspect an image already on disk, Read it.`,
         input_schema: {
           type: 'object',
           properties: {
-            prompt: { type: 'string', description: 'What to depict. Be specific about style, palette (hex codes), composition and negative space.' },
-            output_path: { type: 'string', description: 'Where to save it, e.g. "public/hero.jpg". Relative paths resolve against the project root. Must end in .png, .jpg or .jpeg — the extension decides the encoding.' },
-            size: { type: 'string', description: 'Preset name (icon, square, og, hero, portrait) or explicit "WIDTH*HEIGHT". Defaults to og (1200*630). See the cost note in the description.' },
-            seed: { type: 'number', description: 'Reuse the same seed across assets of one app to keep a consistent visual identity. Range 0-2147483647.' },
+            prompt: { type: 'string', description: 'What to depict (or how to edit the reference). Be specific about style, palette (hex codes), composition and negative space.' },
+            output_path: { type: 'string', description: 'Where to save it, e.g. "public/hero.jpg". Relative paths resolve against the project root. Must end in .png, .jpg or .jpeg.' },
+            reference_path: { type: 'string', description: 'Existing project image to edit (I2I). Read it first if you overwrite the same path.' },
+            reference_paths: { type: 'array', items: { type: 'string' }, description: 'Additional reference images for I2I.' },
+            size: { type: 'string', description: 'Preset name (icon, square, og, hero, portrait) or "WIDTH*HEIGHT". Defaults to og.' },
+            seed: { type: 'number', description: 'Reuse the same seed across assets of one app. Range 0-2147483647.' },
             negative_prompt: { type: 'string', description: 'What to keep OUT of the image (max 500 chars).' },
-            n: { type: 'number', description: 'How many variations to generate (1-6, default 1). Each one is billed separately, but they are generated in parallel so asking for three is barely slower than asking for one. Extra images are saved next to the first as <name>-2, <name>-3, … keeping the same extension.' },
-            prompt_extend: { type: 'boolean', description: 'Let the provider rewrite your prompt for more varied results. Default false — it ignores parts of a precise art-direction brief and makes results non-reproducible.' },
-            max_width: { type: 'number', description: 'Resize down to this width before writing (default 1600). Set it lower for thumbnails; a value above the generated width is a no-op.' },
+            n: { type: 'number', description: 'Variations to generate (1-6, default 1). Each is billed. Extras save as <name>-2, <name>-3, …' },
+            prompt_extend: { type: 'boolean', description: 'Let the provider rewrite the prompt. Default false.' },
+            max_width: { type: 'number', description: 'Resize down to this width before writing (default 1600).' },
           },
           required: ['prompt', 'output_path'],
         },
@@ -4350,19 +4337,45 @@ Only call this when the developer asked for imagery, or when an asset is genuine
         await this.requirePathAccess(outputPath)
         const absolute = this.resolveToAbsolute(outputPath)
 
+        try {
+          const exists = await invoke<boolean>('path_exists', { path: absolute })
+          if (exists) {
+            const readState = this.readFileTimestamps.get(absolute)
+            if (!readState) {
+              this.recordReadBeforeWriteBlocked('generate_image', 'not_read')
+              return `Error: You must call ${READ_ALIAS} on "${outputPath}" before overwriting it. Read the existing image first, then call generate_image.`
+            }
+          }
+        } catch { /* path_exists failed — treat as new file */ }
+
         const {
           generateImages, saveImageTo, SIZE_PRESETS, ImageGenerationError,
         } = await import('./imageGeneration')
+        const { fileToDataUri, describeImageFile } = await import('./imageAssets')
 
-        // Preset OU "L*A" explícito. Um valor que não seja nenhum dos dois é
-        // um erro do modelo, não algo a "corrigir" em silêncio: cair num
-        // default calado esconde que o tamanho pedido foi ignorado — e o
-        // tamanho é o que decide o escalão de preço.
         const rawSize = String(input.size ?? 'og').trim()
         const preset = SIZE_PRESETS[rawSize.toLowerCase()]
         const size = preset ? preset.size : rawSize
         if (!preset && !/^\d{3,4}\*\d{3,4}$/.test(size)) {
           return `Error: size must be a preset (${Object.keys(SIZE_PRESETS).join(', ')}) or "WIDTH*HEIGHT" like "1200*630" — got "${rawSize}".`
+        }
+
+        const refInputs: string[] = []
+        if (typeof input.reference_path === 'string' && input.reference_path.trim()) {
+          refInputs.push(input.reference_path.trim())
+        }
+        if (Array.isArray(input.reference_paths)) {
+          for (const p of input.reference_paths) {
+            if (typeof p === 'string' && p.trim()) refInputs.push(p.trim())
+          }
+        }
+        const referenceDataUris: string[] = []
+        for (const raw of refInputs) {
+          await this.requirePathAccess(raw)
+          const refAbs = this.resolveToAbsolute(raw)
+          const uri = await fileToDataUri(refAbs)
+          if (!uri) return `Error: could not read reference image "${raw}".`
+          referenceDataUris.push(uri)
         }
 
         try {
@@ -4373,39 +4386,41 @@ Only call this when the developer asked for imagery, or when an asset is genuine
             seed: typeof input.seed === 'number' ? input.seed : undefined,
             negativePrompt: typeof input.negative_prompt === 'string' ? input.negative_prompt : undefined,
             promptExtend: input.prompt_extend === true,
+            referenceDataUris: referenceDataUris.length ? referenceDataUris : undefined,
             signal: input._abortSignal as AbortSignal | undefined,
           })
 
           const maxWidth = typeof input.max_width === 'number' && input.max_width > 0
             ? Math.floor(input.max_width)
             : DEFAULT_MAX_WIDTH
-          const written: string[] = []
-          let firstBytes = 0
+          const files: Array<{ path: string; bytes: number; width: number; height: number }> = []
           for (let i = 0; i < result.images.length; i++) {
-            // A primeira fica no caminho pedido; as variações ganham sufixo,
-            // preservando a extensão escolhida (não é sempre .png).
             const target = i === 0
               ? absolute
               : absolute.replace(/\.(png|jpe?g)$/i, m => `-${i + 1}${m}`)
-            const size = await saveImageTo(result.images[i].url, target, maxWidth)
-            if (i === 0) firstBytes = size
-            written.push(target)
+            const bytes = await saveImageTo(result.images[i].url, target, maxWidth)
+            files.push({
+              path: target,
+              bytes,
+              width: result.images[i].width,
+              height: result.images[i].height,
+            })
+            await this.markImageRead(target)
           }
 
-          const first = result.images[0]
-          const kb = Math.round(firstBytes / 1024)
-          // Reporta o que ACONTECEU, não conselhos: a largura gerada, a que
-          // ficou em disco e o peso final. Antes isto mandava o modelo
-          // "comprimir antes de publicar" sem lhe dar com quê.
-          const resized = first.width > maxWidth
-            ? ` Generated at ${first.width}x${first.height} and resized down to ${maxWidth}px wide on disk.`
-            : ` ${first.width}x${first.height} on disk.`
-          return `Generated ${written.length} image(s), tier ${result.tier ?? 'unknown'}.${resized} First file is ${kb} KB.\n${written.join('\n')}`
+          const description = await describeImageFile(
+            files[0].path,
+            String(input.prompt ?? ''),
+          )
+          return JSON.stringify({
+            type: 'generated_image',
+            files,
+            description,
+            tier: result.tier,
+            model: result.model,
+          })
         } catch (err) {
           if (err instanceof ImageGenerationError) {
-            // Erros accionáveis chegam ao modelo com a causa, não como
-            // "falhou": sidecar não publicado, rate limit e BYOK pedem
-            // respostas DIFERENTES do agente.
             return `Error generating image (${err.code}): ${err.message}`
           }
           return `Error generating image: ${String(err)}`
@@ -5350,11 +5365,11 @@ Only call this when the developer asked for imagery, or when an asset is genuine
     this.tools.set('execute_command', {
       definition: {
         name: 'execute_command',
-        description: 'Execute a shell command in the project directory. Blocks until the command exits or the timeout is reached — do NOT use for dev servers or watchers (they never exit). Use for running tests, installing dependencies, building, linting, or short-lived CLI operations. Returns stdout, stderr, and exit code. Default timeout: 120 seconds.',
+        description: 'Execute a shell command in the project directory. Blocks until the command exits or the timeout is reached — do NOT use for dev servers or watchers (they never exit). Use for running tests, installing dependencies, building, linting, or short-lived CLI operations. Returns stdout, stderr, and exit code. Default timeout: 120 seconds. Newlines are ok in quoted strings and heredocs (e.g. `python3 - <<\'PY\'` … `PY`); do not use newlines to separate distinct commands.',
         input_schema: {
           type: 'object',
           properties: {
-            command: { type: 'string', description: 'Shell command to execute (e.g., "pnpm install", "pnpm test", "ls -la")' },
+            command: { type: 'string', description: 'Shell command to execute. Newlines are ok in quoted strings and heredocs; do not use them to separate commands.' },
             cwd: { type: 'string', description: 'Working directory. Default: project root' },
             timeout_secs: { type: 'number', description: 'Timeout in seconds. Default: 120. Max: 600.' }
           },
@@ -6063,12 +6078,12 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
     this.tools.set('agent_shell_write', {
       definition: {
         name: 'agent_shell_write',
-        description: 'Write exactly one command/input line to a persistent agent shell session. This keeps the agent inside the same shell/SSH context — cwd, env and an open SSH session survive between calls. Exactly one command is ENFORCED: newlines, &&, || and ; are rejected (send each step as its own call and read its output — a chained line reports one status for everything). Pipes are allowed: `a | b` is one command. For long jobs (deploy, upload, install) use a large wait_ms so the command can finish in one write+read cycle — avoid polling every few seconds.',
+        description: 'Write a command to a persistent agent shell session. cwd, env and an open SSH session survive between calls. Independent steps: separate tool calls (parallel when they do not depend on each other). Dependent steps: chain with &&. Use ; only if you do not care whether earlier steps fail. Pipes (`a | b`) are one command. Newlines are ok in quoted strings and heredocs — do not use newlines to separate commands. For long jobs (deploy, upload, install) use a large wait_ms so the command can finish in one write+read cycle — avoid polling every few seconds.',
         input_schema: {
           type: 'object',
           properties: {
             session_id: { type: 'string', description: 'Session id returned by agent_shell_start. Defaults to the latest agent shell session.' },
-            input: { type: 'string', description: 'One command or interactive input line to send.' },
+            input: { type: 'string', description: 'One command or interactive input. Newlines are ok in quoted strings and heredocs.' },
             press_enter: { type: 'boolean', description: 'Append Enter/newline after input. Default: true.' },
             wait_ms: { type: 'number', description: 'How long to wait for output after writing. Default: 10000. Max: 120000 (use high values for deploy/upload). Returns EARLY on the first new output or on shell exit, so this is a ceiling, not a delay.' },
           },
@@ -6166,7 +6181,7 @@ frontend_port_hint is OPTIONAL: pass it ONLY if both servers happen to respond w
         input_schema: {
           type: 'object',
           properties: {
-            command: { type: 'string', description: 'Shell command to execute (e.g., "npm install", "npm run build", "tsc --noEmit")' },
+            command: { type: 'string', description: 'Shell command to execute. Newlines are ok in quoted strings and heredocs; do not use them to separate commands.' },
             cwd: { type: 'string', description: 'Working directory. Default: project root' },
             timeout_secs: { type: 'number', description: 'Timeout in seconds. Default: 300. Max: 3600 — for release builds or full test suites, request the ceiling explicitly.' }
           },

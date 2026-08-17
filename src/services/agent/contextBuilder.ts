@@ -71,6 +71,11 @@ import {
   sharedUiBaselineCore,
 } from './contextBuilder/sections/sharedSections'
 import {
+  DEFAULT_AGENT_OUTPUT_STYLE,
+  getOutputStyleSection,
+  isAgentOutputStyle,
+} from './outputStyles'
+import {
   getActivePlanSection,
   getHashtagSkillsSection,
   getBackgroundAgentsSection as getTeamSection,
@@ -467,9 +472,14 @@ class ContextBuilder {
     // up to 30s (TTL) to surface, and the conversation history bias kept
     // pushing the old language even after the cache rebuilt.
     let agentLangKey = 'en'
+    let outputStyleKey = DEFAULT_AGENT_OUTPUT_STYLE
     try {
       const { useSettingsStore } = await import('../../stores/settingsStore')
-      agentLangKey = useSettingsStore.getState().agentLanguage || 'en'
+      const settings = useSettingsStore.getState()
+      agentLangKey = settings.agentLanguage || 'en'
+      if (isAgentOutputStyle(settings.agentOutputStyle)) {
+        outputStyleKey = settings.agentOutputStyle
+      }
     } catch { /* non-critical */ }
     const mcpSig = (mcpTools ?? []).map(t => `${t.serverName}:${t.name}`).sort().join(',')
     // Os nomes diferidos ENTRAM na chave porque entram no PROMPT
@@ -595,7 +605,7 @@ class ContextBuilder {
       auxSelection.contextPlan.selectedContexts.join(','),
       auxSelection.contextPlan.candidateContexts.join(','),
     ].join('|')
-    const cacheKeyBase = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|${mcpSig}|df${deferredSig}|${stickyHashtagSig}|fs${fsVersion}|ac${accessedCount}|p${auxProfile}|ro${auxSelection.readOnly ? 1 : 0}|cp${contextPlanSig}`
+    const cacheKeyBase = `${projectPath}|${projectType}|${coreToolCount ?? 20}|${planKey}|${agentLangKey}|os${outputStyleKey}|${mcpSig}|df${deferredSig}|${stickyHashtagSig}|fs${fsVersion}|ac${accessedCount}|p${auxProfile}|ro${auxSelection.readOnly ? 1 : 0}|cp${contextPlanSig}`
 
     const now = Date.now()
     // Kick off memory work IMMEDIATELY so its network call (selector
@@ -863,6 +873,7 @@ class ContextBuilder {
       getCompletionContractSection(),
       getRoleSection(ctx),
       sharedIdentity(),
+      getOutputStyleSection(outputStyleKey),
       getModelSpecificSection(ctx),
       getSystemSection(),
       getDoingTasksSection(ctx),

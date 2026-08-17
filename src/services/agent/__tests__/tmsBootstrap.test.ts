@@ -74,8 +74,8 @@ describe('runTmsPreflight', () => {
     expect(prompt).toBe('')
   })
 
-  it('does not auto-repair an existing invalid TMS.md during normal preflight', async () => {
-    mockedInvoke.mockResolvedValueOnce('# TMS.md\n')
+  it('treats a free-form TMS.md as valid (claude-vaz: CLAUDE.md has no schema)', async () => {
+    mockedInvoke.mockResolvedValueOnce('# TMS.md\nNotes about the repo.\n')
 
     const result = await runTmsPreflight({
       projectPath: '/repo',
@@ -86,16 +86,18 @@ describe('runTmsPreflight', () => {
 
     expect(result).toMatchObject({
       tmsFound: true,
+      valid: true,
       shouldBootstrap: false,
-      reason: 'invalid',
+      reason: 'ok',
     })
     expect(prompt).toBe('')
     expect(getTmsTurnTelemetry()).toMatchObject({
       executionPhase: 'original_task',
       tmsBootstrapTriggered: false,
-      tmsBootstrapPhase: 'already_exists_invalid',
+      tmsBootstrapPhase: 'already_exists',
       tmsAlreadyExists: true,
       tmsAvailable: true,
+      tmsMissingSections: undefined,
     })
   })
 
@@ -175,7 +177,11 @@ describe('runTmsPreflight', () => {
       shouldBootstrap: true,
       reason: 'missing',
     })).toBe('common.tmsBootstrapMissingStart')
-    expect(getTmsBootstrapStartMessageKey(repair)).toBe('common.tmsBootstrapRepairStart')
+    expect(getTmsBootstrapStartMessageKey({
+      ...repair,
+      valid: false,
+      reason: 'invalid',
+    })).toBe('common.tmsBootstrapRepairStart')
     expect(getTmsBootstrapStartMessageKey({
       ...repair,
       stale: true,

@@ -17,6 +17,7 @@ import type { ContentBlockAPI, ProviderState, RequestUsageEntry } from "../../ty
 // literal "[object Object]" the model then sees as the tool result. formatError
 // resolves a useful message from every shape.
 import { formatError } from "../../utils/errors";
+import { formatGeneratedImageResult, type GeneratedImagePayload } from "./imageGeneration";
 import { logger } from "../../utils/logger";
 import { t } from "../../i18n";
 import {
@@ -134,6 +135,9 @@ function sanitizeToolResultForModel(content: string): string {
   try {
     const parsed = JSON.parse(content) as Record<string, unknown>
     if (parsed?.type === 'diff') return buildAppliedEditResultText(parsed)
+    if (parsed?.type === 'generated_image') {
+      return formatGeneratedImageResult(parsed as GeneratedImagePayload)
+    }
   } catch {
     // Non-JSON tool result.
   }

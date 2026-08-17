@@ -2,6 +2,11 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { IS_MAC } from '../utils/platform'
 import { resolveOllamaUrl, getAutoSelectedOllamaUrls } from '../utils/devUrls'
+import {
+  DEFAULT_AGENT_OUTPUT_STYLE,
+  isAgentOutputStyle,
+  type AgentOutputStyle,
+} from '../services/agent/outputStyles'
 
 export interface EditorIndentationSettings {
   tabSize: number
@@ -83,6 +88,8 @@ interface SettingsState {
   autoSaveDelay: number
   appLanguage: AppLanguage
   agentLanguage: AgentLanguage
+  /** How the coding agent collaborates in chat. Default is pair-partner. */
+  agentOutputStyle: AgentOutputStyle
   shortcuts: ShortcutMap
   hasCompletedOnboarding: boolean
   sandboxEnabled: boolean
@@ -119,6 +126,7 @@ interface SettingsActions {
   setAutoSave: (mode: AutoSaveMode) => void
   setAppLanguage: (lang: AppLanguage) => void
   setAgentLanguage: (lang: AgentLanguage) => void
+  setAgentOutputStyle: (style: AgentOutputStyle) => void
   setChatTextFontSize: (size: number) => void
   setShortcut: (id: ShortcutId, binding: KeyBinding) => void
   resetShortcuts: () => void
@@ -141,6 +149,7 @@ const DEFAULTS: SettingsState = {
   autoSaveDelay: AUTO_SAVE_DELAY_MS,
   appLanguage: 'en',
   agentLanguage: 'en',
+  agentOutputStyle: DEFAULT_AGENT_OUTPUT_STYLE,
   shortcuts: { ...DEFAULT_SHORTCUTS },
   hasCompletedOnboarding: false,
   sandboxEnabled: false,
@@ -258,6 +267,14 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         }).catch(() => { /* non-critical */ })
       },
 
+      setAgentOutputStyle: (style: AgentOutputStyle) => {
+        if (!isAgentOutputStyle(style)) return
+        set(() => ({ agentOutputStyle: style }))
+        void import('../services/agent/contextBuilder').then(mod => {
+          mod.default.getInstance().invalidatePromptCache()
+        }).catch(() => { /* non-critical */ })
+      },
+
       setChatTextFontSize: (size: number) => {
         set(() => ({ chatTextFontSize: normalizeChatTextFontSize(size) }))
       },
@@ -287,7 +304,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
     {
       name: 'settings-storage',
       partialize: (state) => {
-        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, autoSave: state.autoSave, autoSaveDelay: state.autoSaveDelay, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, taskWorktreesV2: state.parallelTaskWorktrees, chatTextFontSize: state.chatTextFontSize, flaggedCommands: state.flaggedCommands }
+        return { editor: state.editor, autocomplete: state.autocomplete, formatOnSave: state.formatOnSave, autoSave: state.autoSave, autoSaveDelay: state.autoSaveDelay, appLanguage: state.appLanguage, agentLanguage: state.agentLanguage, agentOutputStyle: state.agentOutputStyle, shortcuts: state.shortcuts, hasCompletedOnboarding: state.hasCompletedOnboarding, sandboxEnabled: state.sandboxEnabled, taskWorktreesV2: state.parallelTaskWorktrees, chatTextFontSize: state.chatTextFontSize, flaggedCommands: state.flaggedCommands }
       },
       // Deep merge — ensures new fields added to sub-objects get defaults
       merge: (persisted, current) => {
@@ -310,6 +327,7 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           autoSaveDelay: typeof p.autoSaveDelay === 'number' && Number.isFinite(p.autoSaveDelay) && p.autoSaveDelay >= 250 ? p.autoSaveDelay : DEFAULTS.autoSaveDelay,
           appLanguage: p.appLanguage ?? DEFAULTS.appLanguage,
           agentLanguage: p.agentLanguage ?? DEFAULTS.agentLanguage,
+          agentOutputStyle: isAgentOutputStyle(p.agentOutputStyle) ? p.agentOutputStyle : DEFAULTS.agentOutputStyle,
           hasCompletedOnboarding: p.hasCompletedOnboarding ?? DEFAULTS.hasCompletedOnboarding,
           sandboxEnabled: p.sandboxEnabled ?? DEFAULTS.sandboxEnabled,
           // Chave v2: o opt-in de horas antes persistiu false em máquinas de
