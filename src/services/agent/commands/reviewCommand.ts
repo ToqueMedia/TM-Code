@@ -216,6 +216,9 @@ export async function executeReview(
       onToolCallPending: visibility.callbacks.onToolCallPending,
       onToolCallStart: visibility.callbacks.onToolCallStart,
       onToolResult: visibility.callbacks.onToolResult,
+      // /review não actualiza providerState por turno — o report final é
+      // montado no onDone. Turn noop para satisfazer AgentCallbacks.
+      onTurnComplete: () => {},
       onDone: async () => {
         // Persist the report to disk so the user can reference it later
         // (e.g. before a PR, paste into review notes). Best-effort: any

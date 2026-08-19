@@ -550,7 +550,7 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
             {/* PromptBar vive dentro do ChatView (centrado no empty state,
                 a descer para o fundo na 1ª mensagem). GeneratingView não
                 monta ChatView — a barra fica aqui. */}
-            {!chatViewVisible && viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && (
+            {!chatViewVisible && viewMode !== 'editor' && viewMode !== 'settings' && (
               chatComposer
             )}
           </Flex>

@@ -3067,10 +3067,13 @@ ${preview}
    * a file it just wrote. Called by agentService after diff approval.
    */
   private async markImageRead(path: string): Promise<void> {
-    let hash = 'image'
+    // Imagens não têm hash de conteúdo (binário); usamos um hash numérico
+    // derivado do stat (size + mtime) como identificador de estado, para
+    // o read-before-write bookkeeping. Fallback 0 se o stat falhar.
+    let hash = 0
     try {
       const stat = await invoke<{ size: number; modifiedMs: number | null }>('file_stat', { path })
-      hash = `img:${stat.size}:${stat.modifiedMs ?? 0}`
+      hash = stat.size + (stat.modifiedMs ? Math.floor(stat.modifiedMs) : 0)
     } catch { /* keep fallback */ }
     this.readFileTimestamps.set(path, { timestamp: Date.now(), hash })
     bumpFsVersion(`write:${path}`)

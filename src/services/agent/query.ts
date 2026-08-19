@@ -137,7 +137,7 @@ function sanitizeToolResultForModel(content: string): string {
     const parsed = JSON.parse(content) as Record<string, unknown>
     if (parsed?.type === 'diff') return buildAppliedEditResultText(parsed)
     if (parsed?.type === 'generated_image') {
-      return formatGeneratedImageResult(parsed as GeneratedImagePayload)
+      return formatGeneratedImageResult(parsed as unknown as GeneratedImagePayload)
     }
   } catch {
     // Non-JSON tool result.
