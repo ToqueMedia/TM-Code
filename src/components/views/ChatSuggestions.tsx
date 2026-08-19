@@ -1,180 +1,124 @@
-import { memo, useCallback } from 'react'
-import { Flex, Box, Text } from '@chakra-ui/react'
-import { FiFolder, FiArrowUpRight } from 'react-icons/fi'
-import { useProjectStore } from '../../stores/projectStore'
-import AgentLogo from '../ui/AgentLogo'
+import { memo, useId, type ReactNode } from 'react'
+import { Box, Text } from '@chakra-ui/react'
+import { motion } from 'framer-motion'
 import { tokens } from '@/theme/tokens'
-import { t } from '@/i18n'
+import { t, type TranslationKey } from '@/i18n'
+import { emptySessionPeriod, type EmptySessionPeriod } from './emptySessionPeriod'
 
-const suggestions = [
-  { label: t('suggestions.reactTs'), prompt: t('suggestions.reactTsPrompt') },
-  { label: t('suggestions.express'), prompt: t('suggestions.expressPrompt') },
-  { label: t('suggestions.nextjs'), prompt: t('suggestions.nextjsPrompt') },
-  { label: t('suggestions.fixBug'), prompt: t('suggestions.fixBugPrompt') },
-  { label: t('suggestions.addTests'), prompt: t('suggestions.addTestsPrompt') },
-  { label: t('suggestions.explain'), prompt: t('suggestions.explainPrompt') },
-]
+const MotionBox = motion.create(Box)
 
-function ChatSuggestions() {
-  const projectPath = useProjectStore(s => s.currentProject?.path)
+const GREETING_KEY: Record<EmptySessionPeriod, TranslationKey> = {
+  morning: 'chat.empty.greeting.morning',
+  afternoon: 'chat.empty.greeting.afternoon',
+  evening: 'chat.empty.greeting.evening',
+}
 
-  const handleSuggestionClick = useCallback((prompt: string) => {
-    window.dispatchEvent(new CustomEvent('promptbar:insert', { detail: prompt }))
-  }, [])
-
-  if (!projectPath) {
-    return (
-      <Flex
-        direction="column"
-        align="center"
-        justify="center"
-        flex="1"
-        px={{ base: 5, md: 8 }}
-        pb={16}
-      >
-        <Box mb={5}>
-          <AgentLogo size={48} glow />
-        </Box>
-        <Text
-          fontSize={{ base: '22px', md: '26px' }}
-          fontWeight="700"
-          color={tokens.colors.text.primary}
-          letterSpacing="-0.03em"
-          mb={1}
+/** Top half of the TM outline. Clipped so the mark stops where the
+ *  greeting begins — it lands on the text, it does not run through it. */
+function BrandMarkOutline() {
+  const uid = useId().replace(/:/g, '')
+  const filterId = `tmMarkOutline-${uid}`
+  return (
+    <Box
+      w={{ base: '240px', md: '360px' }}
+      h={{ base: '144px', md: '216px' }}
+      overflow="hidden"
+      pointerEvents="none"
+      userSelect="none"
+      aria-hidden
+      position="relative"
+      flexShrink={0}
+    >
+      <Box w="100%" h={{ base: '288px', md: '432px' }}>
+        <svg
+          viewBox="0 0 5000 6000"
+          width="100%"
+          height="100%"
+          fill="none"
+          role="presentation"
         >
-          {t('chat.empty.noProject.title')}
-        </Text>
-        <Text
-          fontSize={{ base: '13px', md: '14px' }}
-          color={tokens.colors.text.muted}
-          maxW="460px"
-          textAlign="center"
-          lineHeight="1.55"
-        >
-          {t('chat.empty.noProject.subtitle')}
-        </Text>
-      </Flex>
-    )
-  }
+          <defs>
+            <filter id={filterId} x="-15%" y="-15%" width="130%" height="130%" colorInterpolationFilters="sRGB">
+              <feMorphology in="SourceAlpha" operator="dilate" radius="18" result="dilated" />
+              <feComposite in="dilated" in2="SourceAlpha" operator="out" result="ring" />
+              <feFlood floodColor={tokens.colors.accent.primary} floodOpacity="0.45" result="tint" />
+              <feComposite in="tint" in2="ring" operator="in" />
+            </filter>
+          </defs>
+          <g transform="translate(-34104 -8123.9)" filter={`url(#${filterId})`}>
+            <polygon fill="#fff" points="34578 8756.3 38671 8756.3 38671 8333 34578 8333" />
+            <polygon fill="#fff" points="36977 10270 37436 10270 37436 9955.8 38177 9955.8 38177 10270 38671 10270 38671 9497.2 36977 9497.2" />
+            <polygon fill="#fff" points="34543 12216 35037 12216 35037 10077 34543 10077" />
+            <polygon fill="#fff" points="35778 12216 36236 12216 36236 10077 35778 10077" />
+            <polygon fill="#fff" points="38177 12216 38671 12216 38671 10270 38177 10270" />
+            <polygon fill="#fff" points="36977 12216 37436 12216 37436 10270 36977 10270" />
+            <polygon fill="#fff" points="34543 10077 35037 10077 35037 9955.8 35778 9955.8 35778 10077 36236 10077 36236 9497.2 34543 9497.2" />
+            <polygon fill="#fff" points="35778 13152 37436 13152 37436 12216 36977 12216 36977 13131 36236 13131 36236 12216 35778 12216" />
+            <polygon fill="#fff" points="37436 13152 35778 13152 35778 13589 37436 13589" />
+            <polygon fill="#fff" points="35037 12216 34543 12216 34543 13166 35037 13166" />
+            <polygon fill="#fff" points="38671 12216 38177 12216 38177 13166 38671 13166" />
+          </g>
+        </svg>
+      </Box>
+      <Box
+        position="absolute"
+        left={0}
+        right={0}
+        bottom={0}
+        h="22px"
+        pointerEvents="none"
+        background={`linear-gradient(180deg, ${tokens.colors.bg.app}00 0%, ${tokens.colors.bg.app} 100%)`}
+      />
+    </Box>
+  )
+}
+
+function ChatSuggestions({ children }: { children?: ReactNode }) {
+  const period = emptySessionPeriod(new Date().getHours())
+  const greeting = t(GREETING_KEY[period])
 
   return (
-      <Flex
-      direction="column"
-      align="center"
-      justify="center"
-      flex="1"
-      px={{ base: 5, md: 8 }}
-      pb={16}
+    <MotionBox
+      position="relative"
+      w="100%"
+      flexShrink={0}
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.55, ease: [0.25, 0.46, 0.45, 0.94] }}
     >
-      {/* ToqueMedia icon */}
-      <Box mb={5}>
-        <AgentLogo size={48} glow />
+      <Box
+        position="absolute"
+        left="50%"
+        bottom="100%"
+        transform="translateX(-50%)"
+        display="flex"
+        flexDirection="column"
+        alignItems="center"
+        mb={{ base: 5, md: 6 }}
+        pointerEvents="none"
+      >
+        <BrandMarkOutline />
+        <Text
+          as="h1"
+          mt="-6px"
+          w="max-content"
+          maxW="min(640px, 92vw)"
+          zIndex={1}
+          fontSize={{ base: '26px', md: '34px' }}
+          fontWeight="600"
+          color={tokens.colors.text.inverse}
+          letterSpacing="-0.035em"
+          lineHeight="1.2"
+          textAlign="center"
+        >
+          {greeting}
+        </Text>
       </Box>
 
-      <Text
-        fontSize={{ base: '22px', md: '26px' }}
-        fontWeight="700"
-        color={tokens.colors.text.primary}
-        letterSpacing="-0.03em"
-        mb={1}
-      >
-        {t("view.whatToBuild")}
-      </Text>
-
-      <Text
-        fontSize={{ base: '13px', md: '14px' }}
-        color={tokens.colors.text.muted}
-        mb={2}
-      >
-        {t("view.tmCodeHelp")}
-      </Text>
-
-      <Flex
-        align="center"
-        gap={1.5}
-        mb={7}
-        maxW="min(620px, 100%)"
-        px={3}
-        py="5px"
-        borderRadius="999px"
-        bg="rgba(255, 255, 255, 0.025)"
-        border="1px solid rgba(255, 255, 255, 0.05)"
-      >
-        <FiFolder size={13} color={tokens.colors.text.disabled} />
-        <Text
-          fontSize="12px"
-          fontFamily={tokens.fontFamily.mono}
-          color={tokens.colors.text.disabled}
-          truncate
-        >
-          {projectPath}
-        </Text>
-      </Flex>
-
-      <Flex direction="column" align="stretch" gap={0} maxW="720px" w="100%">
-        {suggestions.map((s, index) => (
-          <Box
-            key={s.label}
-            as="button"
-            display="grid"
-            gridTemplateColumns={{ base: '1fr auto', md: '190px 1fr auto' }}
-            alignItems="center"
-            gap={{ base: 2, md: 3 }}
-            w="100%"
-            px={{ base: 2.5, md: 3 }}
-            py={{ base: 2.5, md: 3 }}
-            bg="transparent"
-            border="0"
-            borderTop={index === 0 ? '1px solid rgba(255, 255, 255, 0.06)' : '0'}
-            borderBottom="1px solid rgba(255, 255, 255, 0.06)"
-            color={tokens.colors.text.muted}
-            cursor="pointer"
-            transition="background 0.15s ease, color 0.15s ease, transform 0.15s ease"
-            textAlign="left"
-            _hover={{
-              bg: 'rgba(255, 255, 255, 0.025)',
-              color: tokens.colors.text.primary,
-              transform: 'translateX(2px)',
-            }}
-            _active={{ transform: 'scale(0.98)' }}
-            onClick={() => handleSuggestionClick(s.prompt)}
-          >
-            <Text
-              as="span"
-              display={{ base: 'none', md: 'block' }}
-              fontSize="11px"
-              color={tokens.colors.accent.primary}
-              fontWeight="700"
-              textTransform="uppercase"
-              letterSpacing="0.08em"
-              lineClamp={1}
-            >
-              {s.label}
-            </Text>
-            <Box minW={0}>
-              <Text
-                display={{ base: 'block', md: 'none' }}
-                fontSize="10px"
-                color={tokens.colors.accent.primary}
-                fontWeight="700"
-                textTransform="uppercase"
-                letterSpacing="0.08em"
-                mb="3px"
-                lineClamp={1}
-              >
-                {s.label}
-              </Text>
-              <Text as="span" color="inherit" fontSize={{ base: '13px', md: '14px' }} lineHeight="1.45">
-              {s.prompt}
-              </Text>
-            </Box>
-            <Box color={tokens.colors.text.disabled} display="flex" justifyContent="flex-end">
-              <FiArrowUpRight size={13} />
-            </Box>
-          </Box>
-        ))}
-      </Flex>
-    </Flex>
+      <Box position="relative" zIndex={3}>
+        {children}
+      </Box>
+    </MotionBox>
   )
 }
 

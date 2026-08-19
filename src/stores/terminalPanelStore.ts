@@ -14,6 +14,8 @@ interface TerminalPanelState {
   heightPx: number
   instances: TerminalInstance[]
   activeInstanceId: string | null
+  /** Bumped on open / tab switch so the visible xterm can fit + focus. */
+  focusNonce: number
   _nextTerminalNum: number
 }
 
@@ -22,17 +24,14 @@ interface TerminalPanelActions {
   setOpen: (open: boolean) => void
   open: () => void
   close: () => void
-  killAll: () => void
   setHeight: (px: number) => void
+  requestFocus: () => void
 
   addTerminal: () => void
   removeTerminal: (id: string) => void
   renameTerminal: (id: string, name: string) => void
   closeAll: () => void
   setActiveTerminal: (id: string) => void
-
-  getActiveSessionId: () => string | null
-  writeToPty: (data: string) => void
 }
 
 // ── Helpers ──
@@ -48,24 +47,23 @@ function clampHeight(px: number): number {
 
 export { MIN_HEIGHT_PX as TERMINAL_PANEL_MIN_HEIGHT }
 
+function killSession(id: string): void {
+  invoke('kill_pty_session', { sessionId: id }).catch(() => {})
+}
+
 // ── Store ──
 
 export const useTerminalPanelStore = create<TerminalPanelState & TerminalPanelActions>()((set, get) => ({
-  // ── State ──
   isOpen: false,
   heightPx: DEFAULT_HEIGHT_PX,
   instances: [],
   activeInstanceId: null,
+  focusNonce: 0,
   _nextTerminalNum: 1,
 
-  // ── Panel lifecycle ──
   toggle: () => {
-    const { isOpen } = get()
-    if (isOpen) {
-      get().close()
-    } else {
-      get().open()
-    }
+    if (get().isOpen) get().close()
+    else get().open()
   },
 
   setOpen: (open) => {
@@ -76,7 +74,6 @@ export const useTerminalPanelStore = create<TerminalPanelState & TerminalPanelAc
   open: () => {
     const { instances } = get()
     if (instances.length === 0) {
-      // First open — create initial terminal
       const id = crypto.randomUUID()
       const num = get()._nextTerminalNum
       set({
@@ -84,89 +81,75 @@ export const useTerminalPanelStore = create<TerminalPanelState & TerminalPanelAc
         instances: [{ id, name: `Terminal ${num}` }],
         activeInstanceId: id,
         _nextTerminalNum: num + 1,
+        focusNonce: get().focusNonce + 1,
       })
-    } else {
-      set({ isOpen: true })
+      return
     }
+    set({ isOpen: true, focusNonce: get().focusNonce + 1 })
   },
 
   close: () => {
-    // Hide panel only — PTYs stay alive. On reopen, open() reuses existing
-    // instances. This is the default action for Esc, Ctrl+X, and toggle-close.
+    // Hide panel only — PTYs stay alive so reopen is instant.
     set({ isOpen: false })
-  },
-
-  killAll: () => {
-    // Hide panel + kill every PTY session. Use only on /exit.
-    const { instances } = get()
-    for (const inst of instances) {
-      invoke('kill_pty_session', { sessionId: inst.id }).catch(() => {})
-    }
-    set({ isOpen: false, instances: [], activeInstanceId: null })
   },
 
   setHeight: (px) => set({ heightPx: clampHeight(px) }),
 
-  // ── Terminal instance management ──
+  requestFocus: () => set({ focusNonce: get().focusNonce + 1 }),
+
   addTerminal: () => {
     const { instances, _nextTerminalNum } = get()
     if (instances.length >= MAX_TERMINALS) return
     const id = crypto.randomUUID()
     const num = _nextTerminalNum
     set({
+      isOpen: true,
       instances: [...instances, { id, name: `Terminal ${num}` }],
       activeInstanceId: id,
       _nextTerminalNum: num + 1,
+      focusNonce: get().focusNonce + 1,
     })
   },
 
   removeTerminal: (id) => {
     const { instances, activeInstanceId } = get()
     const remaining = instances.filter(i => i.id !== id)
-    // Kill the PTY for this terminal. The store owns PTY lifecycle —
-    // SingleTerminal's cleanup does NOT kill (it only disposes xterm).
-    invoke('kill_pty_session', { sessionId: id }).catch(() => {})
+    // Store owns PTY lifecycle — SingleTerminal only disposes xterm.
+    killSession(id)
     if (remaining.length === 0) {
-      // Last terminal removed — close panel and reset counter
       set({ isOpen: false, instances: [], activeInstanceId: null, _nextTerminalNum: 1 })
       return
     }
-    // If we removed the active terminal, select the last one
     const newActiveId = activeInstanceId === id
       ? remaining[remaining.length - 1].id
       : activeInstanceId
-    set({ instances: remaining, activeInstanceId: newActiveId })
+    set({
+      instances: remaining,
+      activeInstanceId: newActiveId,
+      focusNonce: get().focusNonce + 1,
+    })
   },
 
   renameTerminal: (id, name) => {
     const trimmed = name.trim()
     if (!trimmed) return
-    const { instances } = get()
     set({
-      instances: instances.map(i => i.id === id ? { ...i, name: trimmed } : i),
+      instances: get().instances.map(i => i.id === id ? { ...i, name: trimmed } : i),
     })
   },
 
   closeAll: () => {
-    const { instances } = get()
-    for (const inst of instances) {
-      invoke('kill_pty_session', { sessionId: inst.id }).catch(() => {})
+    for (const inst of get().instances) {
+      killSession(inst.id)
     }
     set({ isOpen: false, instances: [], activeInstanceId: null, _nextTerminalNum: 1 })
   },
 
   setActiveTerminal: (id) => {
-    set({ activeInstanceId: id })
-  },
-
-  getActiveSessionId: () => {
-    return get().activeInstanceId
-  },
-
-  // ── PTY I/O ──
-  writeToPty: (data: string) => {
-    const { activeInstanceId } = get()
-    if (!activeInstanceId) return
-    invoke('write_to_pty', { sessionId: activeInstanceId, data }).catch(() => {})
+    if (get().activeInstanceId === id) {
+      set({ focusNonce: get().focusNonce + 1 })
+      return
+    }
+    set({ activeInstanceId: id, focusNonce: get().focusNonce + 1 })
   },
 }))

@@ -70,6 +70,12 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
   // mesmo momento — a mensagem fica na fila e é drenada no turn boundary,
   // logo a seguir à decisão do lote. Ver DiffApprovalPanel.
   const hasPendingDiffs = useChatStore(s => s.pendingDiffs.length > 0)
+  const isEmptyChat = useChatStore(s => {
+    if (s.isLoadingSession) return false
+    const id = s.activeSessionId
+    if (!id) return true
+    return (s.sessions.get(id)?.messages.length ?? 0) === 0
+  })
   const currentProject = useCurrentProject()
   const { handleFileSelect } = useCodeEditorState()
 
@@ -361,6 +367,29 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
     return () => unlisten?.()
   }, [])
 
+  const chatComposer = pendingPermission ? (
+    <PermissionDialog
+      toolName={pendingPermission.toolName}
+      args={pendingPermission.args}
+      promptReason={pendingPermission.promptReason ?? null}
+      pathAccessTarget={pendingPermission.pathAccessTarget}
+      originLabel={pendingPermission.origin?.label}
+      approve={approve}
+      approveAlwaysInProject={approveAlwaysInProject}
+      approveAlwaysGlobal={approveAlwaysGlobal}
+      deny={deny}
+      denyWith={denyWith}
+    />
+  ) : (
+    <>
+      {hasPendingDiffs && (viewMode === 'preview' || !VIEWS_WITHOUT_DIFF_BAR.has(viewMode)) && (
+        <DiffApprovalPanel />
+      )}
+      <PromptBar placement={isEmptyChat ? 'centered' : 'docked'} />
+    </>
+  )
+  const chatViewVisible = viewMode !== 'editor' && viewMode !== 'settings' && !(viewMode === 'generating' && !previewMounted)
+
   if (!currentProject) {
     if (!embedded) return null
     return (
@@ -375,7 +404,7 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
         fontFamily={tokens.fontFamily.ui}
         position="relative"
       >
-        <ChatView />
+        <ChatView composer={chatComposer} />
       </Flex>
     )
   }
@@ -477,29 +506,8 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
                       // agent transcript on every frame (text wobble).
                     >
                       <ErrorBoundary>
-                        <ChatView />
+                        <ChatView composer={chatComposer} />
                       </ErrorBoundary>
-                      {viewMode === 'preview' && (
-                        pendingPermission ? (
-                          <PermissionDialog
-                            toolName={pendingPermission.toolName}
-                            args={pendingPermission.args}
-                            promptReason={pendingPermission.promptReason ?? null}
-                            pathAccessTarget={pendingPermission.pathAccessTarget}
-                            originLabel={pendingPermission.origin?.label}
-                            approve={approve}
-                            approveAlwaysInProject={approveAlwaysInProject}
-                            approveAlwaysGlobal={approveAlwaysGlobal}
-                            deny={deny}
-                            denyWith={denyWith}
-                          />
-                        ) : (
-                          <>
-                            {hasPendingDiffs && <DiffApprovalPanel />}
-                            <PromptBar />
-                          </>
-                        )
-                      )}
                     </Box>
                     {viewMode === 'preview' && !isPreviewFullscreen && !previewFillsWorkspace && (
                       <Box
@@ -539,31 +547,11 @@ function MainLayout({ embedded = false }: MainLayoutProps) {
               </Box>
             </Flex>
 
-            {/* Permission dialog / PromptBar — in preview mode, rendered inside the chat sidebar wrapper */}
-            {viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && (
-              pendingPermission ? (
-                <PermissionDialog
-                  toolName={pendingPermission.toolName}
-                  args={pendingPermission.args}
-                  promptReason={pendingPermission.promptReason ?? null}
-                  pathAccessTarget={pendingPermission.pathAccessTarget}
-                  originLabel={pendingPermission.origin?.label}
-                  approve={approve}
-                  approveAlwaysInProject={approveAlwaysInProject}
-                  approveAlwaysGlobal={approveAlwaysGlobal}
-                  deny={deny}
-                  denyWith={denyWith}
-                />
-              ) : (
-                <>
-                  {/* Guarda `generating`: o GeneratingView tem o seu próprio
-                      DiffPreview com aprovação — a barra duplicaria a decisão.
-                      Ver VIEWS_WITHOUT_DIFF_BAR (fonte única, partilhada com o
-                      handler global de atalhos). */}
-                  {hasPendingDiffs && !VIEWS_WITHOUT_DIFF_BAR.has(viewMode) && <DiffApprovalPanel />}
-                  <PromptBar />
-                </>
-              )
+            {/* PromptBar vive dentro do ChatView (centrado no empty state,
+                a descer para o fundo na 1ª mensagem). GeneratingView não
+                monta ChatView — a barra fica aqui. */}
+            {!chatViewVisible && viewMode !== 'editor' && viewMode !== 'preview' && viewMode !== 'settings' && (
+              chatComposer
             )}
           </Flex>
 

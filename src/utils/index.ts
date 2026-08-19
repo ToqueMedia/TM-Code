@@ -16,4 +16,3 @@ export { LogLevel } from './logger';
 export type { LoggerConfig } from './logger';
 export { default as MonacoBridge } from './monacoBridge';
 export { getFileIconByExtension, getFolderIconByName, getFolderIconByPath } from './iconMapper';
-export { isTerminalReady, safeTerminalFit, createDebouncedTerminalResize, createTerminalResizeObserver } from './terminalUtils';

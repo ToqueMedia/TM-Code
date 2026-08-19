@@ -4,6 +4,7 @@ import { useProjectStore } from '../../stores/projectStore'
 import { useEditorRepository } from '../../stores/editorStore'
 import { useLayoutStore } from '../../stores/layoutStore'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import MonacoBridge from '../../utils/monacoBridge'
 import { tokens } from '../../theme/tokens'
 import { t } from '@/i18n'
@@ -182,7 +183,9 @@ function CommandPalette(): React.ReactElement | null {
     }
     cmds.push(
       { id: 'view.sidebar', label: t('menu.toggleSidebar'), category: t('menu.view'), hint: '⌘B', run() { window.dispatchEvent(new CustomEvent('sidebar:toggle')); close() } },
-      { id: 'view.bottomPanel', label: t('menu.toggleBottomPanel'), category: t('menu.view'), hint: '⌃`', run() { window.dispatchEvent(new CustomEvent('panel:toggle-bottom')); close() } },
+      { id: 'view.bottomPanel', label: t('menu.toggleBottomPanel'), category: t('menu.view'), run() { window.dispatchEvent(new CustomEvent('panel:toggle-bottom')); close() } },
+      { id: 'view.terminal', label: t('menu.toggleTerminal'), category: t('menu.terminal'), hint: '⌃`', run() { useTerminalPanelStore.getState().toggle(); close() } },
+      { id: 'view.newTerminal', label: t('terminal.new'), category: t('menu.terminal'), hint: '⌃⇧`', run() { useTerminalPanelStore.getState().addTerminal(); close() } },
     )
 
     // ── Go ──────────────────────────────────────────────────────

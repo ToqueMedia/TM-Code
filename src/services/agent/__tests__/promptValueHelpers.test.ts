@@ -465,4 +465,36 @@ describe('downgradeHistoryToText', () => {
     const result = downgradeHistoryToText(history)
     expect(result[0].content).toBeNull()
   })
+
+  it('não achata tool_result — o par tool_call/tool_result tem de chegar ao fio', () => {
+    const history: ConversationMessage[] = [
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', toolCallId: 'call_1', content: 'export function foo() {}' },
+          { type: 'tool_result', toolCallId: 'call_2', content: 'line\n'.repeat(200) },
+        ],
+      },
+    ]
+    const result = downgradeHistoryToText(history)
+    expect(result[0].content).toEqual(history[0].content)
+    expect(result[0]).toBe(history[0])
+  })
+
+  it('com imagem E tool_result: só a imagem vira placeholder, o bloco fica', () => {
+    const history: ConversationMessage[] = [
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', toolCallId: 'call_1', content: 'ok' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,xxx' } },
+        ],
+      },
+    ]
+    const result = downgradeHistoryToText(history)
+    const parts = result[0].content as Array<{ type: string; toolCallId?: string; text?: string }>
+    expect(Array.isArray(parts)).toBe(true)
+    expect(parts[0]).toEqual({ type: 'tool_result', toolCallId: 'call_1', content: 'ok' })
+    expect(parts[1]).toEqual({ type: 'text', text: t('prompt.imageStripped') })
+  })
 })

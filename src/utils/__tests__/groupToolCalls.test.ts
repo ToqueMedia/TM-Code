@@ -16,6 +16,8 @@ import {
   computeContentBlockBatches,
   groupExplorationRuns,
   explorationCounts,
+  mergeReadRanges,
+  readStreakKey,
 } from '../groupToolCalls'
 import type { ToolCallDisplay } from '../../types/chat'
 
@@ -53,7 +55,7 @@ describe('groupConsecutiveLargeReads — toolCalls.map path', () => {
     expect(out).toHaveLength(1)
     expect(out[0].kind).toBe('large_read_batch')
     if (out[0].kind === 'large_read_batch') {
-      expect(out[0].id).toBe('large_result_4')
+      expect(out[0].id).toBe('lr:large_result_4')
       expect(out[0].calls).toHaveLength(3)
     }
   })
@@ -89,6 +91,54 @@ describe('groupConsecutiveLargeReads — toolCalls.map path', () => {
     const calls = [tc({ id: 'c1', toolName: 'read_large_result', input: {} })]
     const out = groupConsecutiveLargeReads(calls)
     expect(out[0].kind).toBe('single')
+  })
+
+  it('batches consecutive ranged Read of the same file', () => {
+    const calls = [
+      tc({ id: 'c1', toolName: 'Read', input: { file_path: '/p/AffiliatesView.tsx', offset: 1, limit: 4000 } }),
+      tc({ id: 'c2', toolName: 'Read', input: { file_path: '/p/AffiliatesView.tsx', offset: 4001, limit: 4600 } }),
+    ]
+    const out = groupConsecutiveLargeReads(calls)
+    expect(out).toHaveLength(1)
+    expect(out[0].kind).toBe('large_read_batch')
+    if (out[0].kind === 'large_read_batch') expect(out[0].calls).toHaveLength(2)
+  })
+
+  it('does not batch a full-file Read with a later ranged Read of another path', () => {
+    const calls = [
+      tc({ id: 'c1', toolName: 'read_file', input: { file_path: '/p/a.ts' } }),
+      tc({ id: 'c2', toolName: 'read_file', input: { file_path: '/p/b.ts', offset: 1, limit: 80 } }),
+    ]
+    const out = groupConsecutiveLargeReads(calls)
+    expect(out.map(g => g.kind)).toEqual(['single', 'large_read_batch'])
+  })
+})
+
+describe('mergeReadRanges / readStreakKey', () => {
+  it('merges contiguous 0–4k + 4k–8.6k into one range', () => {
+    const merged = mergeReadRanges([
+      { offset: 0, end: 4000 },
+      { offset: 4000, end: 8600 },
+    ])
+    expect(merged).toEqual([{ offset: 0, end: 8600 }])
+  })
+
+  it('keeps a gap as two pills', () => {
+    const merged = mergeReadRanges([
+      { offset: 0, end: 100 },
+      { offset: 400, end: 500 },
+    ])
+    expect(merged).toHaveLength(2)
+  })
+
+  it('keys ranged Read by path and read_large_result by id', () => {
+    expect(readStreakKey(tc({
+      id: '1',
+      toolName: 'Read',
+      input: { file_path: '/p/A.tsx', offset: 1, limit: 40 },
+    }))).toBe('file:/p/A.tsx')
+    expect(readStreakKey(read('large_result_4', 0, 2000, 'c1'))).toBe('lr:large_result_4')
+    expect(readStreakKey(tc({ id: '2', toolName: 'read_file', input: { file_path: '/p/A.tsx' } }))).toBeNull()
   })
 })
 
@@ -369,6 +419,18 @@ describe('explorationCounts — sentence data', () => {
     ])
   })
 
+  it('counts a ranged file-read streak as one file, not an output', () => {
+    const calls = [
+      tc({ id: 'c1', toolName: 'Read', input: { file_path: '/p/A.tsx', offset: 1, limit: 4000 } }),
+      tc({ id: 'c2', toolName: 'Read', input: { file_path: '/p/A.tsx', offset: 4001, limit: 4000 } }),
+      tc({ id: 'c3', toolName: 'Grep', input: { pattern: 'foo' } }),
+    ]
+    expect(explorationCounts(calls)).toEqual([
+      { category: 'files', count: 1 },
+      { category: 'searches', count: 1 },
+    ])
+  })
+
   it('folds a paginated-read streak into one output item', () => {
     const calls = [
       read('lr_4', 0, 2000, 'c1'),
@@ -380,6 +442,58 @@ describe('explorationCounts — sentence data', () => {
       { category: 'outputs', count: 1 },
       { category: 'files', count: 1 },
     ])
+  })
+
+  it('Bash joins a read/search run instead of splitting it (cli-vaz fullscreen)', () => {
+    const block = (type: string, toolCallId?: string) => ({ type, toolCallId })
+    const blocks = [
+      block('tool_call', 'c1'),
+      block('tool_call', 'c2'),
+      block('tool_call', 'c3'),
+    ]
+    const calls = new Map([
+      ['c1', readFile('/p/a.ts', 'c1')],
+      ['c2', tc({ id: 'c2', toolName: 'Bash', input: { command: 'git status' } })],
+      ['c3', tc({ id: 'c3', toolName: 'Grep', input: { pattern: 'foo' } })],
+    ])
+    const out = computeContentBlockBatches(blocks, id => calls.get(id))
+    expect(out[0].kind).toBe('exploration_start')
+    if (out[0].kind === 'exploration_start') {
+      expect(out[0].calls.map(c => c.id)).toEqual(['c1', 'c2', 'c3'])
+    }
+    expect(explorationCounts(out[0].kind === 'exploration_start' ? out[0].calls : [])).toEqual([
+      { category: 'files', count: 1 },
+      { category: 'shells', count: 1 },
+      { category: 'searches', count: 1 },
+    ])
+  })
+
+  it('a lone Bash stays a dedicated row', () => {
+    const block = (type: string, toolCallId?: string) => ({ type, toolCallId })
+    const blocks = [block('tool_call', 'c1'), block('text')]
+    const calls = new Map([
+      ['c1', tc({ id: 'c1', toolName: 'execute_command', input: { command: 'ls' } })],
+    ])
+    const out = computeContentBlockBatches(blocks, id => calls.get(id))
+    expect(out[0].kind).toBe('render')
+  })
+
+  it('failed Bash never joins the Explore group', () => {
+    const block = (type: string, toolCallId?: string) => ({ type, toolCallId })
+    const blocks = [
+      block('tool_call', 'c1'),
+      block('tool_call', 'c2'),
+      block('tool_call', 'c3'),
+    ]
+    const calls = new Map([
+      ['c1', readFile('/p/a.ts', 'c1')],
+      ['c2', tc({ id: 'c2', toolName: 'execute_command', input: { command: 'false' }, status: 'failed' })],
+      ['c3', readFile('/p/b.ts', 'c3')],
+    ])
+    const out = computeContentBlockBatches(blocks, id => calls.get(id))
+    expect(out[0].kind).toBe('exploration_start')
+    expect(out[1].kind).toBe('render')
+    expect(out[2].kind).toBe('exploration_start')
   })
 
   it('canonicalizes claude-style aliases (Read/Grep/LS) into the same categories', () => {

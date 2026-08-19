@@ -28,7 +28,7 @@ import type {
   SidecarType,
 } from '../../../services/adminService'
 
-const PERSONA_TYPES: PersonaType[] = ['standard', 'expert', 'master']
+const PERSONA_TYPES: PersonaType[] = ['standard', 'expert', 'master', 'tm']
 const SIDECAR_ROLES: SidecarType[] = ['vision', 'web_search', 'utility', 'fim', 'image']
 
 function slotsUsingEntry(

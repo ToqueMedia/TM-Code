@@ -51,4 +51,23 @@ describe('flush de deltas — um só render', () => {
     jest.advanceTimersByTime(200)
     expect(useChatStore.getState().streamingVersion).toBe(before)
   })
+
+  it('atrasa o flush enquanto o compositor está focado', () => {
+    const ta = document.createElement('textarea')
+    ta.dataset.promptComposer = 'true'
+    document.body.appendChild(ta)
+    ta.focus()
+
+    const before = useChatStore.getState().streamingVersion
+    appendTextDeltaBuffered('a')
+
+    // A janela normal (50ms) NÃO drena — o compositor tem prioridade.
+    jest.advanceTimersByTime(60)
+    expect(useChatStore.getState().streamingVersion).toBe(before)
+
+    jest.advanceTimersByTime(120)
+    expect(useChatStore.getState().streamingVersion).toBe(before + 1)
+
+    ta.remove()
+  })
 })

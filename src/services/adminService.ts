@@ -166,7 +166,7 @@ export async function disableSidecar(type: SidecarType): Promise<void> {
 // cada persona. O campo costMultiplier continua obrigatório no control-plane
 // por compatibilidade, mas o data-plane já não o aplica (metering 30/70).
 
-export type PersonaType = 'standard' | 'expert' | 'master'
+export type PersonaType = 'standard' | 'expert' | 'master' | 'tm'
 
 export interface PersonasResponse {
   /** Catálogo coder completo — o admin escolhe entre estes por persona. */

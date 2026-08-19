@@ -18,7 +18,7 @@ import ParallelTasksDock from './chat/ParallelTasksDock'
 import { usePromptBar } from './prompt/usePromptBar'
 import KeyBindingDisplay from './ui/KeyBindingDisplay'
 
-function PromptBar() {
+function PromptBar({ placement = 'docked' }: { placement?: 'docked' | 'centered' } = {}) {
   const {
     hasInputContent,
     setInput,
@@ -72,11 +72,12 @@ function PromptBar() {
   return (
     <Box
       px={{ base: 3, md: 4 }}
-      py={{ base: 2.5, md: 3 }}
-      bg="rgba(10, 10, 10, 0.96)"
-      borderTop="1px solid rgba(255, 255, 255, 0.04)"
+      py={placement === 'centered' ? { base: 1, md: 1.5 } : { base: 2.5, md: 3 }}
+      bg={placement === 'centered' ? 'transparent' : 'rgba(10, 10, 10, 0.96)'}
+      borderTop={placement === 'centered' ? 'none' : '1px solid rgba(255, 255, 255, 0.04)'}
       flexShrink={0}
       position="relative"
+      w="100%"
     >
       <Box maxW="980px" mx="auto" position="relative">
         {/* Slash command autocomplete menu */}
@@ -120,12 +121,12 @@ function PromptBar() {
         {/* Main input container */}
         <Box
           position="relative"
-          bg="rgba(17, 17, 17, 0.96)"
+          bg={placement === 'centered' ? tokens.colors.bg.panel : 'rgba(17, 17, 17, 0.96)'}
           borderRadius="12px"
           border={`1px solid ${isDragging ? tokens.colors.accent.primary : tokens.colors.border.panel}`}
           outline={isDragging ? `1px dashed ${tokens.colors.accent.primary}` : 'none'}
           outlineOffset="-2px"
-          overflow="visible"
+          overflow={placement === 'centered' ? 'hidden' : 'visible'}
           boxShadow="0 16px 40px rgba(0, 0, 0, 0.22)"
           transition={`border-color ${tokens.transition.normal}, box-shadow ${tokens.transition.normal}, background ${tokens.transition.normal}`}
           cursor="text"
@@ -137,7 +138,7 @@ function PromptBar() {
           _focusWithin={{
             borderColor: tokens.colors.accent.primary,
             boxShadow: `0 0 0 1px ${tokens.colors.accent.primaryMuted}, 0 18px 44px rgba(0, 0, 0, 0.32)`,
-            bg: 'rgba(20, 20, 20, 0.98)',
+            bg: placement === 'centered' ? tokens.colors.bg.panel : 'rgba(20, 20, 20, 0.98)',
           }}
         >
           <PromptTextarea
@@ -214,8 +215,17 @@ function PromptBar() {
           />
         </Box>
 
-        {/* Hint */}
-        <Flex justify="center" align="center" gap={1.5} mt={1.5} flexWrap="wrap" minH="19px">
+        {/* Hint — hidden in the centered empty-session so the card
+            sits like the ZCode composer, without a footer strip. */}
+        <Flex
+          justify="center"
+          align="center"
+          gap={1.5}
+          mt={placement === 'centered' ? 0 : 1.5}
+          flexWrap="wrap"
+          minH={placement === 'centered' ? 0 : '19px'}
+          display={placement === 'centered' ? 'none' : 'flex'}
+        >
           {isScaffolding ? (
             <Text fontSize={tokens.fontSize.xs} color={tokens.colors.text.disabled}>{t('prompt.settingUp')}</Text>
           ) : isDisabled ? (
@@ -241,15 +251,13 @@ function PromptBar() {
           )}
         </Flex>
 
-        <SubAgentStatusBar />
-        {/* Processos shell que o agente deixou em background
-            (execute_command_background) — a única superfície deles enquanto o
-            agente "dorme" à espera do auto-wake, com cancel do user. */}
-        <BackgroundCommandsBar />
-        {/* Multi-project agents (F2/F3): one agent per project. ProjectMenu
-            was removed; the dock under the composer is the control surface
-            again — project name + task title + Stop. */}
-        <ParallelTasksDock />
+        {placement === 'docked' && (
+          <>
+            <SubAgentStatusBar />
+            <BackgroundCommandsBar />
+            <ParallelTasksDock />
+          </>
+        )}
       </Box>
     </Box>
   )

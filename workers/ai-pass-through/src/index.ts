@@ -1,4 +1,4 @@
-import { getConfigForRequest, getTeamByokConfig, buildUpstreamUrl, isStudioWorkspace, sidecarKeyForRequestType } from './activeConfig'
+import { getConfigForRequest, getTeamByokConfig, buildUpstreamUrl, isStudioWorkspace, sidecarKeyForRequestType, personaKeyFor } from './activeConfig'
 import { authenticateUser } from './auth'
 import {
   checkCostBudget,
@@ -40,6 +40,35 @@ export interface HandlerOptions {
 
 function notFound(): Response {
   return jsonError(404, 'tm_not_found', 'Not found.')
+}
+
+/**
+ * I2V DashScope: submit POST no path da config; poll é GET /api/v1/tasks/{id}.
+ * O cliente manda `{ task_id }` sem `input` para perguntar pelo resultado.
+ */
+function resolveVideoUpstream(
+  baseUrl: string,
+  requestType: string | null,
+  bodyJson: string,
+): { url: string; method: string; body: string | undefined; async: boolean } | null {
+  if ((requestType ?? '').trim().toLowerCase() !== 'video') return null
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(bodyJson) as Record<string, unknown>
+  } catch {
+    return { url: '', method: 'POST', body: bodyJson, async: true }
+  }
+  const taskId = typeof parsed.task_id === 'string' ? parsed.task_id.trim() : ''
+  const isPoll = taskId.length > 0 && parsed.input === undefined
+  if (isPoll) {
+    return {
+      url: `${baseUrl.replace(/\/+$/, '')}/api/v1/tasks/${encodeURIComponent(taskId)}`,
+      method: 'GET',
+      body: undefined,
+      async: false,
+    }
+  }
+  return { url: '', method: 'POST', body: bodyJson, async: true }
 }
 
 // Timeout até aos HEADERS do upstream — o stream em si não tem limite (gerações
@@ -302,7 +331,7 @@ async function handleChatCompletions(
   // `image` (geração) é STRICT pela mesma razão que os outros três, levada ao
   // extremo: sem sidecar publicado o pedido cairia num modelo de CHAT e o corpo
   // (`/images/generations`) não tem sequer `messages` — 400 garantido upstream.
-  const strictSidecarRequestType = ['vision', 'web_search', 'fim', 'image'].includes(
+  const strictSidecarRequestType = ['vision', 'web_search', 'fim', 'image', 'video'].includes(
     requestType?.trim().toLowerCase() ?? '',
   )
   if (requestedSidecar && strictSidecarRequestType && active.key !== requestedSidecar) {
@@ -348,6 +377,30 @@ async function handleChatCompletions(
     const downgraded = await getConfigForRequest(env, requestType, 'standard')
     active = downgraded
     config = downgraded.config
+  }
+  // Toque Media — lock bidireccional no plano PESSOAL (não o `plan` remapeado
+  // pela pie). Force + 503 se o slot estiver down; deny de `tm` a qualquer
+  // outro plano (serve `active`, mesmo padrão explorer→standard).
+  {
+    const personal = budgetState?.personalPlan ?? budgetState?.plan
+    const requested = (persona ?? '').trim().toLowerCase()
+    const wantsTm = requested === 'tm' || personaKeyFor(persona) === 'persona:tm'
+    if (personal === 'toque-media' && !requestedSidecar && !isStudioWorkspace(workspace)) {
+      const locked = await getConfigForRequest(env, requestType, 'tm', workspace)
+      if (locked.key !== 'persona:tm') {
+        return jsonError(
+          503,
+          'tm_persona_unavailable',
+          'The Toque Media persona is not published.',
+        )
+      }
+      active = locked
+      config = locked.config
+    } else if (wantsTm && personal !== 'toque-media' && !requestedSidecar && !isStudioWorkspace(workspace)) {
+      const downgraded = await getConfigForRequest(env, requestType, null, workspace)
+      active = downgraded
+      config = downgraded.config
+    }
   }
   if (budgetState && (budgetState.blocked || budgetState.deleted)) {
     return jsonError(
@@ -474,7 +527,6 @@ async function handleChatCompletions(
   const speedApplied = !teamByok && speedRequested && !!config.speedModel && speedEligible
   const model = speedApplied && config.speedModel ? config.speedModel : config.model
 
-  const upstreamUrl = buildUpstreamUrl(config)
   const prepared = await bodyWithActiveModel(
     request,
     model,
@@ -486,7 +538,14 @@ async function handleChatCompletions(
     requestType,
     config.thinking,
   )
+  const videoRoute = resolveVideoUpstream(config.baseUrl, requestType, prepared.body)
+  const upstreamUrl = videoRoute?.url || buildUpstreamUrl(config)
+  const upstreamMethod = videoRoute?.method ?? request.method
+  const upstreamBody = videoRoute ? videoRoute.body : prepared.body
   const { headers: upstreamHeaders, providerKey } = await buildUpstreamHeaders(request, config, env, fetcher)
+  if (videoRoute?.async) {
+    upstreamHeaders.set('X-DashScope-Async', 'enable')
+  }
 
   // Afinidade de sessão do Workers AI — sem isto o prefix cache dele quase não
   // pega: os pedidos espalham-se por instâncias e só acertam quando calham numa
@@ -537,9 +596,9 @@ async function handleChatCompletions(
     let res: Response | null = null
     try {
       res = await fetcher.fetch(upstreamUrl, {
-        method: request.method,
+        method: upstreamMethod,
         headers: upstreamHeaders,
-        body: prepared.body,
+        body: upstreamBody,
         signal: upstreamAbort.signal,
       })
     } catch {
@@ -628,6 +687,7 @@ async function handleChatCompletions(
       // ao preço do escalão que o provider reporta. Preços da config
       // (`sidecar:image`); ausentes → o rate card oficial embutido.
       config.imagePricing,
+      config.videoPricing,
     )
     responseBody = observer.body
     request.signal.addEventListener('abort', observer.settle, { once: true })

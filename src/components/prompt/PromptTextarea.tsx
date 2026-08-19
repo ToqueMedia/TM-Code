@@ -50,7 +50,7 @@ function PromptTextarea({ textareaRef, onChange, onKeyDown, onBlur, onPaste, dis
   const byokEnabled = useByokStore(s => s.enabled)
   const billingPlan = useBillingStore(s => s.plan)
 
-  const planSuffix = byokEnabled ? ` (${billingPlan === 'explorer' ? 'Explorer' : billingPlan === 'vibe' ? 'Vibe' : billingPlan === 'pro' ? 'Pro' : billingPlan === 'max' ? 'Max' : billingPlan === 'welcome' ? 'Welcome' : billingPlan})` : ''
+  const planSuffix = byokEnabled ? ` (${billingPlan === 'explorer' ? 'Explorer' : billingPlan === 'vibe' ? 'Vibe' : billingPlan === 'pro' ? 'Pro' : billingPlan === 'max' ? 'Max' : billingPlan === 'welcome' ? 'Welcome' : billingPlan === 'toque-media' ? 'TM' : billingPlan})` : ''
   // Mirror the textarea's scrollTop onto the overlay so multi-line content
   // (>6 visible rows, when the textarea starts scrolling internally) keeps
   // the coloured highlight aligned with the real glyphs underneath.
@@ -195,6 +195,7 @@ function PromptTextarea({ textareaRef, onChange, onKeyDown, onBlur, onPaste, dis
         <textarea
           ref={textareaRef}
           value={value}
+          data-prompt-composer="true"
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={onKeyDown}
           onBlur={onBlur}

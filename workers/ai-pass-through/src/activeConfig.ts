@@ -45,6 +45,9 @@ const REQUEST_TYPE_TO_SIDECAR_KEY: Record<string, string> = {
   // da config e o corpo passa intacto (o caminho de chat só mexe em
   // `body.messages` e em `stream`, que aqui não existem).
   'image': 'sidecar:image',
+  // 'video' = I2V (HappyHorse). Corpo nativo DashScope, assíncrono.
+  // Submit: { model, input.media[], parameters }. Poll: { task_id }.
+  'video': 'sidecar:video',
   'memory-extractor': 'sidecar:utility',
   'memory-selector': 'sidecar:utility',
   'memory-distiller': 'sidecar:utility',
@@ -66,6 +69,7 @@ const SIDECAR_ENV_FALLBACK: Record<string, keyof Env> = {
   'sidecar:web_search': 'SIDECAR_WEB_SEARCH_CONFIG_JSON',
   'sidecar:fim': 'SIDECAR_FIM_CONFIG_JSON',
   'sidecar:image': 'SIDECAR_IMAGE_CONFIG_JSON',
+  'sidecar:video': 'SIDECAR_VIDEO_CONFIG_JSON',
 }
 
 // ── Personas (Escolha do Modelo, 2026-08-04) ──────────────────────────────
@@ -82,6 +86,7 @@ const PERSONA_TO_KEY: Record<string, string> = {
   'standard': 'persona:standard',
   'expert': 'persona:expert',
   'master': 'persona:master',
+  'tm': 'persona:tm',
 }
 
 export function personaKeyFor(persona: string | null): string | null {
@@ -94,6 +99,7 @@ const PERSONA_ENV_FALLBACK: Record<string, keyof Env> = {
   'persona:standard': 'PERSONA_STANDARD_CONFIG_JSON',
   'persona:expert': 'PERSONA_EXPERT_CONFIG_JSON',
   'persona:master': 'PERSONA_MASTER_CONFIG_JSON',
+  'persona:tm': 'PERSONA_TM_CONFIG_JSON',
 }
 
 /**
@@ -278,6 +284,20 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
       : parsed
   })()
 
+  const videoPricing = (() => {
+    const raw = obj.videoPricing
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+    const src = raw as Record<string, unknown>
+    const pick = (k: string): number | undefined => {
+      const v = src[k]
+      return typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 10 ? v : undefined
+    }
+    const parsed = { second720: pick('second720'), second1080: pick('second1080') }
+    return parsed.second720 === undefined && parsed.second1080 === undefined
+      ? undefined
+      : parsed
+  })()
+
   // Capacidades do modelo, emitidas em X-Model-Capabilities.
   //
   // PORQUÊ (auditoria 2026-07-29): a IDE tem uma tabela MODEL_PROFILES cozida
@@ -327,6 +347,7 @@ function parseActiveConfig(raw: string): ActiveAIConfig {
     contextWindow,
     maxOutputTokens,
     imagePricing,
+    videoPricing,
     updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
   }
 }

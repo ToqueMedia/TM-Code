@@ -68,6 +68,7 @@ const DEFAULT_PLAN_BUDGETS: Record<string, number> = {
   // PROVISÓRIO (2026-08-11): equivalência de custo da antiga allowance de
   // 32,5M tokens (~$22,40 a ρ≈$0,69/M) até decisão de produto sobre o trial.
   welcome: 22_400_000, // µ$ ($22,40)
+  'toque-media': 25_000_000, // µ$ ($25,00) — 100% do notional, sem margem 30/70
   'byok-only': 0,
   // Tiers de equipa (Plano de Equipas): o budget base da "pie" partilhada. Só
   // fallback — o valor real vem do subscription_plans do admin (planKey
@@ -197,6 +198,11 @@ export interface TeamMemberBudget {
 }
 
 export interface UserBudgetState {
+  /**
+   * `users.userPlan` pessoal — NUNCA remapeado pela pie. O lock Toque Media
+   * (force/deny `persona:tm`) lê isto, não `plan`.
+   */
+  personalPlan: string
   plan: string
   /** Consumo do ciclo, na unidade do plano (`unit`). */
   consumed: number
@@ -361,6 +367,7 @@ export async function getUserBudgetState(
         const team = await getTeamMemberBudget(env, activeTeamId, userId, idToken, fetcher)
         if (team) {
           state = {
+            personalPlan: typeof plan === 'string' && plan ? plan : '',
             plan: team.planTier,
             consumed: team.memberConsumed,
             // Tiers de equipa são sempre pagos → µ$.
@@ -395,6 +402,7 @@ export async function getUserBudgetState(
             ? intField(budget['costConsumed'])
             : intField(budget['tokensConsumed']))
         state = {
+          personalPlan: plan,
           plan,
           consumed: Math.max(0, consumed),
           unit,

@@ -5,6 +5,7 @@ import type { ToolCallDisplay } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
 import { normalizeTerminalText } from '@/utils/stripAnsi'
 import { shallowArrayEqual } from '@/utils/shallowArrayEqual'
+import { canonicalToolName } from '@/services/agent/toolNames'
 
 interface ShellCommandBlockProps {
   toolCall: ToolCallDisplay
@@ -36,11 +37,11 @@ const AGENT_SHELL_TOOLS = new Set([
 ])
 
 export function isShellTool(toolName: string): boolean {
-  return SHELL_TOOLS.has(toolName)
+  return SHELL_TOOLS.has(canonicalToolName(toolName))
 }
 
 export function isAgentShellTool(toolName: string): boolean {
-  return AGENT_SHELL_TOOLS.has(toolName)
+  return AGENT_SHELL_TOOLS.has(canonicalToolName(toolName))
 }
 
 /**

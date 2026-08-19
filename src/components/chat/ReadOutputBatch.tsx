@@ -5,6 +5,10 @@ import { ToolCallDisplay as ToolCallDisplayType } from '../../types/chat'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n/useTranslation'
 import { shallowArrayEqual } from '@/utils/shallowArrayEqual'
+import { mergeReadRanges } from '@/utils/groupToolCalls'
+import { canonicalToolName, normalizeToolInputForCanonical } from '@/services/agent/toolNames'
+import { useProjectStore } from '@/stores/projectStore'
+import { relativeToProjectPath } from '@/utils/platform'
 
 /**
  * Consolidated row for a streak of consecutive `read_large_result` tool
@@ -35,9 +39,22 @@ interface ParsedRead {
 }
 
 function parseRead(tc: ToolCallDisplayType): ParsedRead {
-  const offset = Math.max(0, Number(tc.input?.offset) || 0)
-  const limit = Math.max(0, Number(tc.input?.limit) || 10000)
-  return { offset, limit, end: offset + limit, status: tc.status }
+  const input = normalizeToolInputForCanonical(tc.toolName, tc.input)
+  const offset = Math.max(0, Number(input.offset) || 0)
+  const explicit = Number(input.limit)
+  const limit = Number.isFinite(explicit) && explicit > 0 ? explicit : 0
+  return { offset, limit, end: limit > 0 ? offset + limit : offset, status: tc.status }
+}
+
+function batchTitle(calls: ToolCallDisplayType[], projectPath: string): string {
+  const first = calls[0]
+  const name = first ? canonicalToolName(first.toolName) : ''
+  if (name === 'read_file' || name === 'read_around') {
+    const input = normalizeToolInputForCanonical(first.toolName, first.input)
+    const path = typeof input.file_path === 'string' ? input.file_path : ''
+    if (path) return relativeToProjectPath(path, projectPath) || path
+  }
+  return 'Reading output'
 }
 
 function formatChars(n: number): string {
@@ -59,20 +76,23 @@ function hasOverlap(ranges: ParsedRead[]): boolean {
 
 function ReadOutputBatchComponent({ calls }: ReadOutputBatchProps) {
   const t = useTranslation()
+  const projectPath = useProjectStore(s => s.currentProject?.path || '')
   const [expanded, setExpanded] = useState(false)
   const reads = calls.map(parseRead)
   const sorted = [...reads].sort((a, b) => a.offset - b.offset)
   const overlap = hasOverlap(sorted)
+  const compacted = mergeReadRanges(sorted)
 
   const last = calls[calls.length - 1]
   const isRunning = last.status === 'running'
   const isFailed = calls.some(c => c.status === 'failed')
+  const title = batchTitle(calls, projectPath)
 
-  // Compact range pills — sorted by offset so overlap is visually obvious.
-  // Cap at 4 pills + "+N more" so the header stays one line even on big batches.
+  // Compact range pills — overlapping/contiguous ranges merge first
+  // (0–4k + 4k–8.6k → 0–8.6k). Cap at 4 + "+N" so the header stays one line.
   const MAX_PILLS = 4
-  const visiblePills = sorted.slice(0, MAX_PILLS)
-  const extraCount = sorted.length - visiblePills.length
+  const visiblePills = compacted.slice(0, MAX_PILLS)
+  const extraCount = compacted.length - visiblePills.length
 
   return (
     <Box
@@ -121,7 +141,7 @@ function ReadOutputBatchComponent({ calls }: ReadOutputBatchProps) {
           flexShrink={0}
           fontWeight="500"
         >
-          Reading output
+          {title}
         </Text>
         <Text
           color={tokens.colors.text.disabled}

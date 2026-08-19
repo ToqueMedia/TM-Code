@@ -2537,6 +2537,30 @@ describe('update_tasks evidence guard', () => {
     expect(result).not.toContain('BLOCKED')
     expect(statusOf('1.1')).toBe('in_progress')
   })
+
+  it('does not throw when the model sends a single task object instead of an array', async () => {
+    const exec = freshExecutor()
+    seed([{ id: '1.1', description: 'x', status: 'pending' }])
+
+    const result = await exec.execute('update_tasks', {
+      tasks: { id: '1.1', status: 'in_progress' },
+    })
+
+    expect(result).not.toContain('is not a function')
+    expect(result).toContain('Task list updated')
+    expect(statusOf('1.1')).toBe('in_progress')
+  })
+
+  it('returns a shape error (not a TypeError) when tasks cannot be coerced', async () => {
+    const exec = freshExecutor()
+    seed([{ id: '1.1', description: 'x', status: 'pending' }])
+
+    const result = await exec.execute('update_tasks', { tasks: 'not-json' })
+
+    expect(result).toContain('`tasks` must be an array')
+    expect(result).not.toContain('is not a function')
+    expect(statusOf('1.1')).toBe('pending')
+  })
 })
 
 // ── Invariantes do REGISTO (rede da renomeação, 2026-07-28) ─────────────────

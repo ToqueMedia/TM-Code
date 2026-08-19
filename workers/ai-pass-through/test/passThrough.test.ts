@@ -11,7 +11,7 @@ import { clearAccessTokenCache } from '../src/googleAuth'
 import { handleRequest } from '../src/index'
 import { clearPlanCache } from '../src/planGate'
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../src/dashscopePromptCache'
-import { IMAGE_PRICE_USD, imageUsdToTokens } from '../src/usage'
+import { IMAGE_PRICE_USD, VIDEO_PRICE_USD, imageUsdToTokens } from '../src/usage'
 import type { Env } from '../src/types'
 
 const activeConfig = {
@@ -2042,6 +2042,131 @@ test('image: config sem imagePricing cai no rate card embutido, não em quase-ze
   assert.equal(transforms[0].increment.integerValue, String(Math.ceil(IMAGE_PRICE_USD.output2k * 1_000_000)))
 })
 
+const videoSidecarConfig = {
+  provider: 'dashscope',
+  model: 'happyhorse-1.1-i2v',
+  baseUrl: 'https://dashscope-intl.test',
+  chatCompletionsPath: '/api/v1/services/aigc/video-generation/video-synthesis',
+  authHeader: 'Authorization',
+  authScheme: 'Bearer',
+  apiKeyEnv: 'DASHSCOPE_API_VIDEO',
+  enabled: true,
+  videoPricing: { second720: 0.125, second1080: 0.22 },
+}
+
+const NATIVE_VIDEO_BODY = {
+  model: 'placeholder',
+  input: {
+    prompt: 'A gentle camera push-in',
+    media: [{ type: 'first_frame', url: 'data:image/png;base64,AAAA' }],
+  },
+  parameters: { resolution: '720P', duration: 5, watermark: false },
+}
+
+function videoRequest(body: Record<string, unknown> = NATIVE_VIDEO_BODY) {
+  return new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer valid-user-token',
+      'content-type': 'application/json',
+      'x-request-type': 'video',
+    },
+    body: JSON.stringify(body),
+  })
+}
+
+test('video: submit stamps the model, keeps the native body, and sets X-DashScope-Async', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({
+    output: { task_status: 'PENDING', task_id: 'task-1' },
+    request_id: 'req-v1',
+  }))
+  const res = await handleRequest(
+    videoRequest(),
+    kvEnv({ 'sidecar:video': JSON.stringify(videoSidecarConfig) }, { DASHSCOPE_API_VIDEO: 'vid-secret' }),
+    { fetcher },
+  )
+  assert.equal(res.status, 200)
+  assert.equal(
+    String(fetcher.calls[0].input),
+    'https://dashscope-intl.test/api/v1/services/aigc/video-generation/video-synthesis',
+  )
+  assert.equal(fetcher.calls[0].headers.get('x-dashscope-async'), 'enable')
+  assert.equal(fetcher.calls[0].body.model, 'happyhorse-1.1-i2v')
+  assert.deepEqual(fetcher.calls[0].body.input, NATIVE_VIDEO_BODY.input)
+  assert.deepEqual(fetcher.calls[0].body.parameters, NATIVE_VIDEO_BODY.parameters)
+  assert.equal(res.headers.get('x-tm-config-key'), 'sidecar:video')
+})
+
+test('video: unpublished sidecar returns 503 without an upstream call', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({ ok: true }))
+  const res = await handleRequest(videoRequest(), kvEnv({}), { fetcher })
+  assert.equal(res.status, 503)
+  assert.match(await res.text(), /tm_sidecar_unavailable/)
+  assert.equal(fetcher.calls.length, 0)
+})
+
+test('video: poll is GET /api/v1/tasks/{id} with no body', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({
+    output: { task_id: 'task-1', task_status: 'SUCCEEDED', video_url: 'https://oss.test/clip.mp4' },
+    usage: { duration: 5, output_video_duration: 5, SR: 720, video_count: 1 },
+  }))
+  const res = await handleRequest(
+    videoRequest({ model: 'placeholder', task_id: 'task-1' }),
+    kvEnv({ 'sidecar:video': JSON.stringify(videoSidecarConfig) }, { DASHSCOPE_API_VIDEO: 'vid-secret' }),
+    { fetcher },
+  )
+  assert.equal(res.status, 200)
+  assert.equal(String(fetcher.calls[0].input), 'https://dashscope-intl.test/api/v1/tasks/task-1')
+  assert.equal(fetcher.calls[0].init?.method ?? fetcher.calls[0].method, 'GET')
+  assert.equal(fetcher.calls[0].body, undefined)
+})
+
+test('video: SUCCEEDED poll bills per second at the reported resolution', async () => {
+  clearActiveConfigCache()
+  const { tasks, ctx } = collectorCtx()
+  const fetcher = {
+    calls: [] as any[],
+    firestoreCalls: [] as Array<{ method: string; body: any }>,
+    async fetch(input: RequestInfo | URL, init?: RequestInit) {
+      const url = String(input)
+      if (url.includes(':runQuery')) return Response.json([{ readTime: '2026-06-12T00:00:00Z' }])
+      if (url.includes('firestore.googleapis.com')) {
+        const method = init?.method ?? 'GET'
+        this.firestoreCalls.push({
+          method,
+          body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+        })
+        if (method === 'POST') return Response.json({ writeResults: [] })
+        return firestoreUserDoc({ plan: 'pro' })
+      }
+      return Response.json({
+        output: { task_id: 'task-1', task_status: 'SUCCEEDED', video_url: 'https://oss.test/clip.mp4' },
+        usage: { duration: 5, output_video_duration: 5, SR: 720, video_count: 1 },
+      })
+    },
+  }
+
+  const res = await handleRequest(
+    videoRequest({ model: 'placeholder', task_id: 'task-1' }),
+    kvEnv({ 'sidecar:video': JSON.stringify(videoSidecarConfig) }, { DASHSCOPE_API_VIDEO: 'vid-secret' }),
+    { fetcher: fetcher as any, ctx },
+  )
+  await res.text()
+  await Promise.all(tasks)
+
+  const commits = fetcher.firestoreCalls.filter(c => c.method === 'POST')
+  assert.equal(commits.length, 1)
+  const transforms = commits[0].body.writes[0].transform.fieldTransforms
+  assert.equal(transforms[0].fieldPath, 'tokenBudget.costConsumed')
+  assert.equal(
+    transforms[0].increment.integerValue,
+    String(Math.ceil(5 * VIDEO_PRICE_USD.second720 * 1_000_000)),
+  )
+})
+
 test('sidecar: invalid or disabled specialized sidecar returns 503 (never degrades to active)', async () => {
   for (const bad of ['not-json', JSON.stringify({ ...utilitySidecarConfig, enabled: false })]) {
     clearActiveConfigCache()
@@ -2175,6 +2300,148 @@ test('persona: unpublished/unknown persona degrades silently to the active confi
     assert.equal(res.status, 200, persona)
     assert.equal(res.headers.get('x-tm-config-key'), 'active', persona)
   }
+})
+
+test('toque-media: force persona:tm even when client asks for master', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({ ok: true }), () => firestoreUserDoc({ plan: 'toque-media' }))
+  const req = new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer valid-user-token',
+      'Content-Type': 'application/json',
+      'X-TM-Persona': 'master',
+    },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  const res = await handleRequest(
+    req,
+    kvEnv({
+      'persona:tm': JSON.stringify({ ...utilitySidecarConfig, model: 'tm-model' }),
+      'persona:master': JSON.stringify({ ...utilitySidecarConfig, model: 'master-model' }),
+    }),
+    { fetcher },
+  )
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-tm-config-key'), 'persona:tm')
+  assert.equal(fetcher.calls[0].body.model, 'tm-model')
+})
+
+test('toque-media: deny persona:tm to a Pro user (serves active)', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({ ok: true }), () => firestoreUserDoc({ plan: 'pro' }))
+  const req = new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer valid-user-token',
+      'Content-Type': 'application/json',
+      'X-TM-Persona': 'tm',
+    },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  const res = await handleRequest(
+    req,
+    kvEnv({
+      'persona:tm': JSON.stringify({ ...utilitySidecarConfig, model: 'tm-model' }),
+    }),
+    { fetcher },
+  )
+  assert.equal(res.status, 200)
+  assert.notEqual(res.headers.get('x-tm-config-key'), 'persona:tm')
+  assert.equal(res.headers.get('x-tm-config-key'), 'active')
+})
+
+test('toque-media: personalPlan lock holds under team pie remap', async () => {
+  clearActiveConfigCache()
+  const fetcher = teamFetcher({
+    upstream: Response.json({ ok: true }),
+    userDoc: () => Response.json({
+      fields: {
+        userPlan: { stringValue: 'toque-media' },
+        activeTeamId: { stringValue: 'team-1' },
+        tokenBudget: { mapValue: { fields: { tokensConsumed: { integerValue: '0' } } } },
+      },
+    }),
+    teamDoc: () => firestoreTeamDoc({ planTier: 'team-pro', percentAllocation: 0.5, memberConsumed: 0 }),
+  })
+  const req = new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer valid-user-token',
+      'Content-Type': 'application/json',
+      'X-TM-Persona': 'master',
+    },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  const res = await handleRequest(
+    req,
+    kvEnv({
+      'persona:tm': JSON.stringify({ ...utilitySidecarConfig, model: 'tm-model' }),
+      'persona:master': JSON.stringify({ ...utilitySidecarConfig, model: 'master-model' }),
+    }),
+    { fetcher },
+  )
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-tm-config-key'), 'persona:tm')
+})
+
+test('toque-media: unpublished slot returns 503', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({ ok: true }), () => firestoreUserDoc({ plan: 'toque-media' }))
+  const req = new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer valid-user-token',
+      'Content-Type': 'application/json',
+      'X-TM-Persona': 'standard',
+    },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  const res = await handleRequest(req, kvEnv({}), { fetcher })
+  assert.equal(res.status, 503)
+  const body = await res.json() as { error?: { type?: string } }
+  assert.equal(body.error?.type, 'tm_persona_unavailable')
+})
+
+test('toque-media: X-TM-Speed is ignored so the model stays persona:tm', async () => {
+  clearActiveConfigCache()
+  const fetcher = speedFetcher({ plan: 'toque-media' })
+  const res = await handleRequest(
+    speedRequest(),
+    kvEnv({
+      'persona:tm': JSON.stringify({ ...utilitySidecarConfig, model: 'tm-model', speedModel: 'tm-speed' }),
+    }),
+    { fetcher },
+  )
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-tm-config-key'), 'persona:tm')
+  assert.equal(res.headers.get('x-tm-speed-applied'), 'false')
+  assert.equal(fetcher.upstreamCalls[0].body.model, 'tm-model')
+})
+
+test('toque-media: sidecar vision is not forced onto persona:tm', async () => {
+  clearActiveConfigCache()
+  const fetcher = fakeFetcher(Response.json({ ok: true }), () => firestoreUserDoc({ plan: 'toque-media' }))
+  const req = new Request('https://worker.test/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer valid-user-token',
+      'Content-Type': 'application/json',
+      'X-Request-Type': 'vision',
+      'X-TM-Persona': 'master',
+    },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  const res = await handleRequest(
+    req,
+    kvEnv({
+      'sidecar:vision': JSON.stringify({ ...utilitySidecarConfig, model: 'vision-model' }),
+      'persona:tm': JSON.stringify({ ...utilitySidecarConfig, model: 'tm-model' }),
+    }),
+    { fetcher },
+  )
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('x-tm-config-key'), 'sidecar:vision')
 })
 
 test('studio: X-TM-Workspace locks the main loop to qwen3.8-max and ignores persona', async () => {

@@ -91,10 +91,8 @@ function AgentStatusBar() {
   const showElapsed = isBusy && elapsedMs >= 5000
   // Thinking is no longer user-toggleable mid-session (claude-vaz parity).
   // The mandatory badge below renders only when the backend reports the
-  // active model is mandatory-thinking. Slash commands (/plan, /debug,
-  // /review, /te2e) still force reasoning ON for the turn via the
-  // X-Request-Type header — that path is server-side and doesn't surface
-  // here. See src/hooks/useThinkingToggle.ts.
+  // active model is mandatory-thinking. Slash commands do not override
+  // the user's reasoning-effort selector. See src/hooks/useThinkingToggle.ts.
   const { mandatory: thinkingMandatory } = useThinkingToggle()
   const autoApproveDiffs = usePermissionStore(s => s.autoApproveDiffs)
 

@@ -33,8 +33,6 @@ pub struct InteractiveShellInfo {
     pub warning: Option<String>,
 }
 
-// Estado global para manter histórico de comandos
-type CommandHistory = Mutex<Vec<String>>;
 pub type ProcessMap = Mutex<HashMap<u32, std::process::Child>>;
 
 /// PIDs spawned by `run_streaming_command`, tracked for `kill_process`.
@@ -1363,7 +1361,7 @@ pub async fn start_pty_shell(
     cmd.env("FORCE_COLOR", "1");
     cmd.env("CLICOLOR", "1");
     cmd.env("CLICOLOR_FORCE", "1");
-    cmd.env("TERM_PROGRAM", "Apple_Terminal");
+    cmd.env("TERM_PROGRAM", "TMCode");
 
     // Ensure UTF-8 locale is set so zsh/git/etc. enable full color and unicode support
     let lang = env::var("LANG").unwrap_or_default();
@@ -2064,151 +2062,6 @@ pub async fn get_environment_variables(
     Ok(env_vars)
 }
 
-#[tauri::command]
-pub async fn get_completions(
-    partial: String,
-    cwd: Option<String>,
-    active_project: State<'_, ActiveProjectState>,
-) -> Result<Vec<String>, String> {
-    let registry = active_project.lock().map_err(|_| "Lock error")?.clone();
-
-    // Resolve working directory against the union of open projects.
-    let working_dir = match &cwd {
-        Some(dir) if !registry.is_empty() => PathBuf::from(registry.clamp_cwd(dir)),
-        Some(dir) => PathBuf::from(dir),
-        None if !registry.is_empty() => PathBuf::from(registry.default_cwd().unwrap_or_default()),
-        None => env::current_dir().map_err(|e| format!("Failed to get cwd: {}", e))?,
-    };
-
-    // Host mode: resolve path-aware completion
-    // The partial may be a bare name ("src") or a path ("src/comp")
-    let partial_path = PathBuf::from(&partial);
-    let has_path_sep = partial.contains('/') || partial.contains('\\');
-    let (search_dir, prefix) = if has_path_sep {
-        // Path completion: "src/comp" → search in "src/", filter by "comp"
-        let parent = partial_path.parent().unwrap_or(std::path::Path::new(""));
-        let file_prefix = partial_path
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or("");
-
-        let resolved = if parent.is_absolute() {
-            parent.to_path_buf()
-        } else {
-            working_dir.join(parent)
-        };
-        (resolved, file_prefix.to_string())
-    } else {
-        // Bare name: search in cwd
-        (working_dir.clone(), partial.clone())
-    };
-
-    let mut completions = Vec::new();
-
-    if let Ok(entries) = std::fs::read_dir(&search_dir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                // Skip hidden files unless the user is explicitly typing a dot
-                if name.starts_with('.') && !prefix.starts_with('.') {
-                    continue;
-                }
-                if name.starts_with(&prefix) {
-                    // Add trailing / for directories
-                    let sep = if cfg!(target_os = "windows") {
-                        "\\"
-                    } else {
-                        "/"
-                    };
-                    let display = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                        if has_path_sep {
-                            // Reconstruct relative path: "src/" + "components/"
-                            let parent_str =
-                                partial_path.parent().and_then(|p| p.to_str()).unwrap_or("");
-                            format!("{}{}{}{}", parent_str, sep, name, sep)
-                        } else {
-                            format!("{}{}", name, sep)
-                        }
-                    } else if has_path_sep {
-                        let parent_str =
-                            partial_path.parent().and_then(|p| p.to_str()).unwrap_or("");
-                        format!("{}{}{}", parent_str, sep, name)
-                    } else {
-                        name.to_string()
-                    };
-                    completions.push(display);
-                }
-            }
-        }
-    }
-
-    // If no file matches and partial looks like a command (first word), try command completion
-    if completions.is_empty() && !partial.contains('/') && !partial.contains('\\') {
-        // Shell-escape partial to prevent command injection
-        let safe_partial = partial.replace('\'', "'\\''");
-        if let Ok(output) = Command::new("bash")
-            .args([
-                "-c",
-                &format!("compgen -c -- '{}' 2>/dev/null | head -20", safe_partial),
-            ])
-            .output()
-        {
-            if output.status.success() {
-                completions = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(|s| s.to_string())
-                    .collect();
-            }
-        }
-    }
-
-    completions.truncate(20);
-    completions.sort();
-    completions.dedup();
-
-    Ok(completions)
-}
-
-#[tauri::command]
-pub async fn get_command_history(
-    history_state: State<'_, CommandHistory>,
-) -> Result<Vec<String>, String> {
-    let history = history_state.lock().map_err(|_| "Failed to lock history")?;
-    Ok(history.clone())
-}
-
-#[tauri::command]
-pub async fn save_command_to_history(
-    command: String,
-    history_state: State<'_, CommandHistory>,
-) -> Result<(), String> {
-    let mut history = history_state.lock().map_err(|_| "Failed to lock history")?;
-
-    if let Some(last) = history.last() {
-        if last == &command {
-            return Ok(());
-        }
-    }
-
-    history.push(command);
-
-    const MAX_HISTORY: usize = 1000;
-    if history.len() > MAX_HISTORY {
-        let len = history.len();
-        history.drain(0..len - MAX_HISTORY);
-    }
-
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn clear_command_history(history_state: State<'_, CommandHistory>) -> Result<(), String> {
-    let mut history = history_state.lock().map_err(|_| "Failed to lock history")?;
-    history.clear();
-    Ok(())
-}
-
-// Função para inicializar o estado do terminal
-pub fn init_terminal_state() -> (CommandHistory, ProcessMap) {
-    (Mutex::new(Vec::new()), Mutex::new(HashMap::new()))
+pub fn init_terminal_state() -> ProcessMap {
+    Mutex::new(HashMap::new())
 }

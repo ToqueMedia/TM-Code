@@ -1,13 +1,9 @@
 /**
  * TerminalPanel — multi-instance PTY terminal with tab bar.
  *
- * Architecture:
- *  - Store manages up to 5 TerminalInstance objects (id + name).
- *  - All terminals are always mounted (CSS display toggle for active/inactive).
- *  - Each SingleTerminal owns its xterm lifecycle; the store owns PTY lifecycle.
- *  - Tab bar replaces the old single header.
- *  - close() hides panel (PTYs alive); killAll() destroys everything (/exit).
- *  - Right-click context menu on tabs: Rename, Close, Close All.
+ * The shell owns the keyboard. Tab, Esc, Ctrl+W/T/C/L and arrow keys go
+ * to the PTY (zsh/vim/fzf/less). The UI only adds chrome around that:
+ * tabs, resize, copy/paste, and a port-split warning on localhost URLs.
  */
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { Box, Flex, HStack, Text, Input } from '@chakra-ui/react'
@@ -23,8 +19,6 @@ import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import { logger } from '../../utils/logger'
-import { TerminalAutocomplete } from './TerminalAutocomplete'
-import { useTerminalAutocomplete } from './useTerminalAutocomplete'
 
 interface TerminalPanelProps {
   projectPath: string
@@ -51,8 +45,6 @@ interface InteractiveShellInfo {
 
 const TAB_BAR_HEIGHT_PX = 36
 
-// ─── Tab Bar ────────────────────────────────────────────────────────────────
-
 // ─── Context Menu ────────────────────────────────────────────────────────────
 
 interface ContextMenuState {
@@ -62,27 +54,22 @@ interface ContextMenuState {
   tabName: string
 }
 
-function TabContextMenu({
+function PopupMenu({
   x,
   y,
-  tabName,
-  onRename,
+  header,
+  items,
   onClose,
-  onCloseAll,
-  onCloseMenu,
 }: {
   x: number
   y: number
-  tabName: string
-  onRename: () => void
+  header?: string
+  items: Array<{ label: string; onClick: () => void; muted?: boolean; disabled?: boolean }>
   onClose: () => void
-  onCloseAll: () => void
-  onCloseMenu: () => void
 }) {
   const menuRef = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState({ x, y })
 
-  // Clamp to viewport after mount
   useEffect(() => {
     if (!menuRef.current) return
     const rect = menuRef.current.getBoundingClientRect()
@@ -93,13 +80,11 @@ function TabContextMenu({
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        onCloseMenu()
-      }
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose()
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
-  }, [onCloseMenu])
+  }, [onClose])
 
   const itemStyle = {
     px: 3,
@@ -129,19 +114,26 @@ function TabContextMenu({
       backdropFilter="blur(12px)"
       onContextMenu={(e: React.MouseEvent) => e.preventDefault()}
     >
-      <Box px={3} py={1} fontSize="11px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.text.disabled} borderBottom="1px solid rgba(255,255,255,0.06)" mb={1}>
-        {tabName}
-      </Box>
-      <Box {...itemStyle} onClick={() => { onRename(); onCloseMenu() }}>
-        Renomear
-      </Box>
-      <Box {...itemStyle} onClick={() => { onClose(); onCloseMenu() }}>
-        Fechar
-      </Box>
-      <Box h="1px" bg="rgba(255,255,255,0.06)" mx={2} my={1} />
-      <Box {...itemStyle} onClick={() => { onCloseAll(); onCloseMenu() }} color={tokens.colors.text.muted}>
-        Fechar todas
-      </Box>
+      {header && (
+        <Box px={3} py={1} fontSize="11px" fontFamily={tokens.fontFamily.mono} color={tokens.colors.text.disabled} borderBottom="1px solid rgba(255,255,255,0.06)" mb={1}>
+          {header}
+        </Box>
+      )}
+      {items.map((item) => (
+        <Box
+          key={item.label}
+          {...itemStyle}
+          color={item.disabled ? tokens.colors.text.disabled : item.muted ? tokens.colors.text.muted : tokens.colors.text.primary}
+          cursor={item.disabled ? 'default' : 'pointer'}
+          onClick={() => {
+            if (item.disabled) return
+            item.onClick()
+            onClose()
+          }}
+        >
+          {item.label}
+        </Box>
+      ))}
     </Box>
   )
 }
@@ -153,29 +145,35 @@ function TabItem({
   name,
   isActive,
   onClick,
+  onClose,
   onContextMenu,
 }: {
   id: string
   name: string
   isActive: boolean
   onClick: () => void
+  onClose: () => void
   onContextMenu: (e: React.MouseEvent, tabId: string, tabName: string) => void
 }) {
   return (
     <Flex
       align="center"
-      px={3}
+      pl={3}
+      pr={1}
       h="100%"
       cursor="pointer"
       bg={isActive ? 'rgba(255,255,255,0.06)' : 'transparent'}
       borderBottom={isActive ? `2px solid ${tokens.colors.accent.primary}` : '2px solid transparent'}
       _hover={{
         bg: isActive ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.03)',
+        '& [data-tab-close]': { opacity: 1 },
       }}
       onClick={onClick}
       onContextMenu={(e: React.MouseEvent) => onContextMenu(e, id, name)}
       flexShrink={0}
       transition="background 0.15s ease, border-color 0.15s ease"
+      role="tab"
+      aria-selected={isActive}
     >
       <Text
         fontSize="12px"
@@ -189,6 +187,28 @@ function TabItem({
       >
         {name}
       </Text>
+      <Box
+        as="button"
+        data-tab-close
+        aria-label={t('terminal.close')}
+        title={t('terminal.close')}
+        opacity={isActive ? 0.7 : 0}
+        ml={1}
+        w="18px"
+        h="18px"
+        display="flex"
+        alignItems="center"
+        justifyContent="center"
+        borderRadius="3px"
+        color={tokens.colors.text.disabled}
+        _hover={{ color: tokens.colors.text.primary, bg: 'rgba(255,255,255,0.08)' }}
+        onClick={(e: React.MouseEvent) => {
+          e.stopPropagation()
+          onClose()
+        }}
+      >
+        <VscChromeClose size={11} />
+      </Box>
     </Flex>
   )
 }
@@ -198,30 +218,15 @@ function TabItem({
 interface SingleTerminalProps {
   sessionId: string
   projectPath: string
+  isActive: boolean
   onReady?: () => void
 }
 
-// Cache of active start_pty_shell invocations to prevent StrictMode concurrency races
 const spawnPromises = new Map<string, Promise<string>>()
-
-// ─── Deteção de port split-brain ─────────────────────────────────────────────
-//
-// Incidente real (2026-06-11): dois dev servers no MESMO número de porto em
-// famílias de endereço diferentes — Vite do projeto A em `[::1]:5173` (Node
-// ≥17 resolve `localhost` IPv6-first) e Vite do projeto B em `*:5173` IPv4.
-// Ambos anunciam "localhost:5173"; o browser (IPv6 primeiro) abre SEMPRE o
-// projeto A, e o user conclui que o painel correu o projeto errado.
-//
-// Quando um dev server anuncia um URL aqui no painel, sondamos as duas
-// famílias do porto (Rust `check_port_split` — compara status + hash do
-// corpo); conteúdos diferentes ⇒ dois servidores ⇒ aviso escrito no próprio
-// xterm com os URLs desambiguados. Só display — nada é injetado no PTY.
 
 const DEV_URL_ANNOUNCEMENT_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|\[::1?\]|0\.0\.0\.0):(\d{2,5})\//
 
 function checkPortSplitAndWarn(term: Terminal, port: number): void {
-  // Pequena folga: alguns frameworks anunciam o URL um tick antes de o
-  // listener estar plenamente pronto.
   setTimeout(() => {
     invoke<{ ipv4Reachable: boolean; ipv6Reachable: boolean; split: boolean }>(
       'check_port_split', { port },
@@ -240,49 +245,29 @@ function checkPortSplitAndWarn(term: Terminal, port: number): void {
   }, 600)
 }
 
-const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, onReady }: SingleTerminalProps) {
+const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, isActive, onReady }: SingleTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
-  // Portos já sondados nesta sessão de terminal — um aviso por porto chega;
-  // re-anúncios (restart do dev server) não voltam a sondar.
   const probedPortsRef = useRef<Set<number>>(new Set())
   const removeTerminal = useTerminalPanelStore(s => s.removeTerminal)
+  const isOpen = useTerminalPanelStore(s => s.isOpen)
+  const focusNonce = useTerminalPanelStore(s => s.focusNonce)
+  const [termMenu, setTermMenu] = useState<{ x: number; y: number } | null>(null)
 
-  const {
-    completions,
-    selectedIndex,
-    menuPosition,
-    isLoading,
-    handleTab,
-    handleKeyDown,
-    selectCompletion,
-    closeMenu,
-  } = useTerminalAutocomplete({ sessionId, projectPath })
-
-  // O listener de pty-output vive num effect com deps [sessionId, projectPath]
-  // — o closure captura o `completions` do PRIMEIRO render (sempre []), pelo
-  // que `completions.length > 0` lá dentro era perpetuamente falso e o menu
-  // de autocomplete nunca fechava com output novo do shell (flicker: menu
-  // pendurado por cima de um comando a correr). Ref sincronizado resolve sem
-  // re-subscrever o listener a cada keystroke.
-  const completionsOpenRef = useRef(false)
-  useEffect(() => {
-    completionsOpenRef.current = completions.length > 0
-  }, [completions.length])
-
-  // Boot xterm + PTY
   useEffect(() => {
     if (!containerRef.current) return
 
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: 'block',
-      fontFamily: '"SF Mono", "Menlo", "Consolas", "DejaVu Sans Mono", monospace',
+      fontFamily: tokens.fontFamily.mono,
       fontSize: 13,
       lineHeight: 1.25,
-      scrollback: 5000,
+      scrollback: 10000,
       allowProposedApi: true,
+      // Option+letter → ESC+letter so readline/emacs bindings work on macOS.
+      macOptionIsMeta: true,
       theme: {
         background: tokens.colors.terminal.background,
         foreground: tokens.colors.terminal.foreground,
@@ -312,16 +297,8 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
     const links = new WebLinksAddon()
     term.loadAddon(fit)
     term.loadAddon(links)
-
     term.open(containerRef.current)
 
-    // GPU renderer — must be loaded AFTER term.open() (it needs the canvas).
-    // The DOM renderer (xterm's default) renders ANSI colors flat/monochrome
-    // inside Tauri's WKWebView; the WebGL renderer applies the theme palette
-    // correctly and gives the crisp, true-color, GPU-accelerated output of a
-    // native terminal (same renderer VS Code uses). Falls back to DOM if WebGL2
-    // is unavailable or the GL context is lost (disposing the addon makes xterm
-    // revert to the DOM renderer automatically).
     try {
       const webgl = new WebglAddon()
       webgl.onContextLoss(() => {
@@ -340,30 +317,26 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
       requestAnimationFrame(() => {
         try {
           fit.fit()
-          term.focus()
+          if (isActive) term.focus()
         } catch (err) {
           logger.warn('terminal-panel', 'initial fit/focus failed:', err)
         }
       })
     })
 
-    // Frontend → PTY: forward keystrokes with autocomplete interception
+    // Pass every keystroke (Tab, Esc, arrows, ^C, paste) straight to the shell.
     const onDataDisposable = term.onData((data: string) => {
-      if (data === '\t') {
-        handleTab(term)
-        return
-      }
-
-      if (handleKeyDown(term, data)) {
-        return
-      }
-
       invoke('write_to_pty', { sessionId, data }).catch((err) => {
         logger.warn('terminal-panel', 'write_to_pty failed:', err)
       })
     })
 
-    // PTY → frontend: stream output
+    const onSelectionDisposable = term.onSelectionChange(() => {
+      if (!term.hasSelection()) return
+      const sel = term.getSelection()
+      if (sel) void navigator.clipboard.writeText(sel).catch(() => {})
+    })
+
     let unlistenOutput: UnlistenFn | null = null
     let unlistenExit: UnlistenFn | null = null
     let disposed = false
@@ -373,8 +346,6 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
       if (disposed) return
       if (event.payload.session_id !== sessionId) return
       term.write(event.payload.data)
-      // Anúncio de dev server (Vite/Next/etc.) → sonda de split-brain do
-      // porto, uma vez por porto nesta sessão.
       const announced = event.payload.data.match(DEV_URL_ANNOUNCEMENT_RE)
       if (announced) {
         const port = parseInt(announced[1], 10)
@@ -383,7 +354,6 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
           checkPortSplitAndWarn(term, port)
         }
       }
-      if (completionsOpenRef.current) closeMenu()
     }).then((fn) => {
       if (disposed) fn()
       else unlistenOutput = fn
@@ -392,9 +362,6 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
     listen<PtyExitEvent>('pty-exit', (event) => {
       if (disposed) return
       if (event.payload.session_id !== sessionId) return
-      // Guard: ignore pty-exit if start_pty_shell hasn't resolved yet.
-      // This prevents a race where the shell dies before the frontend
-      // confirms the session was created (e.g. StrictMode double-invoke).
       if (!shellStarted) return
       removeTerminal(sessionId)
     }).then((fn) => {
@@ -409,7 +376,6 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
       })
     }
 
-    // Spawn the shell
     let p = spawnPromises.get(sessionId)
     if (!p) {
       p = invoke<string>('start_pty_shell', { sessionId, cwd: projectPath })
@@ -420,11 +386,6 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
       if (disposed) return
       shellStarted = true
       onReady?.()
-
-      // Sync PTY dimensions with frontend after shell initialization.
-      // Windows' ConPTY frequently discards resize requests received before or during process
-      // spawning. Forcing a resize immediately after the process has started (and a second
-      // deferred resize to absorb any ConPTY engine latency) ensures perfect alignment.
       if (termRef.current) {
         const cols = termRef.current.cols
         const rows = termRef.current.rows
@@ -442,22 +403,16 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
       if (disposed) return
       logger.error('terminal-panel', 'start_pty_shell failed:', err)
       term.writeln('\x1b[31mFailed to start shell. Removing terminal...\x1b[0m')
-      // Remove the failed terminal instance from the store to prevent zombie tabs
       setTimeout(() => {
-        if (!disposed) {
-          removeTerminal(sessionId)
-        }
+        if (!disposed) removeTerminal(sessionId)
       }, 2000)
     })
     .finally(() => {
-      // Clean up the promise reference after a short delay to ensure any synchronous unmount/remount
-      // cycles during StrictMode are fully absorbed and reuse the same promise.
       setTimeout(() => {
         spawnPromises.delete(sessionId)
       }, 3000)
     })
 
-    // ResizeObserver
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
     let lastCols = -1
     let lastRows = -1
@@ -467,16 +422,16 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
         fitRef.current.fit()
         const cols = termRef.current.cols
         const rows = termRef.current.rows
-        if (cols <= 10 || rows <= 5) return // Guard against 0 or invalid sizes
+        if (cols <= 10 || rows <= 5) return
         if (cols === lastCols && rows === lastRows) return
         if (resizeTimer) clearTimeout(resizeTimer)
         resizeTimer = setTimeout(() => {
           lastCols = cols
           lastRows = rows
           resizePty(cols, rows)
-        }, 120)
+        }, 80)
       } catch {
-        // ignored — fit can throw during mount/unmount transitions
+        // fit can throw during mount/unmount transitions
       }
     })
     ro.observe(containerRef.current)
@@ -486,13 +441,9 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
       ro.disconnect()
       if (resizeTimer) clearTimeout(resizeTimer)
       onDataDisposable.dispose()
+      onSelectionDisposable.dispose()
       if (unlistenOutput) unlistenOutput()
       if (unlistenExit) unlistenExit()
-      // Do NOT kill PTY here — the store owns PTY lifecycle.
-      // In StrictMode, the effect runs twice with the same sessionId.
-      // start_pty_shell is idempotent (Rust): if the session already exists
-      // it returns Ok without creating a duplicate. This prevents both the
-      // orphaned-PTY race and Tauri callback ID errors.
       term.dispose()
       termRef.current = null
       fitRef.current = null
@@ -500,22 +451,75 @@ const SingleTerminal = memo(function SingleTerminal({ sessionId, projectPath, on
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, projectPath])
 
+  // Re-fit + focus when the drawer opens or this tab becomes the target.
+  useEffect(() => {
+    if (!isOpen || !isActive) return
+    const term = termRef.current
+    const fit = fitRef.current
+    if (!term || !fit) return
+    requestAnimationFrame(() => {
+      try {
+        fit.fit()
+        term.focus()
+        const cols = term.cols
+        const rows = term.rows
+        if (cols > 10 && rows > 5) {
+          invoke('resize_pty', { sessionId, cols, rows }).catch(() => {})
+        }
+      } catch {
+        // ignored — xterm may still be attaching
+      }
+    })
+  }, [isOpen, isActive, focusNonce, sessionId])
+
+  const handleCopy = useCallback(() => {
+    const sel = termRef.current?.getSelection()
+    if (sel) void navigator.clipboard.writeText(sel).catch(() => {})
+  }, [])
+
+  const handlePaste = useCallback(() => {
+    void navigator.clipboard.readText().then((text) => {
+      if (!text) return
+      invoke('write_to_pty', { sessionId, data: text }).catch((err) => {
+        logger.warn('terminal-panel', 'paste write_to_pty failed:', err)
+      })
+    }).catch(() => {})
+    termRef.current?.focus()
+  }, [sessionId])
+
+  const handleClear = useCallback(() => {
+    termRef.current?.clear()
+    termRef.current?.focus()
+  }, [])
+
   return (
-    // data-pty-terminal: marcador para handlers globais de teclado NÃO
-    // interceptarem teclas destinadas ao shell
-    // (^C/^L/^K/^U/Esc) — o helper-textarea do xterm vive dentro deste Box.
-    <Box ref={containerRef} flex="1" minH={0} px="6px" py="4px" position="relative" data-pty-terminal>
-      {(completions.length > 0 || isLoading) && menuPosition && (
-        <TerminalAutocomplete
-          completions={completions}
-          selectedIndex={selectedIndex}
-          position={menuPosition}
-          isLoading={isLoading}
-          onSelect={(item) => {
-            if (termRef.current) {
-              selectCompletion(termRef.current, item)
-            }
-          }}
+    <Box
+      ref={containerRef}
+      flex="1"
+      minH={0}
+      px="6px"
+      py="4px"
+      position="relative"
+      data-pty-terminal
+      onContextMenu={(e: React.MouseEvent) => {
+        e.preventDefault()
+        setTermMenu({ x: e.clientX, y: e.clientY })
+      }}
+    >
+      {termMenu && (
+        <PopupMenu
+          x={termMenu.x}
+          y={termMenu.y}
+          onClose={() => setTermMenu(null)}
+          items={[
+            {
+              label: t('terminal.copy'),
+              onClick: handleCopy,
+              disabled: !termRef.current?.hasSelection(),
+            },
+            { label: t('terminal.paste'), onClick: handlePaste },
+            { label: t('terminal.clear'), onClick: handleClear, muted: true },
+          ]}
         />
       )}
     </Box>
@@ -534,9 +538,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, onReady,
   const closePanel = useTerminalPanelStore(s => s.close)
   const setActiveTerminal = useTerminalPanelStore(s => s.setActiveTerminal)
 
-  // Context menu state
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
-  // Inline rename state
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [shellInfo, setShellInfo] = useState<InteractiveShellInfo | null>(null)
@@ -569,7 +571,6 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, onReady,
     handleCloseMenu()
     setRenamingId(tabId)
     setRenameValue(tabName)
-    // Focus the input after render
     requestAnimationFrame(() => renameInputRef.current?.select())
   }, [contextMenu, handleCloseMenu])
 
@@ -586,51 +587,6 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, onReady,
     setRenameValue('')
   }, [])
 
-  // Keyboard shortcuts for terminal management
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // O painel continua MONTADO quando escondido (close() é display:none
-      // para manter os PTYs vivos) — sem este guard, Ctrl+T/W no prompt do
-      // chat criava/MATAVA terminais invisíveis com o painel fechado.
-      if (!useTerminalPanelStore.getState().isOpen) return
-      const isCtrl = e.ctrlKey || e.metaKey
-
-      // Ctrl+T: Add new terminal
-      if (isCtrl && e.key === 't') {
-        e.preventDefault()
-        if (instances.length < 5) {
-          addTerminal()
-        }
-        return
-      }
-
-      // Ctrl+W: Close active terminal
-      if (isCtrl && e.key === 'w') {
-        e.preventDefault()
-        if (activeInstanceId) {
-          removeTerminal(activeInstanceId)
-        }
-        return
-      }
-
-      // Ctrl+Tab / Ctrl+Shift+Tab: Navigate terminals
-      if (isCtrl && e.key === 'Tab' && instances.length > 1) {
-        e.preventDefault()
-        const currentIndex = instances.findIndex(i => i.id === activeInstanceId)
-        if (currentIndex === -1) return
-
-        const nextIndex = e.shiftKey
-          ? (currentIndex - 1 + instances.length) % instances.length
-          : (currentIndex + 1) % instances.length
-
-        setActiveTerminal(instances[nextIndex].id)
-      }
-    }
-
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [instances, activeInstanceId, addTerminal, removeTerminal, setActiveTerminal])
-
   return (
     <Flex
       direction="column"
@@ -642,7 +598,6 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, onReady,
       borderTop={showBorder ? `1px solid ${tokens.colors.border.panel}` : 'none'}
       minH={0}
     >
-      {/* Tab bar */}
       <Flex
         height={`${TAB_BAR_HEIGHT_PX}px`}
         flexShrink={0}
@@ -696,18 +651,18 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, onReady,
                 name={inst.name}
                 isActive={inst.id === activeInstanceId}
                 onClick={() => setActiveTerminal(inst.id)}
+                onClose={() => removeTerminal(inst.id)}
                 onContextMenu={handleContextMenu}
               />
             )
           )}
 
-          {/* Add terminal button */}
           {instances.length < 5 && (
             <Box
               as="button"
               onClick={addTerminal}
-              aria-label="Add terminal"
-              title={`Add terminal (Ctrl+T) · ${instances.length}/5`}
+              aria-label={t('terminal.add')}
+              title={`${t('terminal.add')} (Ctrl+Shift+\`) · ${instances.length}/5`}
               px="6px"
               ml={1}
               borderRadius="4px"
@@ -719,6 +674,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, onReady,
               gap="4px"
               transition="color 0.15s ease, background 0.15s ease"
               flexShrink={0}
+              data-tauri-drag-region={false}
             >
               <VscAdd size={13} />
               <Text
@@ -767,22 +723,20 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, onReady,
         </Box>
       </Flex>
 
-      {/* Context menu */}
       {contextMenu && (
-        <TabContextMenu
+        <PopupMenu
           x={contextMenu.x}
           y={contextMenu.y}
-          tabName={contextMenu.tabName}
-          onRename={handleRenameStart}
-          onClose={() => { removeTerminal(contextMenu.tabId); handleCloseMenu() }}
-          onCloseAll={closeAll}
-          onCloseMenu={handleCloseMenu}
+          header={contextMenu.tabName}
+          onClose={handleCloseMenu}
+          items={[
+            { label: t('terminal.rename'), onClick: handleRenameStart },
+            { label: t('terminal.close'), onClick: () => removeTerminal(contextMenu.tabId) },
+            { label: t('terminal.closeAll'), onClick: closeAll, muted: true },
+          ]}
         />
       )}
 
-      {/* All terminals — only the active one is visible. Inactive terminals
-          are kept alive (PTY running, xterm mounted) so tab switching is
-          instant and background pty-exit events are still received. */}
       <Box flex="1" minH={0} position="relative">
         {instances.map((inst) => (
           <Box
@@ -795,6 +749,7 @@ export const TerminalPanel = memo(function TerminalPanel({ projectPath, onReady,
             <SingleTerminal
               sessionId={inst.id}
               projectPath={projectPath}
+              isActive={inst.id === activeInstanceId}
               onReady={inst.id === activeInstanceId ? onReady : undefined}
             />
           </Box>

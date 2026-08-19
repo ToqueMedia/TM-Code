@@ -746,7 +746,7 @@ pub fn run() {
     // Must happen before any terminal commands so pnpm/node/etc. are found.
     commands::terminal::init_user_path();
 
-    let (command_history, process_map) = commands::terminal::init_terminal_state();
+    let process_map = commands::terminal::init_terminal_state();
     let active_container = commands::container::init_container_state();
     let debugger_state = commands::debugger::DebuggerState::new();
     let mcp_state = commands::mcp::McpState::new();
@@ -765,7 +765,6 @@ pub fn run() {
 
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
-        .manage(command_history)
         .manage(process_map)
         .manage(active_container)
         .manage(debugger_state)
@@ -1587,10 +1586,6 @@ pub fn run() {
             command_exists,
             install_dev_tool,
             get_environment_variables,
-            get_completions,
-            get_command_history,
-            save_command_to_history,
-            clear_command_history,
             search_in_files,
             replace_in_files,
             check_ripgrep_available,

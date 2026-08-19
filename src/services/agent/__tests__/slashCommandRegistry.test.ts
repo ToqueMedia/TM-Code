@@ -24,7 +24,7 @@ describe('slashCommandRegistry plan gates', () => {
     expect(te2e).toBeDefined()
     expect(te2e?.requiresPaidPlan).toBe(true)
 
-    const allowedByPlan = (['explorer', 'vibe', 'pro', 'max', 'welcome', 'byok-only'] as UserPlanName[])
+    const allowedByPlan = (['explorer', 'vibe', 'pro', 'max', 'welcome', 'byok-only', 'toque-media'] as UserPlanName[])
       .map(plan => [plan, isSlashCommandAllowedForPlan(te2e!, plan)])
 
     expect(allowedByPlan).toEqual([
@@ -34,6 +34,7 @@ describe('slashCommandRegistry plan gates', () => {
       ['max', true],
       ['welcome', true],
       ['byok-only', true],
+      ['toque-media', true],
     ])
   })
 })

@@ -46,3 +46,6 @@ dist-ssr
 
 # Artefactos dos evals do agente (write-cases)
 evals/fixtures/**/EVAL.md
+
+# Estado local de outras ferramentas de IA (planos/sessões)
+.zcode/

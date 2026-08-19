@@ -16,29 +16,41 @@ import { create } from 'zustand'
  *
  * Preferência CROSS-PROJECT, em localStorage (mesmo padrão do
  * reasoningEffortStore).
+ *
+ * `tm` NÃO entra na lista pública. Só o lock Toque Media a selecciona, e
+ * nunca é persistida em `tm_model_persona`.
  */
 
-export const PERSONAS = ['standard', 'expert', 'master'] as const
-export type Persona = (typeof PERSONAS)[number]
+export const SWITCHABLE_PERSONAS = ['standard', 'expert', 'master'] as const
+export type SwitchablePersona = (typeof SWITCHABLE_PERSONAS)[number]
+export const TM_LOCKED_PERSONA = 'tm' as const
+export type Persona = SwitchablePersona | typeof TM_LOCKED_PERSONA
+/** Alias usado pelos selectors — nunca inclui `tm`. */
+export const PERSONAS = SWITCHABLE_PERSONAS
 
-export const DEFAULT_PERSONA: Persona = 'standard'
+export const DEFAULT_PERSONA: SwitchablePersona = 'standard'
 
 const STORAGE_KEY = 'tm_model_persona'
+const BEFORE_TM_KEY = 'tm_model_persona_before_tm'
+
+function isSwitchable(value: unknown): value is SwitchablePersona {
+  return typeof value === 'string' && (SWITCHABLE_PERSONAS as readonly string[]).includes(value)
+}
 
 function isPersona(value: unknown): value is Persona {
-  return typeof value === 'string' && (PERSONAS as readonly string[]).includes(value)
+  return isSwitchable(value) || value === TM_LOCKED_PERSONA
 }
 
 function loadSelected(): Persona {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    return isPersona(raw) ? raw : DEFAULT_PERSONA
+    return isSwitchable(raw) ? raw : DEFAULT_PERSONA
   } catch {
     return DEFAULT_PERSONA
   }
 }
 
-function saveSelected(value: Persona): void {
+function saveSelected(value: SwitchablePersona): void {
   try {
     localStorage.setItem(STORAGE_KEY, value)
   } catch {
@@ -46,41 +58,75 @@ function saveSelected(value: Persona): void {
   }
 }
 
+function rememberBeforeTm(current: Persona): void {
+  if (!isSwitchable(current)) return
+  try {
+    if (!localStorage.getItem(BEFORE_TM_KEY)) {
+      localStorage.setItem(BEFORE_TM_KEY, current)
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function takeBeforeTm(): SwitchablePersona {
+  try {
+    const raw = localStorage.getItem(BEFORE_TM_KEY)
+    localStorage.removeItem(BEFORE_TM_KEY)
+    return isSwitchable(raw) ? raw : DEFAULT_PERSONA
+  } catch {
+    return DEFAULT_PERSONA
+  }
+}
+
 interface PersonaStoreState {
   selected: Persona
   setSelected: (persona: Persona) => void
+  lockTm: () => void
+  unlockTm: () => void
 }
 
-// Sync cross-JANELA (ronda-2 #16): o localStorage é partilhado entre janelas
-// Tauri mas cada webview tem o seu zustand — sem isto, trocar de persona na
-// janela A não mudava a B até ao restart.
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', (e) => {
     if (e.key !== STORAGE_KEY) return
-    if (isPersona(e.newValue) && e.newValue !== usePersonaStore.getState().selected) {
+    if (!isSwitchable(e.newValue)) return
+    if (e.newValue !== usePersonaStore.getState().selected) {
       usePersonaStore.setState({ selected: e.newValue })
     }
   })
 }
 
-export const usePersonaStore = create<PersonaStoreState>((set) => ({
+function bumpModelInfo(): void {
+  void import('./agentStore').then(({ useAgentStore }) => {
+    useAgentStore.getState().setModelInfo(null, null, null, null, null, { vision: null, search: null }, null)
+  }).catch(() => {})
+}
+
+export const usePersonaStore = create<PersonaStoreState>((set, get) => ({
   selected: loadSelected(),
   setSelected: (persona) => {
     if (!isPersona(persona)) return
+    if (persona === TM_LOCKED_PERSONA) {
+      set({ selected: persona })
+      bumpModelInfo()
+      return
+    }
     saveSelected(persona)
     set({ selected: persona })
-    // Trocar de persona invalida TUDO o que se sabia do modelo servido — o
-    // X-TM-Model E os headers de capacidade/janela pertencem à persona
-    // ANTERIOR. A 1ª versão só limpava name/provider (setModelInfo tem
-    // semântica undefined=não-tocar) e a auditoria 05-08 apanhou 4 bugs daí:
-    // imagem inline enviada a modelo cego (effectiveCapability(true,…) da
-    // visão do modelo antigo), auto-compact com a janela da persona anterior
-    // (estouro de contexto), prompt a anunciar pesquisa nativa inexistente, e
-    // badge de thinking com o modo errado. `null` = "o servidor não declarou"
-    // → tudo cai no perfil/fallback da persona até o X-TM-Model real chegar.
-    // Import dinâmico para não criar ciclo estático entre stores.
-    void import('./agentStore').then(({ useAgentStore }) => {
-      useAgentStore.getState().setModelInfo(null, null, null, null, null, { vision: null, search: null }, null)
-    }).catch(() => {})
+    bumpModelInfo()
+  },
+  lockTm: () => {
+    const current = get().selected
+    if (current === TM_LOCKED_PERSONA) return
+    rememberBeforeTm(current)
+    set({ selected: TM_LOCKED_PERSONA })
+    bumpModelInfo()
+  },
+  unlockTm: () => {
+    if (get().selected !== TM_LOCKED_PERSONA) return
+    const restored = takeBeforeTm()
+    saveSelected(restored)
+    set({ selected: restored })
+    bumpModelInfo()
   },
 }))

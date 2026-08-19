@@ -2,9 +2,8 @@
  * Thinking-mode UI state — collapsed to a single fact: "does this model
  * think unconditionally?". Previously this hook also exposed an interactive
  * toggle so the user could flip thinking on/off mid-session, but that was
- * pulled (claude-vaz parity) — thinking now follows the model's default
- * and is forced ON only by slash commands (/plan, /debug, /review, /te2e)
- * via the backend's X-Request-Type header.
+ * pulled (claude-vaz parity) — thinking follows the model default and
+ * the user's reasoning-effort selector. Slash commands do not override it.
  *
  * What remains: the "⚡ Thinking" status badge that renders when the
  * backend reports `X-Model-Thinking-Mode: mandatory` (model thinks every

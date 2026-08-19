@@ -211,7 +211,8 @@ export function applyDashScopePromptCache(
   // `content` da última mensagem num array de blocos com `cache_control` —
   // uma forma que essa API não conhece. Defeito introduzido com o marcador
   // rolante (2026-08-10): antes só se tocava no bloco de system.
-  if ((opts.requestType ?? '').trim().toLowerCase() === 'image') return zero
+  const sidecarType = (opts.requestType ?? '').trim().toLowerCase()
+  if (sidecarType === 'image' || sidecarType === 'video') return zero
   const messages = Array.isArray(body.messages)
     ? (body.messages as Array<Record<string, unknown>>)
     : null

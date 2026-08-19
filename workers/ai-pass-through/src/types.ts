@@ -37,6 +37,12 @@ export interface ActiveAIConfig {
    * campo existe para o preço poder ser corrigido no KV sem deploy.
    */
   imagePricing?: { output1k?: number; output2k?: number; input?: number }
+  /**
+   * Preço POR SEGUNDO em USD (config `sidecar:video`, HappyHorse I2V).
+   * A resposta de SUCCEEDED traz `{ duration, SR, video_count }` sem tokens.
+   * Ausente → o rate card embutido (VIDEO_PRICE_USD em usage.ts).
+   */
+  videoPricing?: { second720?: number; second1080?: number }
   /** Inline provider key — ONLY for Team BYOK configs (`team:{teamId}`), whose
    *  key is per-team and dynamic and so cannot be a static worker env secret
    *  like the managed `active`/`sidecar:*` configs (those always use
@@ -137,10 +143,13 @@ export interface Env {
   /** Geração de imagens (X-Request-Type: image). Publicado mas ainda não
    *  consumido por nenhum caminho da IDE — ver activeConfig.ts. */
   SIDECAR_IMAGE_CONFIG_JSON?: string
+  /** I2V HappyHorse (X-Request-Type: video). */
+  SIDECAR_VIDEO_CONFIG_JSON?: string
   // Personas (Escolha do Modelo) — mesmo par KV/env; ver PERSONA_ENV_FALLBACK.
   PERSONA_STANDARD_CONFIG_JSON?: string
   PERSONA_EXPERT_CONFIG_JSON?: string
   PERSONA_MASTER_CONFIG_JSON?: string
+  PERSONA_TM_CONFIG_JSON?: string
   /** Main loop do Estúdio — modelo único com visão (`qwen3.8-max`). */
   STUDIO_CONFIG_JSON?: string
   AUTH_MODE?: 'firebase_jwt' | 'firebase_emulator' | 'test_static'

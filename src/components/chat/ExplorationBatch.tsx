@@ -47,6 +47,7 @@ const COUNT_KEYS: Record<ExplorationCategory, { one: TranslationKey; many: Trans
   outputs: { one: 'explore.count.outputs.one', many: 'explore.count.outputs.many' },
   web: { one: 'explore.count.web.one', many: 'explore.count.web.many' },
   guides: { one: 'explore.count.guides.one', many: 'explore.count.guides.many' },
+  shells: { one: 'explore.count.shells.one', many: 'explore.count.shells.many' },
 }
 
 function ExplorationBatchComponent({ calls }: ExplorationBatchProps) {

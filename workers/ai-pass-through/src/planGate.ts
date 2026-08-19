@@ -30,5 +30,9 @@ export function clearPlanCache(): void {
 }
 
 export function isSpeedAllowedForPlanState(state: UserBudgetState | null): boolean {
-  return !!state && SPEED_ALLOWED_PLANS.has(state.plan)
+  if (!state) return false
+  // Speed troca o modelo. Plano pessoal TM fica cravado a persona:tm,
+  // mesmo quando a pie remapeia `plan` para team-pro/max.
+  if (state.personalPlan === 'toque-media') return false
+  return SPEED_ALLOWED_PLANS.has(state.plan)
 }

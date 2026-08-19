@@ -25,6 +25,7 @@ import { t } from '@/i18n'
  */
 
 function personaLabel(p: Persona): string {
+  if (p === 'tm') return t('prompt.persona.tm')
   if (p === 'standard') return t('prompt.persona.standard')
   if (p === 'expert') return t('prompt.persona.expert')
   return t('prompt.persona.master')
@@ -39,9 +40,10 @@ function personaDescription(p: Persona): string {
 export function PersonaSelector({ disabled = false }: { disabled?: boolean }) {
   const selected = usePersonaStore((s) => s.selected)
   const setSelected = usePersonaStore((s) => s.setSelected)
+  const toqueMediaActive = useBillingStore((s) => s.toqueMediaActive)
   // Gate de plano (decisão 05-08): só a Standard para o plano free (explorer).
   // O worker também degrada server-side — isto é a metade honesta da UI.
-  const isFreePlan = useBillingStore((s) => s.plan) === 'explorer'
+  const isFreePlan = useBillingStore((s) => s.plan) === 'explorer' && !toqueMediaActive
   // Multiplicador POR persona definido pelo ADMIN (doc aiPersonas) — mostrado
   // ao lado da descrição; NUNCA um número hardcoded.
   const personaModels = useActiveModelStore((s) => s.personaModels)
@@ -82,6 +84,31 @@ export function PersonaSelector({ disabled = false }: { disabled?: boolean }) {
       document.removeEventListener('keydown', onKey)
     }
   }, [open])
+
+  if (toqueMediaActive) {
+    return (
+      <Box flexShrink={0}>
+        <Box
+          data-prompt-tool-button
+          display="flex"
+          alignItems="center"
+          gap="5px"
+          h="28px"
+          px="8px"
+          borderRadius="8px"
+          color={tokens.colors.text.primary}
+          border={`1px solid ${tokens.colors.border.panel}`}
+          title={t('prompt.persona.tmLockedTooltip')}
+          aria-label={t('prompt.persona.tm')}
+        >
+          <Box display="flex" alignItems="center" flexShrink={0}><FiCpu size={14} /></Box>
+          <Text data-prompt-action-label fontSize="11px" fontWeight="600" whiteSpace="nowrap">
+            {t('prompt.persona.tm')}
+          </Text>
+        </Box>
+      </Box>
+    )
+  }
 
   return (
     <Box flexShrink={0}>

@@ -6,33 +6,17 @@ import AgentService from '../agentService'
 import ToolExecutor from '../toolExecutor'
 import CheckpointService from '../checkpointService'
 import { getQueryGuard } from '../queryGuard'
-import { languageDirective } from './_languageInstruction'
 import { logger } from '../../../utils/logger'
 import { t } from '../../../i18n'
-import { GLOB_ALIAS, GREP_ALIAS, LS_ALIAS, READ_ALIAS } from '../toolNames'
 import { onAgentStopRequested } from '../host/hostBus'
 import { appHomePath } from '../../../utils/appHomeDir'
-
-/**
- * Cap on how many files we ask the sub-agent to review when scope is
- * `session`. Above this, reasoning ON × N files explodes the token budget
- * with diminishing returns. The sub-agent already reads each file in full;
- * 20 is a tested sweet spot between coverage and cost.
- */
-const SESSION_FILE_CAP = 20
-
-/**
- * Auto-scaled turn limit. The sub-agent typically does:
- *   - 1 turn per file read
- *   - 2-3 turns of analysis per non-trivial file
- *   - 1-2 turns to compose the final report
- * Base 20 lets a small review (1-3 files) finish without bumping the cap;
- * the +2 per file scales for large-scope reviews; cap 60 prevents runaway
- * loops if the model gets stuck.
- */
-function computeMaxTurns(fileCount: number): number {
-  return Math.min(60, Math.max(20, 20 + fileCount * 2))
-}
+import {
+  assembleInjectedDiffs,
+  buildReviewPrompt,
+  buildReviewSystemPrompt,
+  clipText,
+  DIFF_CHAR_BUDGET,
+} from './reviewDiffs'
 
 /**
  * `/review [scope]` — adversarial code review by a fresh sub-agent.
@@ -49,9 +33,8 @@ function computeMaxTurns(fileCount: number): number {
  *   - `/review <free-form description>` → sub-agent decides what's in scope
  *   - `/review` (no args) → files touched in this session via checkpoints
  *
- * Output: structured markdown with severity tiers, top-10 by criticality,
- * each finding tied to file:line and accompanied by a one-line fix
- * direction. The sub-agent does NOT modify code — `/review` is read-only.
+ * The IDE injects the unified diff (cli-vaz `/review` / security-review
+ * pattern). The sub-agent does not modify code — `/review` is read-only.
  */
 
 const SCOPE_LAST_COMMIT_RE = /^(last\s+commit|commit)$/i
@@ -70,6 +53,10 @@ interface ResolvedScope {
   capped: boolean
   /** Original file count before any cap (for messaging). */
   originalCount: number
+  /** Unified diff already resolved by the IDE. Empty when the sub-agent must discover files. */
+  patch: string
+  /** True when the patch was cut to the char budget. */
+  truncated: boolean
 }
 
 export async function executeReview(
@@ -100,10 +87,8 @@ export async function executeReview(
     return
   }
 
-  // Token budget warning. Reasoning ON across many turns + reading several
-  // files = 10–30K tokens typically. If the user is close to their cycle
-  // cap, the review can push them over. We warn but don't block — the user
-  // chose to run /review knowing it's reasoning-heavy.
+  // Token budget warning. A review still reads a few files and writes a
+  // long report. We warn near the cycle cap but don't block.
   const billing = useBillingStore.getState()
   if (billing.consumedPct > 0.85) {
     const pct = Math.round(billing.consumedPct * 100)
@@ -145,13 +130,15 @@ export async function executeReview(
     return
   }
 
-  if (resolved.capped) {
-    // Inline notice in the assistant bubble — the user sees what we chose.
-    chatStore.appendTextDelta(
-      `_(Scope cap: ${resolved.originalCount} files touched this session, ` +
-      `reviewing the most-recent ${resolved.files.length}. Pass an explicit ` +
-      `scope to override.)_\n\n`
-    )
+  if (resolved.capped || resolved.truncated) {
+    const bits: string[] = []
+    if (resolved.capped) {
+      bits.push(
+        `scope cap: ${resolved.originalCount} files touched, reviewing the most-recent ${resolved.files.length}`,
+      )
+    }
+    if (resolved.truncated) bits.push('diff truncated to the review budget')
+    chatStore.appendTextDelta(`_(${bits.join('; ')}. Pass an explicit scope to override.)_\n\n`)
   }
 
   const toolExecutor = ToolExecutor.getInstance()
@@ -182,26 +169,21 @@ export async function executeReview(
   // pelo botão Stop (handleStop no AgentStatusBar).
   const unsubscribeStop = onAgentStopRequested(stopHandler, { once: true })
 
-  const maxTurns = computeMaxTurns(resolved.files.length)
+  // No maxTurns — cli-vaz prompt commands run until the model stops.
+  // query() defaults omitted maxTurns to Infinity.
   const subAgent = AgentService.createLightweight({
     tools: reviewerTools,
     readOnly: true,
-    maxTurns,
     abortController,
   })
-  // setRequestType targets THIS sub-agent instance's private requestType,
-  // not the main singleton's. Each AgentService keeps its own sticky flag,
-  // so the main agent isn't affected. The 'review' value stays sticky in
-  // agentService.ts:1567-1582 and is cleared in the finally block below.
+  // Sticky label on THIS instance only — not a thinking switch. The
+  // worker has no sidecar for `review`; effort follows the user's selector.
   subAgent.setRequestType('review')
   subAgent.setSystemPrompt(buildReviewSystemPrompt(projectPath))
 
-  // Use the shared sub-agent visibility helper (same one /research and
-  // /verify use). It gives us the standard chat wiring — text/reasoning
-  // streaming, tool-call lifecycle, status ticks, orphan cleanup — for
-  // free, with the only review-specific addition layered on top below
-  // (text buffer for persistence, reasoning-arrived tracker for backend-
-  // mismatch detection).
+  // Shared sub-agent visibility (text/reasoning stream, tool-call
+  // lifecycle, status ticks, orphan cleanup). The report is also
+  // mirrored into a string so we can persist it after the run.
   const { createSubAgentVisibility } = await import('../subAgentVisibility')
   const visibility = createSubAgentVisibility({
     parentToolCallId: undefined, // /review isn't nested inside a tool call
@@ -224,42 +206,16 @@ export async function executeReview(
   // the run, without re-fetching the message from the chat store.
   let reportBuffer = ''
 
-  // Track whether reasoning ON actually arrived from the backend. If the
-  // first response comes back without any reasoning deltas AND the model
-  // reports thinkingMode === 'none', the proxy probably hasn't been
-  // deployed with the 'review' request type — surface this once.
-  let receivedAnyReasoning = false
-  let warnedBackendMismatch = false
-  const checkBackendMismatch = () => {
-    if (warnedBackendMismatch) return
-    warnedBackendMismatch = true
-    const mode = useAgentStore.getState().thinkingMode
-    if (!receivedAnyReasoning && mode === 'none') {
-      const warning =
-        '\n\n> ⚠️ _Reasoning is not active in this run — the backend may not yet ' +
-        'support the `/review` request type. Findings below are from a non-thinking ' +
-        'pass; rerun once the backend deploy is complete for the deeper analysis._\n\n'
-      chatStore.appendTextDelta(warning)
-      reportBuffer += warning
-    }
-  }
-
   try {
     await subAgent.runAgentLoop(buildReviewPrompt(resolved), [], {
       onTextDelta: (delta) => {
         reportBuffer += delta
         visibility.callbacks.onTextDelta(delta)
       },
-      onReasoningDelta: (delta) => {
-        receivedAnyReasoning = true
-        visibility.callbacks.onReasoningDelta(delta)
-      },
+      onReasoningDelta: visibility.callbacks.onReasoningDelta,
       onToolCallPending: visibility.callbacks.onToolCallPending,
       onToolCallStart: visibility.callbacks.onToolCallStart,
       onToolResult: visibility.callbacks.onToolResult,
-      onTurnComplete: () => {
-        checkBackendMismatch()
-      },
       onDone: async () => {
         // Persist the report to disk so the user can reference it later
         // (e.g. before a PR, paste into review notes). Best-effort: any
@@ -361,14 +317,16 @@ function projectKeyFor(projectPath: string): string {
 }
 
 function scopeLabel(scope: ResolvedScope): string {
+  const extra = [
+    scope.capped ? `capped ${scope.files.length}/${scope.originalCount}` : '',
+    scope.truncated ? 'truncated' : '',
+  ].filter(Boolean).join(', ')
   switch (scope.scope.type) {
     case 'file': return `file: ${scope.scope.filePath}`
-    case 'last_commit': return 'last_commit'
+    case 'last_commit': return extra ? `last_commit (${extra})` : 'last_commit'
     case 'description': return `description: ${scope.scope.description}`
     case 'session':
-    default: return scope.capped
-      ? `session (capped ${scope.files.length}/${scope.originalCount})`
-      : 'session'
+    default: return extra ? `session (${extra})` : 'session'
   }
 }
 
@@ -396,12 +354,12 @@ async function resolveScopeFiles(
         )
         return null
       }
-      return { scope, files: [filePath], capped: false, originalCount: 1 }
+      return { scope, files: [filePath], capped: false, originalCount: 1, patch: '', truncated: false }
     }
 
     case 'last_commit': {
-      const files = await resolveLastCommitFiles(projectPath)
-      if (files.length === 0) {
+      const resolved = await resolveLastCommitDiff(projectPath)
+      if (resolved.files.length === 0 && !resolved.patch.trim()) {
         chatStore.addSystemMessage(
           'Could not determine files in the last commit. Either the project ' +
           'has no commits yet, or git is unavailable. Pass an explicit scope ' +
@@ -409,34 +367,38 @@ async function resolveScopeFiles(
         )
         return null
       }
-      return { scope, files, capped: false, originalCount: files.length }
+      return {
+        scope,
+        files: resolved.files,
+        capped: false,
+        originalCount: resolved.files.length,
+        patch: resolved.patch,
+        truncated: resolved.truncated,
+      }
     }
 
     case 'description': {
       // Sub-agent discovers its own files via Grep / Glob. We pass
       // the description through unchanged.
-      return { scope, files: [], capped: false, originalCount: 0 }
+      return { scope, files: [], capped: false, originalCount: 0, patch: '', truncated: false }
     }
 
     case 'session':
     default: {
-      const all = await collectSessionFiles()
-      if (all.length === 0) {
+      const assembled = assembleInjectedDiffs(await collectSessionEntries(), { projectPath })
+      if (assembled.files.length === 0) {
         chatStore.addSystemMessage(
           t('review.noFiles')
         )
         return null
       }
-      // Cap the list when it grows large. Reverse first so we pick the most
-      // recently-touched (assuming insertion order ≈ touch order from the
-      // checkpoint baseline).
-      const reversed = [...all].reverse()
-      const files = reversed.slice(0, SESSION_FILE_CAP)
       return {
         scope,
-        files,
-        capped: all.length > SESSION_FILE_CAP,
-        originalCount: all.length,
+        files: assembled.files,
+        capped: assembled.capped,
+        originalCount: assembled.originalCount,
+        patch: assembled.patch,
+        truncated: assembled.truncated,
       }
     }
   }
@@ -454,7 +416,7 @@ function resolveAbsolute(projectPath: string, p: string): string {
   return `${projectPath.replace(/[\\/]+$/, '')}${sep}${cleaned}`
 }
 
-async function resolveLastCommitFiles(projectPath: string): Promise<string[]> {
+async function gitStdout(projectPath: string, command: string): Promise<string | null> {
   try {
     const result = await invoke<{
       stdout: string
@@ -462,22 +424,36 @@ async function resolveLastCommitFiles(projectPath: string): Promise<string[]> {
       exitCode: number
       success: boolean
     }>('execute_command', {
-      command: 'git diff --name-only HEAD~1 HEAD',
+      command,
       cwd: projectPath,
-      timeoutSecs: 10,
+      timeoutSecs: 15,
     })
     if (!result.success) {
-      logger.warn('review', `git diff failed: ${result.stderr.slice(0, 200)}`)
-      return []
+      logger.warn('review', `${command} failed: ${result.stderr.slice(0, 200)}`)
+      return null
     }
     return result.stdout
-      .split('\n')
-      .map(s => s.trim())
-      .filter(Boolean)
   } catch (err) {
-    logger.warn('review', 'last-commit resolution threw', err)
-    return []
+    logger.warn('review', `${command} threw`, err)
+    return null
   }
+}
+
+async function resolveLastCommitDiff(projectPath: string): Promise<{
+  files: string[]
+  patch: string
+  truncated: boolean
+}> {
+  const [namesOut, patchOut] = await Promise.all([
+    gitStdout(projectPath, 'git diff --name-only HEAD~1 HEAD'),
+    gitStdout(projectPath, 'git diff HEAD~1 HEAD'),
+  ])
+  const files = (namesOut ?? '')
+    .split('\n')
+    .map(s => s.trim())
+    .filter(Boolean)
+  const clipped = clipText(patchOut ?? '', DIFF_CHAR_BUDGET, 'git diff HEAD~1')
+  return { files, patch: clipped.text, truncated: clipped.truncated }
 }
 
 function resolveScope(trimmed: string): ReviewScope {
@@ -493,109 +469,17 @@ function resolveScope(trimmed: string): ReviewScope {
   return { type: 'description', description: trimmed }
 }
 
-async function collectSessionFiles(): Promise<string[]> {
+async function collectSessionEntries(): Promise<Array<{
+  filePath: string
+  before: string | null
+  after: string | null
+}>> {
   try {
-    const diff = await CheckpointService.getInstance().getSessionDiff()
-    // Dedup + filter out files where after === null (deleted; reviewing
-    // deleted code makes no sense) and where before === after (no real
-    // change despite a checkpoint, e.g. revert-then-redo).
-    const files = new Set<string>()
-    for (const entry of diff) {
-      if (entry.after === null) continue
-      if (entry.before === entry.after) continue
-      files.add(entry.filePath)
-    }
-    return Array.from(files)
+    return await CheckpointService.getInstance().getSessionDiff()
   } catch (err) {
     logger.warn('review', 'getSessionDiff failed', err)
     return []
   }
 }
 
-function buildReviewSystemPrompt(projectPath: string): string {
-  return `<role>
-You are a senior code reviewer running as a FRESH sub-agent inside TM Code. You have no chat history with the user — only the code on disk and the review request below. This isolation is intentional: it protects you from defending decisions made earlier in the session that you would otherwise be biased to justify.
 
-Your job is to find real defects and meaningful issues, not to validate cosmetic preferences. Surprising code that works as designed is not a bug. A pattern that looks unfamiliar to you is not necessarily wrong — verify against the actual usage in the project before reporting.
-</role>
-
-<language>${languageDirective()}</language>
-
-<project_path>${projectPath}</project_path>
-
-<severity_tiers>
-Use these EXACT four tiers. Do not invent intermediate ones.
-
-CRITICAL — bugs, security holes, data loss risks, race conditions, broken invariants. The code is wrong, not just imperfect. Examples: missing await on async ops with side effects, unhandled rejection that takes down a process, SQL injection, secrets logged to disk, mutations that violate ownership.
-
-HIGH — anti-patterns the language/framework community considers wrong AND that will bite under realistic conditions. Examples: useEffect with missing dependency that captures stale state, unbounded retry loop, blocking I/O on the request thread, ignored Promise return value where the result matters.
-
-MEDIUM — fragile workarounds / bad separation of concerns. The code works today but is hard to maintain or extend. Examples: type assertions hiding a real type mismatch, magic numbers without constants, business logic in a UI component, copy-pasted code that should be a function.
-
-LOW — naming, organization, micro-readability. Defaults: do NOT report unless you have already filled the higher tiers and have token budget left. Examples: variable name unclear in context, function too long for its single concern, comments that restate the code.
-</severity_tiers>
-
-<protocol>
-1. Read the review request and identify the scope (specific file, last commit, session changes, or free-form description).
-
-2. Read the relevant files completely. Do not skim. If the request mentions a flow that spans multiple files, follow the references with ${READ_ALIAS} / ${GREP_ALIAS} / ${GLOB_ALIAS}.
-
-3. If the project has a TMS.md (project memory), read it. It often documents intentional architectural choices that look unusual but are deliberate.
-
-4. For each candidate finding, BEFORE writing it down:
-   - Verify against the source: does the code actually behave the way you fear? Read it again. Check the call sites.
-   - Ask yourself: am I flagging this because it is wrong, or because I would have written it differently? Discard the second category.
-   - Map it to ONE of the four severity tiers above. If unsure between two tiers, pick the lower one.
-
-5. Cap output: report at most TEN findings, ordered by severity (critical → high → medium → low). If you found more, summarize the rest in a final paragraph ("plus N additional MEDIUM/LOW issues — happy to detail on request").
-
-6. Format each finding as:
-
-   ### [SEVERITY] One-line summary
-   **Location:** \`relative/path/to/file.ext:LINE\`
-   **Why it matters:** one sentence on the concrete impact.
-   **Recommendation:** one-line fix direction (where to look, not full code).
-
-7. End with a one-line summary: \`Found: <N> findings (<C> critical, <H> high, <M> medium, <L> low). Reviewed: <X> files.\`
-</protocol>
-
-<constraints>
-- READ-ONLY. Do not call write_file, edit_file, create_file, delete_file, rename_file, or execute_command. They are not in your tool palette anyway, but do not try.
-- Do not propose code blocks longer than 5 lines. Recommendations are directional, not implementations.
-- Do not flag stylistic preferences unless they cross into MEDIUM (clear maintainability cost).
-- Do not flag missing tests unless the file under review IS a test, or the user explicitly asked.
-- Do not flag missing documentation unless code intent is genuinely unclear from reading.
-- If you would have nothing in CRITICAL or HIGH, say so explicitly. Do not pad with LOW just to fill the report.
-- Reasoning is forced ON for this turn. Use it: weigh each finding's severity carefully, verify against source.
-</constraints>
-
-<output>
-Brief preamble (1 line) stating what you reviewed.
-Findings, in severity order, max 10, formatted as in protocol step 6.
-Final summary line.
-</output>`
-}
-
-function buildReviewPrompt(resolved: ResolvedScope): string {
-  const { scope, files, capped, originalCount } = resolved
-  const fileList = files.map(f => `  - ${f}`).join('\n')
-
-  switch (scope.type) {
-    case 'file':
-      return `Review the file: \`${files[0]}\`\n\nRead it in full, follow references as needed using ${READ_ALIAS}/${GREP_ALIAS}, and report findings per the protocol.`
-
-    case 'last_commit':
-      return `Review the files changed in the last git commit (HEAD~1..HEAD). The IDE already resolved the file list:\n\n${fileList}\n\nRead each in full and report findings per the protocol. Pay special attention to the diff between HEAD~1 and HEAD where you can — those are the lines that just landed.`
-
-    case 'description':
-      return `Review the feature/area described: "${scope.description}"\n\nFind the relevant files yourself using ${GREP_ALIAS} / ${GLOB_ALIAS} / ${LS_ALIAS}, then review per the protocol. Don't review unrelated files.`
-
-    case 'session':
-    default: {
-      const capNote = capped
-        ? `\n\nNote: ${originalCount} files were touched this session; the IDE capped the list above to the most-recent ${files.length} to keep the review focused. If you finish with budget left, you can ask the user whether to extend.`
-        : ''
-      return `Review the files modified in the current session:\n\n${fileList}${capNote}\n\nRead each in full and report findings per the protocol. These were just changed, so focus on the changes themselves where you can infer them; treat the rest of each file as context for evaluating those changes.`
-    }
-  }
-}

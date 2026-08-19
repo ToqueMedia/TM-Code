@@ -24,8 +24,143 @@ type StoredTask = {
 
 const TERMINAL_TASK_STATUSES = new Set<TaskStatus>(['completed', 'failed', 'cancelled'])
 
+export type IncomingTask = {
+  id: string
+  description?: string
+  status: string
+  dependsOn?: string[]
+  blockedBy?: string[]
+  files?: string[]
+  evidence?: string
+  /** Owner id, or empty string/null to release. */
+  claimedBy?: string | null
+}
+
+const UPDATE_TASKS_SHAPE_HINT =
+  'Error: `tasks` must be an array of `{ id, status }` objects (description/evidence optional). ' +
+  'Example: { "tasks": [{ "id": "1.1", "status": "in_progress" }] }. ' +
+  'Wrap a single task in an array. Do not send Claude Code `todos` — use `tasks` and the existing tracker IDs.'
+
 function isTerminalTask(status: string): boolean {
   return TERMINAL_TASK_STATUSES.has(status as TaskStatus)
+}
+
+function describeReceived(value: unknown): string {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return `array(${value.length})`
+  if (typeof value === 'object') {
+    const keys = Object.keys(value as object).slice(0, 8)
+    return keys.length === 0 ? 'empty object' : `object with keys: ${keys.join(', ')}`
+  }
+  return typeof value
+}
+
+function asTaskPatch(value: unknown, fallbackId?: string): IncomingTask | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const rec = value as Record<string, unknown>
+  const rawId = typeof rec.id === 'string' ? rec.id.trim() : ''
+  const id = rawId || (fallbackId ?? '').trim()
+  const status = typeof rec.status === 'string' ? rec.status.trim() : ''
+  if (!id || !status) return null
+  const description =
+    typeof rec.description === 'string'
+      ? rec.description
+      : typeof rec.content === 'string'
+        ? rec.content
+        : undefined
+  return {
+    ...(rec as IncomingTask),
+    id,
+    status,
+    ...(description !== undefined ? { description } : {}),
+  }
+}
+
+function coerceTaskList(raw: unknown): IncomingTask[] | null {
+  if (raw == null) return null
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim()
+    if (!trimmed) return null
+    try {
+      return coerceTaskList(JSON.parse(trimmed))
+    } catch {
+      return null
+    }
+  }
+  if (Array.isArray(raw)) {
+    const mapped = raw.map((item) => asTaskPatch(item))
+    return mapped.every((t): t is IncomingTask => t !== null) ? mapped : null
+  }
+  if (typeof raw !== 'object') return null
+
+  const obj = raw as Record<string, unknown>
+  const single = asTaskPatch(obj)
+  if (single) return [single]
+
+  const keys = Object.keys(obj)
+  if (keys.length === 0) return null
+
+  if ('tasks' in obj && obj.tasks !== raw) {
+    const nested = coerceTaskList(obj.tasks)
+    if (nested) return nested
+  }
+  if ('todos' in obj && obj.todos !== raw) {
+    const nested = coerceTaskList(obj.todos)
+    if (nested) return nested
+  }
+
+  // Providers sometimes serialize arrays as `{ "0": {...}, "1": {...} }`.
+  if (keys.every((k) => /^\d+$/.test(k))) {
+    return coerceTaskList(keys.sort((a, b) => Number(a) - Number(b)).map((k) => obj[k]))
+  }
+
+  // Id-keyed map: `{ "1.1": { status: "completed" } }`.
+  const fromKeys = keys.map((k) => asTaskPatch(obj[k], k))
+  if (fromKeys.every((t): t is IncomingTask => t !== null)) return fromKeys
+
+  return null
+}
+
+/**
+ * Models (and partial JSON repair) routinely send `tasks` as a single object,
+ * a numeric-keyed map, a JSON string, or Claude Code `todos`. The executor
+ * used to crash on `.map` — a deterministic TypeError that retries cannot
+ * fix. Coerce the common shapes; otherwise return a shape error the model
+ * can act on.
+ */
+export function normalizeIncomingTasks(
+  input: unknown,
+): { tasks: IncomingTask[] } | { error: string } {
+  if (Array.isArray(input)) {
+    const tasks = coerceTaskList(input)
+    return tasks
+      ? { tasks }
+      : { error: `${UPDATE_TASKS_SHAPE_HINT} Received ${describeReceived(input)}.` }
+  }
+  if (!input || typeof input !== 'object') {
+    return { error: `${UPDATE_TASKS_SHAPE_HINT} Received ${describeReceived(input)}.` }
+  }
+
+  const rec = input as Record<string, unknown>
+  const raw = rec.tasks !== undefined ? rec.tasks : rec.todos
+  if (raw === undefined) {
+    const topLevel = asTaskPatch(rec)
+    if (topLevel) return { tasks: [topLevel] }
+    return { error: `${UPDATE_TASKS_SHAPE_HINT} No \`tasks\` array was provided.` }
+  }
+
+  const tasks = coerceTaskList(raw)
+  if (!tasks) {
+    if (rec.tasks === undefined && rec.todos !== undefined) {
+      return {
+        error:
+          `${UPDATE_TASKS_SHAPE_HINT} Received \`todos\` (${describeReceived(raw)}) — ` +
+          'resend as `tasks` using the IDs already in the tracker.',
+      }
+    }
+    return { error: `${UPDATE_TASKS_SHAPE_HINT} Received ${describeReceived(raw)}.` }
+  }
+  return { tasks }
 }
 
 // Trivial affirmations that are NOT verification evidence — flipping a task
@@ -137,18 +272,10 @@ Evidence rule: when you flip a task to "completed" you MUST include an "evidence
       const prev = useAgentStore.getState().getTasksForSession(execSid) as StoredTask[]
       const prevCompletedIds = new Set(prev.filter(t => t.status === 'completed').map(t => t.id))
 
-      type IncomingTask = {
-        id: string
-        description?: string
-        status: string
-        dependsOn?: string[]
-        blockedBy?: string[]
-        files?: string[]
-        evidence?: string
-        /** Owner id, or empty string/null to release. */
-        claimedBy?: string | null
-      }
-      const incoming = (input.tasks as IncomingTask[]).map((t) => ({
+      const normalized = normalizeIncomingTasks(input)
+      if ('error' in normalized) return normalized.error
+
+      const incoming = normalized.tasks.map((t) => ({
         ...t,
         // Empty string from the model = explicit release.
         claimedBy: t.claimedBy === '' ? null : t.claimedBy,

@@ -1058,6 +1058,32 @@ setTimeout(() => {
   })
 }, 0)
 
+/**
+ * Flush window while the transcript is the only thing competing for the
+ * main thread. 50ms is ~20fps — enough for the stream to feel live without
+ * a setState per token.
+ */
+export const STREAM_FLUSH_MS = 50
+/**
+ * Wider window while the user is typing the next prompt. The composer and
+ * the transcript share the main thread; a 50ms paint of diffs/markdown
+ * during a keystroke is the "input stutters while the agent works" report.
+ * 160ms still looks like streaming, and gives the input ~3× more room
+ * between ChatView commits.
+ */
+export const STREAM_FLUSH_MS_WHILE_TYPING = 160
+
+/** True when the prompt textarea owns focus (see `data-prompt-composer`). */
+export function isPromptComposerFocused(): boolean {
+  if (typeof document === 'undefined') return false
+  const el = document.activeElement
+  return el instanceof HTMLTextAreaElement && el.dataset.promptComposer === 'true'
+}
+
+function streamFlushDelay(): number {
+  return isPromptComposerFocused() ? STREAM_FLUSH_MS_WHILE_TYPING : STREAM_FLUSH_MS
+}
+
 function scheduleFlush() {
   // If user is currently deciding on a permission/diff/credential, buffer
   // the text until they respond. This prevents the confusing UX of text
@@ -1093,7 +1119,7 @@ function scheduleFlush() {
       if (queued.length > 0) {
         useChatStore.setState(s => ({ streamingVersion: s.streamingVersion + 1 }))
       }
-    }, 50)
+    }, streamFlushDelay())
   }
 }
 

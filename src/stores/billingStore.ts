@@ -12,7 +12,7 @@ import type { Promotion } from './promotionsStore'
 // Pricing is admin-controlled in toquemedia-studio; the IDE only consumes the
 // plan name + token budget reported by the backend. The active AI provider/model
 // is published separately as Active AI Config by the Control Plane.
-export type UserPlanName = 'explorer' | 'vibe' | 'pro' | 'max' | 'welcome' | 'byok-only'
+export type UserPlanName = 'explorer' | 'vibe' | 'pro' | 'max' | 'welcome' | 'byok-only' | 'toque-media'
 
 /**
  * Unidade de metering do plano (decisão de produto 2026-08-11 — metering
@@ -101,6 +101,25 @@ export interface MeResponse {
   }
   /** Active promotions from Firestore (filtered by time window + surface=ide). */
   promotions?: Promotion[]
+  /**
+   * Domain grant Toque Media — computed from the PERSONAL userPlan, before
+   * team pie remaps `plan` to pro/max. Lock persona/BYOK on `active`, never
+   * on `plan === 'toque-media'`.
+   */
+  toqueMedia?: {
+    eligible: boolean
+    canClaim: boolean
+    active: boolean
+    reason?:
+      | 'unverified'
+      | 'wrong_domain'
+      | 'already_active'
+      | 'paid_subscription_active'
+      | 'denied'
+      | 'claim_disabled'
+      | 'persona_unpublished'
+    expiresAt?: string
+  }
 }
 
 // ── Store ──
@@ -156,6 +175,11 @@ interface BillingState {
   // Pertença estável (id da equipa) — presente mesmo em modo pessoal, para a IDE
   // mostrar e permitir o toggle pessoal/equipa. null = não pertence a equipa.
   teamMemberOf: string | null
+  /**
+   * Grant Toque Media no plano PESSOAL. Lock de persona/BYOK lê isto — nunca
+   * `plan === 'toque-media'` (em pie o `plan` remapeia para pro/max).
+   */
+  toqueMediaActive: boolean
 }
 
 interface BillingActions {
@@ -190,6 +214,7 @@ const DEFAULT_STATE: BillingState = {
   noCredits: false,
   team: null,
   teamMemberOf: null,
+  toqueMediaActive: false,
 }
 
 // ── Cache local do snapshot de billing (arranque sem flash de plano) ──
@@ -225,6 +250,7 @@ interface BillingCacheRecord {
   tmsRemaining: number
   team?: TeamBillingContext | null
   teamMemberOf?: string | null
+  toqueMediaActive?: boolean
 }
 
 function loadBillingCache(): BillingCacheRecord | null {
@@ -267,6 +293,7 @@ export function persistBillingCache(uid: string): void {
       tmsRemaining: s.tmsRemaining,
       team: s.team,
       teamMemberOf: s.teamMemberOf,
+      toqueMediaActive: s.toqueMediaActive,
     }
     localStorage.setItem(BILLING_CACHE_KEY, JSON.stringify(record))
   } catch {
@@ -299,6 +326,7 @@ function buildInitialState(): BillingState {
     noCredits: cached.status === 'rejected',
     team: cached.team ?? null,
     teamMemberOf: cached.teamMemberOf ?? null,
+    toqueMediaActive: cached.toqueMediaActive === true,
   }
 }
 
@@ -476,7 +504,13 @@ export const useBillingStore = create<BillingState & BillingActions>((set) => ({
           }
         : null,
       teamMemberOf: data.teamMemberOf ?? null,
+      toqueMediaActive: data.toqueMedia?.active === true,
     })
+    void import('./personaStore').then(({ usePersonaStore }) => {
+      const persona = usePersonaStore.getState()
+      if (data.toqueMedia?.active) persona.lockTm()
+      else persona.unlockTm()
+    }).catch(() => {})
   },
 
   addLastRequestTokens: (tokens) => {

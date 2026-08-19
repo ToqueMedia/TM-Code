@@ -121,7 +121,7 @@ export interface LightweightAgentOptions {
    *  incluindo as DIFERIDAS, porque um run lightweight não leva `ToolSearch`
    *  e não teria como as carregar depois (ver o construtor do AgentService). */
   tools?: OpenAIToolDefinition[]
-  /** Maximum turns before stopping. Default: 50. */
+  /** Maximum turns before stopping. Omit for no ceiling (query defaults to Infinity). */
   maxTurns?: number
   /** If true, skip diff approval — tool results go directly to LLM. */
   readOnly?: boolean

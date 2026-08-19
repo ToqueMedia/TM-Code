@@ -65,8 +65,15 @@ function PromptActions({
   // Source of truth is the active session's BYOK snapshot (if any), with a
   // fallback to the current global byokStore selection for not-yet-snapshotted
   // sessions (e.g. before the first send). This mirrors the agentService logic.
-  const activeSession = useChatStore(s => s.activeSessionId ? s.sessions.get(s.activeSessionId) ?? null : null)
-  const byokSnapshot = activeSession?.byokSnapshot ?? null
+  // Primitive / stable snapshot only. Selecting the whole session object
+  // re-rendered this row (Chakra + effort/persona selectors) on every
+  // chatStore notify that replaced the session — including occupancy
+  // writes mid-run — which is one of the "composer stutters while the
+  // agent works" paths. byokSnapshot is written once per session.
+  const byokSnapshot = useChatStore(s => {
+    if (!s.activeSessionId) return null
+    return s.sessions.get(s.activeSessionId)?.byokSnapshot ?? null
+  })
 
   // Subscribe to PRIMITIVES only — selecting `resolveActive()` directly was
   // returning a fresh object reference each render, which made Zustand's
@@ -74,7 +81,8 @@ function PromptActions({
   // forever ("getSnapshot should be cached" warning + Maximum update depth).
   // Compute the resolved tuple in a memo so the reference stays stable until
   // any of the contributing fields actually changes.
-  const byokEnabled = useByokStore(s => s.enabled)
+  const toqueMediaActive = useBillingStore(s => s.toqueMediaActive)
+  const byokEnabled = useByokStore(s => s.enabled) && !toqueMediaActive
   const byokActiveProvider = useByokStore(s => s.activeProvider)
   const byokActiveModel = useByokStore(s => s.activeModel)
   const byokProviders = useByokStore(s => s.providers)

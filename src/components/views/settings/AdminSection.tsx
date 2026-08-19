@@ -232,6 +232,7 @@ const PERSONA_SLOTS: Array<{ type: import('../../../services/adminService').Pers
   { type: 'standard', label: 'Standard', desc: 'Persona base — o dia-a-dia.' },
   { type: 'expert', label: 'Expert', desc: 'Trabalho complexo — modelo mais forte.' },
   { type: 'master', label: 'Master', desc: 'Capacidade máxima — o topo do catálogo.' },
+  { type: 'tm', label: 'TM', desc: 'Slot exclusivo do plano Toque Media — não publicar até o deny estar em prod.' },
 ]
 
 function PersonasPanel({ onPublished, refreshKey }: { onPublished?: () => void; refreshKey?: number }) {

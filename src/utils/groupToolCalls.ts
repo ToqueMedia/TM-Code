@@ -22,8 +22,13 @@ import { canonicalToolName, normalizeToolInputForCanonical } from '../services/a
  *  - Failures NEVER join a group: a failed call pops out as its own red
  *    row. A green "explored 4 files" hiding one failure would be the worst
  *    possible regression.
- *  - Mutations (writes, shell, deploys) and interactive cards break groups
+ *  - Mutations (writes, deploys) and interactive cards break groups
  *    — they carry decision value and must stay individually visible.
+ *  - One-shot Bash (`execute_command`) JOINS the group, as in cli-vaz
+ *    fullscreen (`isBash` on collapseReadSearch): "Explore · 2 files ·
+ *    1 command" instead of a full terminal card splitting the run.
+ *    Failed commands still pop out. Persistent PTY (`agent_shell_*`)
+ *    stays on ShellSessionBlock — it is a session, not a one-shot.
  *  - Sub-agent calls (spawnedBy) never group — they belong to the nested
  *    delegate hierarchy, not the main-agent stream.
  *
@@ -34,24 +39,62 @@ export type ToolCallGroup =
   | { kind: 'single'; call: ToolCallDisplay }
   | { kind: 'large_read_batch'; id: string; calls: ToolCallDisplay[] }
 
-const TOOL = 'read_large_result'
+/**
+ * Streak key for paginated reads. Same `read_large_result` id, or the
+ * same file path when `read_file`/`read_around` carry offset/limit.
+ * Consecutive hits collapse into one ReadOutputBatch (range pills).
+ */
+export function readStreakKey(tc: ToolCallDisplay): string | null {
+  const name = canonicalToolName(tc.toolName)
+  if (name === 'read_large_result') {
+    const id = tc.input?.id
+    return typeof id === 'string' && id.length > 0 ? `lr:${id}` : null
+  }
+  if (name === 'read_file' || name === 'read_around') {
+    const input = normalizeToolInputForCanonical(tc.toolName, tc.input)
+    const path = typeof input.file_path === 'string' && input.file_path
+      ? input.file_path
+      : typeof input.path === 'string' && input.path
+        ? input.path
+        : null
+    if (!path) return null
+    if (input.offset == null && input.limit == null) return null
+    return `file:${path}`
+  }
+  return null
+}
 
-function readLargeResultId(tc: ToolCallDisplay): string | null {
-  if (tc.toolName !== TOOL) return null
-  const id = tc.input?.id
-  return typeof id === 'string' && id.length > 0 ? id : null
+export interface ReadRange {
+  offset: number
+  end: number
+}
+
+/** Union overlapping or contiguous ranges so 0–4k + 4k–8.6k → 0–8.6k. */
+export function mergeReadRanges<T extends ReadRange>(ranges: T[]): T[] {
+  if (ranges.length <= 1) return ranges.slice()
+  const sorted = [...ranges].sort((a, b) => a.offset - b.offset || a.end - b.end)
+  const out: T[] = [{ ...sorted[0] }]
+  for (let i = 1; i < sorted.length; i++) {
+    const cur = sorted[i]
+    const prev = out[out.length - 1]
+    if (cur.offset <= prev.end) {
+      if (cur.end > prev.end) prev.end = cur.end
+    } else {
+      out.push({ ...cur })
+    }
+  }
+  return out
 }
 
 // ─── Exploration grouping ────────────────────────────────────────────────
 
 /** Sentence categories, in product language: each maps to a verb phrase in
  *  the group header ("a ler N ficheiros" / "a pesquisar N padrões" / …). */
-export type ExplorationCategory = 'files' | 'searches' | 'dirs' | 'outputs' | 'web' | 'guides'
+export type ExplorationCategory = 'files' | 'searches' | 'dirs' | 'outputs' | 'web' | 'guides' | 'shells'
 
-/** Canonical tool → category. Read-only exploration tools ONLY — anything
- *  absent here breaks a group by definition. Deliberately excluded: shell
- *  (exit codes are decision surfaces), writes (approval surfaces), lsp
- *  (rare, unlabelled), task/memory bookkeeping (own treatment later). */
+/** Canonical tool → category. Read-only exploration tools PLUS one-shot
+ *  Bash (cli-vaz fullscreen). Anything absent here breaks a group.
+ *  Excluded: writes (approval), persistent PTY, lsp, task/memory. */
 const EXPLORATION_CATEGORIES: Record<string, ExplorationCategory> = {
   read_file: 'files',
   read_around: 'files',
@@ -63,6 +106,8 @@ const EXPLORATION_CATEGORIES: Record<string, ExplorationCategory> = {
   web_fetch: 'web',
   web_search: 'web',
   read_skill: 'guides',
+  execute_command: 'shells',
+  execute_command_background: 'shells',
 }
 
 export function explorationCategoryOf(tc: ToolCallDisplay): ExplorationCategory | null {
@@ -127,10 +172,10 @@ export function explorationCounts(calls: ToolCallDisplay[]): ExplorationCount[] 
 
   for (const item of foldExplorationItems(calls)) {
     if (item.kind === 'large_read_streak') {
-      // Streak = one action; keyed by first call id so two separate streaks
-      // of the same source (possible across a group after a re-listing)
-      // still count individually.
-      bump('outputs', item.calls[0].id)
+      // Streak = one action. File-offset streaks count as a file; large_result
+      // pagination stays an output.
+      const key = readStreakKey(item.calls[0]) ?? item.calls[0].id
+      bump(key.startsWith('file:') ? 'files' : 'outputs', key)
       continue
     }
     const category = explorationCategoryOf(item.call)
@@ -304,21 +349,17 @@ export function groupConsecutiveLargeReads(toolCalls: ToolCallDisplay[]): ToolCa
   let i = 0
   while (i < toolCalls.length) {
     const tc = toolCalls[i]
-    const id = readLargeResultId(tc)
+    const id = readStreakKey(tc)
     if (id === null) {
       groups.push({ kind: 'single', call: tc })
       i += 1
       continue
     }
-    // Greedy extension: while the NEXT call is also read_large_result with
-    // the same id, swallow it. A single read_large_result keeps the same
-    // shape (calls.length === 1) so the renderer can decide whether to
-    // bother with the batch UI for a degenerate batch of one — currently
-    // it does, since the batch component still reads cleaner than the
-    // generic tool row for paginated reads.
+    // Greedy extension: while the NEXT call shares the streak key
+    // (same large_result id, or same file path on ranged Read), swallow it.
     const batch: ToolCallDisplay[] = [tc]
     let j = i + 1
-    while (j < toolCalls.length && readLargeResultId(toolCalls[j]) === id) {
+    while (j < toolCalls.length && readStreakKey(toolCalls[j]) === id) {
       batch.push(toolCalls[j])
       j += 1
     }

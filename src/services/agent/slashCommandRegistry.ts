@@ -147,7 +147,7 @@ class SlashCommandRegistry {
       description: t('slashCmd.review.desc'),
       enabled: true,
       execute: executeReview,
-      argHint: '[optional: focus area or path]',
+      argHint: '[optional: @file, last commit, or area]',
     })
 
     this.register({

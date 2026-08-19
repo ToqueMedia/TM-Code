@@ -13,6 +13,7 @@ export const PLAN_DISPLAY: Record<UserPlanName, { label: string; color: string }
   max:       { label: 'Max',   color: tokens.colors.accent.primary },
   welcome:   { label: 'Vibe',  color: tokens.colors.accent.green },
   'byok-only': { label: 'BYOK', color: tokens.colors.accent.orange },
+  'toque-media': { label: 'TM', color: tokens.colors.text.primary },
 }
 
 interface CreditIndicatorProps {

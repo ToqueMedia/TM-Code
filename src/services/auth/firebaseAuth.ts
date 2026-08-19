@@ -600,7 +600,7 @@ class FirebaseAuthService {
         if (expectedGen !== this.authGeneration) return
         const data = snap.exists() ? snap.data() : null
         const map: Record<string, { modelId: string; contextWindow?: number; costMultiplier?: number; thinking?: ReasoningEffortOptions }> = {}
-        for (const persona of ['standard', 'expert', 'master'] as const) {
+        for (const persona of ['standard', 'expert', 'master', 'tm'] as const) {
           const entry = data?.[persona] as {
             modelId?: string
             enabled?: boolean
@@ -627,8 +627,12 @@ class FirebaseAuthService {
         // (mapa não-vazio sem ela) → reverter para standard; senão o composer
         // mostrava "EXPERT" enquanto a `active` servia por baixo, sem sinal.
         if (Object.keys(map).length > 0) {
-          void import('../../stores/personaStore').then(({ usePersonaStore }) => {
+          void Promise.all([
+            import('../../stores/personaStore'),
+            import('../../stores/billingStore'),
+          ]).then(([{ usePersonaStore }, { useBillingStore }]) => {
             const selected = usePersonaStore.getState().selected
+            if (useBillingStore.getState().toqueMediaActive && selected === 'tm') return
             if (!(selected in map) && 'standard' in map) {
               usePersonaStore.getState().setSelected('standard')
             }

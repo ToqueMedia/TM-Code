@@ -121,8 +121,12 @@ export function useNativeMenu() {
 					dispatch('sidebar:toggle')
 					break
 				case 'toggle-bottom-panel':
-				case 'toggle-terminal':
 					dispatch('panel:toggle-bottom')
+					break
+				case 'toggle-terminal':
+					void import('../stores/terminalPanelStore').then(m => {
+						m.useTerminalPanelStore.getState().toggle()
+					})
 					break
 				case 'split-editor':
 					dispatch('editor:split')

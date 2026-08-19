@@ -225,8 +225,9 @@ class AgentService {
   }
   /**
    * Set the X-Request-Type header value for subsequent API calls. Sticky
-   * across turns — call with `null` to clear. Used by /plan, /debug, /e2e,
-   * /review to route the backend to a specialised model/prompt pipeline.
+   * across turns — call with `null` to clear. A run label (plan/debug/e2e/
+   * review), not a thinking switch: unmapped types fall through to the
+   * active config. Sidecars exist for utility/vision/etc., not these.
    */
   setRequestType(type: string | null) {
     this.requestType = type;
@@ -613,7 +614,8 @@ class AgentService {
     //    sessions.
     const activeSession = useChatStore.getState().getActiveSession();
     const snapshot = activeSession?.byokSnapshot ?? null;
-    const byokActive = !!snapshot && useByokStore.getState().enabled;
+    const tmLocked = useBillingStore.getState().toqueMediaActive;
+    const byokActive = !tmLocked && !!snapshot && useByokStore.getState().enabled;
     this.byokActive = byokActive;
     this.byokSnapshot = snapshot;
 

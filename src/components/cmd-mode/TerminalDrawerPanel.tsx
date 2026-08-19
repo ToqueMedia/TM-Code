@@ -11,30 +11,20 @@ function TerminalDrawerPanel() {
   const isOpen = useTerminalPanelStore(s => s.isOpen)
   const heightPx = useTerminalPanelStore(s => s.heightPx)
   const setHeight = useTerminalPanelStore(s => s.setHeight)
-  const close = useTerminalPanelStore(s => s.close)
+  const instances = useTerminalPanelStore(s => s.instances)
+  const requestFocus = useTerminalPanelStore(s => s.requestFocus)
   const dragRef = useRef<{ startY: number; startH: number } | null>(null)
 
-  const handleClose = useCallback(() => {
-    close()
-  }, [close])
-
-  useEffect(() => {
-    if (!isOpen) return
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        handleClose()
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [isOpen, handleClose])
+  // Keep xterm mounted while PTYs are alive so reopen is instant, but do
+  // not steal Esc — that belongs to vim/less/fzf inside the PTY.
+  const keepAlive = instances.length > 0
+  const show = isOpen && !!currentProject?.path
 
   useEffect(() => {
     if (isOpen && !currentProject?.path) {
-      close()
+      useTerminalPanelStore.getState().close()
     }
-  }, [isOpen, currentProject?.path, close])
+  }, [isOpen, currentProject?.path])
 
   const handleResizeStart = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault()
@@ -45,7 +35,6 @@ function TerminalDrawerPanel() {
     const onMove = (e: PointerEvent) => {
       const drag = dragRef.current
       if (!drag) return
-      // Dragging the TOP edge up increases height.
       setHeight(drag.startH + (drag.startY - e.clientY))
     }
     const onUp = () => {
@@ -53,22 +42,23 @@ function TerminalDrawerPanel() {
       target.releasePointerCapture(event.pointerId)
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
+      requestFocus()
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
-  }, [setHeight])
+  }, [setHeight, requestFocus])
 
   return (
     <Flex
       direction="column"
       w="100%"
-      h={isOpen ? `${heightPx}px` : '0px'}
+      h={show ? `${heightPx}px` : '0px'}
       flexShrink={0}
       bg={tokens.colors.terminal.background}
-      borderTop={isOpen ? `1px solid ${tokens.colors.border.panel}` : 'none'}
+      borderTop={show ? `1px solid ${tokens.colors.border.panel}` : 'none'}
       overflow="hidden"
     >
-      {isOpen && (
+      {show && (
         <Box
           role="separator"
           aria-orientation="horizontal"
@@ -81,8 +71,14 @@ function TerminalDrawerPanel() {
           onPointerDown={handleResizeStart}
         />
       )}
-      <Box flex={1} minH={0} overflow="hidden">
-        {currentProject?.path && (
+      <Box
+        flex={1}
+        minH={0}
+        overflow="hidden"
+        visibility={show ? 'visible' : 'hidden'}
+        aria-hidden={!show}
+      >
+        {currentProject?.path && (show || keepAlive) && (
           <TerminalPanel projectPath={currentProject.path} showBorder={false} />
         )}
       </Box>

@@ -1,4 +1,4 @@
-import { memo, useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react'
+import { memo, useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo, useDeferredValue, type ReactNode } from 'react'
 import { Flex, Box, HStack, Text, VStack } from '@chakra-ui/react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { VscShield, VscCheck, VscWarning, VscEye, VscEllipsis, VscHistory, VscClose, VscChevronDown, VscTerminal } from 'react-icons/vsc'
@@ -28,8 +28,129 @@ import { CollabShareControls } from '../collab/CollabShareControls'
 import PromoBanner from '../welcome/PromoBanner'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
+import type { ChatMessage } from '../../types/chat'
 
-function ChatView() {
+/**
+ * Live transcript paint is a React transition, not an urgent update.
+ *
+ * Why this split exists
+ * ---------------------
+ * Messages are mutated IN PLACE and `streamingVersion` is the only signal
+ * that content grew (see chatStore). ChatView used to subscribe to that
+ * counter and re-render the whole column — toolbar, window, every bubble
+ * — every 50ms flush. The streaming bubble's memo comparator returns
+ * `false` on purpose, so each flush walked Chakra + diffs + markdown on
+ * the same main thread the composer uses. Typing the next (queued)
+ * prompt then waited on that commit: the "composer freezes while the
+ * agent works" report (InlineDiff profile, 2026-08-10: 61% Chakra style
+ * engine).
+ *
+ * `useDeferredValue` keeps the last painted tree on screen during
+ * keystrokes. The urgent render of this wrapper is cheap (counter +
+ * memo bail-out). The expensive bubble pass runs as a transition and
+ * yields to input.
+ */
+const TranscriptBubbles = memo(function TranscriptBubbles({
+  items,
+  streamingMessageId,
+  paintVersion,
+}: {
+  items: ChatMessage[]
+  streamingMessageId: string | null
+  paintVersion: number
+}) {
+  void paintVersion
+  return (
+    <>
+      {items.map(msg => (
+        <MessageBubble
+          key={msg.id}
+          message={msg}
+          // msg.isStreaming cobre bolhas de TAREFAS PARALELAS
+          // (Fase 4: mutadas in-place na sessão delas) — sem isto o
+          // memo do MessageBubble bloqueava o re-render e o
+          // streaming da tarefa ficava invisível até ao fim.
+          isStreaming={msg.id === streamingMessageId || msg.isStreaming === true}
+        />
+      ))}
+    </>
+  )
+})
+
+function DeferredTranscriptBubbles({
+  items,
+  streamingMessageId,
+  onPainted,
+}: {
+  items: ChatMessage[]
+  streamingMessageId: string | null
+  onPainted: () => void
+}) {
+  const streamingVersion = useChatStore(s => s.streamingVersion)
+  const paintVersion = useDeferredValue(streamingVersion)
+  useEffect(() => {
+    onPainted()
+  }, [paintVersion, onPainted])
+  return (
+    <TranscriptBubbles
+      items={items}
+      streamingMessageId={streamingMessageId}
+      paintVersion={paintVersion}
+    />
+  )
+}
+
+/**
+ * Isolated so `agentStore.status` ticks during a run (awaiting_response ↔
+ * applying) cannot re-render the ChatView column. The banner only cares
+ * about the error state; every other status change is noise for this tree.
+ */
+function AgentErrorBanner() {
+  const agentStatus = useAgentStore(s => s.status)
+  const agentError = useAgentStore(s => s.error)
+  if (agentStatus !== 'error' || !agentError) return null
+  return (
+    <Flex
+      align="center"
+      gap={2}
+      px={4}
+      py="6px"
+      flexShrink={0}
+      bg="rgba(248, 81, 73, 0.08)"
+      borderBottom="1px solid rgba(248, 81, 73, 0.25)"
+    >
+      <Box flexShrink={0} color={tokens.colors.accent.red}>
+        <VscWarning size={14} />
+      </Box>
+      <Text fontSize="12px" color={tokens.colors.accent.red} fontWeight={500} flex={1} lineClamp={2}>
+        {agentError}
+      </Text>
+      <Box
+        as="button"
+        display="flex"
+        alignItems="center"
+        justifyContent="center"
+        w="20px"
+        h="20px"
+        borderRadius="4px"
+        color={tokens.colors.accent.red}
+        opacity={0.7}
+        cursor="pointer"
+        transition={`all ${tokens.transition.fast}`}
+        _hover={{ opacity: 1, bg: tokens.colors.accent.redSubtle }}
+        onClick={() => {
+          useAgentStore.getState().setError(null)
+          useAgentStore.getState().setStatus('idle')
+        }}
+        aria-label={t('chat.dismissError')}
+      >
+        <VscClose size={12} />
+      </Box>
+    </Flex>
+  )
+}
+
+function ChatView({ composer }: { composer?: ReactNode } = {}) {
   const activeSessionId = useChatStore(s => s.activeSessionId)
   const sessions = useChatStore(s => s.sessions)
   const streamingMessageId = useChatStore(s => s.streamingMessageId)
@@ -54,20 +175,14 @@ function ChatView() {
   const tokenBudget = useBillingStore(s => s.tokenBudget)
   const tmsRemaining = useBillingStore(s => s.tmsRemaining)
   const { byokInPlay: showModelIndicator } = useByokState()
-  // Last terminal error from the agent loop. The ServiceError thrown for 402
-  // (NO_CREDITS), 429 (BUDGET_EXHAUSTED / RATE_LIMIT), 5xx, AUTH_EXPIRED, etc.
-  // lands here via onError. Status pins to 'error' until the next turn flips
-  // it back to 'awaiting_response', so we tie banner visibility to status —
-  // the error string lingers in the store but only renders while we're in
-  // the error state.
-  const agentStatus = useAgentStore(s => s.status)
-  const agentError = useAgentStore(s => s.error)
-  // streamingVersion must be subscribed — it's the ONLY selector that triggers
-  // re-renders during streaming (messages are mutated in-place for performance).
-  const streamingVersion = useChatStore(s => s.streamingVersion)
   // conversationVersion bumps on compaction. Without subscribing here, the
   // useMemo for lastBoundaryIndex sees the same `rawMessages` reference
   // (appendTextDelta mutates in-place) and returns a cached stale value.
+  //
+  // streamingVersion deliberately does NOT live here. Subscribing would
+  // re-render this whole column on every flush (toolbar + window + every
+  // bubble). The live transcript subscribes via DeferredTranscriptBubbles
+  // and paints through useDeferredValue so composer keystrokes stay urgent.
   const conversationVersion = useChatStore(s => s.conversationVersion)
 
   const session = activeSessionId ? sessions.get(activeSessionId) : null
@@ -103,6 +218,16 @@ function ChatView() {
   const messages = (lastBoundaryIndex === -1 || revealPreBoundary)
     ? rawMessages
     : rawMessages.slice(lastBoundaryIndex)
+  const isEmptySession = !isLoadingSession && messages.length === 0
+  const centerComposer = Boolean(composer) && isEmptySession
+  const composerSpacerCss = {
+    flexGrow: centerComposer ? 1 : 0,
+    flexShrink: 1,
+    flexBasis: 0,
+    minHeight: 0,
+    transition: 'flex-grow 0.55s cubic-bezier(0.22, 1, 0.36, 1)',
+    '@media (prefers-reduced-motion: reduce)': { transition: 'none' },
+  } as const
   const preBoundaryCount = lastBoundaryIndex === -1 ? 0 : lastBoundaryIndex
   const hasHiddenPreBoundary = preBoundaryCount > 0 && !revealPreBoundary
   const projectPath = currentProject?.path || ''
@@ -217,15 +342,17 @@ function ChatView() {
     }
   }, [messages.length, scrollToBottom])
 
-  // Re-assert the bottom target during streaming — compensates for
-  // ResizeObserver race conditions caused by the 50ms buffer flush + in-place
-  // mutations. 'instant' matches the hook's resize mode: a single imperceptible
+  // Re-assert the bottom target after a deferred transcript paint —
+  // compensates for ResizeObserver races caused by the flush + in-place
+  // mutations. Tied to paint, not to the raw streamingVersion counter,
+  // so this effect cannot drag ChatView into the 50ms flush path.
+  // 'instant' matches the hook's resize mode: a single imperceptible
   // pin, never an animated scroll (see the resize comment above).
-  useEffect(() => {
+  const pinToBottomOnPaint = useCallback(() => {
     if (isStreaming && wasAtBottomRef.current) {
       scrollToBottom('instant')
     }
-  }, [streamingVersion, isStreaming, scrollToBottom])
+  }, [isStreaming, scrollToBottom])
 
   // When streaming ends, the AgentActivityIndicator unmounts (height change)
   // and the hook's "escaped from lock" may be stale. Force a final scroll.
@@ -487,52 +614,7 @@ function ChatView() {
           equipa). Ausente em workers antigos → sem banner (degrada limpo). */}
       <PlanExpiryNotice />
 
-      {/* Agent error banner — surfaces 402/429/5xx/AUTH_EXPIRED messages
-          from the agent loop. The shell-styled status line has its own
-          error label; this keeps the main chat equally visible, so a "Sem créditos
-          disponíveis" or "Sessão expirada" message would land in
-          agentStore.error and never render. Visibility is tied to status
-          ('error') so the banner clears automatically when the next turn
-          starts (setStatus → 'awaiting_response'). */}
-      {agentStatus === 'error' && agentError && (
-        <Flex
-          align="center"
-          gap={2}
-          px={4}
-          py="6px"
-          flexShrink={0}
-          bg="rgba(248, 81, 73, 0.08)"
-          borderBottom="1px solid rgba(248, 81, 73, 0.25)"
-        >
-          <Box flexShrink={0} color={tokens.colors.accent.red}>
-            <VscWarning size={14} />
-          </Box>
-          <Text fontSize="12px" color={tokens.colors.accent.red} fontWeight={500} flex={1} lineClamp={2}>
-            {agentError}
-          </Text>
-          <Box
-            as="button"
-            display="flex"
-            alignItems="center"
-            justifyContent="center"
-            w="20px"
-            h="20px"
-            borderRadius="4px"
-            color={tokens.colors.accent.red}
-            opacity={0.7}
-            cursor="pointer"
-            transition={`all ${tokens.transition.fast}`}
-            _hover={{ opacity: 1, bg: tokens.colors.accent.redSubtle }}
-            onClick={() => {
-              useAgentStore.getState().setError(null)
-              useAgentStore.getState().setStatus('idle')
-            }}
-            aria-label={t('chat.dismissError')}
-          >
-            <VscClose size={12} />
-          </Box>
-        </Flex>
-      )}
+      <AgentErrorBanner />
 
       {/* Billing overage banner — always visible (loading / empty state / with
           messages) when the cycle budget is exhausted. The previous version
@@ -582,7 +664,25 @@ function ChatView() {
         </Flex>
       )}
 
-        <Box position="relative" flex="1" overflow="hidden">
+      <Flex direction="column" flex="1" minH={0} overflow="hidden">
+      <Box aria-hidden css={composerSpacerCss} />
+      {centerComposer && (
+        <Box flexShrink={0} w="100%" position="relative">
+          <Box position="absolute" top="0" left="0" right="0" transform="translateY(-100%)" px={4} pb={2}>
+            <PromoBanner />
+          </Box>
+          <ChatSuggestions>
+            {composer}
+          </ChatSuggestions>
+        </Box>
+      )}
+        <Box
+          position="relative"
+          flex={centerComposer ? '0 0 0' : '1'}
+          overflow="hidden"
+          display={centerComposer ? 'none' : 'block'}
+          minH={0}
+        >
         <Box
           ref={scrollRef}
           role="log"
@@ -609,21 +709,17 @@ function ChatView() {
                 <ChatSkeleton />
               </Box>
             ) : messages.length === 0 ? (
-              // Empty state for ANY chat with no messages — not just empty
-              // projects. The previous `hasContent === false` gate depended on
-              // an async glob_files invoke; when that resolved to null/true (or
-              // its callback was dropped on a dev reload) an empty session
-              // showed a blank pane instead of the suggestions.
-              // PromoBanner rides here: it shows while there's an active promotion
-              // and vanishes the moment the chat opens (messages > 0 swaps this
-              // whole branch out). Returns null when there's no promo, so it's
-              // invisible otherwise.
+              // Fallback empty state when ChatView is mounted without a
+              // composer slot (tests, generating). The live app passes
+              // `composer` and renders the hero above the PromptBar instead.
+              composer ? null : (
               <>
                 <Box px={4} pt={4} w="100%" flexShrink={0}>
                   <PromoBanner />
                 </Box>
                 <ChatSuggestions />
               </>
+              )
             ) : (
               <Box
                 maxW="980px"
@@ -681,17 +777,11 @@ function ChatView() {
                     {t('chat.loadEarlier').replace('{count}', String(hiddenCount))}
                   </Box>
                 )}
-                {visibleItems.map(msg => (
-                  <MessageBubble
-                    key={msg.id}
-                    message={msg}
-                    // msg.isStreaming cobre bolhas de TAREFAS PARALELAS
-                    // (Fase 4: mutadas in-place na sessão delas) — sem isto o
-                    // memo do MessageBubble bloqueava o re-render e o
-                    // streaming da tarefa ficava invisível até ao fim.
-                    isStreaming={msg.id === streamingMessageId || msg.isStreaming === true}
-                  />
-                ))}
+                <DeferredTranscriptBubbles
+                  items={visibleItems}
+                  streamingMessageId={streamingMessageId}
+                  onPainted={pinToBottomOnPaint}
+                />
                 <AgentActivityIndicator />
                 {postCompactSurveyPending && !isStreaming && <PostCompactSurvey />}
               </Box>
@@ -736,7 +826,11 @@ function ChatView() {
       {/* Rotating command tips — parity with the shell-styled working tips.
           Subtle line above the PromptBar, only while the agent is working;
           surfaces the slash-command catalogue progressively. */}
-      <ChatWorkingTips />
+      {!centerComposer && <ChatWorkingTips />}
+
+      {!centerComposer && composer}
+      <Box aria-hidden css={composerSpacerCss} />
+      </Flex>
 
     </Flex>
   )

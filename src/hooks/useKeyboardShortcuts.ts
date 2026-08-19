@@ -5,8 +5,17 @@ import { useLayoutStore, VIEWS_WITHOUT_DIFF_BAR } from '../stores/layoutStore';
 import { useChatStore } from '../stores/chatStore';
 import { useSettingsStore, matchesBinding } from '../stores/settingsStore';
 import { useEditorRepository } from '../stores/editorStore';
+import { useTerminalPanelStore } from '../stores/terminalPanelStore';
 import MonacoBridge from '../utils/monacoBridge';
 import { t } from '@/i18n';
+
+function isPtyFocused(): boolean {
+  return !!document.activeElement?.closest?.('[data-pty-terminal]')
+}
+
+function newTerminalHotkey(e: KeyboardEvent): boolean {
+  return (e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === '`' || e.code === 'Backquote')
+}
 
 export function useKeyboardShortcuts() {
   const { currentProject } = useProjectStore();
@@ -25,10 +34,32 @@ export function useKeyboardShortcuts() {
         if (MonacoBridge.getInstance().getCurrentEditor()) { e.preventDefault(); return; }
       }
 
+      // Inside a PTY: only chrome shortcuts. Ctrl+W, F5, Esc, Tab belong to
+      // the shell — stealing them made vim/less/fzf unusable.
+      if (isPtyFocused()) {
+        if (currentProject && matchesBinding(e, sc.toggleTerminal)) {
+          e.preventDefault()
+          useTerminalPanelStore.getState().toggle()
+          return
+        }
+        if (currentProject && newTerminalHotkey(e)) {
+          e.preventDefault()
+          useTerminalPanelStore.getState().addTerminal()
+          return
+        }
+        return
+      }
+
       if (currentProject && matchesBinding(e, sc.toggleTerminal)) {
         e.preventDefault();
-        window.dispatchEvent(new CustomEvent('panel:toggle-bottom'));
+        useTerminalPanelStore.getState().toggle();
         return;
+      }
+
+      if (currentProject && newTerminalHotkey(e)) {
+        e.preventDefault()
+        useTerminalPanelStore.getState().addTerminal()
+        return
       }
 
       // Open File: Cmd+Shift+O (open file dialog)

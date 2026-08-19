@@ -24,4 +24,13 @@ describe('personaStore', () => {
     usePersonaStore.getState().setSelected('wizard')
     expect(usePersonaStore.getState().selected).toBe('expert')
   })
+
+  it('lockTm não persiste tm no storage público e unlock restaura', () => {
+    usePersonaStore.getState().setSelected('expert')
+    usePersonaStore.getState().lockTm()
+    expect(usePersonaStore.getState().selected).toBe('tm')
+    expect(localStorage.getItem('tm_model_persona')).toBe('expert')
+    usePersonaStore.getState().unlockTm()
+    expect(usePersonaStore.getState().selected).toBe('expert')
+  })
 })

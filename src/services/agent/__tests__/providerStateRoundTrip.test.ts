@@ -1,6 +1,7 @@
 import { toOpenAIMessages, type QueryMessage } from '../query'
 import type { ProviderState, ConversationMessage } from '../../../types/chat'
 import { toQueryMessages } from '../queryEngine'
+import { downgradeHistoryToText } from '../promptValueHelpers'
 
 describe('Provider-native reasoning round-trip', () => {
   // ── Helper: build a ProviderState with a native assistant message ──
@@ -295,6 +296,40 @@ describe('Provider-native reasoning round-trip', () => {
 
       expect((apiMessages[0] as any).tool_calls).toBeUndefined()
       expect(apiMessages.some((m: any) => m.role === 'tool')).toBe(false)
+    })
+
+    it('downgradeHistoryToText (modelo sem visão) não parte o par _native.tool_calls / tool_result', () => {
+      const history: ConversationMessage[] = [
+        {
+          role: 'assistant',
+          content: '',
+          _native: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [
+              {
+                id: 'call_read',
+                type: 'function',
+                function: { name: 'Read', arguments: '{"file_path":"src/a.ts"}' },
+              },
+            ],
+          },
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              toolCallId: 'call_read',
+              content: 'export const a = 1\n'.repeat(80),
+            },
+          ],
+        },
+      ]
+      const api = toOpenAIMessages(toQueryMessages(downgradeHistoryToText(history)))
+      expect((api[0] as { tool_calls?: unknown[] }).tool_calls).toHaveLength(1)
+      const toolMsg = api.find((m) => (m as { role?: string }).role === 'tool') as { content?: string } | undefined
+      expect(toolMsg?.content).toContain('export const a = 1')
     })
   })
 

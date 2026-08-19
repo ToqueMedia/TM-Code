@@ -9,7 +9,7 @@ import { browserSession } from '../../browserSessionManager'
 import { trackEvent } from '../../analytics'
 import { logger } from '../../../utils/logger'
 import { t } from '../../../i18n'
-import { languageDirective } from './_languageInstruction'
+import { buildE2EPrompt } from './e2ePrompt'
 
 /**
  * Classify a `browserSession.start()` failure so we surface the right fix.
@@ -75,13 +75,13 @@ function diagnoseBrowserStartFailure(message: string): { kind: string; remedy: s
 }
 
 /**
- * `/te2e <what to validate>` — agent drives a real browser to validate
+ * `/te2e <what to validate>` — agent drives a real browser to smoke-check
  * the live preview. Uses the Playwright MCP server (lazy-spawned). The
  * user opted into the slash command; browser actions run without
  * per-action prompts so the test flows uninterrupted.
  *
- * No spec files written, no CI artifacts — exploratory validation only.
- * For regression in CI, the user writes specs by hand.
+ * Exploratory validation only — happy path plus one cheap edge, not a
+ * 12-class adversarial matrix. No spec files, no source edits.
  */
 export async function executeE2E(
   args: string,
@@ -103,9 +103,8 @@ export async function executeE2E(
   }
 
   // Paywall: /te2e is a paid feature. The Explorer plan exists to convert
-  // free users to paid; reasoning-heavy adversarial testing is one of the
-  // wedges that makes upgrading worthwhile. Surface a clear upgrade
-  // message and bring the user one click closer to the plans page.
+  // free users to paid; a live browser session is one of the wedges.
+  // Surface a clear upgrade message and open Settings.
   const plan = useBillingStore.getState().plan
   if (plan === 'explorer') {
     void trackEvent('e2e_paywall_hit', { plan })
@@ -159,11 +158,8 @@ export async function executeE2E(
     return
   }
 
-  // Force reasoning ON for adversarial testing. Same wiring /debug and
-  // /plan use: backend reads X-Request-Type and injects enable_thinking
-  // for the turn. Without this, the model cannot derive a meaningful
-  // scenario matrix from the code or judge whether a failure is a real
-  // bug vs. intentional design — adversarial collapses to smoke testing.
+  // Sticky label for this run — not a thinking switch. Effort follows
+  // the user's selector; the worker has no e2e sidecar.
   const agentService = AgentService.getInstance()
   agentService.setRequestType('e2e')
   try {
@@ -175,57 +171,4 @@ export async function executeE2E(
   } finally {
     agentService.setRequestType(null)
   }
-}
-
-function buildE2EPrompt(request: string, projectPath: string): string {
-  return `<role>
-Adversarial QA engineer. The user wants bugs in this feature, not happy-path confirmation. Derive the surface from the code, drive scenarios designed to break it, reason before acting. Reasoning is forced ON for every turn — use it.
-</role>
-
-<language>${languageDirective()}</language>
-
-<request>${request}</request>
-<project_path>${projectPath}</project_path>
-
-<protocol>
-Three phases. Do not collapse them.
-
-PHASE 1 — Discover (read code first):
-  - Read every file that touches the feature: components, routes, guards, stores, validation schemas, API endpoints, error handlers.
-  - Build a surface map: inputs, states, validations PRESENT and MISSING, side effects, anticipated error paths.
-  - Derive a scenario matrix covering the classes that apply: happy, empty/blank, boundary (max+1, min-1, very long), invalid format (no @, weak password, unicode, emojis, whitespace), state transitions (anon→protected, expired token, refresh mid-action), network (offline, 4xx/5xx via direct backend calls), persistence (refresh, back/forward, multi-tab), concurrency (double-submit, race), authorization (access without perm, IDOR), AND visual/UI (layout breaks, contrast, label/role mismatches, focus order, error-state styling). Skip non-applicable classes but say so.
-  - Confirm dev server URL via \`read_dev_server_logs\`; \`start_dev_server\` if needed.
-
-PHASE 2 — Execute:
-  - Navigate. Snapshot (\`mcp__browser__browser_snapshot\`) — accessibility tree is the structural source of truth (roles, labels, refs).
-  - For visual concerns (layout, contrast, alignment, missing visual feedback), call \`mcp__browser__browser_take_screenshot\`. On paid plans the backend has a multimodal pipeline that pre-processes images, so screenshots are not blind data — request them when the bug class is visual.
-  - For each scenario: drive inputs → snapshot (and screenshot if visual) after → reason about the result. If something looks wrong, verify against source — surprising ≠ defective.
-  - Probe the backend directly with curl/http_client when UI does client-side validation. Backend trusting client is a common defect class.
-  - Reset between scenarios (refresh/navigate/clear) so failures are not carryover.
-
-PHASE 3 — Report:
-  - Bugs: one-line summary, severity (data-loss > security > correctness > UX/visual), minimal repro, expected vs actual, file:line.
-  - Coverage: which classes ran, which were skipped and why.
-  - Gaps: state explicitly any class you couldn't cover (e.g. cross-browser when only Chromium ran, tight-timing races, performance).
-  - Recommendations: one-line fix direction per bug.
-</protocol>
-
-<constraints>
-- Do not skip Phase 1. Invented selectors and scenarios produce noise reports.
-- Verify each suspected bug against source before reporting — surprising behaviour may be intentional.
-- Do not write .spec.ts files. Do not edit source code in this session.
-- Do not use real credentials unless the user provided them. Stop at auth walls; describe what would follow.
-- Use \`browser_snapshot\` for selectors and structure; use \`browser_take_screenshot\` for visual checks (paid-plan multimodal handles the image side-channel). Don't use screenshots when a snapshot is sufficient — they cost more tokens.
-- BEFORE destructive scenarios (data at scale, privilege escalation on real backend, deleting records, payment bypass, SQL injection/XSS payloads), STOP and ask.
-- BEFORE running adversarial scenarios on a URL that is not clearly localhost/staging, ask the user.
-- After ~20 browser actions, pause and ask the user whether to continue. Long sessions burn tokens and patience.
-- Two failed retries on the same step → move on, note in report.
-</constraints>
-
-<output>
-- Phase 1: surface map (1-3 lines per category) + scenario matrix list.
-- Phase 2: per scenario — action, snapshot/screenshot delta, judgement (pass/suspected/verified bug).
-- Phase 3: structured report.
-- Final line: \`Found: <N> bugs (<S1> severity1, <S2> severity2, …). Covered: <X>/<Y> scenario classes.\`
-</output>`
 }

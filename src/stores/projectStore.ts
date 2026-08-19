@@ -15,6 +15,7 @@ import CheckpointService from '../services/agent/checkpointService';
 import { useChatStore } from './chatStore';
 
 import { useProblemsStore } from './problemsStore';
+import { useTerminalPanelStore } from './terminalPanelStore';
 import { IS_VITE_DEV } from '../utils/viteEnv';
 import { devServerManager } from '../services/devServerManager';
 import { logger } from '../utils/logger';
@@ -214,6 +215,11 @@ function tearDownProject(_opts?: { forceCancelAll?: boolean }) {
 
   // Close editor files
   useEditorRepository.getState().closeAllFiles();
+
+  // Kill user PTYs — they were spawned in the project that is going away.
+  void import('./terminalPanelStore').then(m => {
+    m.useTerminalPanelStore.getState().closeAll()
+  }).catch(() => {})
 
   // Clear all chat sessions and streaming state (full wipe — no park on close)
   useChatStore.getState().clearAllSessions();
@@ -437,6 +443,9 @@ export const useProjectStore = create<ProjectStore>()(
           // Clear editor open files and diagnostics when opening a new project
           try { useEditorRepository.getState().closeAllFiles() } catch (e) {
             logger.error('project', 'Failed to close editor files during project switch:', e)
+          }
+          try { useTerminalPanelStore.getState().closeAll() } catch (e) {
+            logger.error('project', 'Failed to close terminals during project switch:', e)
           }
           useProblemsStore.getState().clear()
 

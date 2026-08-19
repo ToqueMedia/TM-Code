@@ -9,6 +9,7 @@ import MonacoBridge from '@/utils/monacoBridge'
 import { useSyncExternalStore } from 'react'
 import { getQueryGuard } from '@/services/agent/queryGuard'
 import { useParallelTaskStore } from '@/stores/parallelTaskStore'
+import { useTerminalPanelStore } from '@/stores/terminalPanelStore'
 import ContextMenuOverlay, { type ContextMenuItem } from '../ContextMenuOverlay'
 import { t } from '@/i18n'
 
@@ -148,7 +149,7 @@ function useMenuDefinitions(): MenuDef[] {
 				{ label: t('menu.preview'), action() { useLayoutStore.getState().setViewMode('preview') } },
 				sep(),
 				{ label: t('menu.toggleSidebar'), hint: 'Ctrl+B', action() { dispatch('sidebar:toggle') } },
-				{ label: t('menu.toggleBottomPanel'), hint: 'Ctrl+`', action() { dispatch('panel:toggle-bottom') } },
+				{ label: t('menu.toggleBottomPanel'), action() { dispatch('panel:toggle-bottom') } },
 			]
 			if (inEditor) {
 				const noEditor = !hasEditor()
@@ -172,7 +173,8 @@ function useMenuDefinitions(): MenuDef[] {
 		label: t('menu.terminal'),
 		items() {
 			return [
-				{ label: t('menu.toggleTerminal'), hint: 'Ctrl+`', action() { dispatch('panel:toggle-bottom') } },
+				{ label: t('menu.toggleTerminal'), hint: 'Ctrl+`', action() { useTerminalPanelStore.getState().toggle() } },
+				{ label: t('terminal.new'), hint: 'Ctrl+Shift+`', action() { useTerminalPanelStore.getState().addTerminal() } },
 			]
 		},
 	}

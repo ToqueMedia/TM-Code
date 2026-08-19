@@ -85,6 +85,20 @@ export const IMAGE_PRICE_USD = {
 } as const
 
 /**
+ * Rate card HappyHorse 1.1 I2V (Model Studio / Bailian, ago 2026):
+ * ¥0,9/s em 720P (~$0,125) e ¥1,6/s em 1080P (~$0,22). Overridable no KV.
+ */
+export const VIDEO_PRICE_USD = {
+  second720: 0.125,
+  second1080: 0.22,
+} as const
+
+export interface VideoPricing {
+  second720?: number
+  second1080?: number
+}
+
+/**
  * Âncora de conversão USD → tokens: o orçamento deste produto conta-se em
  * TOKENS, portanto uma imagem tem de ser traduzida para essa moeda. Este é o
  * preço por milhão de tokens de SAÍDA do modelo de texto de referência.
@@ -108,7 +122,11 @@ export interface ImagePricing {
   input?: number
 }
 
-function parseUsageObject(value: unknown, imagePricing: ImagePricing | undefined): ObservedUsage | null {
+function parseUsageObject(
+  value: unknown,
+  imagePricing: ImagePricing | undefined,
+  videoPricing?: VideoPricing,
+): ObservedUsage | null {
   const usage = value as {
     prompt_tokens?: unknown
     completion_tokens?: unknown
@@ -118,6 +136,10 @@ function parseUsageObject(value: unknown, imagePricing: ImagePricing | undefined
     output_image_count?: unknown
     output_image_type?: unknown
     input_image_count?: unknown
+    duration?: unknown
+    output_video_duration?: unknown
+    video_count?: unknown
+    SR?: unknown
   } | null
   if (!usage || typeof usage !== 'object') return null
   const prompt = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : 0
@@ -135,6 +157,25 @@ function parseUsageObject(value: unknown, imagePricing: ImagePricing | undefined
   // sem lhe tocar: multiplicador da persona, overage e fatia de equipa.
   const outCount = typeof usage.output_image_count === 'number' ? usage.output_image_count : 0
   const inCount = typeof usage.input_image_count === 'number' ? usage.input_image_count : 0
+  const videoSeconds = typeof usage.output_video_duration === 'number' && usage.output_video_duration > 0
+    ? usage.output_video_duration
+    : typeof usage.duration === 'number' && usage.duration > 0
+      ? usage.duration
+      : 0
+  if (prompt <= 0 && completion <= 0 && outCount === 0 && videoSeconds > 0) {
+    const sr = typeof usage.SR === 'number' ? usage.SR : 1080
+    const perSecond = sr >= 1080
+      ? (videoPricing?.second1080 ?? VIDEO_PRICE_USD.second1080)
+      : (videoPricing?.second720 ?? VIDEO_PRICE_USD.second720)
+    const usd = videoSeconds * perSecond
+    return {
+      promptTokens: 0,
+      completionTokens: imageUsdToTokens(usd),
+      cachedTokens: 0,
+      imageCostUsd: usd,
+      authoritative: true,
+    }
+  }
   if (prompt <= 0 && completion <= 0 && outCount > 0) {
     // Escalão desconhecido → assume-se o CARO. Um `output_image_type` que a
     // Alibaba renomeie não pode virar desconto silencioso.
@@ -187,6 +228,7 @@ export function observeUsage(
   /** Preços por imagem (USD) da config — só usados quando a resposta é de
    *  geração de imagens. Ausente → o rate card oficial em IMAGE_PRICE_USD. */
   imagePricing?: ImagePricing,
+  videoPricing?: VideoPricing,
 ): UsageObserver {
   const isSse = (contentType ?? '').includes('text/event-stream')
   const decoder = new TextDecoder()
@@ -206,7 +248,10 @@ export function observeUsage(
     if (!usage && !isSse && jsonBuffer) {
       try {
         const parsed = JSON.parse(jsonBuffer) as { usage?: unknown }
-        usage = parseUsageObject(parsed.usage, imagePricing)
+        usage = parseUsageObject(parsed.usage, imagePricing, videoPricing)
+        if (!usage && isDashScopeTaskEnvelope(parsed) && !isBillableVideoTask(parsed)) {
+          usage = { promptTokens: 0, completionTokens: 0, cachedTokens: 0, authoritative: true }
+        }
       } catch { /* corpo não-JSON — segue para a estimativa */ }
     }
     if (!usage && totalBytes > 0) {
@@ -237,7 +282,7 @@ export function observeUsage(
         if (payload && payload !== '[DONE]' && payload.includes('"usage"')) {
           try {
             const parsed = JSON.parse(payload) as { usage?: unknown }
-            const found = parseUsageObject(parsed.usage, imagePricing)
+            const found = parseUsageObject(parsed.usage, imagePricing, videoPricing)
             if (found) usage = found
           } catch { /* chunk parcial/não-JSON — ignora */ }
         }
@@ -288,4 +333,20 @@ export function observeUsage(
     done,
     settle: finish,
   }
+}
+
+function isDashScopeTaskEnvelope(parsed: unknown): boolean {
+  if (!parsed || typeof parsed !== 'object') return false
+  const output = (parsed as { output?: unknown }).output
+  if (!output || typeof output !== 'object') return false
+  const task = output as { task_id?: unknown; task_status?: unknown }
+  return typeof task.task_id === 'string' && typeof task.task_status === 'string'
+}
+
+function isBillableVideoTask(parsed: unknown): boolean {
+  if (!parsed || typeof parsed !== 'object') return false
+  const usage = (parsed as { usage?: { duration?: unknown; output_video_duration?: unknown } }).usage
+  if (!usage || typeof usage !== 'object') return false
+  return (typeof usage.output_video_duration === 'number' && usage.output_video_duration > 0)
+    || (typeof usage.duration === 'number' && usage.duration > 0)
 }

@@ -261,17 +261,32 @@ export function contentAsText(content: string | unknown[] | null | undefined): s
 
 // === ConversationHistory downgrade ===
 
+function isStructuredToolBlock(part: unknown): boolean {
+  if (!part || typeof part !== 'object') return false
+  const type = (part as { type?: unknown }).type
+  return type === 'tool_result' || type === 'tool_call' || type === 'thinking'
+}
+
 /**
- * Flatten any `content: ContentPart[]` in a ConversationMessage[] into
- * plain string content. Used at the boundary into the agent loop when
- * the active model does not support vision but the history contains
- * messages from a previous (vision-capable) session.
+ * Strip `image_url` parts when the active model cannot consume pixels.
  *
- * Image parts become a `[image: <name>]` placeholder so the model at
- * least knows an image was present in the history. Text parts join
- * with newline.
+ * PORQUÊ NÃO ACHTAR O ARRAY INTEIRO (sessão afiliados 2026-08-17)
+ * ──────────────────────────────────────────────────────────────
+ * O Chat chama isto em TODO o follow-up quando o modelo não tem visão
+ * (GLM-5.2 no Cloudflare). `rebuildConversationHistory` emite os results
+ * como array de `tool_result`. Achatá-los a string faz o
+ * `normalizeOpenAIToolSequence` deixar de ver `role: tool`, apagar os
+ * `tool_calls` do `_native` e mandar os reads como prosa. Medido: 184 563
+ * → 92 420 tokens, `toolCall`/`toolResult` a 0, pill 76% → 38%, sem
+ * compact_boundary.
  *
- * The original history is not mutated — a fresh array is returned.
+ * O cli-vaz (`stripImagesFromMessages`) só substitui image/document e
+ * mantém o wrapper `tool_result`. A mesma regra: sem imagem, identity;
+ * com imagem DENTRO de um array com tools, troca o part e deixa a
+ * estrutura. O flatten a string fica só para o caso multimodal sem
+ * tools (user colou uma imagem numa sessão anterior).
+ *
+ * O original não é mutado.
  */
 export function downgradeHistoryToText(
   history: readonly ConversationMessage[],
@@ -281,21 +296,31 @@ export function downgradeHistoryToText(
     if (msg.content == null || typeof msg.content === 'string') {
       return msg as ConversationMessage
     }
-    // The content array mixes OpenAI multimodal parts (text / image_url) with
-    // content blocks (tool_call, tool_result, thinking). Only image_url
-    // parts are the ones that got stripped due to no multimodal support — the
-    // rest are text-equivalent and must be preserved as text so the downstream
-    // model sees the real conversation instead of a row of image placeholders.
-    const text = (msg.content as any[])
+    const parts = msg.content as unknown[]
+    const hasImage = parts.some(
+      p => p && typeof p === 'object' && (p as { type?: unknown }).type === 'image_url',
+    )
+    const hasToolStructure = parts.some(isStructuredToolBlock)
+
+    if (!hasImage) return msg as ConversationMessage
+
+    // Keep tool_call / tool_result / thinking as blocks so the OpenAI
+    // adapter can emit role:tool and keep _native.tool_calls paired.
+    if (hasToolStructure) {
+      const next = parts.map((p: any) => {
+        if (p && p.type === 'image_url') return { type: 'text' as const, text: placeholder }
+        return p
+      })
+      return { ...msg, content: next as ConversationMessage['content'] }
+    }
+
+    const text = parts
       .map((p: any) => {
         if (typeof p === 'string') return p
-        switch (p.type) {
-          case 'text':        return p.text ?? ''
-          case 'thinking':    return p.thinking ?? ''
-          case 'tool_call':    return `[tool: ${p.name}(${p.arguments || '{}'})]`
-          case 'tool_result': return typeof p.content === 'string' ? p.content : JSON.stringify(p.content || '')
-          case 'image_url':   return placeholder
-          default:            return ''
+        switch (p?.type) {
+          case 'text':      return p.text ?? ''
+          case 'image_url': return placeholder
+          default:          return ''
         }
       })
       .filter(Boolean)

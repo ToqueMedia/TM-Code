@@ -80,6 +80,7 @@ import { formatFinalTypecheckReminder, hasTypeErrors } from "./finalTypecheckGat
 import { DESTRUCTIVE_TOOLS } from "./toolPolicy";
 import { canonicalToolName } from "./toolNames";
 import { beginWriteBatch, endWriteBatch } from "./writeBatch";
+import { coerceArgumentChunk, sanitizeAssistantToolCalls } from "./toolCallArguments";
 
 // ── Constants ──
 
@@ -800,7 +801,9 @@ function isCredentialOrConfigError(error: unknown): boolean {
  *     do user — stream stalled). O abort do USER é guardado pelo caller
  *     (!signal.aborted) antes de chamar isto.
  * 4xx tipados NÃO entram — têm caminhos próprios acima (401 refresh, 402
- * budget, 429 escada, credential/config) e re-tentar um 400 é inútil.
+ * budget, 429 escada, credential/config). Um 400 "arguments must be valid
+ * JSON" é DETERMINÍSTICO — o mesmo corpo falha sempre. O reparo é no
+ * limite do fio (`sanitizeAssistantToolCalls` em toOpenAIMessages).
  */
 function isTransientStreamCutError(error: unknown, errMsg: string): boolean {
   const status = errorStatus(error);
@@ -1153,7 +1156,13 @@ export function toOpenAIMessages(
     }
   }
 
-  return normalizeOpenAIToolSequence(result);
+  return normalizeOpenAIToolSequence(
+    result.map((msg) =>
+      msg && typeof msg === "object" && "tool_calls" in msg
+        ? sanitizeAssistantToolCalls(msg)
+        : msg,
+    ),
+  );
 }
 
 /** Filter out incomplete tool_call blocks (no matching tool_result). */
@@ -2227,13 +2236,16 @@ export async function* query(
             if (tc.id && !pending.id) pending.id = tc.id;
             if (tc.function?.name && !pending.name)
               pending.name = tc.function.name;
-            if (tc.function?.arguments) {
-              pending.argsParts.push(tc.function.arguments);
-              yield {
-                type: "tool_use_delta",
-                id: pending.id,
-                input: tc.function.arguments,
-              };
+            if (tc.function?.arguments != null && tc.function.arguments !== "") {
+              const chunk = coerceArgumentChunk(tc.function.arguments);
+              if (chunk) {
+                pending.argsParts.push(chunk);
+                yield {
+                  type: "tool_use_delta",
+                  id: pending.id,
+                  input: chunk,
+                };
+              }
             }
 
             // Gemini 3: Capture thought_signature from extra_content.google
