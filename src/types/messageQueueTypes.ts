@@ -130,6 +130,23 @@ export type QueuedCommand = {
    * composer's Steer/Task toggle (usePromptBar) while the agent is busy.
    */
   asTask?: boolean
+
+  /**
+   * Session (and its project) this command was queued UNDER — stamped at
+   * enqueue time. The queue is a single global strip, but a message queued
+   * while viewing project A belongs to A's conversation: without the stamp
+   * it rendered under project B's input after a switch, and the idle drain
+   * dispatched it into B's chat (the "optical illusion" report). Consumers:
+   *  - the strip shows only items whose sessionId matches the active
+   *    session (legacy items without a stamp stay visible everywhere);
+   *  - the steering drain only absorbs items of the RUNNING session;
+   *  - the idle drain routes foreign-session items to their own
+   *    project/session runner instead of the focused chat.
+   */
+  sessionId?: string
+  /** projectPath of the session above — avoids a store lookup at
+   *  persistence time (snapshots are written per project+session pair). */
+  projectPath?: string
 }
 
 // === Operation log (persistence) ===

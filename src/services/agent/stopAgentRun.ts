@@ -46,7 +46,11 @@ export function stopAgentRun(): boolean {
   // Fila PRIMEIRO, e antes do cancel: com o guard ainda ocupado, o
   // useQueueProcessor não pode disparar entre estas duas linhas; quando o
   // cancelLoop o libertar, a pausa já está posta e nada arranca sozinho.
-  removeSteerableMessages()
+  // Scoping por sessão: só morrem os steers do run que está a parar —
+  // itens enfileirados noutra sessão (outro projecto) sobrevivem.
+  removeSteerableMessages({
+    sessionId: useChatStore.getState().streamingSessionId,
+  })
   if (hasCommandsInQueue()) setQueuePaused(true)
 
   usePermissionStore.getState().clearPending()

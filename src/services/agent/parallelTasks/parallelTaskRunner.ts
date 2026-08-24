@@ -814,8 +814,9 @@ export async function runParallelTask(runId: string): Promise<void> {
     if (typeof firstMessage === 'string' && /(^|\s)@\S/.test(firstMessage)) {
       const { resolveMentionContext } = await import('../atMentions')
       // Executor da TAREFA, não o singleton — scope + read-state do projeto
-      // certo (ver a nota em resolveMentionContext).
-      const mention = await resolveMentionContext(firstMessage, toolExecutor)
+      // certo (ver a nota em resolveMentionContext). O pathMap resolve os
+      // chips só-com-nome que o composer registou (chatStore.mentionPaths).
+      const mention = await resolveMentionContext(firstMessage, toolExecutor, useChatStore.getState().mentionPaths)
       if (mention.contextText || mention.imageParts.length > 0) {
         const blocks: ContentBlockAPI[] = [{ type: 'text', text: firstMessage }]
         if (mention.contextText) blocks.push({ type: 'text', text: mention.contextText })

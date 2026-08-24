@@ -81,8 +81,8 @@ function PromptActions({
   // forever ("getSnapshot should be cached" warning + Maximum update depth).
   // Compute the resolved tuple in a memo so the reference stays stable until
   // any of the contributing fields actually changes.
-  const toqueMediaActive = useBillingStore(s => s.toqueMediaActive)
-  const byokEnabled = useByokStore(s => s.enabled) && !toqueMediaActive
+  // BYOK disponível em todos os planos pessoais, incluindo Toque Media.
+  const byokEnabled = useByokStore(s => s.enabled)
   const byokActiveProvider = useByokStore(s => s.activeProvider)
   const byokActiveModel = useByokStore(s => s.activeModel)
   const byokProviders = useByokStore(s => s.providers)

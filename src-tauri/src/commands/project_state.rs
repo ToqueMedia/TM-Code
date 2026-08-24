@@ -540,6 +540,17 @@ const FOCUS_REQUEST_FILE: &str = "focus-request.json";
 /// Drop requests older than this (ms) so a dead requester cannot keep
 /// re-focusing the owner forever.
 const FOCUS_REQUEST_STALE_MS: u64 = 15_000;
+/// A `running` badge only counts as a live focus target while its writer
+/// heartbeats (3s focused / 30s background) — same ceiling the readers use.
+const FOCUS_RUNNING_FRESH_MS: u64 = 90_000;
+/// Terminal badges (`done`/`error`) are frozen at run end — no heartbeat
+/// proves the owner is alive. Only target them while recent enough that
+/// "go back to the window that finished the run" is still the likely
+/// intent. Beyond this, a click must OPEN locally instead of being
+/// swallowed targeting a dead/restarted pid (the "two clicks to switch"
+/// report: every badge written by a previous app instance had a foreign
+/// pid and swallowed the first click forever).
+const FOCUS_TERMINAL_FRESH_MS: u64 = 10 * 60_000;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -547,6 +558,15 @@ pub struct ProjectFocusRequest {
     pub target_pid: u32,
     pub requester_pid: u32,
     pub requested_at: u64,
+}
+
+/// PID of THIS app instance. Each TM Code window is an independent OS
+/// process, so the pid uniquely identifies the window; the frontend caches
+/// it to tell self-owned agent badges from foreign ones WITHOUT an IPC
+/// round-trip on every project click (instant in-window switching).
+#[tauri::command]
+pub fn get_app_pid() -> u32 {
+    std::process::id()
 }
 
 /// Ask the window that owns `agent-status.json` (or the window lock) for this
@@ -563,17 +583,32 @@ pub async fn request_project_window_focus(project_path: String) -> Result<bool, 
 
     if let Ok(content) = std::fs::read_to_string(root.join(AGENT_STATUS_FILE)) {
         if let Ok(status) = serde_json::from_str::<ProjectAgentStatus>(&content) {
-            if status.pid != self_pid
-                && matches!(status.state.as_str(), "running" | "done" | "error")
-            {
-                target_pid = Some(status.pid);
+            if status.pid != self_pid {
+                // Freshness gate (2026-08-22): a badge whose writer can no
+                // longer prove liveness must not swallow the click — focus
+                // requests aimed at dead pids are never consumed and the
+                // user was forced into the second-click fallback.
+                let fresh = match status.state.as_str() {
+                    "running" => now_ms().saturating_sub(status.updated_at) <= FOCUS_RUNNING_FRESH_MS,
+                    "done" | "error" => {
+                        now_ms().saturating_sub(status.updated_at) <= FOCUS_TERMINAL_FRESH_MS
+                    }
+                    _ => false,
+                };
+                if fresh {
+                    target_pid = Some(status.pid);
+                }
             }
         }
     }
     if target_pid.is_none() {
         if let Ok(content) = std::fs::read_to_string(root.join(WINDOW_LOCK_FILE)) {
             if let Ok(lock) = serde_json::from_str::<ProjectWindowLock>(&content) {
-                if lock.pid != self_pid {
+                // Same staleness ceiling the JS reader applies (90s): a lock
+                // from a crashed process must not count as a live owner.
+                if lock.pid != self_pid
+                    && now_ms().saturating_sub(lock.updated_at) <= FOCUS_RUNNING_FRESH_MS
+                {
                     target_pid = Some(lock.pid);
                 }
             }

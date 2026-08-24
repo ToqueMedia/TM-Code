@@ -1,6 +1,6 @@
 [package]
 name = "toquemedia-studio"
-version = "1.1.1"
+version = "1.1.2"
 description = "TM Code — The Agent-First IDE"
 authors = ["Toque Media"]
 edition = "2021"
@@ -108,7 +108,9 @@ nix = { version = "0.29", features = ["signal", "process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSRunningApplication", "NSView", "NSWindow", "NSResponder", "NSMenu", "NSMenuItem"] }
+# NSPasteboard/NSPasteboardItem: read Finder-copied FILE PATHS from the
+# system clipboard (commands/clipboard_files.rs). NSURL decodes file:// URLs.
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSRunningApplication", "NSView", "NSWindow", "NSResponder", "NSMenu", "NSMenuItem", "NSPasteboard", "NSPasteboardItem"] }
 objc2-foundation = { version = "0.3", features = ["NSData"] }
 # Vibrancy via NSVisualEffectView. Tauri-team-maintained; talks to private API
 # already enabled by `macos-private-api` on the tauri crate.
@@ -117,3 +119,6 @@ window-vibrancy = "0.5"
 [target.'cfg(target_os = "windows")'.dependencies]
 # Same crate handles Mica (Win 11) / Acrylic (Win 10) on Windows.
 window-vibrancy = "0.5"
+# CF_HDROP clipboard reads — Explorer "copy file" → paste full PATH in the
+# prompt (commands/clipboard_files.rs). Small, focused crate.
+clipboard-win = "5"

@@ -4,6 +4,7 @@ import { FiRefreshCw } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
 import ModelsPanel from './ModelsPanel'
+import { readAdminCache, writeAdminCache, ADMIN_CACHE_KEYS } from '@/services/adminCache'
 
 const CONTEXT_WINDOW_OPTIONS: Array<{ label: string; value: number }> = [
   { label: '128k', value: 131_072 },
@@ -87,37 +88,75 @@ const SIDECAR_SLOTS: Array<{ type: import('../../../services/adminService').Side
   { type: 'image', label: 'Imagem (geração)', desc: 'Gera imagens (X-Request-Type: image). Ainda não usado pelo agente.' },
 ]
 
+// ─── Helpers de derivação de state a partir de dados do cache ────────────
+// As seleções (sel) e janelas de contexto (ctxWin) são derivadas dos dados
+// vindos do servidor. Ao ler do cache local, precisamos de computar esses
+// estados derivados da mesma forma — estas funções partilham a lógica entre
+// o initializer do useState (cache) e o load (servidor).
+
+function computeSidecarSel(data: import('../../../services/adminService').SidecarsResponse): Record<string, string> {
+  const next: Record<string, string> = {}
+  for (const slot of SIDECAR_SLOTS) {
+    const cur = data.current[`sidecar:${slot.type}`]
+    const match = cur
+      ? data.catalog.find(m =>
+          m.activeConfig.model === cur.model && m.activeConfig.provider === cur.provider)
+      : undefined
+    next[slot.type] = match?.id ?? ''
+  }
+  return next
+}
+
+function computePersonaState(data: import('../../../services/adminService').PersonasResponse): {
+  sel: Record<string, string>
+  ctxWin: Record<string, string>
+} {
+  const sel: Record<string, string> = {}
+  const ctxWin: Record<string, string> = {}
+  for (const slot of PERSONA_SLOTS) {
+    const cur = data.current[`persona:${slot.type}`]
+    const match = cur
+      ? data.catalog.find(m =>
+          m.activeConfig.model === cur.model
+          && m.activeConfig.provider === cur.provider
+          && m.activeConfig.baseUrl === cur.baseUrl)
+      : undefined
+    sel[slot.type] = match?.id ?? ''
+    ctxWin[slot.type] = String(cur?.contextWindow ?? match?.activeConfig.contextWindow ?? DEFAULT_CONTEXT_WINDOW)
+  }
+  return { sel, ctxWin }
+}
+
 function SidecarsPanel({ refreshKey }: { refreshKey?: number }) {
   const t = useTranslation()
-  const [data, setData] = useState<import('../../../services/adminService').SidecarsResponse | null>(null)
-  const [loading, setLoading] = useState(true)
+  // Local-first: lê o cache do localStorage uma vez (mount) para renderizar
+  // imediatamente. O refresh do servidor corre em background e actualiza o
+  // cache ao terminar.
+  const [cachedData] = useState(() => readAdminCache<import('../../../services/adminService').SidecarsResponse>(ADMIN_CACHE_KEYS.sidecars))
+  const [data, setData] = useState<import('../../../services/adminService').SidecarsResponse | null>(cachedData)
+  const hasCache = cachedData !== null
+  const [loading, setLoading] = useState(!hasCache)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
-  const [sel, setSel] = useState<Record<string, string>>({})
+  const [sel, setSel] = useState<Record<string, string>>(() => cachedData ? computeSidecarSel(cachedData) : {})
 
   const load = useCallback(async function () {
-    setLoading(true)
+    if (!hasCache) setLoading(true)
     setError(null)
     try {
       const { fetchSidecars } = await import('../../../services/adminService')
       const d = await fetchSidecars()
       setData(d)
-      const next: Record<string, string> = {}
-      for (const slot of SIDECAR_SLOTS) {
-        const cur = d.current[`sidecar:${slot.type}`]
-        const match = cur
-          ? d.catalog.find(m =>
-              m.activeConfig.model === cur.model && m.activeConfig.provider === cur.provider)
-          : undefined
-        next[slot.type] = match?.id ?? ''
-      }
-      setSel(next)
+      writeAdminCache(ADMIN_CACHE_KEYS.sidecars, d)
+      setSel(computeSidecarSel(d))
     } catch (err) {
-      setError(err instanceof Error && err.message === 'FORBIDDEN' ? t('admin.forbidden') : (err instanceof Error ? err.message : String(err)))
+      if (!hasCache) {
+        setError(err instanceof Error && err.message === 'FORBIDDEN' ? t('admin.forbidden') : (err instanceof Error ? err.message : String(err)))
+      }
     } finally {
       setLoading(false)
     }
-  }, [t])
+  }, [t, hasCache])
   useEffect(function () { load() }, [load, refreshKey])
 
   async function apply(type: import('../../../services/adminService').SidecarType, action: 'publish' | 'disable') {
@@ -237,41 +276,43 @@ const PERSONA_SLOTS: Array<{ type: import('../../../services/adminService').Pers
 
 function PersonasPanel({ onPublished, refreshKey }: { onPublished?: () => void; refreshKey?: number }) {
   const t = useTranslation()
-  const [data, setData] = useState<import('../../../services/adminService').PersonasResponse | null>(null)
-  const [loading, setLoading] = useState(true)
+  // Local-first: lê o cache do localStorage uma vez (mount) para renderizar
+  // imediatamente. O refresh do servidor corre em background e actualiza o
+  // cache ao terminar.
+  const [cachedData] = useState(() => readAdminCache<import('../../../services/adminService').PersonasResponse>(ADMIN_CACHE_KEYS.personas))
+  const [data, setData] = useState<import('../../../services/adminService').PersonasResponse | null>(cachedData)
+  const hasCache = cachedData !== null
+  const [loading, setLoading] = useState(!hasCache)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
-  const [sel, setSel] = useState<Record<string, string>>({})
-  const [ctxWin, setCtxWin] = useState<Record<string, string>>({})
+  const [sel, setSel] = useState<Record<string, string>>(() => {
+    if (!cachedData) return {}
+    return computePersonaState(cachedData).sel
+  })
+  const [ctxWin, setCtxWin] = useState<Record<string, string>>(() => {
+    if (!cachedData) return {}
+    return computePersonaState(cachedData).ctxWin
+  })
 
   const load = useCallback(async function () {
-    setLoading(true)
+    if (!hasCache) setLoading(true)
     setError(null)
     try {
       const { fetchPersonas } = await import('../../../services/adminService')
       const d = await fetchPersonas()
       setData(d)
-      const nextSel: Record<string, string> = {}
-      const nextCtx: Record<string, string> = {}
-      for (const slot of PERSONA_SLOTS) {
-        const cur = d.current[`persona:${slot.type}`]
-        const match = cur
-          ? d.catalog.find(m =>
-              m.activeConfig.model === cur.model
-              && m.activeConfig.provider === cur.provider
-              && m.activeConfig.baseUrl === cur.baseUrl)
-          : undefined
-        nextSel[slot.type] = match?.id ?? ''
-        nextCtx[slot.type] = String(cur?.contextWindow ?? match?.activeConfig.contextWindow ?? DEFAULT_CONTEXT_WINDOW)
-      }
-      setSel(nextSel)
-      setCtxWin(nextCtx)
+      writeAdminCache(ADMIN_CACHE_KEYS.personas, d)
+      const derived = computePersonaState(d)
+      setSel(derived.sel)
+      setCtxWin(derived.ctxWin)
     } catch (err) {
-      setError(err instanceof Error && err.message === 'FORBIDDEN' ? t('admin.forbidden') : (err instanceof Error ? err.message : String(err)))
+      if (!hasCache) {
+        setError(err instanceof Error && err.message === 'FORBIDDEN' ? t('admin.forbidden') : (err instanceof Error ? err.message : String(err)))
+      }
     } finally {
       setLoading(false)
     }
-  }, [t])
+  }, [t, hasCache])
   useEffect(function () { load() }, [load, refreshKey])
 
   function pickModel(type: string, id: string) {
@@ -453,24 +494,34 @@ function LivePanel(props: {
   refreshKey: number
 }) {
   const t = useTranslation()
-  const [personas, setPersonas] = useState<import('../../../services/adminService').PersonasResponse | null>(null)
-  const [sidecars, setSidecars] = useState<import('../../../services/adminService').SidecarsResponse | null>(null)
-  const [loading, setLoading] = useState(true)
+  // Local-first: personas e sidecars são lidos do cache no mount para o
+  // Live tab renderizar imediatamente. O verify vem do parent (já cached).
+  const [cachedPersonas] = useState(() => readAdminCache<import('../../../services/adminService').PersonasResponse>(ADMIN_CACHE_KEYS.personas))
+  const [cachedSidecars] = useState(() => readAdminCache<import('../../../services/adminService').SidecarsResponse>(ADMIN_CACHE_KEYS.sidecars))
+  const [personas, setPersonas] = useState<import('../../../services/adminService').PersonasResponse | null>(cachedPersonas)
+  const [sidecars, setSidecars] = useState<import('../../../services/adminService').SidecarsResponse | null>(cachedSidecars)
+  const hasCache = cachedPersonas !== null || cachedSidecars !== null
+  const [loading, setLoading] = useState(!hasCache)
 
   const loadSlots = useCallback(async function () {
-    setLoading(true)
+    if (!hasCache) setLoading(true)
     try {
       const svc = await import('../../../services/adminService')
       const [p, s] = await Promise.all([svc.fetchPersonas(), svc.fetchSidecars()])
       setPersonas(p)
       setSidecars(s)
+      writeAdminCache(ADMIN_CACHE_KEYS.personas, p)
+      writeAdminCache(ADMIN_CACHE_KEYS.sidecars, s)
     } catch {
-      setPersonas(null)
-      setSidecars(null)
+      // Em modo cache, mantemos os dados antigos visíveis.
+      if (!hasCache) {
+        setPersonas(null)
+        setSidecars(null)
+      }
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [hasCache])
 
   useEffect(function () { loadSlots() }, [loadSlots, props.refreshKey])
 
@@ -560,40 +611,57 @@ function LivePanel(props: {
 
 export default function AdminSection() {
   const t = useTranslation()
-  const [isLoading, setIsLoading] = useState(true)
+  // Local-first: o cache do localStorage é lido SINCRONAMENTE no initializer
+  // do useState. Se existir, a UI renderiza instantaneamente (isLoading=false)
+  // e o fetch do servidor corre em background para validar/atualizar. Se não
+  // existir (primeira visita), mostra "Loading…" normalmente.
+  const [verify, setVerify] = useState<import('../../../services/adminService').VerifyResponse | null>(
+    () => readAdminCache<import('../../../services/adminService').VerifyResponse>(ADMIN_CACHE_KEYS.verify),
+  )
+  const hasCache = verify !== null
+  const [isLoading, setIsLoading] = useState(!hasCache)
+  const [isRefreshing, setIsRefreshing] = useState(hasCache)
   const [forbidden, setForbidden] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [verify, setVerify] = useState<import('../../../services/adminService').VerifyResponse | null>(null)
-  const [isVerifying, setIsVerifying] = useState(false)
   const [catalogEpoch, setCatalogEpoch] = useState(0)
   const [tab, setTab] = useState<AdminTab>('personas')
 
   const load = useCallback(async function () {
-    setIsLoading(true)
+    // Se já temos cache, não mostramos "Loading…" — o refresh é em background.
+    if (!hasCache) setIsLoading(true)
+    else setIsRefreshing(true)
     setError(null)
     try {
       const { fetchAdminVerify } = await import('../../../services/adminService')
-      setVerify(await fetchAdminVerify())
+      const result = await fetchAdminVerify()
+      setVerify(result)
+      writeAdminCache(ADMIN_CACHE_KEYS.verify, result)
     } catch (err) {
       if (err instanceof Error && err.message === 'FORBIDDEN') {
         setForbidden(true)
       } else {
-        setError(err instanceof Error ? err.message : String(err))
+        // Em modo cache, não sobrepomos os dados do cache com o erro —
+        // o utilizador mantém os dados antigos visíveis e vê o erro como
+        // aviso secundário.
+        if (!hasCache) setError(err instanceof Error ? err.message : String(err))
       }
     } finally {
       setIsLoading(false)
+      setIsRefreshing(false)
     }
-  }, [])
+  }, [hasCache])
 
   const refreshVerify = useCallback(async function () {
-    setIsVerifying(true)
+    setIsRefreshing(true)
     try {
       const { fetchAdminVerify } = await import('../../../services/adminService')
-      setVerify(await fetchAdminVerify())
+      const result = await fetchAdminVerify()
+      setVerify(result)
+      writeAdminCache(ADMIN_CACHE_KEYS.verify, result)
     } catch (err) {
       if (err instanceof Error && err.message === 'FORBIDDEN') setForbidden(true)
     } finally {
-      setIsVerifying(false)
+      setIsRefreshing(false)
     }
   }, [])
 
@@ -608,7 +676,23 @@ export default function AdminSection() {
 
   return (
     <VStack align="stretch" gap={5}>
-      <Text fontSize="12px" color={tokens.colors.text.muted} lineHeight="1.5">{t('admin.subtitle')}</Text>
+      <Flex align="center" justify="space-between" gap={3}>
+        <Text fontSize="12px" color={tokens.colors.text.muted} lineHeight="1.5">{t('admin.subtitle')}</Text>
+        {isRefreshing && (
+          <Flex align="center" gap="4px" flexShrink={0}>
+            <Box
+              w="6px" h="6px" borderRadius="full" bg={tokens.colors.accent.primary}
+              css={{
+                '@keyframes tmAdminRefreshPulse': { '0%, 100%': { opacity: 1 }, '50%': { opacity: 0.3 } },
+                animation: 'tmAdminRefreshPulse 1s ease-in-out infinite',
+              }}
+            />
+            <Text fontSize="10px" color={tokens.colors.text.disabled} fontWeight="600">
+              {t('admin.refreshing')}
+            </Text>
+          </Flex>
+        )}
+      </Flex>
 
       {error && (
         <Box p={3} borderRadius={tokens.radius.lg} bg={tokens.colors.accent.redSubtle}
@@ -660,7 +744,7 @@ export default function AdminSection() {
         <ModelsPanel onCatalogChanged={function () { setCatalogEpoch((n) => n + 1) }} />
       )}
       {tab === 'live' && (
-        <LivePanel verify={verify} isVerifying={isVerifying} onRefresh={refreshVerify} refreshKey={catalogEpoch} />
+        <LivePanel verify={verify} isVerifying={isRefreshing} onRefresh={refreshVerify} refreshKey={catalogEpoch} />
       )}
     </VStack>
   )

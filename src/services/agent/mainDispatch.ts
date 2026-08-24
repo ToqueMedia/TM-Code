@@ -535,8 +535,12 @@ export function buildMainLoopCallbacks(
           // Só mensagens steeráveis ANTES da primeira tarefa em fila entram no
           // run vivo (drainSteerableMessages): slash/bash precisam do
           // executeInput, tarefas esperam o idle drain, e um steer reordenado
-          // ABAIXO de uma tarefa pertence ao run dela.
-          const drained = drainSteerableMessages()
+          // ABAIXO de uma tarefa pertence ao run dela. O corte por sessão
+          // impede que uma mensagem enfileirada nOUTRO projecto (fila global)
+          // seja absorvida por ESTE run.
+          const drained = drainSteerableMessages('next', {
+            sessionId: useChatStore.getState().streamingSessionId,
+          })
           if (drained.length === 0) return deliveries
 
           // Coalesce um burst num só turno steered (joinPromptValues preserva

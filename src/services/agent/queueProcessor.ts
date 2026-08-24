@@ -38,10 +38,27 @@ import type { QueuedCommand } from '../../types/messageQueueTypes'
 
 type ProcessQueueParams = {
   executeInput: (commands: QueuedCommand[]) => Promise<void>
+  /**
+   * Session the queue is being drained FOR (the focused chat). Items
+   * stamped with a different sessionId are foreign — see processQueueIfReady.
+   * Optional for callers/tests that don't model sessions (treated as
+   * "unknown" → every item drains through the legacy global path).
+   */
+  activeSessionId?: string | null
 }
 
 type ProcessQueueResult = {
   processed: boolean
+}
+
+/** True when the command may run in the ACTIVE session: unstamped (legacy)
+ *  or stamped to it. Foreign-session prompts drain separately (their batch
+ *  is routed by executeQueuedInput), foreign slash/bash stay parked. */
+function belongsToActiveSession(
+  cmd: QueuedCommand,
+  activeSessionId: string | null | undefined,
+): boolean {
+  return !cmd.sessionId || !activeSessionId || cmd.sessionId === activeSessionId
 }
 
 /**
@@ -62,6 +79,7 @@ function isSlashCommand(cmd: QueuedCommand): boolean {
  */
 export function processQueueIfReady({
   executeInput,
+  activeSessionId,
 }: ProcessQueueParams): ProcessQueueResult {
   // Note: Claude Code's processor filters by `agentId === undefined` to
   // skip commands addressed to subagents. TM Code does not yet have
@@ -73,20 +91,64 @@ export function processQueueIfReady({
     return { processed: false }
   }
 
+  // Session affiliation: items queued under a different session must NOT
+  // run in the focused chat. Slash/bash commands of a foreign session stay
+  // queued (their routing is bound to the ACTIVE session — they drain when
+  // the user returns to that session). Prompt-mode items of a foreign
+  // session drain and are routed to their own project/session runner by
+  // executeQueuedInput.
+  const isForeignSession =
+    !!next.sessionId && !!activeSessionId && next.sessionId !== activeSessionId
+
   // Slash commands and bash-mode commands are processed individually.
   // Bash needs per-command error isolation; slash commands have side effects
   // that don't compose. F3: `asTask` is legacy — treated as a normal prompt.
   if (isSlashCommand(next) || next.mode === 'bash') {
+    if (isForeignSession) {
+      // Leave it parked for its own session; other items behind it can
+      // still drain through the array-order batch window below.
+      const slashCmd = next
+      const batchMode = next.mode
+      const batch = dequeueAllMatching(
+        cmd =>
+          cmd !== slashCmd
+          && !isSlashCommand(cmd)
+          && cmd.mode === batchMode
+          && belongsToActiveSession(cmd, activeSessionId),
+      )
+      if (batch.length > 0) {
+        dispatchVisible(executeInput, batch)
+        return { processed: true }
+      }
+      return { processed: false }
+    }
     const cmd = dequeue()!
     dispatchVisible(executeInput, [cmd])
     return { processed: true }
   }
 
-  // Drain all non-slash items with the same mode at once.
+  // Drain all non-slash items with the same mode at once — but never mix
+  // destinations in one batch: a batch is dispatched as a single agent
+  // turn, and a turn belongs to exactly one session. Two batch shapes:
+  //  - foreign head → only that session's items (routed to their own
+  //    project runner by executeQueuedInput);
+  //  - active/legacy head → every item that will run in the ACTIVE session
+  //    (stamped-to-active + unstamped legacy), preserving the historical
+  //    single-turn coalescing.
   const targetMode = next.mode
-  const commands = dequeueAllMatching(
-    cmd => !isSlashCommand(cmd) && cmd.mode === targetMode,
-  )
+  const commands = isForeignSession
+    ? dequeueAllMatching(
+        cmd =>
+          !isSlashCommand(cmd)
+          && cmd.mode === targetMode
+          && cmd.sessionId === next.sessionId,
+      )
+    : dequeueAllMatching(
+        cmd =>
+          !isSlashCommand(cmd)
+          && cmd.mode === targetMode
+          && belongsToActiveSession(cmd, activeSessionId),
+      )
   if (commands.length === 0) {
     // Priority reordering can make peek() pick an item the array-order
     // batch window excludes (e.g. a 'now'-priority steer parked AFTER a

@@ -26,6 +26,7 @@ import {
 import { getQueryGuard } from '../services/agent/queryGuard'
 import { processQueueIfReady } from '../services/agent/queueProcessor'
 import { useBillingStore } from '../stores/billingStore'
+import { useChatStore } from '../stores/chatStore'
 import { usePermissionStore } from '../stores/permissionStore'
 import type { QueuedCommand } from '../types/messageQueueTypes'
 
@@ -94,6 +95,11 @@ export function useQueueProcessor({
   // flips and the effect re-fires with the queue intact.
   const billingBlocked = useBillingStore(s => s.noCredits || s.status === 'rejected')
 
+  // Session scoping: foreign-session items are routed/parked by the
+  // processor instead of running in the focused chat. Reactive so a parked
+  // foreign item drains as soon as its session becomes the focused one.
+  const activeSessionId = useChatStore(s => s.activeSessionId)
+
   useEffect(() => {
     if (isQueryActive) return
     if (hasPendingPermission) return
@@ -106,6 +112,9 @@ export function useQueueProcessor({
     // await, so by the time React re-runs this effect (due to the
     // dequeue-triggered snapshot change), isQueryActive is already true
     // (dispatching) and the guard above returns early.
-    processQueueIfReady({ executeInput: executeQueuedInput })
-  }, [queueSnapshot, isQueryActive, hasPendingPermission, queuePaused, billingBlocked, executeQueuedInput])
+    processQueueIfReady({
+      executeInput: executeQueuedInput,
+      activeSessionId,
+    })
+  }, [queueSnapshot, isQueryActive, hasPendingPermission, queuePaused, billingBlocked, executeQueuedInput, activeSessionId])
 }

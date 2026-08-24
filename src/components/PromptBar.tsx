@@ -10,7 +10,7 @@ import AttachmentChips from './prompt/AttachmentChips'
 import SlashCommandMenu from './chat/SlashCommandMenu'
 import MentionMenu from './prompt/MentionMenu'
 import HashtagMenu from './prompt/HashtagMenu'
-import QueuedMessagesPreview from './prompt/QueuedMessagesPreview'
+import QueuedMessagesPreview, { useHasQueuedForActiveSession } from './prompt/QueuedMessagesPreview'
 import AgentTasksPanel from './chat/AgentTasksPanel'
 import SubAgentStatusBar from './chat/SubAgentStatusBar'
 import BackgroundCommandsBar from './chat/BackgroundCommandsBar'
@@ -69,6 +69,10 @@ function PromptBar({ placement = 'docked' }: { placement?: 'docked' | 'centered'
 
   const projectPath = useProjectStore(s => s.currentProject?.path || '')
 
+  // Fused queue stack: while queued messages render, the input square-rounds
+  // its top corners so the strip and the composer read as ONE box.
+  const hasQueued = useHasQueuedForActiveSession()
+
   return (
     <Box
       px={{ base: 3, md: 4 }}
@@ -115,14 +119,14 @@ function PromptBar({ placement = 'docked' }: { placement?: 'docked' | 'centered'
             waiting next, then the input. */}
         <AgentTasksPanel />
 
-        {/* Queued messages preview (above input) */}
-        <QueuedMessagesPreview />
+        {/* Queued messages preview (fused on top of the input) */}
+        <QueuedMessagesPreview placement={placement} />
 
         {/* Main input container */}
         <Box
           position="relative"
           bg={placement === 'centered' ? tokens.colors.bg.panel : 'rgba(17, 17, 17, 0.96)'}
-          borderRadius="12px"
+          borderRadius={hasQueued ? '0 0 12px 12px' : '12px'}
           border={`1px solid ${isDragging ? tokens.colors.accent.primary : tokens.colors.border.panel}`}
           outline={isDragging ? `1px dashed ${tokens.colors.accent.primary}` : 'none'}
           outlineOffset="-2px"

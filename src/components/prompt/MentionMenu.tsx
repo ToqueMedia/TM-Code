@@ -1,7 +1,13 @@
 import { memo, useEffect, useRef } from 'react'
-import { Box, Flex, Text } from '@chakra-ui/react'
-import { FiFile } from 'react-icons/fi'
+import { Box, Flex, Icon, Image, Text } from '@chakra-ui/react'
 import { tokens } from '@/theme/tokens'
+import { getFileIconByExtension, getFolderIconByName, getFolderIconByPath } from '@/utils/iconMapper'
+import {
+  getDefaultFolderIcon,
+  getExtensionIcon,
+  getSpecialFileIcon,
+  getSpecialFolderIcon,
+} from '../ui/filetree/iconMappings'
 import type { QuickOpenItem } from '../../services/quickOpenService'
 
 interface MentionMenuProps {
@@ -9,6 +15,46 @@ interface MentionMenuProps {
   selectedIndex: number
   onSelect: (item: QuickOpenItem) => void
   projectPath: string
+}
+
+function getExtension(fileName: string): string {
+  const dot = fileName.lastIndexOf('.')
+  // Dotfiles (".env", ".gitignore") have no double-extension semantics.
+  if (dot <= 0) return ''
+  return fileName.slice(dot + 1).toLowerCase()
+}
+
+/**
+ * Row icon for the @mention picker: per-extension file glyph (Material Icon
+ * Theme assets, same resolver the file tree uses) or a folder glyph for
+ * directories. Layout-neutral variant of FileTreeIcon (no mr / hover-scale —
+ * the menu owns its own spacing).
+ */
+function MentionRowIcon({ item }: { item: QuickOpenItem }) {
+  const materialUrl = item.isDirectory
+    ? (getFolderIconByPath(item.path, false) || getFolderIconByName(item.name, false))
+    : getFileIconByExtension(getExtension(item.name), item.name)
+
+  if (materialUrl) {
+    return (
+      <Image
+        src={materialUrl}
+        alt=""
+        boxSize="15px"
+        flexShrink={0}
+        opacity={0.95}
+        pointerEvents="none"
+      />
+    )
+  }
+
+  const { icon, color } = item.isDirectory
+    ? getSpecialFolderIcon(item.name.toLowerCase(), false)
+      ?? getDefaultFolderIcon(false, false)
+    : getSpecialFileIcon(item.name.toLowerCase(), false)
+      ?? getExtensionIcon(getExtension(item.name), false)
+
+  return <Icon as={icon} color={color} fontSize="15px" flexShrink={0} />
 }
 
 function MentionMenu({ items, selectedIndex, onSelect, projectPath }: MentionMenuProps) {
@@ -64,7 +110,7 @@ function MentionMenu({ items, selectedIndex, onSelect, projectPath }: MentionMen
             onClick={() => onSelect(item)}
             _hover={{ bg: index === selectedIndex ? 'rgba(254, 16, 99, 0.1)' : 'rgba(255, 255, 255, 0.04)' }}
           >
-            <FiFile size={14} color={tokens.colors.text.muted} style={{ flexShrink: 0 }} />
+            <MentionRowIcon item={item} />
             <Flex direction="column" gap={0} overflow="hidden" flex={1}>
               <Text
                 fontSize="13px"
@@ -73,6 +119,7 @@ function MentionMenu({ items, selectedIndex, onSelect, projectPath }: MentionMen
                 truncate
               >
                 {item.name}
+                {item.isDirectory ? '/' : ''}
               </Text>
               <Text
                 fontSize="11px"

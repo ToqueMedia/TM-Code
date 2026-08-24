@@ -40,7 +40,6 @@ export function buildChatTipPool(t: TFn): string[] {
     t('chatTips.skills'),
     t('chatTips.teamChat'),
     t('chatTips.sourceControl'),
-    t('chatTips.webExport'),
     t('chatTips.webFetch'),
     t('chatTips.designCopy'),
   ]

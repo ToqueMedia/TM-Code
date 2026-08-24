@@ -144,8 +144,8 @@ async function runJob(job: RunnerJob): Promise<void> {
       import('@/stores/byokStore'),
       import('@/utils/devUrls'),
     ])
-    const { useBillingStore } = await import('@/stores/billingStore')
-    byokEnabled = !useBillingStore.getState().toqueMediaActive && useByokStore.getState().enabled
+    // BYOK pode ser usado em todos os planos pessoais, incluindo Toque Media.
+    byokEnabled = useByokStore.getState().enabled
     aiWorkerUrl = resolveAIWorkerUrl()
     emit({
       type: 'system',

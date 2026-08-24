@@ -277,7 +277,11 @@ interface OneMention {
 
 const NO_MENTION: OneMention = { blocks: [] }
 
-async function resolveOneMention(token: string, executor: ToolExecutor): Promise<OneMention> {
+async function resolveOneMention(
+  token: string,
+  executor: ToolExecutor,
+  pathMap?: Record<string, string>,
+): Promise<OneMention> {
   try {
     const { filename, lineStart, lineEnd } = parseAtMentionedFileLines(token)
     // TM Code's autocomplete inserts a trailing '/' on directory mentions;
@@ -285,7 +289,12 @@ async function resolveOneMention(token: string, executor: ToolExecutor): Promise
     const cleaned = filename.replace(/[\\/]+$/, '')
     if (!cleaned) return NO_MENTION
 
-    const absolutePath = executor.resolveMentionPath(cleaned)
+    // Name-only chips (2026-08): the composer inserts `@foo.ts` and keeps the
+    // project-relative path in a side map — resolve through it when present.
+    // Manual full-path mentions and legacy bubbles have no map entry and keep
+    // resolving relative to the project root, exactly as before.
+    const mapped = pathMap?.[cleaned]
+    const absolutePath = executor.resolveMentionPath(mapped ?? cleaned)
     // Out-of-scope → silent drop, same outcome as claude-vaz's deny rules.
     if (!executor.isMentionPathAllowed(absolutePath)) return NO_MENTION
 
@@ -394,6 +403,8 @@ async function resolveOneMention(token: string, executor: ToolExecutor): Promise
 export async function resolveMentionContext(
   input: string,
   executorOverride?: ToolExecutor,
+  /** Display-name → project-relative path for name-only chips (see chatStore.mentionPaths). */
+  pathMap?: Record<string, string>,
 ): Promise<MentionResolution> {
   if (!input || input.trim().startsWith('/')) return EMPTY_RESOLUTION
   const mentions = extractAtMentionedFiles(input)
@@ -408,7 +419,7 @@ export async function resolveMentionContext(
   const executor = executorOverride ?? ToolExecutor.getInstance()
   // Parallel resolution (claude-vaz uses Promise.all); flatten preserves
   // mention order so the transcript reads in the order the user wrote.
-  const resolved = await Promise.all(mentions.map(m => resolveOneMention(m, executor)))
+  const resolved = await Promise.all(mentions.map(m => resolveOneMention(m, executor, pathMap)))
 
   const textBlocks: string[] = []
   const imageParts: MentionImagePart[] = []

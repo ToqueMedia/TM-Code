@@ -112,10 +112,63 @@ async function persistSnapshotNow(): Promise<void> {
   // module too. Resolving inside the timer callback keeps the module
   // graph clean.
   const { activeProjectPath, activeSessionId } = await getQueueContext()
-  if (!activeProjectPath || !activeSessionId) return
   const { saveQueueSnapshot } = await import('./queueSnapshotPersistence')
-  await saveQueueSnapshot(activeProjectPath, activeSessionId, snapshot)
+  // Session-affiliated items are persisted under THEIR OWN (project,
+  // session) pair — writing the whole queue under the focused context
+  // cross-contaminated snapshots: project A's parked prompts resurfaced
+  // in project B's strip after a reload. The FOCUSED pair's file holds its
+  // slice IN QUEUE ORDER (its own stamped items + unstamped legacy items);
+  // other sessions' stamped items go to their own files. Exactly ONE write
+  // per pair — an earlier version also wrote the legacy slice under the
+  // focused pair, racing the group write to the same file (last-write-wins
+  // could drop the stamped items from disk).
+  const groups = new Map<string, { projectPath: string; sessionId: string; items: QueuedCommand[] }>()
+  const hasActivePair = !!activeProjectPath && !!activeSessionId
+  const activeKey = hasActivePair ? `${activeProjectPath}\u0000${activeSessionId}` : null
+  if (hasActivePair) {
+    groups.set(activeKey!, {
+      projectPath: activeProjectPath!,
+      sessionId: activeSessionId!,
+      items: commandQueue.filter(
+        c =>
+          !c.sessionId
+          || (c.sessionId === activeSessionId
+            && (c.projectPath ?? activeProjectPath) === activeProjectPath),
+      ),
+    })
+  }
+  for (const cmd of commandQueue) {
+    if (!cmd.sessionId) continue
+    const key = `${cmd.projectPath ?? ''}\u0000${cmd.sessionId}`
+    if (groups.has(key)) continue
+    groups.set(key, {
+      projectPath: cmd.projectPath ?? activeProjectPath ?? '',
+      sessionId: cmd.sessionId,
+      items: commandQueue.filter(c => c.sessionId === cmd.sessionId
+        && (c.projectPath ?? '') === (cmd.projectPath ?? '')),
+    })
+  }
+  const writes: Promise<unknown>[] = []
+  for (const group of groups.values()) {
+    if (!group.projectPath) continue
+    writes.push(saveQueueSnapshot(group.projectPath, group.sessionId, group.items))
+  }
+  // A pair whose items all drained must have its snapshot CLEARED, or the
+  // consumed prompts resurrect from disk the next time that session loads.
+  // The active pair is always written above (possibly empty) — no extra
+  // clear needed for it.
+  for (const key of Array.from(persistedPairKeys)) {
+    if (groups.has(key)) continue
+    const [projectPath, sessionId] = key.split('\u0000')
+    if (projectPath) writes.push(saveQueueSnapshot(projectPath, sessionId, []))
+  }
+  persistedPairKeys = new Set(groups.keys())
+  await Promise.all(writes)
 }
+
+/** (projectPath, sessionId) pairs present in the LAST persist — drained
+ *  pairs get their snapshot cleared on the next write. */
+let persistedPairKeys = new Set<string>()
 
 async function getQueueContext(): Promise<{
   activeProjectPath: string | null
@@ -165,6 +218,41 @@ export function hydrateCommandQueue(items: QueuedCommand[]): void {
   // snapshots keep the historical auto-restore behaviour. The strip shows
   // the paused banner with a Resume button.
   setQueuePaused(items.some(c => c.asTask === true))
+}
+
+/**
+ * Session-scoped rehydrate: replace THIS session's slice of the queue with
+ * its disk snapshot while KEEPING live items that belong to other sessions
+ * (their runs/strip depend on them). Used on chat-session switch — the old
+ * full-replace either dropped other sessions' live items (snapshot
+ * non-empty) or left this session's stale items rendering under the wrong
+ * project (snapshot empty → no-op).
+ */
+export function hydrateCommandQueueForSession(
+  items: QueuedCommand[],
+  sessionId: string,
+): void {
+  // Live in-memory items of this session win over disk: they are newer
+  // than the debounced snapshot (memory mutated → persist scheduled, disk
+  // lags up to SNAPSHOT_PERSIST_DEBOUNCE_MS). Disk items only restore the
+  // slice when memory has none (e.g. after a restart).
+  const foreign = commandQueue.filter(c => c.sessionId && c.sessionId !== sessionId)
+  const legacy = commandQueue.filter(c => !c.sessionId)
+  const ownLive = commandQueue.filter(c => c.sessionId === sessionId)
+  const next = [...foreign, ...legacy, ...(ownLive.length > 0 ? ownLive : items)]
+  // Track hydrated pairs so a drain that fires before the next persist
+  // still clears their disk snapshot (persist only clears keys it has
+  // seen).
+  for (const item of items) {
+    if (item.sessionId) {
+      persistedPairKeys.add(`${item.projectPath ?? ''}\u0000${item.sessionId}`)
+    }
+  }
+  commandQueue.length = 0
+  commandQueue.push(...next)
+  snapshot = Object.freeze([...commandQueue])
+  queueChanged.emit()
+  setQueuePaused(items.some(c => c.asTask === true) || next.some(c => c.asTask === true))
 }
 
 // ============================================================================
@@ -344,6 +432,7 @@ export function resetCommandQueue(): void {
   commandQueue.length = 0
   snapshot = Object.freeze([])
   queuePaused = false
+  persistedPairKeys = new Set()
 }
 
 // ============================================================================
@@ -404,28 +493,42 @@ export function isSteerable(cmd: QueuedCommand): boolean {
  */
 export function drainSteerableMessages(
   maxPriority: QueuePriority = 'next',
+  opts?: { sessionId?: string | null },
 ): QueuedCommand[] {
+  // Session gate: a message queued while viewing project A steers A's run,
+  // never a run of another project that happens to be live when the turn
+  // boundary hits. Unstamped (legacy) items keep the old behaviour.
+  const belongsToRun = (cmd: QueuedCommand) =>
+    !opts?.sessionId || !cmd.sessionId || cmd.sessionId === opts.sessionId
   const firstTaskIdx = commandQueue.findIndex(c => c.asTask === true)
   const window = firstTaskIdx === -1 ? commandQueue : commandQueue.slice(0, firstTaskIdx)
   const threshold = PRIORITY_ORDER[maxPriority]
   const eligible = new Set<QueuedCommand>()
   for (const cmd of window) {
     if (PRIORITY_ORDER[cmd.priority ?? 'next'] > threshold) break
-    if (isSteerable(cmd)) eligible.add(cmd)
+    if (isSteerable(cmd) && belongsToRun(cmd)) eligible.add(cmd)
   }
   if (eligible.size === 0) return []
   return dequeueAllMatching(c => eligible.has(c))
 }
 
 /**
- * Drop every steerable message, keeping tasks (and slash/bash) in place.
+ * Drop steerable messages, keeping tasks (and slash/bash) in place.
  * Used by Stop: a steer message is a course correction for the run being
  * killed — meaningless afterwards — while queued TASKS are independent
  * units of work the user queued deliberately; they get parked (paused),
  * not destroyed.
+ *
+ * Session-scoped: with `sessionId` (the dying run's session), only THAT
+ * session's steers die. Items queued under a different session belong to
+ * a different conversation/runner and must survive a Stop issued here.
  */
-export function removeSteerableMessages(): void {
-  dequeueAllMatching(isSteerable)
+export function removeSteerableMessages(opts?: { sessionId?: string | null }): void {
+  const belongs =
+    !opts?.sessionId
+      ? () => true
+      : (c: QueuedCommand) => !c.sessionId || c.sessionId === opts.sessionId
+  dequeueAllMatching(c => isSteerable(c) && belongs(c))
 }
 
 /**

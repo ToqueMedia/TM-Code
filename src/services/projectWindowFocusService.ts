@@ -22,12 +22,44 @@ export const SECOND_CLICK_OPEN_MS = 8_000
 
 let lastFocusRequest: { path: string; at: number } | null = null
 
+// ── Self pid ────────────────────────────────────────────────────────────────
+//
+// Every TM Code window is an independent OS process, so the pid uniquely
+// identifies THIS window. Agent badges (agent-status.json) written by this
+// window carry our own pid; knowing it client-side lets the sidebar open a
+// self-owned project WITHOUT the request_project_window_focus round-trip
+// that used to sit between the click and the switch (bug: project switching
+// felt laggy; badges with `done` state fire this on nearly every click).
+let selfPid: number | null = null
+let selfPidPromise: Promise<void> | null = null
+
+/** Resolve (once) and cache this process's pid. Fire-and-forget at boot. */
+export function primeSelfPid(): Promise<void> {
+  if (selfPid !== null || selfPidPromise) return selfPidPromise ?? Promise.resolve()
+  selfPidPromise = invoke<number>('get_app_pid')
+    .then(pid => {
+      selfPid = pid
+    })
+    .catch(err => {
+      logger.warn('agent', 'get_app_pid failed:', err)
+      selfPidPromise = null
+    })
+  return selfPidPromise
+}
+
+/** Test helper. */
+export function setSelfPidForTests(pid: number | null): void {
+  selfPid = pid
+}
+
 /** Whether agent-status looks like a foreign process still relevant for focus. */
 export function isForeignAgentStatus(
   status: ProjectAgentStatus | null | undefined,
 ): boolean {
   if (!status) return false
   if (typeof status.pid !== 'number' || status.pid <= 0) return false
+  // Self-owned badge (this window wrote it) — never foreign, open directly.
+  if (selfPid !== null && status.pid === selfPid) return false
   // Prefer focusing when the other window is mid-run; also when terminal
   // badges remain (user often clicks the finished project to return to it).
   return (
@@ -110,14 +142,20 @@ export async function focusForeignOrOpen(
     return 'opened'
   }
 
+  // Stamp SYNCHRONOUSLY, before the await: the IPC takes a tick to come
+  // back, and a fast second click arriving in that window used to find
+  // lastFocusRequest still null — it started its own IPC too, BOTH clicks
+  // were swallowed as "focused" and the user needed a third click to open.
+  // If the IPC finds no foreign owner we clear the stamp and open.
+  lastFocusRequest = { path: norm, at: now }
+
   const targeted = await requestFocusForProject(projectPath)
   if (!targeted) {
-    lastFocusRequest = null
+    if (lastFocusRequest?.path === norm) lastFocusRequest = null
     onOpen()
     return 'opened'
   }
 
-  lastFocusRequest = { path: norm, at: now }
   opts?.onFocusRequested?.()
   return 'focused'
 }

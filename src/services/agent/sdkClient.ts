@@ -113,14 +113,43 @@ export function createSubAgentClient(
 }
 
 /**
+ * Normalise a BYOK baseURL for the OpenAI SDK.
+ *
+ * The OpenAI SDK appends `/chat/completions` to whatever baseURL it gets, so
+ * the conventional API root for OpenAI-compatible providers is `…/v1`. Local
+ * providers (Ollama, LM Studio) expose `/v1/chat/completions` at the same host,
+ * but users (and our own defaults until now) often store `http://localhost:11434`
+ * without the suffix — producing a 404 upstream.
+ *
+ * Gemini breaks the naive "always append /v1" rule because its OpenAI-compat
+ * root is `/v1beta/openai`. Rule: only append `/v1` when the path does NOT
+ * already contain `/v1` AND the host is local (`localhost` or `127.0.0.1`).
+ * Local providers are OpenAI-compat by definition and have no exotic roots.
+ */
+export function normalizeByokBaseURL(baseURL: string, apiShape: ByokApiShape): string {
+  const trimmed = baseURL.replace(/\/+$/, '')
+  if (apiShape !== 'openai_compat') return trimmed
+  try {
+    const u = new URL(trimmed)
+    const isLocal =
+      u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1'
+    if (isLocal && !u.pathname.includes('/v1')) {
+      return `${trimmed}/v1`
+    }
+  } catch {
+    /* malformed URL — fall through and let the SDK fail cleanly */
+  }
+  return trimmed
+}
+
+/**
  * Create an OpenAI SDK client for the BYOK DIRECT path — IDE → SDK → provider,
  * bypassing the TM worker entirely.
  *
  * Differences from `createAgentClient`:
- *   - `baseURL` is the provider's own URL, used RAW (only trailing slash
- *     trimmed). We must NOT force-append `/v1` like `normalizeBaseURL` does —
- *     that breaks Gemini (`/v1beta/openai`) and double-`/v1`s DashScope. The SDK
- *     appends `/chat/completions` itself.
+ *   - `baseURL` is the provider's own URL, normalised for OpenAI-compatible
+ *     providers (local hosts get `/v1` appended when missing). Gemini's
+ *     `/v1beta/openai` is preserved.
  *   - `apiKey` is the user's own key (read just-in-time from the OS keychain).
  *     The SDK sends it as `Authorization: Bearer`; the Anthropic transport
  *     rewrites that to `x-api-key`.
@@ -135,7 +164,7 @@ export function createByokAgentClient(params: {
   maxRetries?: number
   timeout?: number
 }): OpenAI {
-  const baseURL = params.baseURL.replace(/\/+$/, '')
+  const baseURL = normalizeByokBaseURL(params.baseURL, params.apiShape)
   let expectedHost = ''
   try {
     expectedHost = new URL(baseURL).host

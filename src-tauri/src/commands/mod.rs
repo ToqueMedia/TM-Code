@@ -1,6 +1,7 @@
 pub mod ai_completion;
 pub mod byok;
 pub mod checkpoint;
+pub mod clipboard_files;
 pub mod collab;
 pub mod container;
 pub mod debugger;

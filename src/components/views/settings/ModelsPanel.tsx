@@ -15,6 +15,7 @@ import {
 import { FiPlus, FiTrash2 } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { useTranslation } from '@/i18n'
+import { readAdminCache, writeAdminCache, ADMIN_CACHE_KEYS } from '@/services/adminCache'
 import type {
   ActiveAIConfig,
   ActiveAIConfigInput,
@@ -939,15 +940,25 @@ function CatalogSection(props: {
 
 export default function ModelsPanel(props: { onCatalogChanged?: () => void }) {
   const t = useTranslation()
-  const [coder, setCoder] = useState<AdminModel[]>([])
-  const [sidecar, setSidecar] = useState<SidecarModel[]>([])
-  const [personas, setPersonas] = useState<PersonasResponse | null>(null)
-  const [sidecars, setSidecars] = useState<SidecarsResponse | null>(null)
-  const [loading, setLoading] = useState(true)
+  // Local-first: lê o cache do localStorage uma vez (mount) para renderizar
+  // imediatamente. O refresh do servidor corre em background e actualiza o
+  // cache ao terminar. O catálogo muda raramente (só quando o admin edita),
+  // por isso o cache é quase sempre fresco.
+  const [cachedCoder] = useState(() => readAdminCache<AdminModel[]>(ADMIN_CACHE_KEYS.modelCatalog))
+  const [cachedSidecar] = useState(() => readAdminCache<SidecarModel[]>(ADMIN_CACHE_KEYS.sidecarCatalog))
+  const [cachedPersonas] = useState(() => readAdminCache<PersonasResponse>(ADMIN_CACHE_KEYS.personas))
+  const [cachedSidecars] = useState(() => readAdminCache<SidecarsResponse>(ADMIN_CACHE_KEYS.sidecars))
+  const hasCache = cachedCoder !== null || cachedSidecar !== null
+
+  const [coder, setCoder] = useState<AdminModel[]>(cachedCoder ?? [])
+  const [sidecar, setSidecar] = useState<SidecarModel[]>(cachedSidecar ?? [])
+  const [personas, setPersonas] = useState<PersonasResponse | null>(cachedPersonas)
+  const [sidecars, setSidecars] = useState<SidecarsResponse | null>(cachedSidecars)
+  const [loading, setLoading] = useState(!hasCache)
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(async function () {
-    setLoading(true)
+    if (!hasCache) setLoading(true)
     setError(null)
     try {
       const svc = await import('../../../services/adminService')
@@ -961,14 +972,21 @@ export default function ModelsPanel(props: { onCatalogChanged?: () => void }) {
       setSidecar(sidecarList)
       setPersonas(personaState)
       setSidecars(sidecarState)
+      // Gravar no cache para a próxima visita ser instantânea.
+      writeAdminCache(ADMIN_CACHE_KEYS.modelCatalog, coderList)
+      writeAdminCache(ADMIN_CACHE_KEYS.sidecarCatalog, sidecarList)
+      writeAdminCache(ADMIN_CACHE_KEYS.personas, personaState)
+      writeAdminCache(ADMIN_CACHE_KEYS.sidecars, sidecarState)
     } catch (err) {
-      setError(err instanceof Error && err.message === 'FORBIDDEN'
-        ? t('admin.forbidden')
-        : (err instanceof Error ? err.message : String(err)))
+      if (!hasCache) {
+        setError(err instanceof Error && err.message === 'FORBIDDEN'
+          ? t('admin.forbidden')
+          : (err instanceof Error ? err.message : String(err)))
+      }
     } finally {
       setLoading(false)
     }
-  }, [t])
+  }, [t, hasCache])
 
   useEffect(function () { load() }, [load])
 

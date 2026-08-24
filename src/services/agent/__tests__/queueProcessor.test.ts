@@ -275,3 +275,62 @@ describe('processQueueIfReady — asTask is legacy (F3: one agent per project)',
     expect(getCommandQueueSnapshot()).toHaveLength(0)
   })
 })
+
+// ── Session affiliation (2026-08-22) ─────────────────────────────────────────
+// O idle drain nunca mistura sessões num lote (um lote = um turno de agente =
+// uma sessão) e slash/bash de sessão estrangeira fica estacionado até o user
+// voltar a essa sessão.
+
+describe('processQueueIfReady — session-affiliated batches', () => {
+  it('never mixes sessions in one batch', () => {
+    enqueue(mk('a1', { sessionId: 'A' }))
+    enqueue(mk('b1', { sessionId: 'B' }))
+    enqueue(mk('a2', { sessionId: 'A' }))
+
+    const exec = jest.fn().mockResolvedValue(undefined)
+    const r1 = processQueueIfReady({ executeInput: exec, activeSessionId: 'X' })
+    expect(r1.processed).toBe(true)
+    expect(exec.mock.calls[0]![0].map((c: QueuedCommand) => c.value)).toEqual(['a1', 'a2'])
+
+    // Snapshot mudou → o efeito volta a disparar e drena o lote de B.
+    exec.mockClear()
+    const r2 = processQueueIfReady({ executeInput: exec, activeSessionId: 'X' })
+    expect(r2.processed).toBe(true)
+    expect(exec.mock.calls[0]![0].map((c: QueuedCommand) => c.value)).toEqual(['b1'])
+    expect(getCommandQueueSnapshot()).toHaveLength(0)
+  })
+
+  it('parks a foreign slash command but still drains prompts behind it', () => {
+    enqueue(mk('/init', { sessionId: 'B' }))
+    enqueue(mk('hello', { sessionId: 'A' }))
+
+    const exec = jest.fn().mockResolvedValue(undefined)
+    const r = processQueueIfReady({ executeInput: exec, activeSessionId: 'A' })
+    expect(r.processed).toBe(true)
+    expect(exec.mock.calls[0]![0].map((c: QueuedCommand) => c.value)).toEqual(['hello'])
+    // O /init de B continua em fila — drena quando B voltar a estar em foco.
+    expect(getCommandQueueSnapshot().map(c => c.value)).toEqual(['/init'])
+  })
+
+  it('drains a foreign slash command when its session is active again', () => {
+    enqueue(mk('/init', { sessionId: 'B' }))
+
+    const exec = jest.fn().mockResolvedValue(undefined)
+    const parked = processQueueIfReady({ executeInput: exec, activeSessionId: 'A' })
+    expect(parked.processed).toBe(false)
+
+    const drained = processQueueIfReady({ executeInput: exec, activeSessionId: 'B' })
+    expect(drained.processed).toBe(true)
+    expect(exec.mock.calls[0]![0][0].value).toBe('/init')
+  })
+
+  it('unstamped (legacy) items batch with the active session as before', () => {
+    enqueue(mk('legacy'))
+    enqueue(mk('stamped', { sessionId: 'A' }))
+
+    const exec = jest.fn().mockResolvedValue(undefined)
+    processQueueIfReady({ executeInput: exec, activeSessionId: 'A' })
+    // Legacy e stamped-A partilham o lote (comportamento histórico).
+    expect(exec.mock.calls[0]![0]).toHaveLength(2)
+  })
+})

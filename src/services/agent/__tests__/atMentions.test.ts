@@ -251,6 +251,49 @@ describe('resolveMentionContext', () => {
   })
 })
 
+describe('resolveMentionContext — name-only chips (pathMap)', () => {
+  it('resolves a name-only chip through the map', async () => {
+    mockExecutor.executeForMention.mockImplementation(
+      async (_tool: string, input: Record<string, unknown>) => `contents of ${input.file_path}`,
+    )
+    const r = await resolveMentionContext('fix @foo.ts', undefined, { 'foo.ts': 'src/deep/nested/foo.ts' })
+
+    expect(mockExecutor.executeForMention).toHaveBeenCalledWith('read_file', {
+      file_path: '/proj/src/deep/nested/foo.ts',
+    })
+    expect(r.contextText).toContain('contents of /proj/src/deep/nested/foo.ts')
+  })
+
+  it('falls back to root-relative resolution when the token has no map entry', async () => {
+    await resolveMentionContext('fix @src/a.ts', undefined, { 'other.ts': 'x/other.ts' })
+    expect(mockExecutor.executeForMention).toHaveBeenCalledWith('read_file', { file_path: '/proj/src/a.ts' })
+  })
+
+  it('still applies the scope check to the MAPPED path', async () => {
+    mockExecutor.isMentionPathAllowed.mockReturnValue(false)
+    const r = await resolveMentionContext('see @foo.ts', undefined, { 'foo.ts': 'outside/foo.ts' })
+    expect(r.contextText).toBe('')
+    expect(mockExecutor.executeForMention).not.toHaveBeenCalled()
+  })
+
+  it('strips the directory trailing slash before the map lookup', async () => {
+    mockStat.mockResolvedValue({ isDirectory: true })
+    mockExecutor.executeForMention.mockResolvedValue('[d] nested')
+    await resolveMentionContext('explore @components/', undefined, { components: 'src/ui/components' })
+
+    expect(mockExecutor.executeForMention).toHaveBeenCalledWith('list_directory', {
+      file_path: '/proj/src/ui/components', maxDepth: 1,
+    })
+  })
+
+  it('keeps line-range parsing on top of a mapped chip', async () => {
+    await resolveMentionContext('see @foo.ts#L5', undefined, { 'foo.ts': 'src/foo.ts' })
+    expect(mockExecutor.executeForMention).toHaveBeenCalledWith('read_file', {
+      file_path: '/proj/src/foo.ts', offset: 5, limit: 1,
+    })
+  })
+})
+
 describe('collectChangedFileContext', () => {
   it('returns empty when nothing changed', async () => {
     expect(await collectChangedFileContext()).toBe('')

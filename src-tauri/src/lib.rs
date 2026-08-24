@@ -2,6 +2,7 @@ mod commands;
 use commands::ai_completion::*;
 use commands::byok::*;
 use commands::checkpoint::*;
+use commands::clipboard_files::*;
 use commands::collab::*;
 use commands::container::*;
 use commands::debugger::*;
@@ -1710,7 +1711,9 @@ pub fn run() {
             check_project_window_lock,
             release_project_window_lock,
             request_project_window_focus,
-            take_project_window_focus_request
+            take_project_window_focus_request,
+            get_app_pid,
+            read_clipboard_file_paths
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

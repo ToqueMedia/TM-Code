@@ -102,6 +102,21 @@ interface ChatState {
   /** Draft attachments for the current message */
   draftAttachments: Attachment[]
   /**
+   * @mention display-name → project-relative path. The composer inserts
+   * name-only mention chips (`@foo.ts`) so the user never sees paths; this
+   * map is the internal side-channel that resolves the chip back to the file
+   * the user picked (atMentions consumes it at send time). Travels with the
+   * per-session draft: replaced on setActiveSession, reset on project wipe.
+   */
+  mentionPaths: Record<string, string>
+  /**
+   * Session the user asked to open from the Projects sidebar for a project
+   * that is NOT active in this window yet. Consumed by App.tsx's project
+   * switch effect AFTER the project opens (warm/restore would otherwise land
+   * on the most recent session instead of the clicked one). `null` = none.
+   */
+  pendingSessionOpen: { projectPath: string; sessionId: string } | null
+  /**
    * Project path when the agent is awaiting plan-revision feedback (user
    * clicked "Request changes" on the PlanApprovalCard). Until cleared, the
    * NEXT user message routes to `executePlanRevision(prompt, projectPath)`
@@ -347,6 +362,9 @@ interface ChatActions {
   initPersistence: (projectPath: string) => Promise<void>
   cleanupOnExit: (projectPath: string) => Promise<void>
   setDraftInput: (value: string) => void
+  /** Record/overwrite the internal path for a name-only @mention chip. */
+  registerMentionPath: (token: string, relativePath: string) => void
+  setPendingSessionOpen: (value: { projectPath: string; sessionId: string } | null) => void
   /** Flip the plan-revision flag — null clears it. */
   setPlanRevisionPending: (value: { projectPath: string; planPath?: string } | string | null) => void
   /** Track an interrupted /plan run that should resume in architect mode. */
@@ -553,6 +571,7 @@ function persistDraftNow(): void {
     saveDraftToDisk(session.projectPath, sessionId, {
       input: state.draftInput,
       attachments: state.draftAttachments,
+      mentionPaths: state.mentionPaths,
     }),
   ).catch(() => { /* persistence is best-effort */ })
 }
@@ -1833,6 +1852,8 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
     pendingDiffs: [],
     draftInput: '',
     draftAttachments: [],
+    mentionPaths: {},
+    pendingSessionOpen: null,
     planRevisionPending: null,
     planResumePending: null,
 
@@ -1840,6 +1861,18 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       set({ draftInput: value })
       scheduleDraftPersist()
     },
+
+    registerMentionPath: (token, relativePath) => {
+      set(state => {
+        // Same target → no state churn (the chip overlay + draft persist both
+        // key off identity; a redundant set would re-persist the draft file).
+        if (state.mentionPaths[token] === relativePath) return state
+        return { mentionPaths: { ...state.mentionPaths, [token]: relativePath } }
+      })
+      scheduleDraftPersist()
+    },
+
+    setPendingSessionOpen: (value) => set({ pendingSessionOpen: value }),
 
     setPlanRevisionPending: (value: { projectPath: string; planPath?: string } | string | null) => set({ planRevisionPending: value }),
 
@@ -2170,18 +2203,21 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
       // every IDE reopen.
       if (session?.projectPath) {
         void (async () => {
-          const [{ loadQueueSnapshot }, { hydrateCommandQueue }] = await Promise.all([
+          const [{ loadQueueSnapshot }, { hydrateCommandQueueForSession }] = await Promise.all([
             import('../services/agent/queueSnapshotPersistence'),
             import('../services/agent/messageQueue'),
           ])
           const items = await loadQueueSnapshot(session.projectPath, sessionId)
-          if (items.length === 0) return
           // Re-check the session is still active — the user might have
           // switched again during the async I/O. If they did, the new
           // setActiveSession will fire its own hydrate; we don't want
           // ours to overwrite it.
           if (useChatStore.getState().activeSessionId !== sessionId) return
-          hydrateCommandQueue(items)
+          // Session-scoped merge (not a full replace): keeps live items of
+          // OTHER sessions in the queue — a switch to an empty project used
+          // to leave the previous project's queued messages rendering under
+          // the new chat (the cross-project "optical illusion").
+          hydrateCommandQueueForSession(items, sessionId)
         })().catch(() => { /* non-fatal */ })
 
         // Rehydrate invokedSkills — the post-compaction recovery payload
@@ -2212,7 +2248,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           if (!stillActive) return
           const live = useChatStore.getState()
           if (live.draftInput || live.draftAttachments.length > 0) return
-          set({ draftInput: loaded.input, draftAttachments: loaded.attachments })
+          set({ draftInput: loaded.input, draftAttachments: loaded.attachments, mentionPaths: loaded.mentionPaths ?? {} })
         }).catch(() => { /* non-fatal */ })
       }
     },
@@ -4737,6 +4773,9 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
           pendingDiffs: keepStreaming ? prev.pendingDiffs : [],
           draftInput: '',
           draftAttachments: [],
+          // Name-only mention chips resolve through this map — stale entries
+          // from the previous project would silently hijack same-named files.
+          mentionPaths: {},
         })
         return
       }
@@ -4786,6 +4825,7 @@ export const useChatStore = create<ChatState & ChatActions>()((set, get) => {
         pendingDiffs: [],
         draftInput: '',
         draftAttachments: [],
+        mentionPaths: {},
       })
     },
 

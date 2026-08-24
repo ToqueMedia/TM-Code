@@ -330,6 +330,21 @@ export const useProjectStore = create<ProjectStore>()(
         // new project to the Rust registry without dropping the previous one,
         // so shell/PTY of a background run stays clamped to the right tree.
 
+        // ── Kick the slow work off IN PARALLEL ─────────────────────────────
+        // Switching used to serialize THREE awaits before the UI followed
+        // (double-open guard IPC → park → open_project IPC), which is the
+        // "pequenos atrasos até à troca efectivar" feel. open_project's side
+        // effects when the guard later declines are benign (workspace-list
+        // write for a project that is already in the list), so start it now
+        // and only gate the final `set({currentProject})` on the guard.
+        const openProjectInfoPromise: Promise<ProjectInfo> = invoke('open_project', {
+          path,
+          initGit: options?.initGit,
+        });
+        // Early guard returns below leave this promise unawaited — mark the
+        // rejection handled so a failed open can't surface as unhandled.
+        void openProjectInfoPromise.catch(() => undefined);
+
         // Double-open guard (cross-window): the same project in two windows
         // shares the state dir (sessions last-write-wins) AND the working
         // tree (two agents writing). Default = warn + optional Open anyway.
@@ -411,7 +426,7 @@ export const useProjectStore = create<ProjectStore>()(
         }
 
         try {
-          const projectInfo: ProjectInfo = await invoke('open_project', { path, initGit: options?.initGit });
+          const projectInfo: ProjectInfo = await openProjectInfoPromise;
           // Migration is rare after first open — never block the switch path.
           if (isInWindowSwitch) {
             void invoke('migrate_project_state', { projectPath: path }).catch((error) => {

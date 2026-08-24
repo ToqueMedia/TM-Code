@@ -24,6 +24,7 @@ import {
   hasCommandsInQueue,
   getCommandQueueSnapshot,
   hydrateCommandQueue,
+  hydrateCommandQueueForSession,
   isQueuePaused,
   isSlashCommand,
   isSteerable,
@@ -428,5 +429,84 @@ describe('messageQueue — pause semantics', () => {
 
     hydrateCommandQueue([mk('s1', { uuid: 'S1' })])
     expect(isQueuePaused()).toBe(false)
+  })
+})
+
+// ── Session affiliation (2026-08-22) ─────────────────────────────────────────
+// A fila é global, mas cada item é carimbado com a sessão em que foi
+// enfileirado. Estes testes fixam os três contratos: steering só absorve
+// itens do run vivo, o hydrate por sessão preserva itens vivos de outras
+// sessões, e o hydrate não perde os próprios itens quando há cópia em
+// memória mais recente que o disco.
+
+describe('messageQueue — session-scoped steering drain', () => {
+  it('drains only items of the running session', () => {
+    enqueue(mk('for-A', { sessionId: 'A' }))
+    enqueue(mk('for-B', { sessionId: 'B' }))
+    const drained = drainSteerableMessages('next', { sessionId: 'A' })
+    expect(drained.map(c => c.value)).toEqual(['for-A'])
+    expect(getCommandQueueSnapshot().map(c => c.value)).toEqual(['for-B'])
+  })
+
+  it('keeps unstamped (legacy) items drainable by any run', () => {
+    enqueue(mk('legacy'))
+    enqueue(mk('for-B', { sessionId: 'B' }))
+    const drained = drainSteerableMessages('next', { sessionId: 'A' })
+    expect(drained.map(c => c.value)).toEqual(['legacy'])
+  })
+
+  it('without a sessionId option drains everything (legacy callers)', () => {
+    enqueue(mk('for-A', { sessionId: 'A' }))
+    enqueue(mk('for-B', { sessionId: 'B' }))
+    const drained = drainSteerableMessages()
+    expect(drained).toHaveLength(2)
+  })
+})
+
+describe('messageQueue — hydrateCommandQueueForSession', () => {
+  it('replaces the session slice with the disk snapshot, keeps other sessions alive', () => {
+    enqueue(mk('live-A', { sessionId: 'A', uuid: 'la' }))
+    hydrateCommandQueueForSession([mk('disk-B', { sessionId: 'B', uuid: 'db' })], 'B')
+    const values = getCommandQueueSnapshot().map(c => c.value)
+    expect(values).toContain('live-A')
+    expect(values).toContain('disk-B')
+  })
+
+  it('live items of the hydrated session win over the disk snapshot', () => {
+    enqueue(mk('live-A', { sessionId: 'A', uuid: 'la' }))
+    enqueue(mk('live-B', { sessionId: 'B', uuid: 'lb' }))
+    hydrateCommandQueueForSession([mk('disk-B', { sessionId: 'B', uuid: 'db' })], 'B')
+    const values = getCommandQueueSnapshot().map(c => c.value)
+    expect(values).toContain('live-A')
+    expect(values).toContain('live-B')
+    expect(values).not.toContain('disk-B')
+  })
+
+  it('keeps live in-memory items over the disk snapshot (memory is newer)', () => {
+    enqueue(mk('live-B', { sessionId: 'B', uuid: 'lb' }))
+    hydrateCommandQueueForSession([mk('stale-disk-B', { sessionId: 'B', uuid: 'db' })], 'B')
+    expect(getCommandQueueSnapshot().map(c => c.value)).toEqual(['live-B'])
+  })
+
+  it('rehydrating tasks for the session still starts paused', () => {
+    hydrateCommandQueueForSession([mk('t', { sessionId: 'B', asTask: true })], 'B')
+    expect(isQueuePaused()).toBe(true)
+  })
+})
+
+describe('messageQueue — session-scoped Stop (removeSteerableMessages)', () => {
+  it('with sessionId, only that session\'s steers die; other sessions survive', () => {
+    enqueue(mk('steer-A', { sessionId: 'A' }))
+    enqueue(mk('steer-B', { sessionId: 'B' }))
+    enqueue(mk('/keep', { sessionId: 'A' }))
+    removeSteerableMessages({ sessionId: 'A' })
+    expect(getCommandQueueSnapshot().map(c => c.value)).toEqual(['steer-B', '/keep'])
+  })
+
+  it('without sessionId keeps the historical drop-all behaviour', () => {
+    enqueue(mk('steer-A', { sessionId: 'A' }))
+    enqueue(mk('legacy-steer'))
+    removeSteerableMessages()
+    expect(getCommandQueueSnapshot()).toHaveLength(0)
   })
 })

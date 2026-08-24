@@ -12,7 +12,7 @@
  * required. The wrapper `resolveWorkerUrl()` / `resolveOllamaUrl()` just
  * forwards real runtime values into the same pure function.
  */
-import { buildTmCodeWebImportUrl, resolveUrl } from '../devUrls'
+import { resolveUrl } from '../devUrls'
 
 describe('resolveUrl — pure resolver', () => {
   describe('Mac / Linux dev with UTM gateway env value → remap to localhost', () => {
@@ -144,28 +144,3 @@ describe('resolveUrl — pure resolver', () => {
   })
 })
 
-describe('buildTmCodeWebImportUrl', () => {
-  it('builds local Web import URLs without using the production host', () => {
-    expect(buildTmCodeWebImportUrl('abc-123', 'http://localhost:5173')).toBe(
-      'http://localhost:5173/account/code?importId=abc-123'
-    )
-  })
-
-  it('builds production Web import URLs from the production base', () => {
-    expect(buildTmCodeWebImportUrl('abc-123', 'https://code.toquemedia.net')).toBe(
-      'https://code.toquemedia.net/account/code?importId=abc-123'
-    )
-  })
-
-  it('preserves custom local base paths', () => {
-    expect(buildTmCodeWebImportUrl('abc 123', 'http://localhost:5173/app/')).toBe(
-      'http://localhost:5173/account/code?importId=abc+123'
-    )
-  })
-
-  it('includes an import token when provided', () => {
-    expect(buildTmCodeWebImportUrl('abc-123', 'http://localhost:5173', { importToken: 'tok 123' })).toBe(
-      'http://localhost:5173/account/code?importId=abc-123#importToken=tok+123'
-    )
-  })
-})

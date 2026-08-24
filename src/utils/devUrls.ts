@@ -33,14 +33,11 @@ import {
   VITE_COLLAB_SIGNALING_URL,
   DEFAULT_AI_WORKER_URL,
   DEFAULT_COLLAB_SIGNALING_URL,
-  DEFAULT_TM_CODE_WEB_URL,
   DEFAULT_OLLAMA_URL,
   DEFAULT_WORKER_URL,
   PRODUCTION_AI_WORKER_URL,
   PRODUCTION_COLLAB_SIGNALING_URL,
   PRODUCTION_DEPLOY_URL,
-  PRODUCTION_TM_CODE_WEB_URL,
-  VITE_TM_CODE_WEB_URL,
 } from '@/utils/viteEnv'
 
 export interface ResolveUrlInput {
@@ -88,7 +85,6 @@ export function resolveUrl(input: ResolveUrlInput): string {
 // where requests are going (helps debug "is the IDE hitting prod or local?").
 let _workerUrlLogged = false
 let _aiWorkerUrlLogged = false
-let _tmCodeWebUrlLogged = false
 
 export function resolveWorkerUrl(): string {
   const url = resolveUrl({
@@ -116,35 +112,6 @@ export function resolveAIWorkerUrl(): string {
     console.info(`[devUrls] AI Worker URL: ${url} (env=${VITE_AI_WORKER_URL ?? '<unset>'}, fallback=${IS_VITE_DEV ? DEFAULT_AI_WORKER_URL : PRODUCTION_AI_WORKER_URL}, mac/linux remap=${!IS_WINDOWS ? 'on' : 'off'})`)
   }
   return url
-}
-
-export function resolveTmCodeWebUrl(): string {
-  const url = resolveUrl({
-    envValue: VITE_TM_CODE_WEB_URL,
-    fallback: IS_VITE_DEV ? DEFAULT_TM_CODE_WEB_URL : PRODUCTION_TM_CODE_WEB_URL,
-    isViteDev: IS_VITE_DEV,
-    isWindows: IS_WINDOWS,
-  })
-  if (IS_VITE_DEV && !_tmCodeWebUrlLogged) {
-    _tmCodeWebUrlLogged = true
-    console.info(`[devUrls] TM Code Web URL: ${url} (env=${VITE_TM_CODE_WEB_URL ?? '<unset>'}, fallback=${IS_VITE_DEV ? DEFAULT_TM_CODE_WEB_URL : PRODUCTION_TM_CODE_WEB_URL}, mac/linux remap=${!IS_WINDOWS ? 'on' : 'off'})`)
-  }
-  return url
-}
-
-export function buildTmCodeWebImportUrl(
-  importId: string,
-  baseUrl = resolveTmCodeWebUrl(),
-  options?: { importToken?: string },
-): string {
-  const url = new URL('/account/code', baseUrl)
-  url.searchParams.set('importId', importId)
-  if (options?.importToken) {
-    const fragment = new URLSearchParams()
-    fragment.set('importToken', options.importToken)
-    url.hash = fragment.toString()
-  }
-  return url.toString()
 }
 
 /**

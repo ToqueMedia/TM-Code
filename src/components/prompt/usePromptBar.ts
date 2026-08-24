@@ -25,7 +25,7 @@ import { browserSession } from '../../services/browserSessionManager'
 import { isSlashCommandAllowedForPlan, slashCommandRegistry, type SlashCommand } from '../../services/agent/slashCommandRegistry'
 import { useRequiredToolsStore, selectAgentBlocked, selectMissingTools } from '../../stores/requiredToolsStore'
 import QuickOpenService, { type QuickOpenItem } from '../../services/quickOpenService'
-import { findMentionAtCursor, findMentionTokenEnd } from '../../utils/mentionParser'
+import { findMentionAtCursor, findMentionTokenEnd, extractMentions } from '../../utils/mentionParser'
 import { preprocessHashtags } from '../../services/agent/hashtagRegistry'
 import { useHashtagMenu } from './useHashtagMenu'
 import { t } from '@/i18n'
@@ -50,6 +50,7 @@ import {
 import { getQueryGuard } from '../../services/agent/queryGuard'
 import { isAtBlockingLimit, resolveContextWindow, totalContextTokens } from '../../utils/contextWindow'
 import { resolveSessionOccupancy } from '../../utils/sessionOccupancy'
+import { invoke } from '@/utils/invokeMetrics'
 import { enqueueSerializedRun } from '../../services/agent/agentRunner'
 import type { ContentBlock, PromptValue, QueuedCommand } from '../../types/messageQueueTypes'
 import type { ConversationMessage } from '../../types/chat'
@@ -480,9 +481,11 @@ export function usePromptBar() {
     }, 150)
   }, [hashtagMenu])
 
-  // @mention selection: insert @path as text in the textarea, replacing the
-  // full mention token (not just up to the cursor) so mid-token edits don't
-  // leave trailing garbage.
+  // @mention selection: insert a NAME-ONLY chip (`@foo.ts`) in the textarea —
+  // the user never sees paths; the project-relative path is recorded in
+  // chatStore.mentionPaths and resolved at send time (atMentions). Replaces
+  // the full mention token (not just up to the cursor) so mid-token edits
+  // don't leave trailing garbage.
   const handleMentionSelect = useCallback((item: QuickOpenItem) => {
     const currentInput = useChatStore.getState().draftInput
     const start = mentionStartRef.current
@@ -500,8 +503,21 @@ export function usePromptBar() {
       ? normItem.slice(projectPath.length + 1)
       : normItem
 
+    // Same-basename collision: the draft already holds a chip with this
+    // display name pointing at ANOTHER file — a second map entry would
+    // silently re-point the FIRST chip. Insert the full path instead
+    // (self-describing, resolves without the map).
+    const chat = useChatStore.getState()
+    const conflicting = chat.mentionPaths[item.name] !== undefined
+      && chat.mentionPaths[item.name] !== relativePath
+      && extractMentions(currentInput).some(m => m.token.replace(/[\\/]+$/, '') === item.name)
+    const displayToken = conflicting ? relativePath : item.name
+    if (!conflicting) chat.registerMentionPath(item.name, relativePath)
+
+    // Directories keep the trailing '/' — it doubles as the folder cue in
+    // the chip AND the authoritative isDirectory marker for atMentions.
     const suffix = item.isDirectory ? '/' : ''
-    const insertion = `@${relativePath}${suffix} `
+    const insertion = `@${displayToken}${suffix} `
     const newValue = before + insertion + after
     const newCursor = before.length + insertion.length
 
@@ -545,6 +561,26 @@ export function usePromptBar() {
     textareaRef.current?.focus()
   }, [addDraftAttachment])
 
+  // Insert text at the textarea cursor (or append when unfocused) and keep
+  // the caret after the insertion.
+  const insertTextAtCursor = useCallback((text: string) => {
+    const ta = textareaRef.current
+    const current = useChatStore.getState().draftInput ?? ''
+    if (!ta) {
+      setInput(current ? `${current}\n${text}` : text)
+      return
+    }
+    const start = ta.selectionStart ?? current.length
+    const end = ta.selectionEnd ?? start
+    const next = current.slice(0, start) + text + current.slice(end)
+    setInput(next)
+    requestAnimationFrame(() => {
+      const pos = start + text.length
+      ta.focus()
+      ta.setSelectionRange(pos, pos)
+    })
+  }, [setInput])
+
   // Paste handler — intercept images from clipboard
   const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
     const items = e.clipboardData?.items
@@ -565,8 +601,34 @@ export function usePromptBar() {
         return // Only handle first image
       }
     }
-    // If no image, let default paste behavior (text) proceed
-  }, [addDraftAttachment])
+
+    // Non-image FILES copied in Finder/Explorer: the WebView exposes only
+    // the file NAME as text — useless for the agent. Read the absolute
+    // paths from the OS clipboard and insert those instead so the agent
+    // can read the file. When the native read fails (no Tauri, empty
+    // clipboard, unsupported platform), fall back to the default text
+    // paste so nothing is silently dropped.
+    const files = e.clipboardData?.files
+    if (files && files.length > 0) {
+      e.preventDefault()
+      const fallbackText = e.clipboardData?.getData('text/plain') ?? ''
+      const insertOrFallback = (paths: string[]) => {
+        if (paths.length > 0) {
+          insertTextAtCursor(paths.join('\n'))
+        } else if (fallbackText) {
+          insertTextAtCursor(fallbackText)
+        }
+      }
+      try {
+        const paths = await invoke<string[]>('read_clipboard_file_paths')
+        insertOrFallback(paths)
+      } catch (err) {
+        logger.warn('prompt', 'read_clipboard_file_paths failed:', err)
+        insertOrFallback([])
+      }
+    }
+    // Otherwise let the default text paste proceed
+  }, [addDraftAttachment, insertTextAtCursor])
 
   // Drag-and-drop handlers — counter prevents flicker when dragging over child elements
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -622,8 +684,17 @@ export function usePromptBar() {
         textareaRef.current?.focus()
       }
     }
+    // Focus-only request from outside the composer (e.g. the queue strip's
+    // edit action, which restores a queued message into the draft).
+    function handleFocusRequest() {
+      textareaRef.current?.focus()
+    }
     window.addEventListener('promptbar:insert', handleInsert)
-    return () => window.removeEventListener('promptbar:insert', handleInsert)
+    window.addEventListener('promptbar:focus', handleFocusRequest)
+    return () => {
+      window.removeEventListener('promptbar:insert', handleInsert)
+      window.removeEventListener('promptbar:focus', handleFocusRequest)
+    }
   }, [])
 
   /**
@@ -832,7 +903,9 @@ export function usePromptBar() {
     // since it last saw them — claude-vaz injects the same note at turn
     // start via getAttachmentMessages.
     if (!bootstrapOnly) try {
-      const mentionResolution = await resolveMentionContext(display.text)
+      // mentionPaths: name-only chips resolve through the side map
+      // (chatStore.mentionPaths) — see handleMentionSelect.
+      const mentionResolution = await resolveMentionContext(display.text, undefined, chatStore.mentionPaths)
       const changedContext = await collectChangedFileContext()
       if (mentionResolution.contextText || mentionResolution.imageParts.length > 0 || changedContext) {
         const applied = applyMentionResolution(
@@ -1323,11 +1396,20 @@ export function usePromptBar() {
     // matches Claude Code's separation of "queued preview" and "transcript
     // entry", which removes any chance of a position race against the
     // AgentActivityIndicator's elapsed-time message.
+    //
+    // Stamp the session (and its project) the message was queued UNDER:
+    // the strip renders it only in that session's chat and the drains
+    // (steering + idle) deliver it there — a queued message used to follow
+    // the FOCUSED project after a switch and land in the wrong chat.
+    const enqueueChat = useChatStore.getState()
+    const enqueueSession = enqueueChat.sessions.get(enqueueChat.activeSessionId ?? '')
     enqueueMessage({
       value,
       mode: 'prompt',
       priority: 'next',
       uuid: generateId('queued'),
+      sessionId: enqueueChat.activeSessionId ?? undefined,
+      projectPath: enqueueSession?.projectPath ?? currentProject?.path ?? undefined,
     })
 
     // Clear input immediately — message is in the queue
@@ -1376,6 +1458,34 @@ export function usePromptBar() {
   const executeQueuedInput = useCallback(async (commands: QueuedCommand[]) => {
     if (commands.length === 0) return
 
+    // ── Session-affiliated items of ANOTHER session ──────────────────────
+    // The processor batches per session; if this batch belongs to a
+    // different session than the focused one, dispatch it to that
+    // session's project runner (F2: one agent per project) — never into
+    // the focused chat. The bubble is written to the RIGHT session by
+    // addSessionAgentRun; steers/spawns follow the same rules as a direct
+    // send in that project.
+    const head = commands[0]!
+    {
+      const chatNow = useChatStore.getState()
+      if (head.sessionId && chatNow.activeSessionId && head.sessionId !== chatNow.activeSessionId) {
+        if (!chatNow.sessions.has(head.sessionId)) {
+          // Session gone (project closed) — requeue instead of losing the
+          // message; it parks until its session is back.
+          const { enqueue } = await import('../../services/agent/messageQueue')
+          for (const cmd of commands) enqueue(cmd)
+          return
+        }
+        const merged: PromptValue =
+          commands.length > 1 ? joinPromptValues(commands.map(c => c.value)) : head.value
+        const display = extractDisplayFromValue(merged)
+        addSessionAgentRun(head.sessionId, display.text, {
+          blocks: typeof merged === 'string' ? undefined : merged,
+        })
+        return
+      }
+    }
+
     // Reserve the QueryGuard SYNCHRONOUSLY before any await. This closes the
     // window where the queue snapshot changes (post-dequeue or new enqueue)
     // could re-fire useQueueProcessor's effect with isQueryActive=false and
@@ -1401,7 +1511,6 @@ export function usePromptBar() {
         layoutStore.setViewMode('chat')
       }
 
-      const head = commands[0]!
       // Coalesce prompt-mode batches into a single turn. joinPromptValues
       // handles both string-only and block-mixed inputs:
       //   - all strings → single newline-joined string

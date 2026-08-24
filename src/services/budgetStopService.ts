@@ -55,8 +55,12 @@ async function stopAllAgentWork(): Promise<void> {
     // Fila primeiro e SEMPRE (mesmo sem run vivo — o 402 pode ter chegado
     // quando o run principal já ia a terminar): orientações fora, tarefas
     // parqueadas. O gate de billing do processor já as segura; a pausa
-    // torna o estado visível (banner + Retomar na strip).
-    removeSteerableMessages()
+    // torna o estado visível (banner + Retomar na strip). Scoping por
+    // sessão: só morrem os steers do run principal — itens enfileirados
+    // nOUTRA sessão pertencem a outra conversa e sobrevivem.
+    removeSteerableMessages({
+      sessionId: (await import('@/stores/chatStore')).useChatStore.getState().streamingSessionId,
+    })
     if (hasCommandsInQueue()) setQueuePaused(true)
 
     const busy =

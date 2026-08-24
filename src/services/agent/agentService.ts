@@ -614,8 +614,10 @@ class AgentService {
     //    sessions.
     const activeSession = useChatStore.getState().getActiveSession();
     const snapshot = activeSession?.byokSnapshot ?? null;
-    const tmLocked = useBillingStore.getState().toqueMediaActive;
-    const byokActive = !tmLocked && !!snapshot && useByokStore.getState().enabled;
+    // BYOK é permitido em TODOS os planos pessoais, incluindo Toque Media:
+    // quando activo, a IDE fala directamente com o provider e o consumo do
+    // plano TM não é tocado.
+    const byokActive = !!snapshot && useByokStore.getState().enabled;
     this.byokActive = byokActive;
     this.byokSnapshot = snapshot;
 

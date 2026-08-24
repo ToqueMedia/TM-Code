@@ -31,6 +31,9 @@ interface DraftFileV1 {
   updatedAt: string
   input: string
   attachments: Attachment[]
+  /** Optional so schemaVersion-1 files written before the field existed
+   *  still parse — absent maps to `{}` on load. */
+  mentionPaths?: Record<string, string>
 }
 
 async function draftPath(projectPath: string, sessionId: string): Promise<string> {
@@ -40,6 +43,7 @@ async function draftPath(projectPath: string, sessionId: string): Promise<string
 export interface LoadedDraft {
   input: string
   attachments: Attachment[]
+  mentionPaths: Record<string, string>
 }
 
 /**
@@ -60,6 +64,10 @@ export async function loadDraftFromDisk(
     return {
       input: typeof parsed.input === 'string' ? parsed.input : '',
       attachments: Array.isArray(parsed.attachments) ? parsed.attachments : [],
+      mentionPaths:
+        parsed.mentionPaths && !Array.isArray(parsed.mentionPaths)
+          ? parsed.mentionPaths
+          : {},
     }
   } catch {
     // File missing OR read/parse error — both treated as "no draft".
@@ -79,7 +87,7 @@ export async function loadDraftFromDisk(
 export async function saveDraftToDisk(
   projectPath: string,
   sessionId: string,
-  draft: { input: string; attachments: Attachment[] },
+  draft: { input: string; attachments: Attachment[]; mentionPaths?: Record<string, string> },
 ): Promise<void> {
   if (!projectPath || !sessionId) return
   const path = await draftPath(projectPath, sessionId)
@@ -100,6 +108,9 @@ export async function saveDraftToDisk(
     updatedAt: new Date().toISOString(),
     input: draft.input,
     attachments: draft.attachments,
+    ...(draft.mentionPaths && Object.keys(draft.mentionPaths).length > 0
+      ? { mentionPaths: draft.mentionPaths }
+      : {}),
   }
   try {
     await invoke('write_file', {

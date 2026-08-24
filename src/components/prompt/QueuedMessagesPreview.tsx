@@ -1,20 +1,26 @@
 /**
- * Queued Messages Preview — the queue strip above the PromptBar.
+ * Queued Messages Preview — the stack fused on top of the composer.
  *
- * Two kinds of entries share the strip, with distinct semantics and visuals:
+ * Renders as a connected extension of the input box (shared border, no gap,
+ * square corners at the seam): the queue is "part of the prompt" until it
+ * drains, not a floating strip. PromptBar square-rounds the input's top
+ * corners while this component renders (see useHasQueuedForActiveSession).
+ *
+ * Two kinds of entries share the stack, with distinct semantics and visuals:
  *  - STEER (default, pink) — joins the RUNNING task at its next turn
  *    boundary (drained by the steering collectors mid-run).
  *  - TASK (`asTask`, purple) — waits for the current run to END, then the
  *    idle drain (queueProcessor) starts it as its OWN run, one at a time.
  *
- * Every entry can be removed; with 2+ entries they can be reordered — queue
- * order is execution order (the idle drain respects it, and the batch drain
- * never crosses a task boundary).
+ * Every entry can be removed or EDITED — editing pops it back into the
+ * textarea (text + attachments) and takes it out of the queue. With 2+
+ * entries they can be reordered — queue order is execution order (the idle
+ * drain respects it, and the batch drain never crosses a task boundary).
  */
 
-import { memo, useSyncExternalStore } from 'react'
+import { memo, useCallback, useSyncExternalStore } from 'react'
 import { Box, Flex, Text } from '@chakra-ui/react'
-import { FiChevronDown, FiChevronUp, FiCornerDownRight, FiLayers, FiPause, FiX } from 'react-icons/fi'
+import { FiChevronDown, FiChevronUp, FiCornerDownRight, FiEdit2, FiLayers, FiPause, FiX } from 'react-icons/fi'
 import { tokens } from '@/theme/tokens'
 import { t } from '@/i18n'
 import {
@@ -26,6 +32,8 @@ import {
   subscribeToCommandQueue,
   subscribeToQueuePause,
 } from '@/services/agent/messageQueue'
+import { useChatStore } from '@/stores/chatStore'
+import type { Attachment } from '@/types/chat'
 import type { PromptValue, QueuedCommand } from '@/types/messageQueueTypes'
 
 /**
@@ -64,7 +72,45 @@ function kindOf(cmd: QueuedCommand): { color: string; icon: typeof FiLayers; bad
   }
 }
 
-/** Tiny ghost icon-button used for reorder/remove row actions. */
+/** True when the command queue holds an entry the ACTIVE session's strip
+ *  would render. PromptBar subscribes to square-round the input's top
+ *  corners while the stack is fused on top of it. */
+export function useHasQueuedForActiveSession(): boolean {
+  const queued = useSyncExternalStore(subscribeToCommandQueue, getCommandQueueSnapshot)
+  const activeSessionId = useChatStore(s => s.activeSessionId)
+  return queued.some(cmd => !cmd.sessionId || cmd.sessionId === activeSessionId)
+}
+
+/**
+ * Pop a queued command back into the composer: text goes to the draft
+ * (appended on a new line when a draft is already in progress — editing
+ * must never eat what the user is typing), attachment blocks return as
+ * draft attachment chips. The command leaves the queue.
+ */
+function restoreToDraft(cmd: QueuedCommand): void {
+  const chat = useChatStore.getState()
+  let text: string
+  const attachments: Attachment[] = []
+  if (typeof cmd.value === 'string') {
+    text = cmd.value
+  } else {
+    const texts: string[] = []
+    for (const block of cmd.value) {
+      if (block.type === 'text') texts.push(block.text)
+      else attachments.push(block.attachment)
+    }
+    text = texts.join('\n')
+  }
+  if (text.length > 0) {
+    const draft = chat.draftInput
+    chat.setDraftInput(draft.trim().length > 0 ? `${draft}\n${text}` : text)
+  }
+  for (const att of attachments) chat.addDraftAttachment(att)
+  removeFromQueue([cmd])
+  window.dispatchEvent(new CustomEvent('promptbar:focus'))
+}
+
+/** Tiny ghost icon-button used for edit/reorder/remove row actions. */
 function RowActionButton({
   label,
   disabled,
@@ -103,23 +149,36 @@ function RowActionButton({
   )
 }
 
-function QueuedMessagesPreview() {
+function QueuedMessagesPreview({ placement = 'docked' }: { placement?: 'docked' | 'centered' }) {
   const queuedCommands = useSyncExternalStore(
     subscribeToCommandQueue,
     getCommandQueueSnapshot,
   )
   const paused = useSyncExternalStore(subscribeToQueuePause, isQueuePaused)
+  const activeSessionId = useChatStore(s => s.activeSessionId)
+  const resume = useCallback(() => setQueuePaused(false), [])
 
-  // TM Code currently only enqueues 'prompt' mode commands so every
-  // queued item is user-visible. When task notifications are added,
-  // re-introduce the isQueuedCommandVisible filter from Claude Code.
-  const visibleCommands = queuedCommands
+  // The queue is a single global strip, but each entry is stamped with the
+  // session it was queued under — show ONLY this session's entries. A
+  // message queued in project A used to render under project B's input
+  // after a switch, and "leaving the queue" looked like it landed in B's
+  // chat while it actually drained into A's run. Unstamped (legacy) items
+  // stay visible everywhere.
+  const visibleCommands = queuedCommands.filter(
+    cmd => !cmd.sessionId || cmd.sessionId === activeSessionId,
+  )
   const canReorder = visibleCommands.length > 1
 
   if (visibleCommands.length === 0) return null
 
   return (
-    <Box mb={2}>
+    <Box
+      borderRadius="12px 12px 0 0"
+      border={`1px solid ${tokens.colors.border.panel}`}
+      borderBottom="none"
+      bg={placement === 'centered' ? tokens.colors.bg.panel : 'rgba(17, 17, 17, 0.96)'}
+      overflow="hidden"
+    >
       {paused && (
         // Parked queue (Stop / budget stop / rehydrated tasks): nothing
         // runs until the user resumes here or sends a new message.
@@ -128,10 +187,8 @@ function QueuedMessagesPreview() {
           gap={2}
           px={3}
           py="6px"
-          mb={1}
-          borderRadius="8px"
           bg="rgba(255, 149, 0, 0.07)"
-          border="1px solid rgba(255, 149, 0, 0.22)"
+          borderBottom="1px solid rgba(255, 149, 0, 0.22)"
         >
           <Box color={tokens.colors.status.warning} display="flex" flexShrink={0}>
             <FiPause size={12} />
@@ -150,9 +207,10 @@ function QueuedMessagesPreview() {
             border="1px solid rgba(255, 149, 0, 0.35)"
             cursor="pointer"
             flexShrink={0}
+            bg="transparent"
             _hover={{ bg: 'rgba(255, 149, 0, 0.12)' }}
             transition={tokens.transition.fast}
-            onClick={() => setQueuePaused(false)}
+            onClick={resume}
           >
             {t('queue.resume')}
           </Box>
@@ -167,12 +225,14 @@ function QueuedMessagesPreview() {
             align="center"
             gap={2}
             px={3}
-            py={2}
-            borderRadius="8px"
+            py="7px"
             bg="rgba(255, 255, 255, 0.028)"
-            border="1px solid rgba(255, 255, 255, 0.07)"
-            mb={index < visibleCommands.length - 1 ? 1 : 0}
+            _hover={{ bg: 'rgba(255, 255, 255, 0.05)' }}
+            transition={tokens.transition.fast}
             boxShadow={`inset 2px 0 0 ${kind.color}`}
+            borderBottom={
+              index < visibleCommands.length - 1 ? '1px solid rgba(255, 255, 255, 0.05)' : 'none'
+            }
             title={previewText(cmd.value)}
           >
             <Box color={kind.color} display="flex" flexShrink={0}>
@@ -199,6 +259,9 @@ function QueuedMessagesPreview() {
             >
               {kind.badge}
             </Text>
+            <RowActionButton label={t('queue.editQueued')} onClick={() => restoreToDraft(cmd)}>
+              <FiEdit2 size={12} />
+            </RowActionButton>
             {canReorder && cmd.uuid && (
               <>
                 <RowActionButton

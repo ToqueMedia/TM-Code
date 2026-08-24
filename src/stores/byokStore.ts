@@ -326,7 +326,11 @@ const LOCAL_PROVIDERS: ByokProvider[] = [
     name: 'Ollama',
     enabled: true,
     group: 'local',
-    defaultBaseURL: 'http://localhost:11434',
+    // Ollama's OpenAI-compatible endpoint lives at /v1/chat/completions; the
+    // SDK appends /chat/completions, so the baseURL must end in /v1. Users who
+    // saved the old default will still work thanks to runtime normalisation in
+    // sdkClient.ts.
+    defaultBaseURL: 'http://localhost:11434/v1',
     authHeader: '',
     authPrefix: '',
     apiShape: 'openai_compat',
@@ -338,7 +342,8 @@ const LOCAL_PROVIDERS: ByokProvider[] = [
     name: 'LM Studio',
     enabled: true,
     group: 'local',
-    defaultBaseURL: 'http://localhost:1234',
+    // Same convention as Ollama: LM Studio serves /v1/chat/completions.
+    defaultBaseURL: 'http://localhost:1234/v1',
     authHeader: '',
     authPrefix: '',
     apiShape: 'openai_compat',

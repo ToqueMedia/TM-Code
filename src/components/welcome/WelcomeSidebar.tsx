@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box,
   Flex,
@@ -9,6 +9,7 @@ import {
   Icon,
 } from '@chakra-ui/react'
 import {
+  LuFolder,
   LuFolderOpen,
   LuGitBranch,
   LuSettings,
@@ -32,7 +33,8 @@ import { invoke } from '@/utils/invokeMetrics'
 import { useAuthStore } from '@/stores/authStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useLayoutStore } from '@/stores/layoutStore'
-import { openMainSessionChat } from '@/hooks/useParallelTaskRows'
+import { focusForeignOrOpen } from '@/services/projectWindowFocusService'
+import ProjectSessions from './ProjectSessions'
 import { useBillingStore, isTeamCollabActive } from '@/stores/billingStore'
 import { useCollabStore } from '@/stores/collabStore'
 import { signOutWithGuard } from '@/services/auth/signOutFlow'
@@ -166,6 +168,40 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
 
   // F3: asTask queue items no longer exist (one agent per project).
 
+  // ── Sessions accordion ─────────────────────────────────────────────────
+  // ONE project expanded at a time: clicking a folder toggles ITS sessions
+  // (collapse when open; expand + select the first session — the most
+  // recent, listSessions sorts updatedAt desc — when closed), and SELECTING
+  // another project collapses all the others. Manual toggles live until the
+  // active project changes again, which re-syncs the accordion to it.
+  const [expandedProjectPath, setExpandedProjectPath] = useState<string | null>(activeProjectPath ?? null)
+  // Project whose FIRST session should be selected as soon as its list
+  // finishes loading (the id only exists after listProjectSessions resolves).
+  const [pendingFirstSelect, setPendingFirstSelect] = useState<string | null>(null)
+  const prevActivePathRef = useRef<string | null>(activeProjectPath ?? null)
+  useEffect(() => {
+    if (prevActivePathRef.current === activeProjectPath) return
+    prevActivePathRef.current = activeProjectPath ?? null
+    // Project switch (sidebar, titlebar, queue…): the newly selected project
+    // expands, every other one collapses, and no stale first-select survives.
+    setExpandedProjectPath(activeProjectPath ?? null)
+    setPendingFirstSelect(null)
+  }, [activeProjectPath])
+
+  const handleToggleProjectExpand = useCallback((path: string) => {
+    if (expandedProjectPath === path) {
+      setExpandedProjectPath(null)
+      setPendingFirstSelect(null)
+    } else {
+      setExpandedProjectPath(path)
+      setPendingFirstSelect(path)
+    }
+  }, [expandedProjectPath])
+
+  const handleFirstSessionSelected = useCallback(() => {
+    setPendingFirstSelect(null)
+  }, [])
+
   useEffect(() => {
     getAppVersion().then(setAppVersion)
   }, [])
@@ -278,11 +314,17 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
                 borderRadius="0 8px 8px 0"
                 onClick={() => {
                   if (!project.path) return
-                  void import('@/services/projectWindowFocusService')
-                    .then(({ focusForeignOrOpen }) =>
-                      focusForeignOrOpen(project.path!, status, () => onOpenProject(project.path)),
-                    )
-                    .catch(() => onOpenProject(project.path))
+                  const path = project.path
+                  // Mesmo epoch guard do handleOpenClick: cliques cujo
+                  // contexto de foco já mudou (ação mais nova a meio do
+                  // caminho assíncrono) são descartados em vez de reabrir
+                  // o projecto antigo.
+                  const focusedAtClick = useProjectStore.getState().currentProject?.path ?? null
+                  const proceedIfFresh = () => {
+                    if ((useProjectStore.getState().currentProject?.path ?? null) !== focusedAtClick) return
+                    onOpenProject(path)
+                  }
+                  focusForeignOrOpen(path, status, proceedIfFresh).catch(() => proceedIfFresh())
                 }}
                 onContextMenu={(e: React.MouseEvent) => handleProjectContextMenu(e, project)}
               >
@@ -505,6 +547,10 @@ const WelcomeSidebar: React.FC<WelcomeSidebarProps> = ({
               isActive={activeProjectPath === project.path}
               agentStatus={agentStatuses[project.path] ?? null}
               ambiguous={duplicateNames.has(project.name)}
+              expanded={!!project.path && expandedProjectPath === project.path}
+              autoSelectFirst={!!project.path && pendingFirstSelect === project.path}
+              onToggleExpand={() => project.path && handleToggleProjectExpand(project.path)}
+              onFirstSessionSelected={handleFirstSessionSelected}
               onOpen={() => project.path && onOpenProject(project.path)}
               onContextMenu={(e) => handleProjectContextMenu(e, project)}
             />
@@ -639,6 +685,13 @@ interface ProjectGroupProps {
   agentStatus: ProjectAgentStatus | null
   /** True when another recent shares this project's name → show a parent hint. */
   ambiguous: boolean
+  /** Sessions list visibility — the folder row toggles this (accordion). */
+  expanded: boolean
+  /** Expanding also selects the project's first (most recent) session once
+   *  the list loads; WelcomeSidebar clears it after consumption. */
+  autoSelectFirst: boolean
+  onToggleExpand: () => void
+  onFirstSessionSelected: () => void
   onOpen: () => void
   onContextMenu: (e: React.MouseEvent) => void
 }
@@ -654,6 +707,10 @@ function ProjectGroup({
   isActive,
   agentStatus,
   ambiguous,
+  expanded,
+  autoSelectFirst,
+  onToggleExpand,
+  onFirstSessionSelected,
   onOpen,
   onContextMenu,
 }: ProjectGroupProps) {
@@ -695,43 +752,10 @@ function ProjectGroup({
     void invoke('open_new_instance', { projectPath: project.path }).catch(() => {})
   }, [project.path])
 
-  /**
-   * Prefer focusing the foreign window that already owns this project.
-   * Second click within ~8s opens here (explicit fallback).
-   */
-  const handleOpenClick = useCallback(() => {
-    const path = project.path
-    if (!path) return
-    void import('@/services/projectWindowFocusService')
-      .then(({ focusForeignOrOpen }) =>
-        focusForeignOrOpen(path, agentStatus, () => {
-          onOpen()
-          if (isActive) openMainSessionChat(path)
-        }, {
-          onFocusRequested: () => {
-            try {
-              const { useChatStore } = require('@/stores/chatStore') as typeof import('@/stores/chatStore')
-              useChatStore.getState().addSystemMessage(
-                `${t('parallel.focusOtherWindow')} ${t('parallel.focusOtherWindowRetry')}`,
-                'info',
-              )
-            } catch {
-              void import('@/services/notificationService').then(({ notify }) =>
-                notify({
-                  title: t('parallel.focusOtherWindow'),
-                  body: t('parallel.focusOtherWindowRetry'),
-                  dedupKey: `focus-${path}`,
-                }),
-              )
-            }
-          },
-        }),
-      )
-      .catch(() => {
-        onOpen()
-        if (isActive) openMainSessionChat(path)
-      })
-  }, [agentStatus, isActive, onOpen, project.path])
+  // The folder row is now the sessions accordion toggle (click collapses /
+  // expands + selects the first session). Opening/focusing the project moved
+  // INTO the expand flow: ProjectSessions lands on the chosen session via
+  // focusForeignOrOpen + pendingSessionOpen once its list resolves.
 
   const stopBusy = stopPhase === 'local' || stopPhase === 'remote'
   const stopTitle =
@@ -756,7 +780,8 @@ function ProjectGroup({
         '& [data-sidebar-stop-busy]': { opacity: '1 !important' },
       }}
     >
-      {/* Folder row */}
+      {/* Folder row — the accordion toggle: click collapses the sessions,
+          click again expands + selects the first one. */}
       <Flex
         alignItems="center"
         gap={2}
@@ -766,12 +791,13 @@ function ProjectGroup({
         cursor="pointer"
         transition={`background ${tokens.transition.fast}`}
         _hover={{ bg: 'rgba(255, 255, 255, 0.05)' }}
-        onClick={handleOpenClick}
+        onClick={onToggleExpand}
         onContextMenu={onContextMenu}
         title={project.path}
+        aria-expanded={expanded}
       >
         <Icon
-          as={LuFolderOpen}
+          as={expanded ? LuFolderOpen : LuFolder}
           fontSize="15px"
           flexShrink={0}
           color={isActive ? tokens.colors.accent.primary : tokens.colors.text.secondary}
@@ -939,6 +965,22 @@ function ProjectGroup({
             {agentStatus.label}
           </Text>
         </Flex>
+      )}
+
+      {/* Chat sessions nested under the project folder — the folder IS the
+          project, the rows are its conversations (replaces the titlebar's
+          SessionDropdown; see ProjectSessions for the switch semantics).
+          Accordion: only the expanded project mounts its list (collapsed
+          groups skip the disk read entirely). */}
+      {project.path && expanded && (
+        <ProjectSessions
+          projectPath={project.path}
+          isActiveProject={isActive}
+          agentStatus={agentStatus}
+          onOpenHere={onOpen}
+          autoSelectFirst={autoSelectFirst}
+          onFirstSelected={onFirstSessionSelected}
+        />
       )}
     </Box>
   )

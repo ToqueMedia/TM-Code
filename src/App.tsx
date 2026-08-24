@@ -394,6 +394,9 @@ function App() {
 		// Focus requests while agent is idle (finished run still on this project).
 		void import('./services/projectWindowFocusService')
 			.then(m => {
+				// Cache this process's pid once — the sidebar uses it to open
+				// self-owned agent-badge projects without the focus IPC round-trip.
+				void m.primeSelfPid()
 				m.startFocusRequestConsumer(
 					() => useProjectStore.getState().currentProject?.path,
 				)
@@ -638,6 +641,33 @@ function App() {
 		}
 
 		const chatStore = useChatStore.getState();
+		// Sessão pedida a partir da sidebar de Projectos (clique numa sessão de
+		// um projecto que ainda não estava activo nesta janela): consome-se
+		// DEPOIS do wipe/park e ANTES do warm-restore — sem isto, o restore
+		// aterraría na sessão mais recente do projecto em vez da escolhida.
+		const pendingOpen = chatStore.pendingSessionOpen;
+		if (pendingOpen && pendingOpen.projectPath === projectPath) {
+			useChatStore.getState().setPendingSessionOpen(null);
+			// Parked live sessions keep their in-memory transcript ahead of
+			// disk — activate directly instead of regressing via disk read.
+			if (chatStore.sessions.has(pendingOpen.sessionId)) {
+				chatStore.setActiveSession(pendingOpen.sessionId);
+				return;
+			}
+			void (async () => {
+				await useChatStore.getState().loadSessionFromDisk(projectPath, pendingOpen.sessionId);
+				// loadSessionFromDisk sai em silêncio quando o ficheiro não
+				// existe (sessão apagada entretanto) — fallback ao comportamento
+				// normal para não deixar o chat sem sessão activa.
+				if (useChatStore.getState().activeSessionId !== pendingOpen.sessionId) {
+					await useChatStore.getState().createNewSession(projectPath);
+				}
+			})().catch(err => {
+				logger.error('app', 'Failed to open requested session:', err);
+				useChatStore.getState().createNewSession(projectPath).catch(() => {});
+			});
+			return;
+		}
 		// Warm switch: prefer an in-memory main session for this project
 		// (kept by preserveLiveRuns) so A→B→A does not re-read disk.
 		let warmSessionId: string | null = null;

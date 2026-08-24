@@ -534,7 +534,7 @@ async function runAgentInternal(
       : null)
   if (!bootstrapOnly) try {
     const mentionResolution = mentionSource
-      ? await resolveMentionContext(mentionSource)
+      ? await resolveMentionContext(mentionSource, undefined, useChatStore.getState().mentionPaths)
       : { contextText: '', imageParts: [], resolvedPaths: [] }
     const changedContext = await collectChangedFileContext()
     if (mentionResolution.contextText || mentionResolution.imageParts.length > 0 || changedContext) {
