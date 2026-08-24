@@ -18,7 +18,13 @@ pub struct IssueReportResult {
     pub message: String,
 }
 
-const RESEND_API_KEY: &str = "REDACTED_RESEND_KEY";
+// SECURITY: A chave da Resend era hardcoded aqui (commit 2cc0124, 2026-03-31)
+// e esteve exposta no repo público ToqueMedia/TM-Code via tag v1.1.2. A chave
+// antiga (re_PC6eLdkc_*) foi REVOGADA. Agora lê-se de variável de ambiente
+// em tempo de compilação (option_env!) — a chave nunca entra no source code;
+// é injectada pelo ambiente de build (shell local ou CI). Se não estiver
+// definida, o comando devolve erro amigável em vez de enviar sem auth.
+const RESEND_API_KEY: Option<&str> = option_env!("RESEND_API_KEY");
 const RECIPIENT_EMAIL: &str = "geral@toquemedia.net";
 const FROM_EMAIL: &str = "TM Code <noreply@toquemedia.net>";
 
@@ -32,6 +38,15 @@ fn escape_html(s: &str) -> String {
 
 #[tauri::command]
 pub async fn send_issue_report(input: IssueReportInput) -> Result<IssueReportResult, String> {
+    // A chave é injectada em tempo de compilação via option_env!("RESEND_API_KEY").
+    // Se não estiver definida no ambiente de build, devolvemos erro amigável
+    // — o issue reporter fica desactivado mas a app não crasha.
+    let api_key = RESEND_API_KEY.ok_or_else(|| {
+        "Issue reporter is not configured: RESEND_API_KEY not set at build time. \
+         Export RESEND_API_KEY before building, or set it in CI."
+            .to_string()
+    })?;
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -125,7 +140,7 @@ pub async fn send_issue_report(input: IssueReportInput) -> Result<IssueReportRes
 
     let resp = client
         .post("https://api.resend.com/emails")
-        .header("Authorization", format!("Bearer {}", RESEND_API_KEY))
+        .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&payload)
         .send()
